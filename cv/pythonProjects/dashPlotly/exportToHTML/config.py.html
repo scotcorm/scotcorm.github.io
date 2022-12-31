@@ -1,0 +1,366 @@
+<html>
+<head>
+<title>config.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #808080;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+config.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;distutils.command.config 
+ 
+Implements the Distutils 'config' command, a (mostly) empty command class 
+that exists mainly to be sub-classed by specific module distributions and 
+applications.  The idea is that while every &quot;config&quot; command is different, 
+at least they're all named the same, and users always see &quot;config&quot; in the 
+list of standard commands.  Also, this is a good place to put common 
+configure-like tasks: &quot;try to compile this C code&quot;, or &quot;figure out where 
+this header file lives&quot;. 
+&quot;&quot;&quot;</span>
+
+<span class="s2">import </span><span class="s1">os</span><span class="s2">, </span><span class="s1">re</span>
+
+<span class="s2">from </span><span class="s1">distutils.core </span><span class="s2">import </span><span class="s1">Command</span>
+<span class="s2">from </span><span class="s1">distutils.errors </span><span class="s2">import </span><span class="s1">DistutilsExecError</span>
+<span class="s2">from </span><span class="s1">distutils.sysconfig </span><span class="s2">import </span><span class="s1">customize_compiler</span>
+<span class="s2">from </span><span class="s1">distutils </span><span class="s2">import </span><span class="s1">log</span>
+
+<span class="s1">LANG_EXT = {</span><span class="s3">&quot;c&quot;</span><span class="s1">: </span><span class="s3">&quot;.c&quot;</span><span class="s2">, </span><span class="s3">&quot;c++&quot;</span><span class="s1">: </span><span class="s3">&quot;.cxx&quot;</span><span class="s1">}</span>
+
+<span class="s2">class </span><span class="s1">config(Command):</span>
+
+    <span class="s1">description = </span><span class="s3">&quot;prepare to build&quot;</span>
+
+    <span class="s1">user_options = [</span>
+        <span class="s1">(</span><span class="s3">'compiler='</span><span class="s2">, None,</span>
+         <span class="s3">&quot;specify the compiler type&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s3">'cc='</span><span class="s2">, None,</span>
+         <span class="s3">&quot;specify the compiler executable&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s3">'include-dirs='</span><span class="s2">, </span><span class="s3">'I'</span><span class="s2">,</span>
+         <span class="s3">&quot;list of directories to search for header files&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s3">'define='</span><span class="s2">, </span><span class="s3">'D'</span><span class="s2">,</span>
+         <span class="s3">&quot;C preprocessor macros to define&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s3">'undef='</span><span class="s2">, </span><span class="s3">'U'</span><span class="s2">,</span>
+         <span class="s3">&quot;C preprocessor macros to undefine&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s3">'libraries='</span><span class="s2">, </span><span class="s3">'l'</span><span class="s2">,</span>
+         <span class="s3">&quot;external C libraries to link with&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s3">'library-dirs='</span><span class="s2">, </span><span class="s3">'L'</span><span class="s2">,</span>
+         <span class="s3">&quot;directories to search for external C libraries&quot;</span><span class="s1">)</span><span class="s2">,</span>
+
+        <span class="s1">(</span><span class="s3">'noisy'</span><span class="s2">, None,</span>
+         <span class="s3">&quot;show every action (compile, link, run, ...) taken&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s3">'dump-source'</span><span class="s2">, None,</span>
+         <span class="s3">&quot;dump generated source files before attempting to compile them&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">]</span>
+
+
+    <span class="s4"># The three standard command methods: since the &quot;config&quot; command</span>
+    <span class="s4"># does nothing by default, these are empty.</span>
+
+    <span class="s2">def </span><span class="s1">initialize_options(self):</span>
+        <span class="s1">self.compiler = </span><span class="s2">None</span>
+        <span class="s1">self.cc = </span><span class="s2">None</span>
+        <span class="s1">self.include_dirs = </span><span class="s2">None</span>
+        <span class="s1">self.libraries = </span><span class="s2">None</span>
+        <span class="s1">self.library_dirs = </span><span class="s2">None</span>
+
+        <span class="s4"># maximal output for now</span>
+        <span class="s1">self.noisy = </span><span class="s5">1</span>
+        <span class="s1">self.dump_source = </span><span class="s5">1</span>
+
+        <span class="s4"># list of temporary files generated along-the-way that we have</span>
+        <span class="s4"># to clean at some point</span>
+        <span class="s1">self.temp_files = []</span>
+
+    <span class="s2">def </span><span class="s1">finalize_options(self):</span>
+        <span class="s2">if </span><span class="s1">self.include_dirs </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">self.include_dirs = self.distribution.include_dirs </span><span class="s2">or </span><span class="s1">[]</span>
+        <span class="s2">elif </span><span class="s1">isinstance(self.include_dirs</span><span class="s2">, </span><span class="s1">str):</span>
+            <span class="s1">self.include_dirs = self.include_dirs.split(os.pathsep)</span>
+
+        <span class="s2">if </span><span class="s1">self.libraries </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">self.libraries = []</span>
+        <span class="s2">elif </span><span class="s1">isinstance(self.libraries</span><span class="s2">, </span><span class="s1">str):</span>
+            <span class="s1">self.libraries = [self.libraries]</span>
+
+        <span class="s2">if </span><span class="s1">self.library_dirs </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">self.library_dirs = []</span>
+        <span class="s2">elif </span><span class="s1">isinstance(self.library_dirs</span><span class="s2">, </span><span class="s1">str):</span>
+            <span class="s1">self.library_dirs = self.library_dirs.split(os.pathsep)</span>
+
+    <span class="s2">def </span><span class="s1">run(self):</span>
+        <span class="s2">pass</span>
+
+    <span class="s4"># Utility methods for actual &quot;config&quot; commands.  The interfaces are</span>
+    <span class="s4"># loosely based on Autoconf macros of similar names.  Sub-classes</span>
+    <span class="s4"># may use these freely.</span>
+
+    <span class="s2">def </span><span class="s1">_check_compiler(self):</span>
+        <span class="s0">&quot;&quot;&quot;Check that 'self.compiler' really is a CCompiler object; 
+        if not, make it one. 
+        &quot;&quot;&quot;</span>
+        <span class="s4"># We do this late, and only on-demand, because this is an expensive</span>
+        <span class="s4"># import.</span>
+        <span class="s2">from </span><span class="s1">distutils.ccompiler </span><span class="s2">import </span><span class="s1">CCompiler</span><span class="s2">, </span><span class="s1">new_compiler</span>
+        <span class="s2">if not </span><span class="s1">isinstance(self.compiler</span><span class="s2">, </span><span class="s1">CCompiler):</span>
+            <span class="s1">self.compiler = new_compiler(compiler=self.compiler</span><span class="s2">,</span>
+                                         <span class="s1">dry_run=self.dry_run</span><span class="s2">, </span><span class="s1">force=</span><span class="s5">1</span><span class="s1">)</span>
+            <span class="s1">customize_compiler(self.compiler)</span>
+            <span class="s2">if </span><span class="s1">self.include_dirs:</span>
+                <span class="s1">self.compiler.set_include_dirs(self.include_dirs)</span>
+            <span class="s2">if </span><span class="s1">self.libraries:</span>
+                <span class="s1">self.compiler.set_libraries(self.libraries)</span>
+            <span class="s2">if </span><span class="s1">self.library_dirs:</span>
+                <span class="s1">self.compiler.set_library_dirs(self.library_dirs)</span>
+
+    <span class="s2">def </span><span class="s1">_gen_temp_sourcefile(self</span><span class="s2">, </span><span class="s1">body</span><span class="s2">, </span><span class="s1">headers</span><span class="s2">, </span><span class="s1">lang):</span>
+        <span class="s1">filename = </span><span class="s3">&quot;_configtest&quot; </span><span class="s1">+ LANG_EXT[lang]</span>
+        <span class="s2">with </span><span class="s1">open(filename</span><span class="s2">, </span><span class="s3">&quot;w&quot;</span><span class="s1">) </span><span class="s2">as </span><span class="s1">file:</span>
+            <span class="s2">if </span><span class="s1">headers:</span>
+                <span class="s2">for </span><span class="s1">header </span><span class="s2">in </span><span class="s1">headers:</span>
+                    <span class="s1">file.write(</span><span class="s3">&quot;#include &lt;%s&gt;</span><span class="s2">\n</span><span class="s3">&quot; </span><span class="s1">% header)</span>
+                <span class="s1">file.write(</span><span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">&quot;</span><span class="s1">)</span>
+            <span class="s1">file.write(body)</span>
+            <span class="s2">if </span><span class="s1">body[-</span><span class="s5">1</span><span class="s1">] != </span><span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">&quot;</span><span class="s1">:</span>
+                <span class="s1">file.write(</span><span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">&quot;</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">filename</span>
+
+    <span class="s2">def </span><span class="s1">_preprocess(self</span><span class="s2">, </span><span class="s1">body</span><span class="s2">, </span><span class="s1">headers</span><span class="s2">, </span><span class="s1">include_dirs</span><span class="s2">, </span><span class="s1">lang):</span>
+        <span class="s1">src = self._gen_temp_sourcefile(body</span><span class="s2">, </span><span class="s1">headers</span><span class="s2">, </span><span class="s1">lang)</span>
+        <span class="s1">out = </span><span class="s3">&quot;_configtest.i&quot;</span>
+        <span class="s1">self.temp_files.extend([src</span><span class="s2">, </span><span class="s1">out])</span>
+        <span class="s1">self.compiler.preprocess(src</span><span class="s2">, </span><span class="s1">out</span><span class="s2">, </span><span class="s1">include_dirs=include_dirs)</span>
+        <span class="s2">return </span><span class="s1">(src</span><span class="s2">, </span><span class="s1">out)</span>
+
+    <span class="s2">def </span><span class="s1">_compile(self</span><span class="s2">, </span><span class="s1">body</span><span class="s2">, </span><span class="s1">headers</span><span class="s2">, </span><span class="s1">include_dirs</span><span class="s2">, </span><span class="s1">lang):</span>
+        <span class="s1">src = self._gen_temp_sourcefile(body</span><span class="s2">, </span><span class="s1">headers</span><span class="s2">, </span><span class="s1">lang)</span>
+        <span class="s2">if </span><span class="s1">self.dump_source:</span>
+            <span class="s1">dump_file(src</span><span class="s2">, </span><span class="s3">&quot;compiling '%s':&quot; </span><span class="s1">% src)</span>
+        <span class="s1">(obj</span><span class="s2">,</span><span class="s1">) = self.compiler.object_filenames([src])</span>
+        <span class="s1">self.temp_files.extend([src</span><span class="s2">, </span><span class="s1">obj])</span>
+        <span class="s1">self.compiler.compile([src]</span><span class="s2">, </span><span class="s1">include_dirs=include_dirs)</span>
+        <span class="s2">return </span><span class="s1">(src</span><span class="s2">, </span><span class="s1">obj)</span>
+
+    <span class="s2">def </span><span class="s1">_link(self</span><span class="s2">, </span><span class="s1">body</span><span class="s2">, </span><span class="s1">headers</span><span class="s2">, </span><span class="s1">include_dirs</span><span class="s2">, </span><span class="s1">libraries</span><span class="s2">, </span><span class="s1">library_dirs</span><span class="s2">,</span>
+              <span class="s1">lang):</span>
+        <span class="s1">(src</span><span class="s2">, </span><span class="s1">obj) = self._compile(body</span><span class="s2">, </span><span class="s1">headers</span><span class="s2">, </span><span class="s1">include_dirs</span><span class="s2">, </span><span class="s1">lang)</span>
+        <span class="s1">prog = os.path.splitext(os.path.basename(src))[</span><span class="s5">0</span><span class="s1">]</span>
+        <span class="s1">self.compiler.link_executable([obj]</span><span class="s2">, </span><span class="s1">prog</span><span class="s2">,</span>
+                                      <span class="s1">libraries=libraries</span><span class="s2">,</span>
+                                      <span class="s1">library_dirs=library_dirs</span><span class="s2">,</span>
+                                      <span class="s1">target_lang=lang)</span>
+
+        <span class="s2">if </span><span class="s1">self.compiler.exe_extension </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">prog = prog + self.compiler.exe_extension</span>
+        <span class="s1">self.temp_files.append(prog)</span>
+
+        <span class="s2">return </span><span class="s1">(src</span><span class="s2">, </span><span class="s1">obj</span><span class="s2">, </span><span class="s1">prog)</span>
+
+    <span class="s2">def </span><span class="s1">_clean(self</span><span class="s2">, </span><span class="s1">*filenames):</span>
+        <span class="s2">if not </span><span class="s1">filenames:</span>
+            <span class="s1">filenames = self.temp_files</span>
+            <span class="s1">self.temp_files = []</span>
+        <span class="s1">log.info(</span><span class="s3">&quot;removing: %s&quot;</span><span class="s2">, </span><span class="s3">' '</span><span class="s1">.join(filenames))</span>
+        <span class="s2">for </span><span class="s1">filename </span><span class="s2">in </span><span class="s1">filenames:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">os.remove(filename)</span>
+            <span class="s2">except </span><span class="s1">OSError:</span>
+                <span class="s2">pass</span>
+
+
+    <span class="s4"># XXX these ignore the dry-run flag: what to do, what to do? even if</span>
+    <span class="s4"># you want a dry-run build, you still need some sort of configuration</span>
+    <span class="s4"># info.  My inclination is to make it up to the real config command to</span>
+    <span class="s4"># consult 'dry_run', and assume a default (minimal) configuration if</span>
+    <span class="s4"># true.  The problem with trying to do it here is that you'd have to</span>
+    <span class="s4"># return either true or false from all the 'try' methods, neither of</span>
+    <span class="s4"># which is correct.</span>
+
+    <span class="s4"># XXX need access to the header search path and maybe default macros.</span>
+
+    <span class="s2">def </span><span class="s1">try_cpp(self</span><span class="s2">, </span><span class="s1">body=</span><span class="s2">None, </span><span class="s1">headers=</span><span class="s2">None, </span><span class="s1">include_dirs=</span><span class="s2">None, </span><span class="s1">lang=</span><span class="s3">&quot;c&quot;</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Construct a source file from 'body' (a string containing lines 
+        of C/C++ code) and 'headers' (a list of header files to include) 
+        and run it through the preprocessor.  Return true if the 
+        preprocessor succeeded, false if there were any errors. 
+        ('body' probably isn't of much use, but what the heck.) 
+        &quot;&quot;&quot;</span>
+        <span class="s2">from </span><span class="s1">distutils.ccompiler </span><span class="s2">import </span><span class="s1">CompileError</span>
+        <span class="s1">self._check_compiler()</span>
+        <span class="s1">ok = </span><span class="s2">True</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">self._preprocess(body</span><span class="s2">, </span><span class="s1">headers</span><span class="s2">, </span><span class="s1">include_dirs</span><span class="s2">, </span><span class="s1">lang)</span>
+        <span class="s2">except </span><span class="s1">CompileError:</span>
+            <span class="s1">ok = </span><span class="s2">False</span>
+
+        <span class="s1">self._clean()</span>
+        <span class="s2">return </span><span class="s1">ok</span>
+
+    <span class="s2">def </span><span class="s1">search_cpp(self</span><span class="s2">, </span><span class="s1">pattern</span><span class="s2">, </span><span class="s1">body=</span><span class="s2">None, </span><span class="s1">headers=</span><span class="s2">None, </span><span class="s1">include_dirs=</span><span class="s2">None,</span>
+                   <span class="s1">lang=</span><span class="s3">&quot;c&quot;</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Construct a source file (just like 'try_cpp()'), run it through 
+        the preprocessor, and return true if any line of the output matches 
+        'pattern'.  'pattern' should either be a compiled regex object or a 
+        string containing a regex.  If both 'body' and 'headers' are None, 
+        preprocesses an empty file -- which can be useful to determine the 
+        symbols the preprocessor and compiler set by default. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self._check_compiler()</span>
+        <span class="s1">src</span><span class="s2">, </span><span class="s1">out = self._preprocess(body</span><span class="s2">, </span><span class="s1">headers</span><span class="s2">, </span><span class="s1">include_dirs</span><span class="s2">, </span><span class="s1">lang)</span>
+
+        <span class="s2">if </span><span class="s1">isinstance(pattern</span><span class="s2">, </span><span class="s1">str):</span>
+            <span class="s1">pattern = re.compile(pattern)</span>
+
+        <span class="s2">with </span><span class="s1">open(out) </span><span class="s2">as </span><span class="s1">file:</span>
+            <span class="s1">match = </span><span class="s2">False</span>
+            <span class="s2">while True</span><span class="s1">:</span>
+                <span class="s1">line = file.readline()</span>
+                <span class="s2">if </span><span class="s1">line == </span><span class="s3">''</span><span class="s1">:</span>
+                    <span class="s2">break</span>
+                <span class="s2">if </span><span class="s1">pattern.search(line):</span>
+                    <span class="s1">match = </span><span class="s2">True</span>
+                    <span class="s2">break</span>
+
+        <span class="s1">self._clean()</span>
+        <span class="s2">return </span><span class="s1">match</span>
+
+    <span class="s2">def </span><span class="s1">try_compile(self</span><span class="s2">, </span><span class="s1">body</span><span class="s2">, </span><span class="s1">headers=</span><span class="s2">None, </span><span class="s1">include_dirs=</span><span class="s2">None, </span><span class="s1">lang=</span><span class="s3">&quot;c&quot;</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Try to compile a source file built from 'body' and 'headers'. 
+        Return true on success, false otherwise. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">from </span><span class="s1">distutils.ccompiler </span><span class="s2">import </span><span class="s1">CompileError</span>
+        <span class="s1">self._check_compiler()</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">self._compile(body</span><span class="s2">, </span><span class="s1">headers</span><span class="s2">, </span><span class="s1">include_dirs</span><span class="s2">, </span><span class="s1">lang)</span>
+            <span class="s1">ok = </span><span class="s2">True</span>
+        <span class="s2">except </span><span class="s1">CompileError:</span>
+            <span class="s1">ok = </span><span class="s2">False</span>
+
+        <span class="s1">log.info(ok </span><span class="s2">and </span><span class="s3">&quot;success!&quot; </span><span class="s2">or </span><span class="s3">&quot;failure.&quot;</span><span class="s1">)</span>
+        <span class="s1">self._clean()</span>
+        <span class="s2">return </span><span class="s1">ok</span>
+
+    <span class="s2">def </span><span class="s1">try_link(self</span><span class="s2">, </span><span class="s1">body</span><span class="s2">, </span><span class="s1">headers=</span><span class="s2">None, </span><span class="s1">include_dirs=</span><span class="s2">None, </span><span class="s1">libraries=</span><span class="s2">None,</span>
+                 <span class="s1">library_dirs=</span><span class="s2">None, </span><span class="s1">lang=</span><span class="s3">&quot;c&quot;</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Try to compile and link a source file, built from 'body' and 
+        'headers', to executable form.  Return true on success, false 
+        otherwise. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">from </span><span class="s1">distutils.ccompiler </span><span class="s2">import </span><span class="s1">CompileError</span><span class="s2">, </span><span class="s1">LinkError</span>
+        <span class="s1">self._check_compiler()</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">self._link(body</span><span class="s2">, </span><span class="s1">headers</span><span class="s2">, </span><span class="s1">include_dirs</span><span class="s2">,</span>
+                       <span class="s1">libraries</span><span class="s2">, </span><span class="s1">library_dirs</span><span class="s2">, </span><span class="s1">lang)</span>
+            <span class="s1">ok = </span><span class="s2">True</span>
+        <span class="s2">except </span><span class="s1">(CompileError</span><span class="s2">, </span><span class="s1">LinkError):</span>
+            <span class="s1">ok = </span><span class="s2">False</span>
+
+        <span class="s1">log.info(ok </span><span class="s2">and </span><span class="s3">&quot;success!&quot; </span><span class="s2">or </span><span class="s3">&quot;failure.&quot;</span><span class="s1">)</span>
+        <span class="s1">self._clean()</span>
+        <span class="s2">return </span><span class="s1">ok</span>
+
+    <span class="s2">def </span><span class="s1">try_run(self</span><span class="s2">, </span><span class="s1">body</span><span class="s2">, </span><span class="s1">headers=</span><span class="s2">None, </span><span class="s1">include_dirs=</span><span class="s2">None, </span><span class="s1">libraries=</span><span class="s2">None,</span>
+                <span class="s1">library_dirs=</span><span class="s2">None, </span><span class="s1">lang=</span><span class="s3">&quot;c&quot;</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Try to compile, link to an executable, and run a program 
+        built from 'body' and 'headers'.  Return true on success, false 
+        otherwise. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">from </span><span class="s1">distutils.ccompiler </span><span class="s2">import </span><span class="s1">CompileError</span><span class="s2">, </span><span class="s1">LinkError</span>
+        <span class="s1">self._check_compiler()</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">src</span><span class="s2">, </span><span class="s1">obj</span><span class="s2">, </span><span class="s1">exe = self._link(body</span><span class="s2">, </span><span class="s1">headers</span><span class="s2">, </span><span class="s1">include_dirs</span><span class="s2">,</span>
+                                       <span class="s1">libraries</span><span class="s2">, </span><span class="s1">library_dirs</span><span class="s2">, </span><span class="s1">lang)</span>
+            <span class="s1">self.spawn([exe])</span>
+            <span class="s1">ok = </span><span class="s2">True</span>
+        <span class="s2">except </span><span class="s1">(CompileError</span><span class="s2">, </span><span class="s1">LinkError</span><span class="s2">, </span><span class="s1">DistutilsExecError):</span>
+            <span class="s1">ok = </span><span class="s2">False</span>
+
+        <span class="s1">log.info(ok </span><span class="s2">and </span><span class="s3">&quot;success!&quot; </span><span class="s2">or </span><span class="s3">&quot;failure.&quot;</span><span class="s1">)</span>
+        <span class="s1">self._clean()</span>
+        <span class="s2">return </span><span class="s1">ok</span>
+
+
+    <span class="s4"># -- High-level methods --------------------------------------------</span>
+    <span class="s4"># (these are the ones that are actually likely to be useful</span>
+    <span class="s4"># when implementing a real-world config command!)</span>
+
+    <span class="s2">def </span><span class="s1">check_func(self</span><span class="s2">, </span><span class="s1">func</span><span class="s2">, </span><span class="s1">headers=</span><span class="s2">None, </span><span class="s1">include_dirs=</span><span class="s2">None,</span>
+                   <span class="s1">libraries=</span><span class="s2">None, </span><span class="s1">library_dirs=</span><span class="s2">None, </span><span class="s1">decl=</span><span class="s5">0</span><span class="s2">, </span><span class="s1">call=</span><span class="s5">0</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Determine if function 'func' is available by constructing a 
+        source file that refers to 'func', and compiles and links it. 
+        If everything succeeds, returns true; otherwise returns false. 
+ 
+        The constructed source file starts out by including the header 
+        files listed in 'headers'.  If 'decl' is true, it then declares 
+        'func' (as &quot;int func()&quot;); you probably shouldn't supply 'headers' 
+        and set 'decl' true in the same call, or you might get errors about 
+        a conflicting declarations for 'func'.  Finally, the constructed 
+        'main()' function either references 'func' or (if 'call' is true) 
+        calls it.  'libraries' and 'library_dirs' are used when 
+        linking. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self._check_compiler()</span>
+        <span class="s1">body = []</span>
+        <span class="s2">if </span><span class="s1">decl:</span>
+            <span class="s1">body.append(</span><span class="s3">&quot;int %s ();&quot; </span><span class="s1">% func)</span>
+        <span class="s1">body.append(</span><span class="s3">&quot;int main () {&quot;</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">call:</span>
+            <span class="s1">body.append(</span><span class="s3">&quot;  %s();&quot; </span><span class="s1">% func)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">body.append(</span><span class="s3">&quot;  %s;&quot; </span><span class="s1">% func)</span>
+        <span class="s1">body.append(</span><span class="s3">&quot;}&quot;</span><span class="s1">)</span>
+        <span class="s1">body = </span><span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">&quot;</span><span class="s1">.join(body) + </span><span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">&quot;</span>
+
+        <span class="s2">return </span><span class="s1">self.try_link(body</span><span class="s2">, </span><span class="s1">headers</span><span class="s2">, </span><span class="s1">include_dirs</span><span class="s2">,</span>
+                             <span class="s1">libraries</span><span class="s2">, </span><span class="s1">library_dirs)</span>
+
+    <span class="s2">def </span><span class="s1">check_lib(self</span><span class="s2">, </span><span class="s1">library</span><span class="s2">, </span><span class="s1">library_dirs=</span><span class="s2">None, </span><span class="s1">headers=</span><span class="s2">None,</span>
+                  <span class="s1">include_dirs=</span><span class="s2">None, </span><span class="s1">other_libraries=[]):</span>
+        <span class="s0">&quot;&quot;&quot;Determine if 'library' is available to be linked against, 
+        without actually checking that any particular symbols are provided 
+        by it.  'headers' will be used in constructing the source file to 
+        be compiled, but the only effect of this is to check if all the 
+        header files listed are available.  Any libraries listed in 
+        'other_libraries' will be included in the link, in case 'library' 
+        has symbols that depend on other libraries. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self._check_compiler()</span>
+        <span class="s2">return </span><span class="s1">self.try_link(</span><span class="s3">&quot;int main (void) { }&quot;</span><span class="s2">, </span><span class="s1">headers</span><span class="s2">, </span><span class="s1">include_dirs</span><span class="s2">,</span>
+                             <span class="s1">[library] + other_libraries</span><span class="s2">, </span><span class="s1">library_dirs)</span>
+
+    <span class="s2">def </span><span class="s1">check_header(self</span><span class="s2">, </span><span class="s1">header</span><span class="s2">, </span><span class="s1">include_dirs=</span><span class="s2">None, </span><span class="s1">library_dirs=</span><span class="s2">None,</span>
+                     <span class="s1">lang=</span><span class="s3">&quot;c&quot;</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Determine if the system header file named by 'header_file' 
+        exists and can be found by the preprocessor; return true if so, 
+        false otherwise. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self.try_cpp(body=</span><span class="s3">&quot;/* No body */&quot;</span><span class="s2">, </span><span class="s1">headers=[header]</span><span class="s2">,</span>
+                            <span class="s1">include_dirs=include_dirs)</span>
+
+<span class="s2">def </span><span class="s1">dump_file(filename</span><span class="s2">, </span><span class="s1">head=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot;Dumps a file content into log.info. 
+ 
+    If head is not None, will be dumped before the file content. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">head </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">log.info(</span><span class="s3">'%s'</span><span class="s2">, </span><span class="s1">filename)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">log.info(head)</span>
+    <span class="s1">file = open(filename)</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">log.info(file.read())</span>
+    <span class="s2">finally</span><span class="s1">:</span>
+        <span class="s1">file.close()</span>
+</pre>
+</body>
+</html>

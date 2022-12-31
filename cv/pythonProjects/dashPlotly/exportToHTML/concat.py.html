@@ -1,0 +1,674 @@
+<html>
+<head>
+<title>concat.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #808080;}
+.s4 { color: #6897bb;}
+.s5 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+concat.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">itertools</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">TYPE_CHECKING</span><span class="s0">,</span>
+    <span class="s1">Sequence</span><span class="s0">,</span>
+    <span class="s1">cast</span><span class="s0">,</span>
+<span class="s1">)</span>
+
+<span class="s0">import </span><span class="s1">numpy </span><span class="s0">as </span><span class="s1">np</span>
+
+<span class="s0">from </span><span class="s1">pandas._libs </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">NaT</span><span class="s0">,</span>
+    <span class="s1">internals </span><span class="s0">as </span><span class="s1">libinternals</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas._typing </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">ArrayLike</span><span class="s0">,</span>
+    <span class="s1">DtypeObj</span><span class="s0">,</span>
+    <span class="s1">Manager</span><span class="s0">,</span>
+    <span class="s1">Shape</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.util._decorators </span><span class="s0">import </span><span class="s1">cache_readonly</span>
+
+<span class="s0">from </span><span class="s1">pandas.core.dtypes.cast </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">ensure_dtype_can_hold_na</span><span class="s0">,</span>
+    <span class="s1">find_common_type</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.core.dtypes.common </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">is_1d_only_ea_dtype</span><span class="s0">,</span>
+    <span class="s1">is_1d_only_ea_obj</span><span class="s0">,</span>
+    <span class="s1">is_datetime64tz_dtype</span><span class="s0">,</span>
+    <span class="s1">is_dtype_equal</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.core.dtypes.concat </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">cast_to_common_type</span><span class="s0">,</span>
+    <span class="s1">concat_compat</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.core.dtypes.dtypes </span><span class="s0">import </span><span class="s1">ExtensionDtype</span>
+
+<span class="s0">from </span><span class="s1">pandas.core.arrays </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">DatetimeArray</span><span class="s0">,</span>
+    <span class="s1">ExtensionArray</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.core.construction </span><span class="s0">import </span><span class="s1">ensure_wrapped_if_datetimelike</span>
+<span class="s0">from </span><span class="s1">pandas.core.internals.array_manager </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">ArrayManager</span><span class="s0">,</span>
+    <span class="s1">NullArrayProxy</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.core.internals.blocks </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">ensure_block_shape</span><span class="s0">,</span>
+    <span class="s1">new_block_2d</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.core.internals.managers </span><span class="s0">import </span><span class="s1">BlockManager</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING:</span>
+    <span class="s0">from </span><span class="s1">pandas </span><span class="s0">import </span><span class="s1">Index</span>
+    <span class="s0">from </span><span class="s1">pandas.core.internals.blocks </span><span class="s0">import </span><span class="s1">Block</span>
+
+
+<span class="s0">def </span><span class="s1">_concatenate_array_managers(</span>
+    <span class="s1">mgrs_indexers</span><span class="s0">, </span><span class="s1">axes: list[Index]</span><span class="s0">, </span><span class="s1">concat_axis: int</span><span class="s0">, </span><span class="s1">copy: bool</span>
+<span class="s1">) -&gt; Manager:</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Concatenate array managers into one. 
+ 
+    Parameters 
+    ---------- 
+    mgrs_indexers : list of (ArrayManager, {axis: indexer,...}) tuples 
+    axes : list of Index 
+    concat_axis : int 
+    copy : bool 
+ 
+    Returns 
+    ------- 
+    ArrayManager 
+    &quot;&quot;&quot;</span>
+    <span class="s3"># reindex all arrays</span>
+    <span class="s1">mgrs = []</span>
+    <span class="s0">for </span><span class="s1">mgr</span><span class="s0">, </span><span class="s1">indexers </span><span class="s0">in </span><span class="s1">mgrs_indexers:</span>
+        <span class="s1">axis1_made_copy = </span><span class="s0">False</span>
+        <span class="s0">for </span><span class="s1">ax</span><span class="s0">, </span><span class="s1">indexer </span><span class="s0">in </span><span class="s1">indexers.items():</span>
+            <span class="s1">mgr = mgr.reindex_indexer(</span>
+                <span class="s1">axes[ax]</span><span class="s0">, </span><span class="s1">indexer</span><span class="s0">, </span><span class="s1">axis=ax</span><span class="s0">, </span><span class="s1">allow_dups=</span><span class="s0">True, </span><span class="s1">use_na_proxy=</span><span class="s0">True</span>
+            <span class="s1">)</span>
+            <span class="s0">if </span><span class="s1">ax == </span><span class="s4">1 </span><span class="s0">and </span><span class="s1">indexer </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s1">axis1_made_copy = </span><span class="s0">True</span>
+        <span class="s0">if </span><span class="s1">copy </span><span class="s0">and </span><span class="s1">concat_axis == </span><span class="s4">0 </span><span class="s0">and not </span><span class="s1">axis1_made_copy:</span>
+            <span class="s3"># for concat_axis 1 we will always get a copy through concat_arrays</span>
+            <span class="s1">mgr = mgr.copy()</span>
+        <span class="s1">mgrs.append(mgr)</span>
+
+    <span class="s0">if </span><span class="s1">concat_axis == </span><span class="s4">1</span><span class="s1">:</span>
+        <span class="s3"># concatting along the rows -&gt; concat the reindexed arrays</span>
+        <span class="s3"># TODO(ArrayManager) doesn't yet preserve the correct dtype</span>
+        <span class="s1">arrays = [</span>
+            <span class="s1">concat_arrays([mgrs[i].arrays[j] </span><span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">range(len(mgrs))])</span>
+            <span class="s0">for </span><span class="s1">j </span><span class="s0">in </span><span class="s1">range(len(mgrs[</span><span class="s4">0</span><span class="s1">].arrays))</span>
+        <span class="s1">]</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s3"># concatting along the columns -&gt; combine reindexed arrays in a single manager</span>
+        <span class="s0">assert </span><span class="s1">concat_axis == </span><span class="s4">0</span>
+        <span class="s1">arrays = list(itertools.chain.from_iterable([mgr.arrays </span><span class="s0">for </span><span class="s1">mgr </span><span class="s0">in </span><span class="s1">mgrs]))</span>
+
+    <span class="s1">new_mgr = ArrayManager(arrays</span><span class="s0">, </span><span class="s1">[axes[</span><span class="s4">1</span><span class="s1">]</span><span class="s0">, </span><span class="s1">axes[</span><span class="s4">0</span><span class="s1">]]</span><span class="s0">, </span><span class="s1">verify_integrity=</span><span class="s0">False</span><span class="s1">)</span>
+    <span class="s0">return </span><span class="s1">new_mgr</span>
+
+
+<span class="s0">def </span><span class="s1">concat_arrays(to_concat: list) -&gt; ArrayLike:</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Alternative for concat_compat but specialized for use in the ArrayManager. 
+ 
+    Differences: only deals with 1D arrays (no axis keyword), assumes 
+    ensure_wrapped_if_datetimelike and does not skip empty arrays to determine 
+    the dtype. 
+    In addition ensures that all NullArrayProxies get replaced with actual 
+    arrays. 
+ 
+    Parameters 
+    ---------- 
+    to_concat : list of arrays 
+ 
+    Returns 
+    ------- 
+    np.ndarray or ExtensionArray 
+    &quot;&quot;&quot;</span>
+    <span class="s3"># ignore the all-NA proxies to determine the resulting dtype</span>
+    <span class="s1">to_concat_no_proxy = [x </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">to_concat </span><span class="s0">if not </span><span class="s1">isinstance(x</span><span class="s0">, </span><span class="s1">NullArrayProxy)]</span>
+
+    <span class="s1">dtypes = {x.dtype </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">to_concat_no_proxy}</span>
+    <span class="s1">single_dtype = len(dtypes) == </span><span class="s4">1</span>
+
+    <span class="s0">if </span><span class="s1">single_dtype:</span>
+        <span class="s1">target_dtype = to_concat_no_proxy[</span><span class="s4">0</span><span class="s1">].dtype</span>
+    <span class="s0">elif </span><span class="s1">all(x.kind </span><span class="s0">in </span><span class="s1">[</span><span class="s5">&quot;i&quot;</span><span class="s0">, </span><span class="s5">&quot;u&quot;</span><span class="s0">, </span><span class="s5">&quot;b&quot;</span><span class="s1">] </span><span class="s0">and </span><span class="s1">isinstance(x</span><span class="s0">, </span><span class="s1">np.dtype) </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">dtypes):</span>
+        <span class="s3"># GH#42092</span>
+        <span class="s1">target_dtype = np.find_common_type(list(dtypes)</span><span class="s0">, </span><span class="s1">[])</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">target_dtype = find_common_type([arr.dtype </span><span class="s0">for </span><span class="s1">arr </span><span class="s0">in </span><span class="s1">to_concat_no_proxy])</span>
+
+    <span class="s0">if </span><span class="s1">target_dtype.kind </span><span class="s0">in </span><span class="s1">[</span><span class="s5">&quot;m&quot;</span><span class="s0">, </span><span class="s5">&quot;M&quot;</span><span class="s1">]:</span>
+        <span class="s3"># for datetimelike use DatetimeArray/TimedeltaArray concatenation</span>
+        <span class="s3"># don't use arr.astype(target_dtype, copy=False), because that doesn't</span>
+        <span class="s3"># work for DatetimeArray/TimedeltaArray (returns ndarray)</span>
+        <span class="s1">to_concat = [</span>
+            <span class="s1">arr.to_array(target_dtype) </span><span class="s0">if </span><span class="s1">isinstance(arr</span><span class="s0">, </span><span class="s1">NullArrayProxy) </span><span class="s0">else </span><span class="s1">arr</span>
+            <span class="s0">for </span><span class="s1">arr </span><span class="s0">in </span><span class="s1">to_concat</span>
+        <span class="s1">]</span>
+        <span class="s0">return </span><span class="s1">type(to_concat_no_proxy[</span><span class="s4">0</span><span class="s1">])._concat_same_type(to_concat</span><span class="s0">, </span><span class="s1">axis=</span><span class="s4">0</span><span class="s1">)</span>
+
+    <span class="s1">to_concat = [</span>
+        <span class="s1">arr.to_array(target_dtype)</span>
+        <span class="s0">if </span><span class="s1">isinstance(arr</span><span class="s0">, </span><span class="s1">NullArrayProxy)</span>
+        <span class="s0">else </span><span class="s1">cast_to_common_type(arr</span><span class="s0">, </span><span class="s1">target_dtype)</span>
+        <span class="s0">for </span><span class="s1">arr </span><span class="s0">in </span><span class="s1">to_concat</span>
+    <span class="s1">]</span>
+
+    <span class="s0">if </span><span class="s1">isinstance(to_concat[</span><span class="s4">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">ExtensionArray):</span>
+        <span class="s1">cls = type(to_concat[</span><span class="s4">0</span><span class="s1">])</span>
+        <span class="s0">return </span><span class="s1">cls._concat_same_type(to_concat)</span>
+
+    <span class="s1">result = np.concatenate(to_concat)</span>
+
+    <span class="s3"># TODO decide on exact behaviour (we shouldn't do this only for empty result)</span>
+    <span class="s3"># see https://github.com/pandas-dev/pandas/issues/39817</span>
+    <span class="s0">if </span><span class="s1">len(result) == </span><span class="s4">0</span><span class="s1">:</span>
+        <span class="s3"># all empties -&gt; check for bool to not coerce to float</span>
+        <span class="s1">kinds = {obj.dtype.kind </span><span class="s0">for </span><span class="s1">obj </span><span class="s0">in </span><span class="s1">to_concat_no_proxy}</span>
+        <span class="s0">if </span><span class="s1">len(kinds) != </span><span class="s4">1</span><span class="s1">:</span>
+            <span class="s0">if </span><span class="s5">&quot;b&quot; </span><span class="s0">in </span><span class="s1">kinds:</span>
+                <span class="s1">result = result.astype(object)</span>
+    <span class="s0">return </span><span class="s1">result</span>
+
+
+<span class="s0">def </span><span class="s1">concatenate_managers(</span>
+    <span class="s1">mgrs_indexers</span><span class="s0">, </span><span class="s1">axes: list[Index]</span><span class="s0">, </span><span class="s1">concat_axis: int</span><span class="s0">, </span><span class="s1">copy: bool</span>
+<span class="s1">) -&gt; Manager:</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Concatenate block managers into one. 
+ 
+    Parameters 
+    ---------- 
+    mgrs_indexers : list of (BlockManager, {axis: indexer,...}) tuples 
+    axes : list of Index 
+    concat_axis : int 
+    copy : bool 
+ 
+    Returns 
+    ------- 
+    BlockManager 
+    &quot;&quot;&quot;</span>
+    <span class="s3"># TODO(ArrayManager) this assumes that all managers are of the same type</span>
+    <span class="s0">if </span><span class="s1">isinstance(mgrs_indexers[</span><span class="s4">0</span><span class="s1">][</span><span class="s4">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">ArrayManager):</span>
+        <span class="s0">return </span><span class="s1">_concatenate_array_managers(mgrs_indexers</span><span class="s0">, </span><span class="s1">axes</span><span class="s0">, </span><span class="s1">concat_axis</span><span class="s0">, </span><span class="s1">copy)</span>
+
+    <span class="s3"># Assertions disabled for performance</span>
+    <span class="s3"># for tup in mgrs_indexers:</span>
+    <span class="s3">#    # caller is responsible for ensuring this</span>
+    <span class="s3">#    indexers = tup[1]</span>
+    <span class="s3">#    assert concat_axis not in indexers</span>
+
+    <span class="s0">if </span><span class="s1">concat_axis == </span><span class="s4">0</span><span class="s1">:</span>
+        <span class="s0">return </span><span class="s1">_concat_managers_axis0(mgrs_indexers</span><span class="s0">, </span><span class="s1">axes</span><span class="s0">, </span><span class="s1">copy)</span>
+
+    <span class="s1">mgrs_indexers = _maybe_reindex_columns_na_proxy(axes</span><span class="s0">, </span><span class="s1">mgrs_indexers)</span>
+
+    <span class="s3"># Assertion disabled for performance</span>
+    <span class="s3"># assert all(not x[1] for x in mgrs_indexers)</span>
+
+    <span class="s1">concat_plans = [_get_mgr_concatenation_plan(mgr) </span><span class="s0">for </span><span class="s1">mgr</span><span class="s0">, </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">mgrs_indexers]</span>
+    <span class="s1">concat_plan = _combine_concat_plans(concat_plans)</span>
+    <span class="s1">blocks = []</span>
+
+    <span class="s0">for </span><span class="s1">placement</span><span class="s0">, </span><span class="s1">join_units </span><span class="s0">in </span><span class="s1">concat_plan:</span>
+        <span class="s1">unit = join_units[</span><span class="s4">0</span><span class="s1">]</span>
+        <span class="s1">blk = unit.block</span>
+
+        <span class="s0">if </span><span class="s1">len(join_units) == </span><span class="s4">1</span><span class="s1">:</span>
+            <span class="s1">values = blk.values</span>
+            <span class="s0">if </span><span class="s1">copy:</span>
+                <span class="s1">values = values.copy()</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">values = values.view()</span>
+            <span class="s1">fastpath = </span><span class="s0">True</span>
+        <span class="s0">elif </span><span class="s1">_is_uniform_join_units(join_units):</span>
+            <span class="s1">vals = [ju.block.values </span><span class="s0">for </span><span class="s1">ju </span><span class="s0">in </span><span class="s1">join_units]</span>
+
+            <span class="s0">if not </span><span class="s1">blk.is_extension:</span>
+                <span class="s3"># _is_uniform_join_units ensures a single dtype, so</span>
+                <span class="s3">#  we can use np.concatenate, which is more performant</span>
+                <span class="s3">#  than concat_compat</span>
+                <span class="s1">values = np.concatenate(vals</span><span class="s0">, </span><span class="s1">axis=</span><span class="s4">1</span><span class="s1">)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s3"># TODO(EA2D): special-casing not needed with 2D EAs</span>
+                <span class="s1">values = concat_compat(vals</span><span class="s0">, </span><span class="s1">axis=</span><span class="s4">1</span><span class="s1">)</span>
+                <span class="s1">values = ensure_block_shape(values</span><span class="s0">, </span><span class="s1">ndim=</span><span class="s4">2</span><span class="s1">)</span>
+
+            <span class="s1">values = ensure_wrapped_if_datetimelike(values)</span>
+
+            <span class="s1">fastpath = blk.values.dtype == values.dtype</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">values = _concatenate_join_units(join_units</span><span class="s0">, </span><span class="s1">copy=copy)</span>
+            <span class="s1">fastpath = </span><span class="s0">False</span>
+
+        <span class="s0">if </span><span class="s1">fastpath:</span>
+            <span class="s1">b = blk.make_block_same_class(values</span><span class="s0">, </span><span class="s1">placement=placement)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">b = new_block_2d(values</span><span class="s0">, </span><span class="s1">placement=placement)</span>
+
+        <span class="s1">blocks.append(b)</span>
+
+    <span class="s0">return </span><span class="s1">BlockManager(tuple(blocks)</span><span class="s0">, </span><span class="s1">axes)</span>
+
+
+<span class="s0">def </span><span class="s1">_concat_managers_axis0(</span>
+    <span class="s1">mgrs_indexers</span><span class="s0">, </span><span class="s1">axes: list[Index]</span><span class="s0">, </span><span class="s1">copy: bool</span>
+<span class="s1">) -&gt; BlockManager:</span>
+    <span class="s2">&quot;&quot;&quot; 
+    concat_managers specialized to concat_axis=0, with reindexing already 
+    having been done in _maybe_reindex_columns_na_proxy. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">had_reindexers = {</span>
+        <span class="s1">i: len(mgrs_indexers[i][</span><span class="s4">1</span><span class="s1">]) &gt; </span><span class="s4">0 </span><span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">range(len(mgrs_indexers))</span>
+    <span class="s1">}</span>
+    <span class="s1">mgrs_indexers = _maybe_reindex_columns_na_proxy(axes</span><span class="s0">, </span><span class="s1">mgrs_indexers)</span>
+
+    <span class="s1">mgrs = [x[</span><span class="s4">0</span><span class="s1">] </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">mgrs_indexers]</span>
+
+    <span class="s1">offset = </span><span class="s4">0</span>
+    <span class="s1">blocks = []</span>
+    <span class="s0">for </span><span class="s1">i</span><span class="s0">, </span><span class="s1">mgr </span><span class="s0">in </span><span class="s1">enumerate(mgrs):</span>
+        <span class="s3"># If we already reindexed, then we definitely don't need another copy</span>
+        <span class="s1">made_copy = had_reindexers[i]</span>
+
+        <span class="s0">for </span><span class="s1">blk </span><span class="s0">in </span><span class="s1">mgr.blocks:</span>
+            <span class="s0">if </span><span class="s1">made_copy:</span>
+                <span class="s1">nb = blk.copy(deep=</span><span class="s0">False</span><span class="s1">)</span>
+            <span class="s0">elif </span><span class="s1">copy:</span>
+                <span class="s1">nb = blk.copy()</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s3"># by slicing instead of copy(deep=False), we get a new array</span>
+                <span class="s3">#  object, see test_concat_copy</span>
+                <span class="s1">nb = blk.getitem_block(slice(</span><span class="s0">None</span><span class="s1">))</span>
+            <span class="s1">nb._mgr_locs = nb._mgr_locs.add(offset)</span>
+            <span class="s1">blocks.append(nb)</span>
+
+        <span class="s1">offset += len(mgr.items)</span>
+    <span class="s0">return </span><span class="s1">BlockManager(tuple(blocks)</span><span class="s0">, </span><span class="s1">axes)</span>
+
+
+<span class="s0">def </span><span class="s1">_maybe_reindex_columns_na_proxy(</span>
+    <span class="s1">axes: list[Index]</span><span class="s0">, </span><span class="s1">mgrs_indexers: list[tuple[BlockManager</span><span class="s0">, </span><span class="s1">dict[int</span><span class="s0">, </span><span class="s1">np.ndarray]]]</span>
+<span class="s1">) -&gt; list[tuple[BlockManager</span><span class="s0">, </span><span class="s1">dict[int</span><span class="s0">, </span><span class="s1">np.ndarray]]]:</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Reindex along columns so that all of the BlockManagers being concatenated 
+    have matching columns. 
+ 
+    Columns added in this reindexing have dtype=np.void, indicating they 
+    should be ignored when choosing a column's final dtype. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">new_mgrs_indexers: list[tuple[BlockManager</span><span class="s0">, </span><span class="s1">dict[int</span><span class="s0">, </span><span class="s1">np.ndarray]]] = []</span>
+
+    <span class="s0">for </span><span class="s1">mgr</span><span class="s0">, </span><span class="s1">indexers </span><span class="s0">in </span><span class="s1">mgrs_indexers:</span>
+        <span class="s3"># For axis=0 (i.e. columns) we use_na_proxy and only_slice, so this</span>
+        <span class="s3">#  is a cheap reindexing.</span>
+        <span class="s0">for </span><span class="s1">i</span><span class="s0">, </span><span class="s1">indexer </span><span class="s0">in </span><span class="s1">indexers.items():</span>
+            <span class="s1">mgr = mgr.reindex_indexer(</span>
+                <span class="s1">axes[i]</span><span class="s0">,</span>
+                <span class="s1">indexers[i]</span><span class="s0">,</span>
+                <span class="s1">axis=i</span><span class="s0">,</span>
+                <span class="s1">copy=</span><span class="s0">False,</span>
+                <span class="s1">only_slice=</span><span class="s0">True,  </span><span class="s3"># only relevant for i==0</span>
+                <span class="s1">allow_dups=</span><span class="s0">True,</span>
+                <span class="s1">use_na_proxy=</span><span class="s0">True,  </span><span class="s3"># only relevant for i==0</span>
+            <span class="s1">)</span>
+        <span class="s1">new_mgrs_indexers.append((mgr</span><span class="s0">, </span><span class="s1">{}))</span>
+
+    <span class="s0">return </span><span class="s1">new_mgrs_indexers</span>
+
+
+<span class="s0">def </span><span class="s1">_get_mgr_concatenation_plan(mgr: BlockManager):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Construct concatenation plan for given block manager. 
+ 
+    Parameters 
+    ---------- 
+    mgr : BlockManager 
+ 
+    Returns 
+    ------- 
+    plan : list of (BlockPlacement, JoinUnit) tuples 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s3"># Calculate post-reindex shape , save for item axis which will be separate</span>
+    <span class="s3"># for each block anyway.</span>
+    <span class="s1">mgr_shape_list = list(mgr.shape)</span>
+    <span class="s1">mgr_shape = tuple(mgr_shape_list)</span>
+
+    <span class="s0">if </span><span class="s1">mgr.is_single_block:</span>
+        <span class="s1">blk = mgr.blocks[</span><span class="s4">0</span><span class="s1">]</span>
+        <span class="s0">return </span><span class="s1">[(blk.mgr_locs</span><span class="s0">, </span><span class="s1">JoinUnit(blk</span><span class="s0">, </span><span class="s1">mgr_shape))]</span>
+
+    <span class="s1">blknos = mgr.blknos</span>
+    <span class="s1">blklocs = mgr.blklocs</span>
+
+    <span class="s1">plan = []</span>
+    <span class="s0">for </span><span class="s1">blkno</span><span class="s0">, </span><span class="s1">placements </span><span class="s0">in </span><span class="s1">libinternals.get_blkno_placements(blknos</span><span class="s0">, </span><span class="s1">group=</span><span class="s0">False</span><span class="s1">):</span>
+
+        <span class="s0">assert </span><span class="s1">placements.is_slice_like</span>
+        <span class="s0">assert </span><span class="s1">blkno != -</span><span class="s4">1</span>
+
+        <span class="s1">shape_list = list(mgr_shape)</span>
+        <span class="s1">shape_list[</span><span class="s4">0</span><span class="s1">] = len(placements)</span>
+        <span class="s1">shape = tuple(shape_list)</span>
+
+        <span class="s1">blk = mgr.blocks[blkno]</span>
+        <span class="s1">ax0_blk_indexer = blklocs[placements.indexer]</span>
+
+        <span class="s1">unit_no_ax0_reindexing = (</span>
+            <span class="s1">len(placements) == len(blk.mgr_locs)</span>
+            <span class="s0">and</span>
+            <span class="s3"># Fastpath detection of join unit not</span>
+            <span class="s3"># needing to reindex its block: no ax0</span>
+            <span class="s3"># reindexing took place and block</span>
+            <span class="s3"># placement was sequential before.</span>
+            <span class="s1">(</span>
+                <span class="s1">(blk.mgr_locs.is_slice_like </span><span class="s0">and </span><span class="s1">blk.mgr_locs.as_slice.step == </span><span class="s4">1</span><span class="s1">)</span>
+                <span class="s0">or</span>
+                <span class="s3"># Slow-ish detection: all indexer locs</span>
+                <span class="s3"># are sequential (and length match is</span>
+                <span class="s3"># checked above).</span>
+                <span class="s1">(np.diff(ax0_blk_indexer) == </span><span class="s4">1</span><span class="s1">).all()</span>
+            <span class="s1">)</span>
+        <span class="s1">)</span>
+
+        <span class="s0">if not </span><span class="s1">unit_no_ax0_reindexing:</span>
+            <span class="s3"># create block from subset of columns</span>
+            <span class="s1">blk = blk.getitem_block(ax0_blk_indexer)</span>
+
+        <span class="s3"># Assertions disabled for performance</span>
+        <span class="s3"># assert blk._mgr_locs.as_slice == placements.as_slice</span>
+        <span class="s3"># assert blk.shape[0] == shape[0]</span>
+        <span class="s1">unit = JoinUnit(blk</span><span class="s0">, </span><span class="s1">shape)</span>
+
+        <span class="s1">plan.append((placements</span><span class="s0">, </span><span class="s1">unit))</span>
+
+    <span class="s0">return </span><span class="s1">plan</span>
+
+
+<span class="s0">class </span><span class="s1">JoinUnit:</span>
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">block: Block</span><span class="s0">, </span><span class="s1">shape: Shape):</span>
+        <span class="s3"># Passing shape explicitly is required for cases when block is None.</span>
+        <span class="s1">self.block = block</span>
+        <span class="s1">self.shape = shape</span>
+
+    <span class="s0">def </span><span class="s1">__repr__(self) -&gt; str:</span>
+        <span class="s0">return </span><span class="s5">f&quot;</span><span class="s0">{</span><span class="s1">type(self).__name__</span><span class="s0">}</span><span class="s5">(</span><span class="s0">{</span><span class="s1">repr(self.block)</span><span class="s0">}</span><span class="s5">)&quot;</span>
+
+    <span class="s1">@cache_readonly</span>
+    <span class="s0">def </span><span class="s1">is_na(self) -&gt; bool:</span>
+        <span class="s1">blk = self.block</span>
+        <span class="s0">if </span><span class="s1">blk.dtype.kind == </span><span class="s5">&quot;V&quot;</span><span class="s1">:</span>
+            <span class="s0">return True</span>
+        <span class="s0">return False</span>
+
+    <span class="s0">def </span><span class="s1">get_reindexed_values(self</span><span class="s0">, </span><span class="s1">empty_dtype: DtypeObj) -&gt; ArrayLike:</span>
+        <span class="s1">values: ArrayLike</span>
+
+        <span class="s0">if </span><span class="s1">self.is_na:</span>
+            <span class="s0">return </span><span class="s1">make_na_array(empty_dtype</span><span class="s0">, </span><span class="s1">self.shape)</span>
+
+        <span class="s0">else</span><span class="s1">:</span>
+
+            <span class="s0">if not </span><span class="s1">self.block._can_consolidate:</span>
+                <span class="s3"># preserve these for validation in concat_compat</span>
+                <span class="s0">return </span><span class="s1">self.block.values</span>
+
+            <span class="s3"># No dtype upcasting is done here, it will be performed during</span>
+            <span class="s3"># concatenation itself.</span>
+            <span class="s1">values = self.block.values</span>
+
+        <span class="s0">return </span><span class="s1">values</span>
+
+
+<span class="s0">def </span><span class="s1">make_na_array(dtype: DtypeObj</span><span class="s0">, </span><span class="s1">shape: Shape) -&gt; ArrayLike:</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Construct an np.ndarray or ExtensionArray of the given dtype and shape 
+    holding all-NA values. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">is_datetime64tz_dtype(dtype):</span>
+        <span class="s3"># NaT here is analogous to dtype.na_value below</span>
+        <span class="s1">i8values = np.full(shape</span><span class="s0">, </span><span class="s1">NaT.value)</span>
+        <span class="s0">return </span><span class="s1">DatetimeArray(i8values</span><span class="s0">, </span><span class="s1">dtype=dtype)</span>
+
+    <span class="s0">elif </span><span class="s1">is_1d_only_ea_dtype(dtype):</span>
+        <span class="s1">dtype = cast(ExtensionDtype</span><span class="s0">, </span><span class="s1">dtype)</span>
+        <span class="s1">cls = dtype.construct_array_type()</span>
+
+        <span class="s1">missing_arr = cls._from_sequence([]</span><span class="s0">, </span><span class="s1">dtype=dtype)</span>
+        <span class="s1">nrows = shape[-</span><span class="s4">1</span><span class="s1">]</span>
+        <span class="s1">taker = -</span><span class="s4">1 </span><span class="s1">* np.ones((nrows</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">dtype=np.intp)</span>
+        <span class="s0">return </span><span class="s1">missing_arr.take(taker</span><span class="s0">, </span><span class="s1">allow_fill=</span><span class="s0">True, </span><span class="s1">fill_value=dtype.na_value)</span>
+    <span class="s0">elif </span><span class="s1">isinstance(dtype</span><span class="s0">, </span><span class="s1">ExtensionDtype):</span>
+        <span class="s3"># TODO: no tests get here, a handful would if we disabled</span>
+        <span class="s3">#  the dt64tz special-case above (which is faster)</span>
+        <span class="s1">cls = dtype.construct_array_type()</span>
+        <span class="s1">missing_arr = cls._empty(shape=shape</span><span class="s0">, </span><span class="s1">dtype=dtype)</span>
+        <span class="s1">missing_arr[:] = dtype.na_value</span>
+        <span class="s0">return </span><span class="s1">missing_arr</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s3"># NB: we should never get here with dtype integer or bool;</span>
+        <span class="s3">#  if we did, the missing_arr.fill would cast to gibberish</span>
+        <span class="s1">missing_arr = np.empty(shape</span><span class="s0">, </span><span class="s1">dtype=dtype)</span>
+        <span class="s1">fill_value = _dtype_to_na_value(dtype)</span>
+        <span class="s1">missing_arr.fill(fill_value)</span>
+        <span class="s0">return </span><span class="s1">missing_arr</span>
+
+
+<span class="s0">def </span><span class="s1">_concatenate_join_units(join_units: list[JoinUnit]</span><span class="s0">, </span><span class="s1">copy: bool) -&gt; ArrayLike:</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Concatenate values from several join units along axis=1. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">empty_dtype = _get_empty_dtype(join_units)</span>
+
+    <span class="s1">to_concat = [ju.get_reindexed_values(empty_dtype=empty_dtype) </span><span class="s0">for </span><span class="s1">ju </span><span class="s0">in </span><span class="s1">join_units]</span>
+
+    <span class="s0">if </span><span class="s1">len(to_concat) == </span><span class="s4">1</span><span class="s1">:</span>
+        <span class="s3"># Only one block, nothing to concatenate.</span>
+        <span class="s1">concat_values = to_concat[</span><span class="s4">0</span><span class="s1">]</span>
+        <span class="s0">if </span><span class="s1">copy:</span>
+            <span class="s0">if </span><span class="s1">isinstance(concat_values</span><span class="s0">, </span><span class="s1">np.ndarray):</span>
+                <span class="s3"># non-reindexed (=not yet copied) arrays are made into a view</span>
+                <span class="s3"># in JoinUnit.get_reindexed_values</span>
+                <span class="s0">if </span><span class="s1">concat_values.base </span><span class="s0">is not None</span><span class="s1">:</span>
+                    <span class="s1">concat_values = concat_values.copy()</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">concat_values = concat_values.copy()</span>
+
+    <span class="s0">elif </span><span class="s1">any(is_1d_only_ea_obj(t) </span><span class="s0">for </span><span class="s1">t </span><span class="s0">in </span><span class="s1">to_concat):</span>
+        <span class="s3"># TODO(EA2D): special case not needed if all EAs used HybridBlocks</span>
+        <span class="s3"># NB: we are still assuming here that Hybrid blocks have shape (1, N)</span>
+        <span class="s3"># concatting with at least one EA means we are concatting a single column</span>
+        <span class="s3"># the non-EA values are 2D arrays with shape (1, n)</span>
+
+        <span class="s3"># error: No overload variant of &quot;__getitem__&quot; of &quot;ExtensionArray&quot; matches</span>
+        <span class="s3"># argument type &quot;Tuple[int, slice]&quot;</span>
+        <span class="s1">to_concat = [</span>
+            <span class="s1">t </span><span class="s0">if </span><span class="s1">is_1d_only_ea_obj(t) </span><span class="s0">else </span><span class="s1">t[</span><span class="s4">0</span><span class="s0">, </span><span class="s1">:]  </span><span class="s3"># type: ignore[call-overload]</span>
+            <span class="s0">for </span><span class="s1">t </span><span class="s0">in </span><span class="s1">to_concat</span>
+        <span class="s1">]</span>
+        <span class="s1">concat_values = concat_compat(to_concat</span><span class="s0">, </span><span class="s1">axis=</span><span class="s4">0</span><span class="s0">, </span><span class="s1">ea_compat_axis=</span><span class="s0">True</span><span class="s1">)</span>
+        <span class="s1">concat_values = ensure_block_shape(concat_values</span><span class="s0">, </span><span class="s4">2</span><span class="s1">)</span>
+
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">concat_values = concat_compat(to_concat</span><span class="s0">, </span><span class="s1">axis=</span><span class="s4">1</span><span class="s1">)</span>
+
+    <span class="s0">return </span><span class="s1">concat_values</span>
+
+
+<span class="s0">def </span><span class="s1">_dtype_to_na_value(dtype: DtypeObj):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Find the NA value to go with this dtype. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">isinstance(dtype</span><span class="s0">, </span><span class="s1">ExtensionDtype):</span>
+        <span class="s0">return </span><span class="s1">dtype.na_value</span>
+    <span class="s0">elif </span><span class="s1">dtype.kind </span><span class="s0">in </span><span class="s1">[</span><span class="s5">&quot;m&quot;</span><span class="s0">, </span><span class="s5">&quot;M&quot;</span><span class="s1">]:</span>
+        <span class="s0">return </span><span class="s1">dtype.type(</span><span class="s5">&quot;NaT&quot;</span><span class="s1">)</span>
+    <span class="s0">elif </span><span class="s1">dtype.kind </span><span class="s0">in </span><span class="s1">[</span><span class="s5">&quot;f&quot;</span><span class="s0">, </span><span class="s5">&quot;c&quot;</span><span class="s1">]:</span>
+        <span class="s0">return </span><span class="s1">dtype.type(</span><span class="s5">&quot;NaN&quot;</span><span class="s1">)</span>
+    <span class="s0">elif </span><span class="s1">dtype.kind == </span><span class="s5">&quot;b&quot;</span><span class="s1">:</span>
+        <span class="s3"># different from missing.na_value_for_dtype</span>
+        <span class="s0">return None</span>
+    <span class="s0">elif </span><span class="s1">dtype.kind </span><span class="s0">in </span><span class="s1">[</span><span class="s5">&quot;i&quot;</span><span class="s0">, </span><span class="s5">&quot;u&quot;</span><span class="s1">]:</span>
+        <span class="s0">return </span><span class="s1">np.nan</span>
+    <span class="s0">elif </span><span class="s1">dtype.kind == </span><span class="s5">&quot;O&quot;</span><span class="s1">:</span>
+        <span class="s0">return </span><span class="s1">np.nan</span>
+    <span class="s0">raise </span><span class="s1">NotImplementedError</span>
+
+
+<span class="s0">def </span><span class="s1">_get_empty_dtype(join_units: Sequence[JoinUnit]) -&gt; DtypeObj:</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Return dtype and N/A values to use when concatenating specified units. 
+ 
+    Returned N/A value may be None which means there was no casting involved. 
+ 
+    Returns 
+    ------- 
+    dtype 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">len(join_units) == </span><span class="s4">1</span><span class="s1">:</span>
+        <span class="s1">blk = join_units[</span><span class="s4">0</span><span class="s1">].block</span>
+        <span class="s0">return </span><span class="s1">blk.dtype</span>
+
+    <span class="s0">if </span><span class="s1">_is_uniform_reindex(join_units):</span>
+        <span class="s1">empty_dtype = join_units[</span><span class="s4">0</span><span class="s1">].block.dtype</span>
+        <span class="s0">return </span><span class="s1">empty_dtype</span>
+
+    <span class="s1">needs_can_hold_na = any(unit.is_na </span><span class="s0">for </span><span class="s1">unit </span><span class="s0">in </span><span class="s1">join_units)</span>
+
+    <span class="s1">dtypes = [unit.block.dtype </span><span class="s0">for </span><span class="s1">unit </span><span class="s0">in </span><span class="s1">join_units </span><span class="s0">if not </span><span class="s1">unit.is_na]</span>
+
+    <span class="s1">dtype = find_common_type(dtypes)</span>
+    <span class="s0">if </span><span class="s1">needs_can_hold_na:</span>
+        <span class="s1">dtype = ensure_dtype_can_hold_na(dtype)</span>
+    <span class="s0">return </span><span class="s1">dtype</span>
+
+
+<span class="s0">def </span><span class="s1">_is_uniform_join_units(join_units: list[JoinUnit]) -&gt; bool:</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Check if the join units consist of blocks of uniform type that can 
+    be concatenated using Block.concat_same_type instead of the generic 
+    _concatenate_join_units (which uses `concat_compat`). 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s1">first = join_units[</span><span class="s4">0</span><span class="s1">].block</span>
+    <span class="s0">if </span><span class="s1">first.dtype.kind == </span><span class="s5">&quot;V&quot;</span><span class="s1">:</span>
+        <span class="s0">return False</span>
+    <span class="s0">return </span><span class="s1">(</span>
+        <span class="s3"># exclude cases where a) ju.block is None or b) we have e.g. Int64+int64</span>
+        <span class="s1">all(type(ju.block) </span><span class="s0">is </span><span class="s1">type(first) </span><span class="s0">for </span><span class="s1">ju </span><span class="s0">in </span><span class="s1">join_units)</span>
+        <span class="s0">and</span>
+        <span class="s3"># e.g. DatetimeLikeBlock can be dt64 or td64, but these are not uniform</span>
+        <span class="s1">all(</span>
+            <span class="s1">is_dtype_equal(ju.block.dtype</span><span class="s0">, </span><span class="s1">first.dtype)</span>
+            <span class="s3"># GH#42092 we only want the dtype_equal check for non-numeric blocks</span>
+            <span class="s3">#  (for now, may change but that would need a deprecation)</span>
+            <span class="s0">or </span><span class="s1">ju.block.dtype.kind </span><span class="s0">in </span><span class="s1">[</span><span class="s5">&quot;b&quot;</span><span class="s0">, </span><span class="s5">&quot;i&quot;</span><span class="s0">, </span><span class="s5">&quot;u&quot;</span><span class="s1">]</span>
+            <span class="s0">for </span><span class="s1">ju </span><span class="s0">in </span><span class="s1">join_units</span>
+        <span class="s1">)</span>
+        <span class="s0">and</span>
+        <span class="s3"># no blocks that would get missing values (can lead to type upcasts)</span>
+        <span class="s3"># unless we're an extension dtype.</span>
+        <span class="s1">all(</span><span class="s0">not </span><span class="s1">ju.is_na </span><span class="s0">or </span><span class="s1">ju.block.is_extension </span><span class="s0">for </span><span class="s1">ju </span><span class="s0">in </span><span class="s1">join_units)</span>
+        <span class="s0">and</span>
+        <span class="s3"># only use this path when there is something to concatenate</span>
+        <span class="s1">len(join_units) &gt; </span><span class="s4">1</span>
+    <span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">_is_uniform_reindex(join_units) -&gt; bool:</span>
+    <span class="s0">return </span><span class="s1">(</span>
+        <span class="s3"># TODO: should this be ju.block._can_hold_na?</span>
+        <span class="s1">all(ju.block.is_extension </span><span class="s0">for </span><span class="s1">ju </span><span class="s0">in </span><span class="s1">join_units)</span>
+        <span class="s0">and </span><span class="s1">len({ju.block.dtype.name </span><span class="s0">for </span><span class="s1">ju </span><span class="s0">in </span><span class="s1">join_units}) == </span><span class="s4">1</span>
+    <span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">_trim_join_unit(join_unit: JoinUnit</span><span class="s0">, </span><span class="s1">length: int) -&gt; JoinUnit:</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Reduce join_unit's shape along item axis to length. 
+ 
+    Extra items that didn't fit are returned as a separate block. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">extra_block = join_unit.block.getitem_block(slice(length</span><span class="s0">, None</span><span class="s1">))</span>
+    <span class="s1">join_unit.block = join_unit.block.getitem_block(slice(length))</span>
+
+    <span class="s1">extra_shape = (join_unit.shape[</span><span class="s4">0</span><span class="s1">] - length</span><span class="s0">,</span><span class="s1">) + join_unit.shape[</span><span class="s4">1</span><span class="s1">:]</span>
+    <span class="s1">join_unit.shape = (length</span><span class="s0">,</span><span class="s1">) + join_unit.shape[</span><span class="s4">1</span><span class="s1">:]</span>
+
+    <span class="s0">return </span><span class="s1">JoinUnit(block=extra_block</span><span class="s0">, </span><span class="s1">shape=extra_shape)</span>
+
+
+<span class="s0">def </span><span class="s1">_combine_concat_plans(plans):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Combine multiple concatenation plans into one. 
+ 
+    existing_plan is updated in-place. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">len(plans) == </span><span class="s4">1</span><span class="s1">:</span>
+        <span class="s0">for </span><span class="s1">p </span><span class="s0">in </span><span class="s1">plans[</span><span class="s4">0</span><span class="s1">]:</span>
+            <span class="s0">yield </span><span class="s1">p[</span><span class="s4">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[p[</span><span class="s4">1</span><span class="s1">]]</span>
+
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s3"># singleton list so we can modify it as a side-effect within _next_or_none</span>
+        <span class="s1">num_ended = [</span><span class="s4">0</span><span class="s1">]</span>
+
+        <span class="s0">def </span><span class="s1">_next_or_none(seq):</span>
+            <span class="s1">retval = next(seq</span><span class="s0">, None</span><span class="s1">)</span>
+            <span class="s0">if </span><span class="s1">retval </span><span class="s0">is None</span><span class="s1">:</span>
+                <span class="s1">num_ended[</span><span class="s4">0</span><span class="s1">] += </span><span class="s4">1</span>
+            <span class="s0">return </span><span class="s1">retval</span>
+
+        <span class="s1">plans = list(map(iter</span><span class="s0">, </span><span class="s1">plans))</span>
+        <span class="s1">next_items = list(map(_next_or_none</span><span class="s0">, </span><span class="s1">plans))</span>
+
+        <span class="s0">while </span><span class="s1">num_ended[</span><span class="s4">0</span><span class="s1">] != len(next_items):</span>
+            <span class="s0">if </span><span class="s1">num_ended[</span><span class="s4">0</span><span class="s1">] &gt; </span><span class="s4">0</span><span class="s1">:</span>
+                <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s5">&quot;Plan shapes are not aligned&quot;</span><span class="s1">)</span>
+
+            <span class="s1">placements</span><span class="s0">, </span><span class="s1">units = zip(*next_items)</span>
+
+            <span class="s1">lengths = list(map(len</span><span class="s0">, </span><span class="s1">placements))</span>
+            <span class="s1">min_len</span><span class="s0">, </span><span class="s1">max_len = min(lengths)</span><span class="s0">, </span><span class="s1">max(lengths)</span>
+
+            <span class="s0">if </span><span class="s1">min_len == max_len:</span>
+                <span class="s0">yield </span><span class="s1">placements[</span><span class="s4">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">units</span>
+                <span class="s1">next_items[:] = map(_next_or_none</span><span class="s0">, </span><span class="s1">plans)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">yielded_placement = </span><span class="s0">None</span>
+                <span class="s1">yielded_units = [</span><span class="s0">None</span><span class="s1">] * len(next_items)</span>
+                <span class="s0">for </span><span class="s1">i</span><span class="s0">, </span><span class="s1">(plc</span><span class="s0">, </span><span class="s1">unit) </span><span class="s0">in </span><span class="s1">enumerate(next_items):</span>
+                    <span class="s1">yielded_units[i] = unit</span>
+                    <span class="s0">if </span><span class="s1">len(plc) &gt; min_len:</span>
+                        <span class="s3"># _trim_join_unit updates unit in place, so only</span>
+                        <span class="s3"># placement needs to be sliced to skip min_len.</span>
+                        <span class="s1">next_items[i] = (plc[min_len:]</span><span class="s0">, </span><span class="s1">_trim_join_unit(unit</span><span class="s0">, </span><span class="s1">min_len))</span>
+                    <span class="s0">else</span><span class="s1">:</span>
+                        <span class="s1">yielded_placement = plc</span>
+                        <span class="s1">next_items[i] = _next_or_none(plans[i])</span>
+
+                <span class="s0">yield </span><span class="s1">yielded_placement</span><span class="s0">, </span><span class="s1">yielded_units</span>
+</pre>
+</body>
+</html>

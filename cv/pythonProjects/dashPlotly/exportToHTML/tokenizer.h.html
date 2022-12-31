@@ -1,0 +1,257 @@
+<html>
+<head>
+<title>tokenizer.h</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6897bb;}
+.s4 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+tokenizer.h</font>
+</center></td></tr></table>
+<pre><span class="s0">/* 
+ 
+Copyright (c) 2012, Lambda Foundry, Inc., except where noted 
+ 
+Incorporates components of WarrenWeckesser/textreader, licensed under 3-clause 
+BSD 
+ 
+See LICENSE for the license 
+ 
+*/</span>
+
+<span class="s2">#ifndef </span><span class="s1">PANDAS__LIBS_SRC_PARSER_TOKENIZER_H_</span>
+<span class="s2">#define </span><span class="s1">PANDAS__LIBS_SRC_PARSER_TOKENIZER_H_</span>
+
+<span class="s2">#define </span><span class="s1">PY_SSIZE_T_CLEAN</span>
+<span class="s2">#include </span><span class="s1">&lt;Python.h&gt;</span>
+
+<span class="s2">#define </span><span class="s1">ERROR_NO_DIGITS </span><span class="s3">1</span>
+<span class="s2">#define </span><span class="s1">ERROR_OVERFLOW </span><span class="s3">2</span>
+<span class="s2">#define </span><span class="s1">ERROR_INVALID_CHARS </span><span class="s3">3</span>
+
+<span class="s2">#include </span><span class="s4">&quot;../headers/stdint.h&quot;</span>
+<span class="s2">#include </span><span class="s4">&quot;../inline_helper.h&quot;</span>
+<span class="s2">#include </span><span class="s4">&quot;../headers/portable.h&quot;</span>
+
+<span class="s2">#include </span><span class="s4">&quot;khash.h&quot;</span>
+
+<span class="s2">#define </span><span class="s1">STREAM_INIT_SIZE </span><span class="s3">32</span>
+
+<span class="s2">#define </span><span class="s1">REACHED_EOF </span><span class="s3">1</span>
+<span class="s2">#define </span><span class="s1">CALLING_READ_FAILED </span><span class="s3">2</span>
+
+
+<span class="s0">/* 
+ 
+  C flat file parsing low level code for pandas / NumPy 
+ 
+ */</span>
+
+<span class="s0">/* 
+ *  Common set of error types for the read_rows() and tokenize() 
+ *  functions. 
+ */</span>
+
+<span class="s0">// #define VERBOSE</span>
+<span class="s2">#if </span><span class="s1">defined(VERBOSE)</span>
+<span class="s2">#define </span><span class="s1">TRACE(X) printf X;</span>
+<span class="s2">#else</span>
+<span class="s2">#define </span><span class="s1">TRACE(X)</span>
+<span class="s2">#endif  </span><span class="s0">// VERBOSE</span>
+
+<span class="s2">#define </span><span class="s1">PARSER_OUT_OF_MEMORY -</span><span class="s3">1</span>
+
+<span class="s0">/* 
+ *  TODO: Might want to couple count_rows() with read_rows() to avoid 
+ *        duplication of some file I/O. 
+ */</span>
+
+<span class="s2">typedef enum </span><span class="s1">{</span>
+    <span class="s1">START_RECORD,</span>
+    <span class="s1">START_FIELD,</span>
+    <span class="s1">ESCAPED_CHAR,</span>
+    <span class="s1">IN_FIELD,</span>
+    <span class="s1">IN_QUOTED_FIELD,</span>
+    <span class="s1">ESCAPE_IN_QUOTED_FIELD,</span>
+    <span class="s1">QUOTE_IN_QUOTED_FIELD,</span>
+    <span class="s1">EAT_CRNL,</span>
+    <span class="s1">EAT_CRNL_NOP,</span>
+    <span class="s1">EAT_WHITESPACE,</span>
+    <span class="s1">EAT_COMMENT,</span>
+    <span class="s1">EAT_LINE_COMMENT,</span>
+    <span class="s1">WHITESPACE_LINE,</span>
+    <span class="s1">START_FIELD_IN_SKIP_LINE,</span>
+    <span class="s1">IN_FIELD_IN_SKIP_LINE,</span>
+    <span class="s1">IN_QUOTED_FIELD_IN_SKIP_LINE,</span>
+    <span class="s1">QUOTE_IN_QUOTED_FIELD_IN_SKIP_LINE,</span>
+    <span class="s1">FINISHED</span>
+<span class="s1">} ParserState;</span>
+
+<span class="s2">typedef enum </span><span class="s1">{</span>
+    <span class="s1">QUOTE_MINIMAL,</span>
+    <span class="s1">QUOTE_ALL,</span>
+    <span class="s1">QUOTE_NONNUMERIC,</span>
+    <span class="s1">QUOTE_NONE</span>
+<span class="s1">} QuoteStyle;</span>
+
+<span class="s2">typedef enum </span><span class="s1">{</span>
+    <span class="s1">ERROR,</span>
+    <span class="s1">WARN,</span>
+    <span class="s1">SKIP</span>
+<span class="s1">} BadLineHandleMethod;</span>
+
+<span class="s2">typedef void </span><span class="s1">*(*io_callback)(</span><span class="s2">void </span><span class="s1">*src, size_t nbytes, size_t *bytes_read,</span>
+                             <span class="s2">int </span><span class="s1">*status, </span><span class="s2">const char </span><span class="s1">*encoding_errors);</span>
+<span class="s2">typedef int </span><span class="s1">(*io_cleanup)(</span><span class="s2">void </span><span class="s1">*src);</span>
+
+<span class="s2">typedef struct </span><span class="s1">parser_t {</span>
+    <span class="s2">void </span><span class="s1">*source;</span>
+    <span class="s1">io_callback cb_io;</span>
+    <span class="s1">io_cleanup cb_cleanup;</span>
+
+    <span class="s1">int64_t chunksize;      </span><span class="s0">// Number of bytes to prepare for each chunk</span>
+    <span class="s2">char </span><span class="s1">*data;             </span><span class="s0">// pointer to data to be processed</span>
+    <span class="s1">int64_t datalen;        </span><span class="s0">// amount of data available</span>
+    <span class="s1">int64_t datapos;</span>
+
+    <span class="s0">// where to write out tokenized data</span>
+    <span class="s2">char </span><span class="s1">*stream;</span>
+    <span class="s1">uint64_t stream_len;</span>
+    <span class="s1">uint64_t stream_cap;</span>
+
+    <span class="s0">// Store words in (potentially ragged) matrix for now, hmm</span>
+    <span class="s2">char </span><span class="s1">**words;</span>
+    <span class="s1">int64_t *word_starts;   </span><span class="s0">// where we are in the stream</span>
+    <span class="s1">uint64_t words_len;</span>
+    <span class="s1">uint64_t words_cap;</span>
+    <span class="s1">uint64_t max_words_cap;  </span><span class="s0">// maximum word cap encountered</span>
+
+    <span class="s2">char </span><span class="s1">*pword_start;      </span><span class="s0">// pointer to stream start of current field</span>
+    <span class="s1">int64_t word_start;     </span><span class="s0">// position start of current field</span>
+
+    <span class="s1">int64_t *line_start;    </span><span class="s0">// position in words for start of line</span>
+    <span class="s1">int64_t *line_fields;   </span><span class="s0">// Number of fields in each line</span>
+    <span class="s1">uint64_t lines;         </span><span class="s0">// Number of (good) lines observed</span>
+    <span class="s1">uint64_t file_lines;    </span><span class="s0">// Number of lines (including bad or skipped)</span>
+    <span class="s1">uint64_t lines_cap;     </span><span class="s0">// Vector capacity</span>
+
+    <span class="s0">// Tokenizing stuff</span>
+    <span class="s1">ParserState state;</span>
+    <span class="s2">int </span><span class="s1">doublequote;      </span><span class="s0">/* is &quot; represented by &quot;&quot;? */</span>
+    <span class="s2">char </span><span class="s1">delimiter;       </span><span class="s0">/* field separator */</span>
+    <span class="s2">int </span><span class="s1">delim_whitespace; </span><span class="s0">/* delimit by consuming space/tabs instead */</span>
+    <span class="s2">char </span><span class="s1">quotechar;       </span><span class="s0">/* quote character */</span>
+    <span class="s2">char </span><span class="s1">escapechar;      </span><span class="s0">/* escape character */</span>
+    <span class="s2">char </span><span class="s1">lineterminator;</span>
+    <span class="s2">int </span><span class="s1">skipinitialspace; </span><span class="s0">/* ignore spaces following delimiter? */</span>
+    <span class="s2">int </span><span class="s1">quoting;          </span><span class="s0">/* style of quoting to write */</span>
+
+    <span class="s2">char </span><span class="s1">commentchar;</span>
+    <span class="s2">int </span><span class="s1">allow_embedded_newline;</span>
+
+    <span class="s2">int </span><span class="s1">usecols;  </span><span class="s0">// Boolean: 1: usecols provided, 0: none provided</span>
+
+    <span class="s1">Py_ssize_t expected_fields;</span>
+    <span class="s1">BadLineHandleMethod on_bad_lines;</span>
+
+    <span class="s0">// floating point options</span>
+    <span class="s2">char </span><span class="s1">decimal;</span>
+    <span class="s2">char </span><span class="s1">sci;</span>
+
+    <span class="s0">// thousands separator (comma, period)</span>
+    <span class="s2">char </span><span class="s1">thousands;</span>
+
+    <span class="s2">int </span><span class="s1">header;            </span><span class="s0">// Boolean: 1: has header, 0: no header</span>
+    <span class="s1">int64_t header_start;  </span><span class="s0">// header row start</span>
+    <span class="s1">uint64_t header_end;   </span><span class="s0">// header row end</span>
+
+    <span class="s2">void </span><span class="s1">*skipset;</span>
+    <span class="s1">PyObject *skipfunc;</span>
+    <span class="s1">int64_t skip_first_N_rows;</span>
+    <span class="s1">int64_t skip_footer;</span>
+    <span class="s2">double </span><span class="s1">(*double_converter)(</span><span class="s2">const char </span><span class="s1">*, </span><span class="s2">char </span><span class="s1">**,</span>
+                               <span class="s2">char</span><span class="s1">, </span><span class="s2">char</span><span class="s1">, </span><span class="s2">char</span><span class="s1">, </span><span class="s2">int</span><span class="s1">, </span><span class="s2">int </span><span class="s1">*, </span><span class="s2">int </span><span class="s1">*);</span>
+
+    <span class="s0">// error handling</span>
+    <span class="s2">char </span><span class="s1">*warn_msg;</span>
+    <span class="s2">char </span><span class="s1">*error_msg;</span>
+
+    <span class="s2">int </span><span class="s1">skip_empty_lines;</span>
+<span class="s1">} parser_t;</span>
+
+<span class="s2">typedef struct </span><span class="s1">coliter_t {</span>
+    <span class="s2">char </span><span class="s1">**words;</span>
+    <span class="s1">int64_t *line_start;</span>
+    <span class="s1">int64_t col;</span>
+<span class="s1">} coliter_t;</span>
+
+<span class="s2">void </span><span class="s1">coliter_setup(coliter_t *self, parser_t *parser, int64_t i, int64_t start);</span>
+
+<span class="s2">#define </span><span class="s1">COLITER_NEXT(iter, word)                           \</span>
+    <span class="s2">do </span><span class="s1">{                                                   \</span>
+        <span class="s2">const </span><span class="s1">int64_t i = *iter.line_start++ + iter.col;   \</span>
+        <span class="s1">word = i &gt;= *iter.line_start ? </span><span class="s4">&quot;&quot; </span><span class="s1">: iter.words[i]; \</span>
+    <span class="s1">} </span><span class="s2">while </span><span class="s1">(</span><span class="s3">0</span><span class="s1">)</span>
+
+<span class="s1">parser_t *parser_new(</span><span class="s2">void</span><span class="s1">);</span>
+
+<span class="s2">int </span><span class="s1">parser_init(parser_t *self);</span>
+
+<span class="s2">int </span><span class="s1">parser_consume_rows(parser_t *self, size_t nrows);</span>
+
+<span class="s2">int </span><span class="s1">parser_trim_buffers(parser_t *self);</span>
+
+<span class="s2">int </span><span class="s1">parser_add_skiprow(parser_t *self, int64_t row);</span>
+
+<span class="s2">int </span><span class="s1">parser_set_skipfirstnrows(parser_t *self, int64_t nrows);</span>
+
+<span class="s2">void </span><span class="s1">parser_free(parser_t *self);</span>
+
+<span class="s2">void </span><span class="s1">parser_del(parser_t *self);</span>
+
+<span class="s2">void </span><span class="s1">parser_set_default_options(parser_t *self);</span>
+
+<span class="s2">int </span><span class="s1">tokenize_nrows(parser_t *self, size_t nrows, </span><span class="s2">const char </span><span class="s1">*encoding_errors);</span>
+
+<span class="s2">int </span><span class="s1">tokenize_all_rows(parser_t *self, </span><span class="s2">const char </span><span class="s1">*encoding_errors);</span>
+
+<span class="s0">// Have parsed / type-converted a chunk of data</span>
+<span class="s0">// and want to free memory from the token stream</span>
+
+<span class="s2">typedef struct </span><span class="s1">uint_state {</span>
+    <span class="s2">int </span><span class="s1">seen_sint;</span>
+    <span class="s2">int </span><span class="s1">seen_uint;</span>
+    <span class="s2">int </span><span class="s1">seen_null;</span>
+<span class="s1">} uint_state;</span>
+
+<span class="s2">void </span><span class="s1">uint_state_init(uint_state *self);</span>
+
+<span class="s2">int </span><span class="s1">uint64_conflict(uint_state *self);</span>
+
+<span class="s1">uint64_t str_to_uint64(uint_state *state, </span><span class="s2">const char </span><span class="s1">*p_item, int64_t int_max,</span>
+                       <span class="s1">uint64_t uint_max, </span><span class="s2">int </span><span class="s1">*error, </span><span class="s2">char </span><span class="s1">tsep);</span>
+<span class="s1">int64_t str_to_int64(</span><span class="s2">const char </span><span class="s1">*p_item, int64_t int_min, int64_t int_max,</span>
+                     <span class="s2">int </span><span class="s1">*error, </span><span class="s2">char </span><span class="s1">tsep);</span>
+<span class="s2">double </span><span class="s1">xstrtod(</span><span class="s2">const char </span><span class="s1">*p, </span><span class="s2">char </span><span class="s1">**q, </span><span class="s2">char </span><span class="s1">decimal, </span><span class="s2">char </span><span class="s1">sci, </span><span class="s2">char </span><span class="s1">tsep,</span>
+               <span class="s2">int </span><span class="s1">skip_trailing, </span><span class="s2">int </span><span class="s1">*error, </span><span class="s2">int </span><span class="s1">*maybe_int);</span>
+<span class="s2">double </span><span class="s1">precise_xstrtod(</span><span class="s2">const char </span><span class="s1">*p, </span><span class="s2">char </span><span class="s1">**q, </span><span class="s2">char </span><span class="s1">decimal,</span>
+                       <span class="s2">char </span><span class="s1">sci, </span><span class="s2">char </span><span class="s1">tsep, </span><span class="s2">int </span><span class="s1">skip_trailing,</span>
+                       <span class="s2">int </span><span class="s1">*error, </span><span class="s2">int </span><span class="s1">*maybe_int);</span>
+
+<span class="s0">// GH-15140 - round_trip requires and acquires the GIL on its own</span>
+<span class="s2">double </span><span class="s1">round_trip(</span><span class="s2">const char </span><span class="s1">*p, </span><span class="s2">char </span><span class="s1">**q, </span><span class="s2">char </span><span class="s1">decimal, </span><span class="s2">char </span><span class="s1">sci, </span><span class="s2">char </span><span class="s1">tsep,</span>
+                  <span class="s2">int </span><span class="s1">skip_trailing, </span><span class="s2">int </span><span class="s1">*error, </span><span class="s2">int </span><span class="s1">*maybe_int);</span>
+<span class="s2">int </span><span class="s1">to_boolean(</span><span class="s2">const char </span><span class="s1">*item, uint8_t *val);</span>
+
+<span class="s2">#endif  </span><span class="s0">// PANDAS__LIBS_SRC_PARSER_TOKENIZER_H_</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,200 @@
+<html>
+<head>
+<title>localization.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #808080;}
+.s5 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+localization.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+Helpers for configuring locale settings. 
+ 
+Name `localization` is chosen to avoid overlap with builtin `locale` module. 
+&quot;&quot;&quot;</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">from </span><span class="s1">contextlib </span><span class="s2">import </span><span class="s1">contextmanager</span>
+<span class="s2">import </span><span class="s1">locale</span>
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">subprocess</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">Callable</span><span class="s2">,</span>
+    <span class="s1">Iterator</span><span class="s2">,</span>
+<span class="s1">)</span>
+
+<span class="s2">from </span><span class="s1">pandas._config.config </span><span class="s2">import </span><span class="s1">options</span>
+
+
+<span class="s1">@contextmanager</span>
+<span class="s2">def </span><span class="s1">set_locale(</span>
+    <span class="s1">new_locale: str | tuple[str</span><span class="s2">, </span><span class="s1">str]</span><span class="s2">, </span><span class="s1">lc_var: int = locale.LC_ALL</span>
+<span class="s1">) -&gt; Iterator[str | tuple[str</span><span class="s2">, </span><span class="s1">str]]:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Context manager for temporarily setting a locale. 
+ 
+    Parameters 
+    ---------- 
+    new_locale : str or tuple 
+        A string of the form &lt;language_country&gt;.&lt;encoding&gt;. For example to set 
+        the current locale to US English with a UTF8 encoding, you would pass 
+        &quot;en_US.UTF-8&quot;. 
+    lc_var : int, default `locale.LC_ALL` 
+        The category of the locale being set. 
+ 
+    Notes 
+    ----- 
+    This is useful when you want to run a particular block of code under a 
+    particular locale, without globally setting the locale. This probably isn't 
+    thread-safe. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">current_locale = locale.getlocale()</span>
+
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">locale.setlocale(lc_var</span><span class="s2">, </span><span class="s1">new_locale)</span>
+        <span class="s1">normalized_locale = locale.getlocale()</span>
+        <span class="s2">if </span><span class="s1">all(x </span><span class="s2">is not None for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">normalized_locale):</span>
+            <span class="s2">yield </span><span class="s3">&quot;.&quot;</span><span class="s1">.join(normalized_locale)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">yield </span><span class="s1">new_locale</span>
+    <span class="s2">finally</span><span class="s1">:</span>
+        <span class="s1">locale.setlocale(lc_var</span><span class="s2">, </span><span class="s1">current_locale)</span>
+
+
+<span class="s2">def </span><span class="s1">can_set_locale(lc: str</span><span class="s2">, </span><span class="s1">lc_var: int = locale.LC_ALL) -&gt; bool:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Check to see if we can set a locale, and subsequently get the locale, 
+    without raising an Exception. 
+ 
+    Parameters 
+    ---------- 
+    lc : str 
+        The locale to attempt to set. 
+    lc_var : int, default `locale.LC_ALL` 
+        The category of the locale being set. 
+ 
+    Returns 
+    ------- 
+    bool 
+        Whether the passed locale can be set 
+    &quot;&quot;&quot;</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s2">with </span><span class="s1">set_locale(lc</span><span class="s2">, </span><span class="s1">lc_var=lc_var):</span>
+            <span class="s2">pass</span>
+    <span class="s2">except </span><span class="s1">(ValueError</span><span class="s2">, </span><span class="s1">locale.Error):</span>
+        <span class="s4"># horrible name for a Exception subclass</span>
+        <span class="s2">return False</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">return True</span>
+
+
+<span class="s2">def </span><span class="s1">_valid_locales(locales: list[str] | str</span><span class="s2">, </span><span class="s1">normalize: bool) -&gt; list[str]:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Return a list of normalized locales that do not throw an ``Exception`` 
+    when set. 
+ 
+    Parameters 
+    ---------- 
+    locales : str 
+        A string where each locale is separated by a newline. 
+    normalize : bool 
+        Whether to call ``locale.normalize`` on each locale. 
+ 
+    Returns 
+    ------- 
+    valid_locales : list 
+        A list of valid locales. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">return </span><span class="s1">[</span>
+        <span class="s1">loc</span>
+        <span class="s2">for </span><span class="s1">loc </span><span class="s2">in </span><span class="s1">(</span>
+            <span class="s1">locale.normalize(loc.strip()) </span><span class="s2">if </span><span class="s1">normalize </span><span class="s2">else </span><span class="s1">loc.strip()</span>
+            <span class="s2">for </span><span class="s1">loc </span><span class="s2">in </span><span class="s1">locales</span>
+        <span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">can_set_locale(loc)</span>
+    <span class="s1">]</span>
+
+
+<span class="s2">def </span><span class="s1">_default_locale_getter() -&gt; bytes:</span>
+    <span class="s2">return </span><span class="s1">subprocess.check_output([</span><span class="s3">&quot;locale -a&quot;</span><span class="s1">]</span><span class="s2">, </span><span class="s1">shell=</span><span class="s2">True</span><span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">get_locales(</span>
+    <span class="s1">prefix: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">normalize: bool = </span><span class="s2">True,</span>
+    <span class="s1">locale_getter: Callable[[]</span><span class="s2">, </span><span class="s1">bytes] = _default_locale_getter</span><span class="s2">,</span>
+<span class="s1">) -&gt; list[str] | </span><span class="s2">None</span><span class="s1">:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Get all the locales that are available on the system. 
+ 
+    Parameters 
+    ---------- 
+    prefix : str 
+        If not ``None`` then return only those locales with the prefix 
+        provided. For example to get all English language locales (those that 
+        start with ``&quot;en&quot;``), pass ``prefix=&quot;en&quot;``. 
+    normalize : bool 
+        Call ``locale.normalize`` on the resulting list of available locales. 
+        If ``True``, only locales that can be set without throwing an 
+        ``Exception`` are returned. 
+    locale_getter : callable 
+        The function to use to retrieve the current locales. This should return 
+        a string with each locale separated by a newline character. 
+ 
+    Returns 
+    ------- 
+    locales : list of strings 
+        A list of locale strings that can be set with ``locale.setlocale()``. 
+        For example:: 
+ 
+            locale.setlocale(locale.LC_ALL, locale_string) 
+ 
+    On error will return None (no locale available, e.g. Windows) 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">raw_locales = locale_getter()</span>
+    <span class="s2">except </span><span class="s1">subprocess.CalledProcessError:</span>
+        <span class="s4"># Raised on (some? all?) Windows platforms because Note: &quot;locale -a&quot;</span>
+        <span class="s4">#  is not defined</span>
+        <span class="s2">return None</span>
+
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s4"># raw_locales is &quot;\n&quot; separated list of locales</span>
+        <span class="s4"># it may contain non-decodable parts, so split</span>
+        <span class="s4"># extract what we can and then rejoin.</span>
+        <span class="s1">split_raw_locales = raw_locales.split(</span><span class="s5">b&quot;</span><span class="s2">\n</span><span class="s5">&quot;</span><span class="s1">)</span>
+        <span class="s1">out_locales = []</span>
+        <span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">split_raw_locales:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">out_locales.append(str(x</span><span class="s2">, </span><span class="s1">encoding=options.display.encoding))</span>
+            <span class="s2">except </span><span class="s1">UnicodeError:</span>
+                <span class="s4"># 'locale -a' is used to populated 'raw_locales' and on</span>
+                <span class="s4"># Redhat 7 Linux (and maybe others) prints locale names</span>
+                <span class="s4"># using windows-1252 encoding.  Bug only triggered by</span>
+                <span class="s4"># a few special characters and when there is an</span>
+                <span class="s4"># extensive list of installed locales.</span>
+                <span class="s1">out_locales.append(str(x</span><span class="s2">, </span><span class="s1">encoding=</span><span class="s3">&quot;windows-1252&quot;</span><span class="s1">))</span>
+
+    <span class="s2">except </span><span class="s1">TypeError:</span>
+        <span class="s2">pass</span>
+
+    <span class="s2">if </span><span class="s1">prefix </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">_valid_locales(out_locales</span><span class="s2">, </span><span class="s1">normalize)</span>
+
+    <span class="s1">pattern = re.compile(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">prefix</span><span class="s2">}</span><span class="s3">.*&quot;</span><span class="s1">)</span>
+    <span class="s1">found = pattern.findall(</span><span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">&quot;</span><span class="s1">.join(out_locales))</span>
+    <span class="s2">return </span><span class="s1">_valid_locales(found</span><span class="s2">, </span><span class="s1">normalize)</span>
+</pre>
+</body>
+</html>

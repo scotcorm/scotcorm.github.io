@@ -1,0 +1,666 @@
+<html>
+<head>
+<title>tile.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6897bb;}
+.s4 { color: #6a8759;}
+.s5 { color: #808080;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+tile.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+Quantilization functions and related stuff 
+&quot;&quot;&quot;</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">Any</span><span class="s2">,</span>
+    <span class="s1">Callable</span><span class="s2">,</span>
+    <span class="s1">Literal</span><span class="s2">,</span>
+<span class="s1">)</span>
+
+<span class="s2">import </span><span class="s1">numpy </span><span class="s2">as </span><span class="s1">np</span>
+
+<span class="s2">from </span><span class="s1">pandas._libs </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">Timedelta</span><span class="s2">,</span>
+    <span class="s1">Timestamp</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas._libs.lib </span><span class="s2">import </span><span class="s1">infer_dtype</span>
+
+<span class="s2">from </span><span class="s1">pandas.core.dtypes.common </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">DT64NS_DTYPE</span><span class="s2">,</span>
+    <span class="s1">ensure_platform_int</span><span class="s2">,</span>
+    <span class="s1">is_bool_dtype</span><span class="s2">,</span>
+    <span class="s1">is_categorical_dtype</span><span class="s2">,</span>
+    <span class="s1">is_datetime64_dtype</span><span class="s2">,</span>
+    <span class="s1">is_datetime64tz_dtype</span><span class="s2">,</span>
+    <span class="s1">is_datetime_or_timedelta_dtype</span><span class="s2">,</span>
+    <span class="s1">is_extension_array_dtype</span><span class="s2">,</span>
+    <span class="s1">is_integer</span><span class="s2">,</span>
+    <span class="s1">is_list_like</span><span class="s2">,</span>
+    <span class="s1">is_numeric_dtype</span><span class="s2">,</span>
+    <span class="s1">is_scalar</span><span class="s2">,</span>
+    <span class="s1">is_timedelta64_dtype</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas.core.dtypes.generic </span><span class="s2">import </span><span class="s1">ABCSeries</span>
+<span class="s2">from </span><span class="s1">pandas.core.dtypes.missing </span><span class="s2">import </span><span class="s1">isna</span>
+
+<span class="s2">from </span><span class="s1">pandas </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">Categorical</span><span class="s2">,</span>
+    <span class="s1">Index</span><span class="s2">,</span>
+    <span class="s1">IntervalIndex</span><span class="s2">,</span>
+    <span class="s1">to_datetime</span><span class="s2">,</span>
+    <span class="s1">to_timedelta</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">import </span><span class="s1">pandas.core.algorithms </span><span class="s2">as </span><span class="s1">algos</span>
+<span class="s2">import </span><span class="s1">pandas.core.nanops </span><span class="s2">as </span><span class="s1">nanops</span>
+
+
+<span class="s2">def </span><span class="s1">cut(</span>
+    <span class="s1">x</span><span class="s2">,</span>
+    <span class="s1">bins</span><span class="s2">,</span>
+    <span class="s1">right: bool = </span><span class="s2">True,</span>
+    <span class="s1">labels=</span><span class="s2">None,</span>
+    <span class="s1">retbins: bool = </span><span class="s2">False,</span>
+    <span class="s1">precision: int = </span><span class="s3">3</span><span class="s2">,</span>
+    <span class="s1">include_lowest: bool = </span><span class="s2">False,</span>
+    <span class="s1">duplicates: str = </span><span class="s4">&quot;raise&quot;</span><span class="s2">,</span>
+    <span class="s1">ordered: bool = </span><span class="s2">True,</span>
+<span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Bin values into discrete intervals. 
+ 
+    Use `cut` when you need to segment and sort data values into bins. This 
+    function is also useful for going from a continuous variable to a 
+    categorical variable. For example, `cut` could convert ages to groups of 
+    age ranges. Supports binning into an equal number of bins, or a 
+    pre-specified array of bins. 
+ 
+    Parameters 
+    ---------- 
+    x : array-like 
+        The input array to be binned. Must be 1-dimensional. 
+    bins : int, sequence of scalars, or IntervalIndex 
+        The criteria to bin by. 
+ 
+        * int : Defines the number of equal-width bins in the range of `x`. The 
+          range of `x` is extended by .1% on each side to include the minimum 
+          and maximum values of `x`. 
+        * sequence of scalars : Defines the bin edges allowing for non-uniform 
+          width. No extension of the range of `x` is done. 
+        * IntervalIndex : Defines the exact bins to be used. Note that 
+          IntervalIndex for `bins` must be non-overlapping. 
+ 
+    right : bool, default True 
+        Indicates whether `bins` includes the rightmost edge or not. If 
+        ``right == True`` (the default), then the `bins` ``[1, 2, 3, 4]`` 
+        indicate (1,2], (2,3], (3,4]. This argument is ignored when 
+        `bins` is an IntervalIndex. 
+    labels : array or False, default None 
+        Specifies the labels for the returned bins. Must be the same length as 
+        the resulting bins. If False, returns only integer indicators of the 
+        bins. This affects the type of the output container (see below). 
+        This argument is ignored when `bins` is an IntervalIndex. If True, 
+        raises an error. When `ordered=False`, labels must be provided. 
+    retbins : bool, default False 
+        Whether to return the bins or not. Useful when bins is provided 
+        as a scalar. 
+    precision : int, default 3 
+        The precision at which to store and display the bins labels. 
+    include_lowest : bool, default False 
+        Whether the first interval should be left-inclusive or not. 
+    duplicates : {default 'raise', 'drop'}, optional 
+        If bin edges are not unique, raise ValueError or drop non-uniques. 
+    ordered : bool, default True 
+        Whether the labels are ordered or not. Applies to returned types 
+        Categorical and Series (with Categorical dtype). If True, 
+        the resulting categorical will be ordered. If False, the resulting 
+        categorical will be unordered (labels must be provided). 
+ 
+        .. versionadded:: 1.1.0 
+ 
+    Returns 
+    ------- 
+    out : Categorical, Series, or ndarray 
+        An array-like object representing the respective bin for each value 
+        of `x`. The type depends on the value of `labels`. 
+ 
+        * None (default) : returns a Series for Series `x` or a 
+          Categorical for all other inputs. The values stored within 
+          are Interval dtype. 
+ 
+        * sequence of scalars : returns a Series for Series `x` or a 
+          Categorical for all other inputs. The values stored within 
+          are whatever the type in the sequence is. 
+ 
+        * False : returns an ndarray of integers. 
+ 
+    bins : numpy.ndarray or IntervalIndex. 
+        The computed or specified bins. Only returned when `retbins=True`. 
+        For scalar or sequence `bins`, this is an ndarray with the computed 
+        bins. If set `duplicates=drop`, `bins` will drop non-unique bin. For 
+        an IntervalIndex `bins`, this is equal to `bins`. 
+ 
+    See Also 
+    -------- 
+    qcut : Discretize variable into equal-sized buckets based on rank 
+        or based on sample quantiles. 
+    Categorical : Array type for storing data that come from a 
+        fixed set of values. 
+    Series : One-dimensional array with axis labels (including time series). 
+    IntervalIndex : Immutable Index implementing an ordered, sliceable set. 
+ 
+    Notes 
+    ----- 
+    Any NA values will be NA in the result. Out of bounds values will be NA in 
+    the resulting Series or Categorical object. 
+ 
+    Examples 
+    -------- 
+    Discretize into three equal-sized bins. 
+ 
+    &gt;&gt;&gt; pd.cut(np.array([1, 7, 5, 4, 6, 3]), 3) 
+    ... # doctest: +ELLIPSIS 
+    [(0.994, 3.0], (5.0, 7.0], (3.0, 5.0], (3.0, 5.0], (5.0, 7.0], ... 
+    Categories (3, interval[float64, right]): [(0.994, 3.0] &lt; (3.0, 5.0] ... 
+ 
+    &gt;&gt;&gt; pd.cut(np.array([1, 7, 5, 4, 6, 3]), 3, retbins=True) 
+    ... # doctest: +ELLIPSIS 
+    ([(0.994, 3.0], (5.0, 7.0], (3.0, 5.0], (3.0, 5.0], (5.0, 7.0], ... 
+    Categories (3, interval[float64, right]): [(0.994, 3.0] &lt; (3.0, 5.0] ... 
+    array([0.994, 3.   , 5.   , 7.   ])) 
+ 
+    Discovers the same bins, but assign them specific labels. Notice that 
+    the returned Categorical's categories are `labels` and is ordered. 
+ 
+    &gt;&gt;&gt; pd.cut(np.array([1, 7, 5, 4, 6, 3]), 
+    ...        3, labels=[&quot;bad&quot;, &quot;medium&quot;, &quot;good&quot;]) 
+    ['bad', 'good', 'medium', 'medium', 'good', 'bad'] 
+    Categories (3, object): ['bad' &lt; 'medium' &lt; 'good'] 
+ 
+    ``ordered=False`` will result in unordered categories when labels are passed. 
+    This parameter can be used to allow non-unique labels: 
+ 
+    &gt;&gt;&gt; pd.cut(np.array([1, 7, 5, 4, 6, 3]), 3, 
+    ...        labels=[&quot;B&quot;, &quot;A&quot;, &quot;B&quot;], ordered=False) 
+    ['B', 'B', 'A', 'A', 'B', 'B'] 
+    Categories (2, object): ['A', 'B'] 
+ 
+    ``labels=False`` implies you just want the bins back. 
+ 
+    &gt;&gt;&gt; pd.cut([0, 1, 1, 2], bins=4, labels=False) 
+    array([0, 1, 1, 3]) 
+ 
+    Passing a Series as an input returns a Series with categorical dtype: 
+ 
+    &gt;&gt;&gt; s = pd.Series(np.array([2, 4, 6, 8, 10]), 
+    ...               index=['a', 'b', 'c', 'd', 'e']) 
+    &gt;&gt;&gt; pd.cut(s, 3) 
+    ... # doctest: +ELLIPSIS 
+    a    (1.992, 4.667] 
+    b    (1.992, 4.667] 
+    c    (4.667, 7.333] 
+    d     (7.333, 10.0] 
+    e     (7.333, 10.0] 
+    dtype: category 
+    Categories (3, interval[float64, right]): [(1.992, 4.667] &lt; (4.667, ... 
+ 
+    Passing a Series as an input returns a Series with mapping value. 
+    It is used to map numerically to intervals based on bins. 
+ 
+    &gt;&gt;&gt; s = pd.Series(np.array([2, 4, 6, 8, 10]), 
+    ...               index=['a', 'b', 'c', 'd', 'e']) 
+    &gt;&gt;&gt; pd.cut(s, [0, 2, 4, 6, 8, 10], labels=False, retbins=True, right=False) 
+    ... # doctest: +ELLIPSIS 
+    (a    1.0 
+     b    2.0 
+     c    3.0 
+     d    4.0 
+     e    NaN 
+     dtype: float64, 
+     array([ 0,  2,  4,  6,  8, 10])) 
+ 
+    Use `drop` optional when bins is not unique 
+ 
+    &gt;&gt;&gt; pd.cut(s, [0, 2, 4, 6, 10, 10], labels=False, retbins=True, 
+    ...        right=False, duplicates='drop') 
+    ... # doctest: +ELLIPSIS 
+    (a    1.0 
+     b    2.0 
+     c    3.0 
+     d    3.0 
+     e    NaN 
+     dtype: float64, 
+     array([ 0,  2,  4,  6, 10])) 
+ 
+    Passing an IntervalIndex for `bins` results in those categories exactly. 
+    Notice that values not covered by the IntervalIndex are set to NaN. 0 
+    is to the left of the first bin (which is closed on the right), and 1.5 
+    falls between two bins. 
+ 
+    &gt;&gt;&gt; bins = pd.IntervalIndex.from_tuples([(0, 1), (2, 3), (4, 5)]) 
+    &gt;&gt;&gt; pd.cut([0, 0.5, 1.5, 2.5, 4.5], bins) 
+    [NaN, (0.0, 1.0], NaN, (2.0, 3.0], (4.0, 5.0]] 
+    Categories (3, interval[int64, right]): [(0, 1] &lt; (2, 3] &lt; (4, 5]] 
+    &quot;&quot;&quot;</span>
+    <span class="s5"># NOTE: this binning code is changed a bit from histogram for var(x) == 0</span>
+
+    <span class="s1">original = x</span>
+    <span class="s1">x = _preprocess_for_cut(x)</span>
+    <span class="s1">x</span><span class="s2">, </span><span class="s1">dtype = _coerce_to_type(x)</span>
+
+    <span class="s2">if not </span><span class="s1">np.iterable(bins):</span>
+        <span class="s2">if </span><span class="s1">is_scalar(bins) </span><span class="s2">and </span><span class="s1">bins &lt; </span><span class="s3">1</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;`bins` should be a positive integer.&quot;</span><span class="s1">)</span>
+
+        <span class="s2">try</span><span class="s1">:  </span><span class="s5"># for array-like</span>
+            <span class="s1">sz = x.size</span>
+        <span class="s2">except </span><span class="s1">AttributeError:</span>
+            <span class="s1">x = np.asarray(x)</span>
+            <span class="s1">sz = x.size</span>
+
+        <span class="s2">if </span><span class="s1">sz == </span><span class="s3">0</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Cannot cut empty array&quot;</span><span class="s1">)</span>
+
+        <span class="s1">rng = (nanops.nanmin(x)</span><span class="s2">, </span><span class="s1">nanops.nanmax(x))</span>
+        <span class="s1">mn</span><span class="s2">, </span><span class="s1">mx = (mi + </span><span class="s3">0.0 </span><span class="s2">for </span><span class="s1">mi </span><span class="s2">in </span><span class="s1">rng)</span>
+
+        <span class="s2">if </span><span class="s1">np.isinf(mn) </span><span class="s2">or </span><span class="s1">np.isinf(mx):</span>
+            <span class="s5"># GH 24314</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span>
+                <span class="s4">&quot;cannot specify integer `bins` when input data contains infinity&quot;</span>
+            <span class="s1">)</span>
+        <span class="s2">elif </span><span class="s1">mn == mx:  </span><span class="s5"># adjust end points before binning</span>
+            <span class="s1">mn -= </span><span class="s3">0.001 </span><span class="s1">* abs(mn) </span><span class="s2">if </span><span class="s1">mn != </span><span class="s3">0 </span><span class="s2">else </span><span class="s3">0.001</span>
+            <span class="s1">mx += </span><span class="s3">0.001 </span><span class="s1">* abs(mx) </span><span class="s2">if </span><span class="s1">mx != </span><span class="s3">0 </span><span class="s2">else </span><span class="s3">0.001</span>
+            <span class="s1">bins = np.linspace(mn</span><span class="s2">, </span><span class="s1">mx</span><span class="s2">, </span><span class="s1">bins + </span><span class="s3">1</span><span class="s2">, </span><span class="s1">endpoint=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:  </span><span class="s5"># adjust end points after binning</span>
+            <span class="s1">bins = np.linspace(mn</span><span class="s2">, </span><span class="s1">mx</span><span class="s2">, </span><span class="s1">bins + </span><span class="s3">1</span><span class="s2">, </span><span class="s1">endpoint=</span><span class="s2">True</span><span class="s1">)</span>
+            <span class="s1">adj = (mx - mn) * </span><span class="s3">0.001  </span><span class="s5"># 0.1% of the range</span>
+            <span class="s2">if </span><span class="s1">right:</span>
+                <span class="s1">bins[</span><span class="s3">0</span><span class="s1">] -= adj</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">bins[-</span><span class="s3">1</span><span class="s1">] += adj</span>
+
+    <span class="s2">elif </span><span class="s1">isinstance(bins</span><span class="s2">, </span><span class="s1">IntervalIndex):</span>
+        <span class="s2">if </span><span class="s1">bins.is_overlapping:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Overlapping IntervalIndex is not accepted.&quot;</span><span class="s1">)</span>
+
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">is_datetime64tz_dtype(bins):</span>
+            <span class="s1">bins = np.asarray(bins</span><span class="s2">, </span><span class="s1">dtype=DT64NS_DTYPE)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">bins = np.asarray(bins)</span>
+        <span class="s1">bins = _convert_bin_to_numeric_type(bins</span><span class="s2">, </span><span class="s1">dtype)</span>
+
+        <span class="s5"># GH 26045: cast to float64 to avoid an overflow</span>
+        <span class="s2">if </span><span class="s1">(np.diff(bins.astype(</span><span class="s4">&quot;float64&quot;</span><span class="s1">)) &lt; </span><span class="s3">0</span><span class="s1">).any():</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;bins must increase monotonically.&quot;</span><span class="s1">)</span>
+
+    <span class="s1">fac</span><span class="s2">, </span><span class="s1">bins = _bins_to_cuts(</span>
+        <span class="s1">x</span><span class="s2">,</span>
+        <span class="s1">bins</span><span class="s2">,</span>
+        <span class="s1">right=right</span><span class="s2">,</span>
+        <span class="s1">labels=labels</span><span class="s2">,</span>
+        <span class="s1">precision=precision</span><span class="s2">,</span>
+        <span class="s1">include_lowest=include_lowest</span><span class="s2">,</span>
+        <span class="s1">dtype=dtype</span><span class="s2">,</span>
+        <span class="s1">duplicates=duplicates</span><span class="s2">,</span>
+        <span class="s1">ordered=ordered</span><span class="s2">,</span>
+    <span class="s1">)</span>
+
+    <span class="s2">return </span><span class="s1">_postprocess_for_cut(fac</span><span class="s2">, </span><span class="s1">bins</span><span class="s2">, </span><span class="s1">retbins</span><span class="s2">, </span><span class="s1">dtype</span><span class="s2">, </span><span class="s1">original)</span>
+
+
+<span class="s2">def </span><span class="s1">qcut(</span>
+    <span class="s1">x</span><span class="s2">,</span>
+    <span class="s1">q</span><span class="s2">,</span>
+    <span class="s1">labels=</span><span class="s2">None,</span>
+    <span class="s1">retbins: bool = </span><span class="s2">False,</span>
+    <span class="s1">precision: int = </span><span class="s3">3</span><span class="s2">,</span>
+    <span class="s1">duplicates: str = </span><span class="s4">&quot;raise&quot;</span><span class="s2">,</span>
+<span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Quantile-based discretization function. 
+ 
+    Discretize variable into equal-sized buckets based on rank or based 
+    on sample quantiles. For example 1000 values for 10 quantiles would 
+    produce a Categorical object indicating quantile membership for each data point. 
+ 
+    Parameters 
+    ---------- 
+    x : 1d ndarray or Series 
+    q : int or list-like of float 
+        Number of quantiles. 10 for deciles, 4 for quartiles, etc. Alternately 
+        array of quantiles, e.g. [0, .25, .5, .75, 1.] for quartiles. 
+    labels : array or False, default None 
+        Used as labels for the resulting bins. Must be of the same length as 
+        the resulting bins. If False, return only integer indicators of the 
+        bins. If True, raises an error. 
+    retbins : bool, optional 
+        Whether to return the (bins, labels) or not. Can be useful if bins 
+        is given as a scalar. 
+    precision : int, optional 
+        The precision at which to store and display the bins labels. 
+    duplicates : {default 'raise', 'drop'}, optional 
+        If bin edges are not unique, raise ValueError or drop non-uniques. 
+ 
+    Returns 
+    ------- 
+    out : Categorical or Series or array of integers if labels is False 
+        The return type (Categorical or Series) depends on the input: a Series 
+        of type category if input is a Series else Categorical. Bins are 
+        represented as categories when categorical data is returned. 
+    bins : ndarray of floats 
+        Returned only if `retbins` is True. 
+ 
+    Notes 
+    ----- 
+    Out of bounds values will be NA in the resulting Categorical object 
+ 
+    Examples 
+    -------- 
+    &gt;&gt;&gt; pd.qcut(range(5), 4) 
+    ... # doctest: +ELLIPSIS 
+    [(-0.001, 1.0], (-0.001, 1.0], (1.0, 2.0], (2.0, 3.0], (3.0, 4.0]] 
+    Categories (4, interval[float64, right]): [(-0.001, 1.0] &lt; (1.0, 2.0] ... 
+ 
+    &gt;&gt;&gt; pd.qcut(range(5), 3, labels=[&quot;good&quot;, &quot;medium&quot;, &quot;bad&quot;]) 
+    ... # doctest: +SKIP 
+    [good, good, medium, bad, bad] 
+    Categories (3, object): [good &lt; medium &lt; bad] 
+ 
+    &gt;&gt;&gt; pd.qcut(range(5), 4, labels=False) 
+    array([0, 0, 1, 2, 3]) 
+    &quot;&quot;&quot;</span>
+    <span class="s1">original = x</span>
+    <span class="s1">x = _preprocess_for_cut(x)</span>
+    <span class="s1">x</span><span class="s2">, </span><span class="s1">dtype = _coerce_to_type(x)</span>
+
+    <span class="s1">quantiles = np.linspace(</span><span class="s3">0</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s1">q + </span><span class="s3">1</span><span class="s1">) </span><span class="s2">if </span><span class="s1">is_integer(q) </span><span class="s2">else </span><span class="s1">q</span>
+
+    <span class="s1">x_np = np.asarray(x)</span>
+    <span class="s1">x_np = x_np[~np.isnan(x_np)]</span>
+    <span class="s1">bins = np.quantile(x_np</span><span class="s2">, </span><span class="s1">quantiles)</span>
+
+    <span class="s1">fac</span><span class="s2">, </span><span class="s1">bins = _bins_to_cuts(</span>
+        <span class="s1">x</span><span class="s2">,</span>
+        <span class="s1">bins</span><span class="s2">,</span>
+        <span class="s1">labels=labels</span><span class="s2">,</span>
+        <span class="s1">precision=precision</span><span class="s2">,</span>
+        <span class="s1">include_lowest=</span><span class="s2">True,</span>
+        <span class="s1">dtype=dtype</span><span class="s2">,</span>
+        <span class="s1">duplicates=duplicates</span><span class="s2">,</span>
+    <span class="s1">)</span>
+
+    <span class="s2">return </span><span class="s1">_postprocess_for_cut(fac</span><span class="s2">, </span><span class="s1">bins</span><span class="s2">, </span><span class="s1">retbins</span><span class="s2">, </span><span class="s1">dtype</span><span class="s2">, </span><span class="s1">original)</span>
+
+
+<span class="s2">def </span><span class="s1">_bins_to_cuts(</span>
+    <span class="s1">x</span><span class="s2">,</span>
+    <span class="s1">bins: np.ndarray</span><span class="s2">,</span>
+    <span class="s1">right: bool = </span><span class="s2">True,</span>
+    <span class="s1">labels=</span><span class="s2">None,</span>
+    <span class="s1">precision: int = </span><span class="s3">3</span><span class="s2">,</span>
+    <span class="s1">include_lowest: bool = </span><span class="s2">False,</span>
+    <span class="s1">dtype=</span><span class="s2">None,</span>
+    <span class="s1">duplicates: str = </span><span class="s4">&quot;raise&quot;</span><span class="s2">,</span>
+    <span class="s1">ordered: bool = </span><span class="s2">True,</span>
+<span class="s1">):</span>
+    <span class="s2">if not </span><span class="s1">ordered </span><span class="s2">and </span><span class="s1">labels </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;'labels' must be provided if 'ordered = False'&quot;</span><span class="s1">)</span>
+
+    <span class="s2">if </span><span class="s1">duplicates </span><span class="s2">not in </span><span class="s1">[</span><span class="s4">&quot;raise&quot;</span><span class="s2">, </span><span class="s4">&quot;drop&quot;</span><span class="s1">]:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span>
+            <span class="s4">&quot;invalid value for 'duplicates' parameter, valid options are: raise, drop&quot;</span>
+        <span class="s1">)</span>
+
+    <span class="s2">if </span><span class="s1">isinstance(bins</span><span class="s2">, </span><span class="s1">IntervalIndex):</span>
+        <span class="s5"># we have a fast-path here</span>
+        <span class="s1">ids = bins.get_indexer(x)</span>
+        <span class="s1">result = Categorical.from_codes(ids</span><span class="s2">, </span><span class="s1">categories=bins</span><span class="s2">, </span><span class="s1">ordered=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">result</span><span class="s2">, </span><span class="s1">bins</span>
+
+    <span class="s1">unique_bins = algos.unique(bins)</span>
+    <span class="s2">if </span><span class="s1">len(unique_bins) &lt; len(bins) </span><span class="s2">and </span><span class="s1">len(bins) != </span><span class="s3">2</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">duplicates == </span><span class="s4">&quot;raise&quot;</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span>
+                <span class="s4">f&quot;Bin edges must be unique: </span><span class="s2">{</span><span class="s1">repr(bins)</span><span class="s2">}</span><span class="s4">.</span><span class="s2">\n</span><span class="s4">&quot;</span>
+                <span class="s4">f&quot;You can drop duplicate edges by setting the 'duplicates' kwarg&quot;</span>
+            <span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">bins = unique_bins</span>
+
+    <span class="s1">side: Literal[</span><span class="s4">&quot;left&quot;</span><span class="s2">, </span><span class="s4">&quot;right&quot;</span><span class="s1">] = </span><span class="s4">&quot;left&quot; </span><span class="s2">if </span><span class="s1">right </span><span class="s2">else </span><span class="s4">&quot;right&quot;</span>
+    <span class="s1">ids = ensure_platform_int(bins.searchsorted(x</span><span class="s2">, </span><span class="s1">side=side))</span>
+
+    <span class="s2">if </span><span class="s1">include_lowest:</span>
+        <span class="s1">ids[np.asarray(x) == bins[</span><span class="s3">0</span><span class="s1">]] = </span><span class="s3">1</span>
+
+    <span class="s1">na_mask = isna(x) | (ids == len(bins)) | (ids == </span><span class="s3">0</span><span class="s1">)</span>
+    <span class="s1">has_nas = na_mask.any()</span>
+
+    <span class="s2">if </span><span class="s1">labels </span><span class="s2">is not False</span><span class="s1">:</span>
+        <span class="s2">if not </span><span class="s1">(labels </span><span class="s2">is None or </span><span class="s1">is_list_like(labels)):</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span>
+                <span class="s4">&quot;Bin labels must either be False, None or passed in as a &quot;</span>
+                <span class="s4">&quot;list-like argument&quot;</span>
+            <span class="s1">)</span>
+
+        <span class="s2">elif </span><span class="s1">labels </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">labels = _format_labels(</span>
+                <span class="s1">bins</span><span class="s2">, </span><span class="s1">precision</span><span class="s2">, </span><span class="s1">right=right</span><span class="s2">, </span><span class="s1">include_lowest=include_lowest</span><span class="s2">, </span><span class="s1">dtype=dtype</span>
+            <span class="s1">)</span>
+        <span class="s2">elif </span><span class="s1">ordered </span><span class="s2">and </span><span class="s1">len(set(labels)) != len(labels):</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span>
+                <span class="s4">&quot;labels must be unique if ordered=True; pass ordered=False &quot;</span>
+                <span class="s4">&quot;for duplicate labels&quot;</span>
+            <span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">len(labels) != len(bins) - </span><span class="s3">1</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span>
+                    <span class="s4">&quot;Bin labels must be one fewer than the number of bin edges&quot;</span>
+                <span class="s1">)</span>
+        <span class="s2">if not </span><span class="s1">is_categorical_dtype(labels):</span>
+            <span class="s1">labels = Categorical(</span>
+                <span class="s1">labels</span><span class="s2">,</span>
+                <span class="s1">categories=labels </span><span class="s2">if </span><span class="s1">len(set(labels)) == len(labels) </span><span class="s2">else None,</span>
+                <span class="s1">ordered=ordered</span><span class="s2">,</span>
+            <span class="s1">)</span>
+        <span class="s5"># TODO: handle mismatch between categorical label order and pandas.cut order.</span>
+        <span class="s1">np.putmask(ids</span><span class="s2">, </span><span class="s1">na_mask</span><span class="s2">, </span><span class="s3">0</span><span class="s1">)</span>
+        <span class="s1">result = algos.take_nd(labels</span><span class="s2">, </span><span class="s1">ids - </span><span class="s3">1</span><span class="s1">)</span>
+
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">result = ids - </span><span class="s3">1</span>
+        <span class="s2">if </span><span class="s1">has_nas:</span>
+            <span class="s1">result = result.astype(np.float64)</span>
+            <span class="s1">np.putmask(result</span><span class="s2">, </span><span class="s1">na_mask</span><span class="s2">, </span><span class="s1">np.nan)</span>
+
+    <span class="s2">return </span><span class="s1">result</span><span class="s2">, </span><span class="s1">bins</span>
+
+
+<span class="s2">def </span><span class="s1">_coerce_to_type(x):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    if the passed data is of datetime/timedelta, bool or nullable int type, 
+    this method converts it to numeric so that cut or qcut method can 
+    handle it 
+    &quot;&quot;&quot;</span>
+    <span class="s1">dtype = </span><span class="s2">None</span>
+
+    <span class="s2">if </span><span class="s1">is_datetime64tz_dtype(x.dtype):</span>
+        <span class="s1">dtype = x.dtype</span>
+    <span class="s2">elif </span><span class="s1">is_datetime64_dtype(x.dtype):</span>
+        <span class="s1">x = to_datetime(x)</span>
+        <span class="s1">dtype = np.dtype(</span><span class="s4">&quot;datetime64[ns]&quot;</span><span class="s1">)</span>
+    <span class="s2">elif </span><span class="s1">is_timedelta64_dtype(x.dtype):</span>
+        <span class="s1">x = to_timedelta(x)</span>
+        <span class="s1">dtype = np.dtype(</span><span class="s4">&quot;timedelta64[ns]&quot;</span><span class="s1">)</span>
+    <span class="s2">elif </span><span class="s1">is_bool_dtype(x.dtype):</span>
+        <span class="s5"># GH 20303</span>
+        <span class="s1">x = x.astype(np.int64)</span>
+    <span class="s5"># To support cut and qcut for IntegerArray we convert to float dtype.</span>
+    <span class="s5"># Will properly support in the future.</span>
+    <span class="s5"># https://github.com/pandas-dev/pandas/pull/31290</span>
+    <span class="s5"># https://github.com/pandas-dev/pandas/issues/31389</span>
+    <span class="s2">elif </span><span class="s1">is_extension_array_dtype(x.dtype) </span><span class="s2">and </span><span class="s1">is_numeric_dtype(x.dtype):</span>
+        <span class="s1">x = x.to_numpy(dtype=np.float64</span><span class="s2">, </span><span class="s1">na_value=np.nan)</span>
+
+    <span class="s2">if </span><span class="s1">dtype </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s5"># GH 19768: force NaT to NaN during integer conversion</span>
+        <span class="s1">x = np.where(x.notna()</span><span class="s2">, </span><span class="s1">x.view(np.int64)</span><span class="s2">, </span><span class="s1">np.nan)</span>
+
+    <span class="s2">return </span><span class="s1">x</span><span class="s2">, </span><span class="s1">dtype</span>
+
+
+<span class="s2">def </span><span class="s1">_convert_bin_to_numeric_type(bins</span><span class="s2">, </span><span class="s1">dtype):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    if the passed bin is of datetime/timedelta type, 
+    this method converts it to integer 
+ 
+    Parameters 
+    ---------- 
+    bins : list-like of bins 
+    dtype : dtype of data 
+ 
+    Raises 
+    ------ 
+    ValueError if bins are not of a compat dtype to dtype 
+    &quot;&quot;&quot;</span>
+    <span class="s1">bins_dtype = infer_dtype(bins</span><span class="s2">, </span><span class="s1">skipna=</span><span class="s2">False</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">is_timedelta64_dtype(dtype):</span>
+        <span class="s2">if </span><span class="s1">bins_dtype </span><span class="s2">in </span><span class="s1">[</span><span class="s4">&quot;timedelta&quot;</span><span class="s2">, </span><span class="s4">&quot;timedelta64&quot;</span><span class="s1">]:</span>
+            <span class="s1">bins = to_timedelta(bins).view(np.int64)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;bins must be of timedelta64 dtype&quot;</span><span class="s1">)</span>
+    <span class="s2">elif </span><span class="s1">is_datetime64_dtype(dtype) </span><span class="s2">or </span><span class="s1">is_datetime64tz_dtype(dtype):</span>
+        <span class="s2">if </span><span class="s1">bins_dtype </span><span class="s2">in </span><span class="s1">[</span><span class="s4">&quot;datetime&quot;</span><span class="s2">, </span><span class="s4">&quot;datetime64&quot;</span><span class="s1">]:</span>
+            <span class="s1">bins = to_datetime(bins).view(np.int64)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;bins must be of datetime64 dtype&quot;</span><span class="s1">)</span>
+
+    <span class="s2">return </span><span class="s1">bins</span>
+
+
+<span class="s2">def </span><span class="s1">_convert_bin_to_datelike_type(bins</span><span class="s2">, </span><span class="s1">dtype):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Convert bins to a DatetimeIndex or TimedeltaIndex if the original dtype is 
+    datelike 
+ 
+    Parameters 
+    ---------- 
+    bins : list-like of bins 
+    dtype : dtype of data 
+ 
+    Returns 
+    ------- 
+    bins : Array-like of bins, DatetimeIndex or TimedeltaIndex if dtype is 
+           datelike 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">is_datetime64tz_dtype(dtype):</span>
+        <span class="s1">bins = to_datetime(bins.astype(np.int64)</span><span class="s2">, </span><span class="s1">utc=</span><span class="s2">True</span><span class="s1">).tz_convert(dtype.tz)</span>
+    <span class="s2">elif </span><span class="s1">is_datetime_or_timedelta_dtype(dtype):</span>
+        <span class="s1">bins = Index(bins.astype(np.int64)</span><span class="s2">, </span><span class="s1">dtype=dtype)</span>
+    <span class="s2">return </span><span class="s1">bins</span>
+
+
+<span class="s2">def </span><span class="s1">_format_labels(</span>
+    <span class="s1">bins</span><span class="s2">, </span><span class="s1">precision: int</span><span class="s2">, </span><span class="s1">right: bool = </span><span class="s2">True, </span><span class="s1">include_lowest: bool = </span><span class="s2">False, </span><span class="s1">dtype=</span><span class="s2">None</span>
+<span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot;based on the dtype, return our labels&quot;&quot;&quot;</span>
+    <span class="s1">closed = </span><span class="s4">&quot;right&quot; </span><span class="s2">if </span><span class="s1">right </span><span class="s2">else </span><span class="s4">&quot;left&quot;</span>
+
+    <span class="s1">formatter: Callable[[Any]</span><span class="s2">, </span><span class="s1">Timestamp] | Callable[[Any]</span><span class="s2">, </span><span class="s1">Timedelta]</span>
+
+    <span class="s2">if </span><span class="s1">is_datetime64tz_dtype(dtype):</span>
+        <span class="s1">formatter = </span><span class="s2">lambda </span><span class="s1">x: Timestamp(x</span><span class="s2">, </span><span class="s1">tz=dtype.tz)</span>
+        <span class="s1">adjust = </span><span class="s2">lambda </span><span class="s1">x: x - Timedelta(</span><span class="s4">&quot;1ns&quot;</span><span class="s1">)</span>
+    <span class="s2">elif </span><span class="s1">is_datetime64_dtype(dtype):</span>
+        <span class="s1">formatter = Timestamp</span>
+        <span class="s1">adjust = </span><span class="s2">lambda </span><span class="s1">x: x - Timedelta(</span><span class="s4">&quot;1ns&quot;</span><span class="s1">)</span>
+    <span class="s2">elif </span><span class="s1">is_timedelta64_dtype(dtype):</span>
+        <span class="s1">formatter = Timedelta</span>
+        <span class="s1">adjust = </span><span class="s2">lambda </span><span class="s1">x: x - Timedelta(</span><span class="s4">&quot;1ns&quot;</span><span class="s1">)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">precision = _infer_precision(precision</span><span class="s2">, </span><span class="s1">bins)</span>
+        <span class="s1">formatter = </span><span class="s2">lambda </span><span class="s1">x: _round_frac(x</span><span class="s2">, </span><span class="s1">precision)</span>
+        <span class="s1">adjust = </span><span class="s2">lambda </span><span class="s1">x: x - </span><span class="s3">10 </span><span class="s1">** (-precision)</span>
+
+    <span class="s1">breaks = [formatter(b) </span><span class="s2">for </span><span class="s1">b </span><span class="s2">in </span><span class="s1">bins]</span>
+    <span class="s2">if </span><span class="s1">right </span><span class="s2">and </span><span class="s1">include_lowest:</span>
+        <span class="s5"># adjust lhs of first interval by precision to account for being right closed</span>
+        <span class="s1">breaks[</span><span class="s3">0</span><span class="s1">] = adjust(breaks[</span><span class="s3">0</span><span class="s1">])</span>
+
+    <span class="s2">return </span><span class="s1">IntervalIndex.from_breaks(breaks</span><span class="s2">, </span><span class="s1">closed=closed)</span>
+
+
+<span class="s2">def </span><span class="s1">_preprocess_for_cut(x):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    handles preprocessing for cut where we convert passed 
+    input to array, strip the index information and store it 
+    separately 
+    &quot;&quot;&quot;</span>
+    <span class="s5"># Check that the passed array is a Pandas or Numpy object</span>
+    <span class="s5"># We don't want to strip away a Pandas data-type here (e.g. datetimetz)</span>
+    <span class="s1">ndim = getattr(x</span><span class="s2">, </span><span class="s4">&quot;ndim&quot;</span><span class="s2">, None</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">ndim </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">x = np.asarray(x)</span>
+    <span class="s2">if </span><span class="s1">x.ndim != </span><span class="s3">1</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Input array must be 1 dimensional&quot;</span><span class="s1">)</span>
+
+    <span class="s2">return </span><span class="s1">x</span>
+
+
+<span class="s2">def </span><span class="s1">_postprocess_for_cut(fac</span><span class="s2">, </span><span class="s1">bins</span><span class="s2">, </span><span class="s1">retbins: bool</span><span class="s2">, </span><span class="s1">dtype</span><span class="s2">, </span><span class="s1">original):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    handles post processing for the cut method where 
+    we combine the index information if the originally passed 
+    datatype was a series 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">isinstance(original</span><span class="s2">, </span><span class="s1">ABCSeries):</span>
+        <span class="s1">fac = original._constructor(fac</span><span class="s2">, </span><span class="s1">index=original.index</span><span class="s2">, </span><span class="s1">name=original.name)</span>
+
+    <span class="s2">if not </span><span class="s1">retbins:</span>
+        <span class="s2">return </span><span class="s1">fac</span>
+
+    <span class="s1">bins = _convert_bin_to_datelike_type(bins</span><span class="s2">, </span><span class="s1">dtype)</span>
+
+    <span class="s2">return </span><span class="s1">fac</span><span class="s2">, </span><span class="s1">bins</span>
+
+
+<span class="s2">def </span><span class="s1">_round_frac(x</span><span class="s2">, </span><span class="s1">precision: int):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Round the fractional part of the given number 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if not </span><span class="s1">np.isfinite(x) </span><span class="s2">or </span><span class="s1">x == </span><span class="s3">0</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">x</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">frac</span><span class="s2">, </span><span class="s1">whole = np.modf(x)</span>
+        <span class="s2">if </span><span class="s1">whole == </span><span class="s3">0</span><span class="s1">:</span>
+            <span class="s1">digits = -int(np.floor(np.log10(abs(frac)))) - </span><span class="s3">1 </span><span class="s1">+ precision</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">digits = precision</span>
+        <span class="s2">return </span><span class="s1">np.around(x</span><span class="s2">, </span><span class="s1">digits)</span>
+
+
+<span class="s2">def </span><span class="s1">_infer_precision(base_precision: int</span><span class="s2">, </span><span class="s1">bins) -&gt; int:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Infer an appropriate precision for _round_frac 
+    &quot;&quot;&quot;</span>
+    <span class="s2">for </span><span class="s1">precision </span><span class="s2">in </span><span class="s1">range(base_precision</span><span class="s2">, </span><span class="s3">20</span><span class="s1">):</span>
+        <span class="s1">levels = [_round_frac(b</span><span class="s2">, </span><span class="s1">precision) </span><span class="s2">for </span><span class="s1">b </span><span class="s2">in </span><span class="s1">bins]</span>
+        <span class="s2">if </span><span class="s1">algos.unique(levels).size == bins.size:</span>
+            <span class="s2">return </span><span class="s1">precision</span>
+    <span class="s2">return </span><span class="s1">base_precision  </span><span class="s5"># default</span>
+</pre>
+</body>
+</html>

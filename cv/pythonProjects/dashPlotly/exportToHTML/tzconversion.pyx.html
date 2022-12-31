@@ -1,0 +1,616 @@
+<html>
+<head>
+<title>tzconversion.pyx</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+tzconversion.pyx</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;</span>
+<span class="s0">timezone conversion</span>
+<span class="s0">&quot;&quot;&quot;</span>
+<span class="s0">import cython</span>
+<span class="s0">from cython import Py_ssize_t</span>
+
+<span class="s0">from cpython.datetime cimport (</span>
+    <span class="s0">PyDateTime_IMPORT,</span>
+    <span class="s0">PyDelta_Check,</span>
+    <span class="s0">datetime,</span>
+    <span class="s0">timedelta,</span>
+    <span class="s0">tzinfo,</span>
+<span class="s0">)</span>
+
+<span class="s0">PyDateTime_IMPORT</span>
+
+<span class="s0">from dateutil.tz import tzutc</span>
+<span class="s0">import numpy as np</span>
+<span class="s0">import pytz</span>
+
+<span class="s0">cimport numpy as cnp</span>
+<span class="s0">from numpy cimport (</span>
+    <span class="s0">int64_t,</span>
+    <span class="s0">intp_t,</span>
+    <span class="s0">ndarray,</span>
+    <span class="s0">uint8_t,</span>
+<span class="s0">)</span>
+
+<span class="s0">cnp.import_array()</span>
+
+<span class="s0">from pandas._libs.tslibs.ccalendar cimport (</span>
+    <span class="s0">DAY_NANOS,</span>
+    <span class="s0">HOUR_NANOS,</span>
+<span class="s0">)</span>
+<span class="s0">from pandas._libs.tslibs.nattype cimport NPY_NAT</span>
+<span class="s0">from pandas._libs.tslibs.np_datetime cimport (</span>
+    <span class="s0">dt64_to_dtstruct,</span>
+    <span class="s0">npy_datetimestruct,</span>
+<span class="s0">)</span>
+<span class="s0">from pandas._libs.tslibs.timezones cimport (</span>
+    <span class="s0">get_dst_info,</span>
+    <span class="s0">get_utcoffset,</span>
+    <span class="s0">is_fixed_offset,</span>
+    <span class="s0">is_tzlocal,</span>
+    <span class="s0">is_utc,</span>
+<span class="s0">)</span>
+
+
+<span class="s0">cdef int64_t tz_localize_to_utc_single(</span>
+    <span class="s0">int64_t val, tzinfo tz, object ambiguous=None, object nonexistent=None,</span>
+<span class="s0">) except? -1:</span>
+    <span class="s0">&quot;&quot;&quot;See tz_localize_to_utc.__doc__&quot;&quot;&quot;</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">int64_t delta</span>
+        <span class="s0">int64_t[:] deltas</span>
+
+    <span class="s0">if val == NPY_NAT:</span>
+        <span class="s0">return val</span>
+
+    <span class="s0">elif is_utc(tz) or tz is None:</span>
+        <span class="s0">return val</span>
+
+    <span class="s0">elif is_tzlocal(tz):</span>
+        <span class="s0">return _tz_convert_tzlocal_utc(val, tz, to_utc=True)</span>
+
+    <span class="s0">elif is_fixed_offset(tz):</span>
+        <span class="s0"># TODO: in this case we should be able to use get_utcoffset,</span>
+        <span class="s0">#  that returns None for e.g. 'dateutil//usr/share/zoneinfo/Etc/GMT-9'</span>
+        <span class="s0">_, deltas, _ = get_dst_info(tz)</span>
+        <span class="s0">delta = deltas[0]</span>
+        <span class="s0">return val - delta</span>
+
+    <span class="s0">else:</span>
+        <span class="s0">return tz_localize_to_utc(</span>
+            <span class="s0">np.array([val], dtype=&quot;i8&quot;),</span>
+            <span class="s0">tz,</span>
+            <span class="s0">ambiguous=ambiguous,</span>
+            <span class="s0">nonexistent=nonexistent,</span>
+        <span class="s0">)[0]</span>
+
+
+<span class="s0">@cython.boundscheck(False)</span>
+<span class="s0">@cython.wraparound(False)</span>
+<span class="s0">def tz_localize_to_utc(ndarray[int64_t] vals, tzinfo tz, object ambiguous=None,</span>
+                       <span class="s0">object nonexistent=None):</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Localize tzinfo-naive i8 to given time zone (using pytz). If</span>
+    <span class="s0">there are ambiguities in the values, raise AmbiguousTimeError.</span>
+
+    <span class="s0">Parameters</span>
+    <span class="s0">----------</span>
+    <span class="s0">vals : ndarray[int64_t]</span>
+    <span class="s0">tz : tzinfo or None</span>
+    <span class="s0">ambiguous : str, bool, or arraylike</span>
+        <span class="s0">When clocks moved backward due to DST, ambiguous times may arise.</span>
+        <span class="s0">For example in Central European Time (UTC+01), when going from 03:00</span>
+        <span class="s0">DST to 02:00 non-DST, 02:30:00 local time occurs both at 00:30:00 UTC</span>
+        <span class="s0">and at 01:30:00 UTC. In such a situation, the `ambiguous` parameter</span>
+        <span class="s0">dictates how ambiguous times should be handled.</span>
+
+        <span class="s0">- 'infer' will attempt to infer fall dst-transition hours based on</span>
+          <span class="s0">order</span>
+        <span class="s0">- bool-ndarray where True signifies a DST time, False signifies a</span>
+          <span class="s0">non-DST time (note that this flag is only applicable for ambiguous</span>
+          <span class="s0">times, but the array must have the same length as vals)</span>
+        <span class="s0">- bool if True, treat all vals as DST. If False, treat them as non-DST</span>
+        <span class="s0">- 'NaT' will return NaT where there are ambiguous times</span>
+
+    <span class="s0">nonexistent : {None, &quot;NaT&quot;, &quot;shift_forward&quot;, &quot;shift_backward&quot;, &quot;raise&quot;, \</span>
+<span class="s0">timedelta-like}</span>
+        <span class="s0">How to handle non-existent times when converting wall times to UTC</span>
+
+    <span class="s0">Returns</span>
+    <span class="s0">-------</span>
+    <span class="s0">localized : ndarray[int64_t]</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">int64_t[:] deltas, idx_shifted, idx_shifted_left, idx_shifted_right</span>
+        <span class="s0">ndarray[uint8_t, cast=True] ambiguous_array, both_nat, both_eq</span>
+        <span class="s0">Py_ssize_t i, idx, pos, ntrans, n = len(vals)</span>
+        <span class="s0">Py_ssize_t delta_idx_offset, delta_idx, pos_left, pos_right</span>
+        <span class="s0">int64_t *tdata</span>
+        <span class="s0">int64_t v, left, right, val, v_left, v_right, new_local, remaining_mins</span>
+        <span class="s0">int64_t first_delta</span>
+        <span class="s0">int64_t shift_delta = 0</span>
+        <span class="s0">ndarray[int64_t] trans, result, result_a, result_b, dst_hours, delta</span>
+        <span class="s0">ndarray trans_idx, grp, a_idx, b_idx, one_diff</span>
+        <span class="s0">npy_datetimestruct dts</span>
+        <span class="s0">bint infer_dst = False, is_dst = False, fill = False</span>
+        <span class="s0">bint shift_forward = False, shift_backward = False</span>
+        <span class="s0">bint fill_nonexist = False</span>
+        <span class="s0">list trans_grp</span>
+        <span class="s0">str stamp</span>
+
+    <span class="s0"># Vectorized version of DstTzInfo.localize</span>
+    <span class="s0">if is_utc(tz) or tz is None:</span>
+        <span class="s0">return vals</span>
+
+    <span class="s0">result = np.empty(n, dtype=np.int64)</span>
+
+    <span class="s0">if is_tzlocal(tz):</span>
+        <span class="s0">for i in range(n):</span>
+            <span class="s0">v = vals[i]</span>
+            <span class="s0">if v == NPY_NAT:</span>
+                <span class="s0">result[i] = NPY_NAT</span>
+            <span class="s0">else:</span>
+                <span class="s0">result[i] = _tz_convert_tzlocal_utc(v, tz, to_utc=True)</span>
+        <span class="s0">return result</span>
+
+    <span class="s0"># silence false-positive compiler warning</span>
+    <span class="s0">ambiguous_array = np.empty(0, dtype=bool)</span>
+    <span class="s0">if isinstance(ambiguous, str):</span>
+        <span class="s0">if ambiguous == 'infer':</span>
+            <span class="s0">infer_dst = True</span>
+        <span class="s0">elif ambiguous == 'NaT':</span>
+            <span class="s0">fill = True</span>
+    <span class="s0">elif isinstance(ambiguous, bool):</span>
+        <span class="s0">is_dst = True</span>
+        <span class="s0">if ambiguous:</span>
+            <span class="s0">ambiguous_array = np.ones(len(vals), dtype=bool)</span>
+        <span class="s0">else:</span>
+            <span class="s0">ambiguous_array = np.zeros(len(vals), dtype=bool)</span>
+    <span class="s0">elif hasattr(ambiguous, '__iter__'):</span>
+        <span class="s0">is_dst = True</span>
+        <span class="s0">if len(ambiguous) != len(vals):</span>
+            <span class="s0">raise ValueError(&quot;Length of ambiguous bool-array must be &quot;</span>
+                             <span class="s0">&quot;the same size as vals&quot;)</span>
+        <span class="s0">ambiguous_array = np.asarray(ambiguous, dtype=bool)</span>
+
+    <span class="s0">if nonexistent == 'NaT':</span>
+        <span class="s0">fill_nonexist = True</span>
+    <span class="s0">elif nonexistent == 'shift_forward':</span>
+        <span class="s0">shift_forward = True</span>
+    <span class="s0">elif nonexistent == 'shift_backward':</span>
+        <span class="s0">shift_backward = True</span>
+    <span class="s0">elif PyDelta_Check(nonexistent):</span>
+        <span class="s0">from .timedeltas import delta_to_nanoseconds</span>
+        <span class="s0">shift_delta = delta_to_nanoseconds(nonexistent)</span>
+    <span class="s0">elif nonexistent not in ('raise', None):</span>
+        <span class="s0">msg = (&quot;nonexistent must be one of {'NaT', 'raise', 'shift_forward', &quot;</span>
+               <span class="s0">&quot;shift_backwards} or a timedelta object&quot;)</span>
+        <span class="s0">raise ValueError(msg)</span>
+
+    <span class="s0">trans, deltas, _ = get_dst_info(tz)</span>
+
+    <span class="s0">tdata = &lt;int64_t*&gt;cnp.PyArray_DATA(trans)</span>
+    <span class="s0">ntrans = len(trans)</span>
+
+    <span class="s0"># Determine whether each date lies left of the DST transition (store in</span>
+    <span class="s0"># result_a) or right of the DST transition (store in result_b)</span>
+    <span class="s0">result_a = np.empty(n, dtype=np.int64)</span>
+    <span class="s0">result_b = np.empty(n, dtype=np.int64)</span>
+    <span class="s0">result_a[:] = NPY_NAT</span>
+    <span class="s0">result_b[:] = NPY_NAT</span>
+
+    <span class="s0">idx_shifted_left = (np.maximum(0, trans.searchsorted(</span>
+        <span class="s0">vals - DAY_NANOS, side='right') - 1)).astype(np.int64)</span>
+
+    <span class="s0">idx_shifted_right = (np.maximum(0, trans.searchsorted(</span>
+        <span class="s0">vals + DAY_NANOS, side='right') - 1)).astype(np.int64)</span>
+
+    <span class="s0">for i in range(n):</span>
+        <span class="s0">val = vals[i]</span>
+        <span class="s0">v_left = val - deltas[idx_shifted_left[i]]</span>
+        <span class="s0">pos_left = bisect_right_i8(tdata, v_left, ntrans) - 1</span>
+        <span class="s0"># timestamp falls to the left side of the DST transition</span>
+        <span class="s0">if v_left + deltas[pos_left] == val:</span>
+            <span class="s0">result_a[i] = v_left</span>
+
+        <span class="s0">v_right = val - deltas[idx_shifted_right[i]]</span>
+        <span class="s0">pos_right = bisect_right_i8(tdata, v_right, ntrans) - 1</span>
+        <span class="s0"># timestamp falls to the right side of the DST transition</span>
+        <span class="s0">if v_right + deltas[pos_right] == val:</span>
+            <span class="s0">result_b[i] = v_right</span>
+
+    <span class="s0"># silence false-positive compiler warning</span>
+    <span class="s0">dst_hours = np.empty(0, dtype=np.int64)</span>
+    <span class="s0">if infer_dst:</span>
+        <span class="s0">dst_hours = np.empty(n, dtype=np.int64)</span>
+        <span class="s0">dst_hours[:] = NPY_NAT</span>
+
+        <span class="s0"># Get the ambiguous hours (given the above, these are the hours</span>
+        <span class="s0"># where result_a != result_b and neither of them are NAT)</span>
+        <span class="s0">both_nat = np.logical_and(result_a != NPY_NAT, result_b != NPY_NAT)</span>
+        <span class="s0">both_eq = result_a == result_b</span>
+        <span class="s0">trans_idx = np.squeeze(np.nonzero(np.logical_and(both_nat, ~both_eq)))</span>
+        <span class="s0">if trans_idx.size == 1:</span>
+            <span class="s0">stamp = _render_tstamp(vals[trans_idx])</span>
+            <span class="s0">raise pytz.AmbiguousTimeError(</span>
+                <span class="s0">f&quot;Cannot infer dst time from {stamp} as there &quot;</span>
+                <span class="s0">f&quot;are no repeated times&quot;)</span>
+        <span class="s0"># Split the array into contiguous chunks (where the difference between</span>
+        <span class="s0"># indices is 1).  These are effectively dst transitions in different</span>
+        <span class="s0"># years which is useful for checking that there is not an ambiguous</span>
+        <span class="s0"># transition in an individual year.</span>
+        <span class="s0">if trans_idx.size &gt; 0:</span>
+            <span class="s0">one_diff = np.where(np.diff(trans_idx) != 1)[0] + 1</span>
+            <span class="s0">trans_grp = np.array_split(trans_idx, one_diff)</span>
+
+            <span class="s0"># Iterate through each day, if there are no hours where the</span>
+            <span class="s0"># delta is negative (indicates a repeat of hour) the switch</span>
+            <span class="s0"># cannot be inferred</span>
+            <span class="s0">for grp in trans_grp:</span>
+
+                <span class="s0">delta = np.diff(result_a[grp])</span>
+                <span class="s0">if grp.size == 1 or np.all(delta &gt; 0):</span>
+                    <span class="s0">stamp = _render_tstamp(vals[grp[0]])</span>
+                    <span class="s0">raise pytz.AmbiguousTimeError(stamp)</span>
+
+                <span class="s0"># Find the index for the switch and pull from a for dst and b</span>
+                <span class="s0"># for standard</span>
+                <span class="s0">switch_idx = (delta &lt;= 0).nonzero()[0]</span>
+                <span class="s0">if switch_idx.size &gt; 1:</span>
+                    <span class="s0">raise pytz.AmbiguousTimeError(</span>
+                        <span class="s0">f&quot;There are {switch_idx.size} dst switches when &quot;</span>
+                        <span class="s0">f&quot;there should only be 1.&quot;)</span>
+                <span class="s0">switch_idx = switch_idx[0] + 1</span>
+                <span class="s0"># Pull the only index and adjust</span>
+                <span class="s0">a_idx = grp[:switch_idx]</span>
+                <span class="s0">b_idx = grp[switch_idx:]</span>
+                <span class="s0">dst_hours[grp] = np.hstack((result_a[a_idx], result_b[b_idx]))</span>
+
+    <span class="s0">for i in range(n):</span>
+        <span class="s0">val = vals[i]</span>
+        <span class="s0">left = result_a[i]</span>
+        <span class="s0">right = result_b[i]</span>
+        <span class="s0">if val == NPY_NAT:</span>
+            <span class="s0">result[i] = val</span>
+        <span class="s0">elif left != NPY_NAT and right != NPY_NAT:</span>
+            <span class="s0">if left == right:</span>
+                <span class="s0">result[i] = left</span>
+            <span class="s0">else:</span>
+                <span class="s0">if infer_dst and dst_hours[i] != NPY_NAT:</span>
+                    <span class="s0">result[i] = dst_hours[i]</span>
+                <span class="s0">elif is_dst:</span>
+                    <span class="s0">if ambiguous_array[i]:</span>
+                        <span class="s0">result[i] = left</span>
+                    <span class="s0">else:</span>
+                        <span class="s0">result[i] = right</span>
+                <span class="s0">elif fill:</span>
+                    <span class="s0">result[i] = NPY_NAT</span>
+                <span class="s0">else:</span>
+                    <span class="s0">stamp = _render_tstamp(val)</span>
+                    <span class="s0">raise pytz.AmbiguousTimeError(</span>
+                        <span class="s0">f&quot;Cannot infer dst time from {stamp}, try using the &quot;</span>
+                        <span class="s0">f&quot;'ambiguous' argument&quot;)</span>
+        <span class="s0">elif left != NPY_NAT:</span>
+            <span class="s0">result[i] = left</span>
+        <span class="s0">elif right != NPY_NAT:</span>
+            <span class="s0">result[i] = right</span>
+        <span class="s0">else:</span>
+            <span class="s0"># Handle nonexistent times</span>
+            <span class="s0">if shift_forward or shift_backward or shift_delta != 0:</span>
+                <span class="s0"># Shift the nonexistent time to the closest existing time</span>
+                <span class="s0">remaining_mins = val % HOUR_NANOS</span>
+                <span class="s0">if shift_delta != 0:</span>
+                    <span class="s0"># Validate that we don't relocalize on another nonexistent</span>
+                    <span class="s0"># time</span>
+                    <span class="s0">if -1 &lt; shift_delta + remaining_mins &lt; HOUR_NANOS:</span>
+                        <span class="s0">raise ValueError(</span>
+                            <span class="s0">f&quot;The provided timedelta will relocalize on a &quot;</span>
+                            <span class="s0">f&quot;nonexistent time: {nonexistent}&quot;</span>
+                        <span class="s0">)</span>
+                    <span class="s0">new_local = val + shift_delta</span>
+                <span class="s0">elif shift_forward:</span>
+                    <span class="s0">new_local = val + (HOUR_NANOS - remaining_mins)</span>
+                <span class="s0">else:</span>
+                    <span class="s0"># Subtract 1 since the beginning hour is _inclusive_ of</span>
+                    <span class="s0"># nonexistent times</span>
+                    <span class="s0">new_local = val - remaining_mins - 1</span>
+                <span class="s0">delta_idx = trans.searchsorted(new_local, side='right')</span>
+                <span class="s0"># Shift the delta_idx by if the UTC offset of</span>
+                <span class="s0"># the target tz is greater than 0 and we're moving forward</span>
+                <span class="s0"># or vice versa</span>
+                <span class="s0">first_delta = deltas[0]</span>
+                <span class="s0">if (shift_forward or shift_delta &gt; 0) and first_delta &gt; 0:</span>
+                    <span class="s0">delta_idx_offset = 1</span>
+                <span class="s0">elif (shift_backward or shift_delta &lt; 0) and first_delta &lt; 0:</span>
+                    <span class="s0">delta_idx_offset = 1</span>
+                <span class="s0">else:</span>
+                    <span class="s0">delta_idx_offset = 0</span>
+                <span class="s0">delta_idx = delta_idx - delta_idx_offset</span>
+                <span class="s0">result[i] = new_local - deltas[delta_idx]</span>
+            <span class="s0">elif fill_nonexist:</span>
+                <span class="s0">result[i] = NPY_NAT</span>
+            <span class="s0">else:</span>
+                <span class="s0">stamp = _render_tstamp(val)</span>
+                <span class="s0">raise pytz.NonExistentTimeError(stamp)</span>
+
+    <span class="s0">return result</span>
+
+
+<span class="s0">cdef inline Py_ssize_t bisect_right_i8(int64_t *data,</span>
+                                       <span class="s0">int64_t val, Py_ssize_t n):</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">Py_ssize_t pivot, left = 0, right = n</span>
+
+    <span class="s0">assert n &gt;= 1</span>
+
+    <span class="s0"># edge cases</span>
+    <span class="s0">if val &gt; data[n - 1]:</span>
+        <span class="s0">return n</span>
+
+    <span class="s0">if val &lt; data[0]:</span>
+        <span class="s0">return 0</span>
+
+    <span class="s0">while left &lt; right:</span>
+        <span class="s0">pivot = left + (right - left) // 2</span>
+
+        <span class="s0">if data[pivot] &lt;= val:</span>
+            <span class="s0">left = pivot + 1</span>
+        <span class="s0">else:</span>
+            <span class="s0">right = pivot</span>
+
+    <span class="s0">return left</span>
+
+
+<span class="s0">cdef inline str _render_tstamp(int64_t val):</span>
+    <span class="s0">&quot;&quot;&quot; Helper function to render exception messages&quot;&quot;&quot;</span>
+    <span class="s0">from pandas._libs.tslibs.timestamps import Timestamp</span>
+    <span class="s0">return str(Timestamp(val))</span>
+
+
+<span class="s0"># ----------------------------------------------------------------------</span>
+<span class="s0"># Timezone Conversion</span>
+
+<span class="s0">cdef int64_t tz_convert_utc_to_tzlocal(</span>
+    <span class="s0">int64_t utc_val, tzinfo tz, bint* fold=NULL</span>
+<span class="s0">) except? -1:</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Parameters</span>
+    <span class="s0">----------</span>
+    <span class="s0">utc_val : int64_t</span>
+    <span class="s0">tz : tzinfo</span>
+    <span class="s0">fold : bint*</span>
+        <span class="s0">pointer to fold: whether datetime ends up in a fold or not</span>
+        <span class="s0">after adjustment</span>
+
+    <span class="s0">Returns</span>
+    <span class="s0">-------</span>
+    <span class="s0">local_val : int64_t</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">return _tz_convert_tzlocal_utc(utc_val, tz, to_utc=False, fold=fold)</span>
+
+
+<span class="s0">cpdef int64_t tz_convert_from_utc_single(int64_t val, tzinfo tz):</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Convert the val (in i8) from UTC to tz</span>
+
+    <span class="s0">This is a single value version of tz_convert_from_utc.</span>
+
+    <span class="s0">Parameters</span>
+    <span class="s0">----------</span>
+    <span class="s0">val : int64</span>
+    <span class="s0">tz : tzinfo</span>
+
+    <span class="s0">Returns</span>
+    <span class="s0">-------</span>
+    <span class="s0">converted: int64</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">int64_t delta</span>
+        <span class="s0">int64_t[:] deltas</span>
+        <span class="s0">ndarray[int64_t, ndim=1] trans</span>
+        <span class="s0">intp_t pos</span>
+
+    <span class="s0">if val == NPY_NAT:</span>
+        <span class="s0">return val</span>
+
+    <span class="s0">if is_utc(tz):</span>
+        <span class="s0">return val</span>
+    <span class="s0">elif is_tzlocal(tz):</span>
+        <span class="s0">return _tz_convert_tzlocal_utc(val, tz, to_utc=False)</span>
+    <span class="s0">elif is_fixed_offset(tz):</span>
+        <span class="s0">_, deltas, _ = get_dst_info(tz)</span>
+        <span class="s0">delta = deltas[0]</span>
+        <span class="s0">return val + delta</span>
+    <span class="s0">else:</span>
+        <span class="s0">trans, deltas, _ = get_dst_info(tz)</span>
+        <span class="s0">pos = trans.searchsorted(val, side=&quot;right&quot;) - 1</span>
+        <span class="s0">return val + deltas[pos]</span>
+
+
+<span class="s0">def tz_convert_from_utc(const int64_t[:] vals, tzinfo tz):</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Convert the values (in i8) from UTC to tz</span>
+
+    <span class="s0">Parameters</span>
+    <span class="s0">----------</span>
+    <span class="s0">vals : int64 ndarray</span>
+    <span class="s0">tz : tzinfo</span>
+
+    <span class="s0">Returns</span>
+    <span class="s0">-------</span>
+    <span class="s0">int64 ndarray of converted</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">const int64_t[:] converted</span>
+
+    <span class="s0">if len(vals) == 0:</span>
+        <span class="s0">return np.array([], dtype=np.int64)</span>
+
+    <span class="s0">converted = _tz_convert_from_utc(vals, tz)</span>
+    <span class="s0">return np.array(converted, dtype=np.int64)</span>
+
+
+<span class="s0">@cython.boundscheck(False)</span>
+<span class="s0">@cython.wraparound(False)</span>
+<span class="s0">cdef const int64_t[:] _tz_convert_from_utc(const int64_t[:] vals, tzinfo tz):</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Convert the given values (in i8) either to UTC or from UTC.</span>
+
+    <span class="s0">Parameters</span>
+    <span class="s0">----------</span>
+    <span class="s0">vals : int64 ndarray</span>
+    <span class="s0">tz : tzinfo</span>
+
+    <span class="s0">Returns</span>
+    <span class="s0">-------</span>
+    <span class="s0">converted : ndarray[int64_t]</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">int64_t[:] converted, deltas</span>
+        <span class="s0">Py_ssize_t i, n = len(vals)</span>
+        <span class="s0">int64_t val, delta</span>
+        <span class="s0">intp_t[:] pos</span>
+        <span class="s0">ndarray[int64_t] trans</span>
+        <span class="s0">str typ</span>
+
+    <span class="s0">if is_utc(tz):</span>
+        <span class="s0">return vals</span>
+    <span class="s0">elif is_tzlocal(tz):</span>
+        <span class="s0">converted = np.empty(n, dtype=np.int64)</span>
+        <span class="s0">for i in range(n):</span>
+            <span class="s0">val = vals[i]</span>
+            <span class="s0">if val == NPY_NAT:</span>
+                <span class="s0">converted[i] = NPY_NAT</span>
+            <span class="s0">else:</span>
+                <span class="s0">converted[i] = _tz_convert_tzlocal_utc(val, tz, to_utc=False)</span>
+    <span class="s0">else:</span>
+        <span class="s0">converted = np.empty(n, dtype=np.int64)</span>
+
+        <span class="s0">trans, deltas, typ = get_dst_info(tz)</span>
+
+        <span class="s0">if typ not in [&quot;pytz&quot;, &quot;dateutil&quot;]:</span>
+            <span class="s0"># FixedOffset, we know len(deltas) == 1</span>
+            <span class="s0">delta = deltas[0]</span>
+
+            <span class="s0">for i in range(n):</span>
+                <span class="s0">val = vals[i]</span>
+                <span class="s0">if val == NPY_NAT:</span>
+                    <span class="s0">converted[i] = val</span>
+                <span class="s0">else:</span>
+                    <span class="s0">converted[i] = val + delta</span>
+
+        <span class="s0">else:</span>
+            <span class="s0">pos = trans.searchsorted(vals, side=&quot;right&quot;) - 1</span>
+
+            <span class="s0">for i in range(n):</span>
+                <span class="s0">val = vals[i]</span>
+                <span class="s0">if val == NPY_NAT:</span>
+                    <span class="s0">converted[i] = val</span>
+                <span class="s0">else:</span>
+                    <span class="s0">if pos[i] &lt; 0:</span>
+                        <span class="s0"># TODO: How is this reached?  Should we be checking for</span>
+                        <span class="s0">#  it elsewhere?</span>
+                        <span class="s0">raise ValueError(&quot;First time before start of DST info&quot;)</span>
+
+                    <span class="s0">converted[i] = val + deltas[pos[i]]</span>
+
+    <span class="s0">return converted</span>
+
+
+<span class="s0"># OSError may be thrown by tzlocal on windows at or close to 1970-01-01</span>
+<span class="s0">#  see https://github.com/pandas-dev/pandas/pull/37591#issuecomment-720628241</span>
+<span class="s0">cdef inline int64_t _tzlocal_get_offset_components(int64_t val, tzinfo tz,</span>
+                                                   <span class="s0">bint to_utc,</span>
+                                                   <span class="s0">bint *fold=NULL) except? -1:</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Calculate offset in nanoseconds needed to convert the i8 representation of</span>
+    <span class="s0">a datetime from a tzlocal timezone to UTC, or vice-versa.</span>
+
+    <span class="s0">Parameters</span>
+    <span class="s0">----------</span>
+    <span class="s0">val : int64_t</span>
+    <span class="s0">tz : tzinfo</span>
+    <span class="s0">to_utc : bint</span>
+        <span class="s0">True if converting tzlocal _to_ UTC, False if going the other direction</span>
+    <span class="s0">fold : bint*, default NULL</span>
+        <span class="s0">pointer to fold: whether datetime ends up in a fold or not</span>
+        <span class="s0">after adjustment</span>
+
+    <span class="s0">Returns</span>
+    <span class="s0">-------</span>
+    <span class="s0">delta : int64_t</span>
+
+    <span class="s0">Notes</span>
+    <span class="s0">-----</span>
+    <span class="s0">Sets fold by pointer</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">npy_datetimestruct dts</span>
+        <span class="s0">datetime dt</span>
+        <span class="s0">int64_t delta</span>
+        <span class="s0">timedelta td</span>
+
+    <span class="s0">dt64_to_dtstruct(val, &amp;dts)</span>
+    <span class="s0">dt = datetime(dts.year, dts.month, dts.day, dts.hour,</span>
+                  <span class="s0">dts.min, dts.sec, dts.us)</span>
+    <span class="s0"># tz.utcoffset only makes sense if datetime</span>
+    <span class="s0"># is _wall time_, so if val is a UTC timestamp convert to wall time</span>
+    <span class="s0">if not to_utc:</span>
+        <span class="s0">dt = dt.replace(tzinfo=tzutc())</span>
+        <span class="s0">dt = dt.astimezone(tz)</span>
+
+    <span class="s0">if fold is not NULL:</span>
+        <span class="s0">fold[0] = dt.fold</span>
+
+    <span class="s0">td = tz.utcoffset(dt)</span>
+    <span class="s0">return int(td.total_seconds() * 1_000_000_000)</span>
+
+
+<span class="s0"># OSError may be thrown by tzlocal on windows at or close to 1970-01-01</span>
+<span class="s0">#  see https://github.com/pandas-dev/pandas/pull/37591#issuecomment-720628241</span>
+<span class="s0">cdef int64_t _tz_convert_tzlocal_utc(int64_t val, tzinfo tz, bint to_utc=True,</span>
+                                     <span class="s0">bint* fold=NULL) except? -1:</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Convert the i8 representation of a datetime from a tzlocal timezone to</span>
+    <span class="s0">UTC, or vice-versa.</span>
+
+    <span class="s0">Private, not intended for use outside of tslibs.conversion</span>
+
+    <span class="s0">Parameters</span>
+    <span class="s0">----------</span>
+    <span class="s0">val : int64_t</span>
+    <span class="s0">tz : tzinfo</span>
+    <span class="s0">to_utc : bint</span>
+        <span class="s0">True if converting tzlocal _to_ UTC, False if going the other direction</span>
+    <span class="s0">fold : bint*</span>
+        <span class="s0">pointer to fold: whether datetime ends up in a fold or not</span>
+        <span class="s0">after adjustment</span>
+
+    <span class="s0">Returns</span>
+    <span class="s0">-------</span>
+    <span class="s0">result : int64_t</span>
+
+    <span class="s0">Notes</span>
+    <span class="s0">-----</span>
+    <span class="s0">Sets fold by pointer</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">int64_t delta</span>
+
+    <span class="s0">delta = _tzlocal_get_offset_components(val, tz, to_utc, fold)</span>
+
+    <span class="s0">if to_utc:</span>
+        <span class="s0">return val - delta</span>
+    <span class="s0">else:</span>
+        <span class="s0">return val + delta</span>
+</pre>
+</body>
+</html>

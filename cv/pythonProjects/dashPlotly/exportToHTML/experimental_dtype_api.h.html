@@ -1,0 +1,408 @@
+<html>
+<head>
+<title>experimental_dtype_api.h</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #4646f1;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+experimental_dtype_api.h</font>
+</center></td></tr></table>
+<pre><span class="s0">/* 
+ * This header exports the new experimental DType API as proposed in 
+ * NEPs 41 to 43.  For background, please check these NEPs.  Otherwise, 
+ * this header also serves as documentation for the time being. 
+ * 
+ * Please do not hesitate to contact @seberg with questions.  This is 
+ * developed together with https://github.com/seberg/experimental_user_dtypes 
+ * and those interested in experimenting are encouraged to contribute there. 
+ * 
+ * To use the functions defined in the header, call:: 
+ * 
+ *     if (import_experimental_dtype_api(version) &lt; 0) { 
+ *         return NULL; 
+ *     } 
+ * 
+ * in your module init.  (A version mismatch will be reported, just update 
+ * to the correct one, this will alert you of possible changes.) 
+ * 
+ * The following lists the main symbols currently exported.  Please do not 
+ * hesitate to ask for help or clarification: 
+ * 
+ * - PyUFunc_AddLoopFromSpec: 
+ * 
+ *     Register a new loop for a ufunc.  This uses the `PyArrayMethod_Spec` 
+ *     which must be filled in (see in-line comments). 
+ * 
+ * - PyUFunc_AddPromoter: 
+ * 
+ *     Register a new promoter for a ufunc.  A promoter is a function stored 
+ *     in a PyCapsule (see in-line comments).  It is passed the operation and 
+ *     requested DType signatures and can mutate it to attempt a new search 
+ *     for a matching loop/promoter. 
+ *     I.e. for Numba a promoter could even add the desired loop. 
+ * 
+ * - PyArrayInitDTypeMeta_FromSpec: 
+ * 
+ *     Initialize a new DType.  It must currently be a static Python C type 
+ *     that is declared as `PyArray_DTypeMeta` and not `PyTypeObject`. 
+ *     Further, it must subclass `np.dtype` and set its type to 
+ *     `PyArrayDTypeMeta_Type` (before calling `PyType_Read()`). 
+ * 
+ * - PyArray_CommonDType: 
+ * 
+ *     Find the common-dtype (&quot;promotion&quot;) for two DType classes.  Similar 
+ *     to `np.result_type`, but works on the classes and not instances. 
+ * 
+ * - PyArray_PromoteDTypeSequence: 
+ * 
+ *     Same as CommonDType, but works with an arbitrary number of DTypes. 
+ *     This function is smarter and can often return successful and unambiguous 
+ *     results when `common_dtype(common_dtype(dt1, dt2), dt3)` would 
+ *     depend on the operation order or fail.  Nevertheless, DTypes should 
+ *     aim to ensure that their common-dtype implementation is associative 
+ *     and commutative!  (Mainly, unsigned and signed integers are not.) 
+ * 
+ *     For guaranteed consistent results DTypes must implement common-Dtype 
+ *     &quot;transitively&quot;.  If A promotes B and B promotes C, than A must generally 
+ *     also promote C; where &quot;promotes&quot; means implements the promotion. 
+ *     (There are some exceptions for abstract DTypes) 
+ * 
+ * WARNING 
+ * ======= 
+ * 
+ * By using this header, you understand that this is a fully experimental 
+ * exposure.  Details are expected to change, and some options may have no 
+ * effect.  (Please contact @seberg if you have questions!) 
+ * If the exposure stops working, please file a bug report with NumPy. 
+ * Further, a DType created using this API/header should still be expected 
+ * to be incompatible with some functionality inside and outside of NumPy. 
+ * In this case crashes must be expected.  Please report any such problems 
+ * so that they can be fixed before final exposure. 
+ * Furthermore, expect missing checks for programming errors which the final 
+ * API is expected to have. 
+ * 
+ * Symbols with a leading underscore are likely to not be included in the 
+ * first public version, if these are central to your use-case, please let 
+ * us know, so that we can reconsider. 
+ * 
+ * &quot;Array-like&quot; consumer API not yet under considerations 
+ * ====================================================== 
+ * 
+ * The new DType API is designed in a way to make it potentially useful for 
+ * alternative &quot;array-like&quot; implementations.  This will require careful 
+ * exposure of details and functions and is not part of this experimental API. 
+ */</span>
+
+<span class="s2">#ifndef </span><span class="s1">NUMPY_CORE_INCLUDE_NUMPY_EXPERIMENTAL_DTYPE_API_H_</span>
+<span class="s2">#define </span><span class="s1">NUMPY_CORE_INCLUDE_NUMPY_EXPERIMENTAL_DTYPE_API_H_</span>
+
+<span class="s2">#include </span><span class="s1">&lt;Python.h&gt;</span>
+<span class="s2">#include </span><span class="s3">&quot;ndarraytypes.h&quot;</span>
+
+
+<span class="s0">/* 
+ * Just a hack so I don't forget importing as much myself, I spend way too 
+ * much time noticing it the first time around :). 
+ */</span>
+<span class="s2">static void</span>
+<span class="s1">__not_imported(</span><span class="s2">void</span><span class="s1">)</span>
+<span class="s1">{</span>
+    <span class="s1">printf(</span><span class="s3">&quot;*****</span><span class="s4">\n</span><span class="s3">Critical error, dtype API not imported</span><span class="s4">\n</span><span class="s3">*****</span><span class="s4">\n</span><span class="s3">&quot;</span><span class="s1">);</span>
+<span class="s1">}</span>
+<span class="s2">static void </span><span class="s1">*__uninitialized_table[] = {</span>
+        <span class="s1">&amp;__not_imported, &amp;__not_imported, &amp;__not_imported, &amp;__not_imported,</span>
+        <span class="s1">&amp;__not_imported, &amp;__not_imported, &amp;__not_imported, &amp;__not_imported};</span>
+
+
+<span class="s2">static void </span><span class="s1">**__experimental_dtype_api_table = __uninitialized_table;</span>
+
+
+<span class="s0">/* 
+ * DTypeMeta struct, the content may be made fully opaque (except the size). 
+ * We may also move everything into a single `void *dt_slots`. 
+ */</span>
+<span class="s2">typedef struct </span><span class="s1">{</span>
+    <span class="s1">PyHeapTypeObject super;</span>
+    <span class="s1">PyArray_Descr *singleton;</span>
+    <span class="s2">int </span><span class="s1">type_num;</span>
+    <span class="s1">PyTypeObject *scalar_type;</span>
+    <span class="s1">npy_uint64 flags;</span>
+    <span class="s2">void </span><span class="s1">*dt_slots;</span>
+    <span class="s2">void </span><span class="s1">*reserved[</span><span class="s5">3</span><span class="s1">];</span>
+<span class="s1">} PyArray_DTypeMeta;</span>
+
+
+<span class="s0">/* 
+ * ****************************************************** 
+ *         ArrayMethod API (Casting and UFuncs) 
+ * ****************************************************** 
+ */</span>
+<span class="s0">/* 
+ * NOTE: Expected changes: 
+ *       * invert logic of floating point error flag 
+ *       * probably split runtime and general flags into two 
+ *       * should possibly not use an enum for typdef for more stable ABI? 
+ */</span>
+<span class="s2">typedef enum </span><span class="s1">{</span>
+    <span class="s0">/* Flag for whether the GIL is required */</span>
+    <span class="s1">NPY_METH_REQUIRES_PYAPI = </span><span class="s5">1 </span><span class="s1">&lt;&lt; </span><span class="s5">1</span><span class="s1">,</span>
+    <span class="s0">/* 
+     * Some functions cannot set floating point error flags, this flag 
+     * gives us the option (not requirement) to skip floating point error 
+     * setup/check. No function should set error flags and ignore them 
+     * since it would interfere with chaining operations (e.g. casting). 
+     */</span>
+    <span class="s1">NPY_METH_NO_FLOATINGPOINT_ERRORS = </span><span class="s5">1 </span><span class="s1">&lt;&lt; </span><span class="s5">2</span><span class="s1">,</span>
+    <span class="s0">/* Whether the method supports unaligned access (not runtime) */</span>
+    <span class="s1">NPY_METH_SUPPORTS_UNALIGNED = </span><span class="s5">1 </span><span class="s1">&lt;&lt; </span><span class="s5">3</span><span class="s1">,</span>
+
+    <span class="s0">/* All flags which can change at runtime */</span>
+    <span class="s1">NPY_METH_RUNTIME_FLAGS = (</span>
+            <span class="s1">NPY_METH_REQUIRES_PYAPI |</span>
+            <span class="s1">NPY_METH_NO_FLOATINGPOINT_ERRORS),</span>
+<span class="s1">} NPY_ARRAYMETHOD_FLAGS;</span>
+
+
+<span class="s0">/* 
+ * The main object for creating a new ArrayMethod. We use the typical `slots` 
+ * mechanism used by the Python limited API (see below for the slot defs). 
+ */</span>
+<span class="s2">typedef struct </span><span class="s1">{</span>
+    <span class="s2">const char </span><span class="s1">*name;</span>
+    <span class="s2">int </span><span class="s1">nin, nout;</span>
+    <span class="s1">NPY_CASTING casting;</span>
+    <span class="s1">NPY_ARRAYMETHOD_FLAGS flags;</span>
+    <span class="s1">PyObject **dtypes;  </span><span class="s0">/* array of DType class objects */</span>
+    <span class="s1">PyType_Slot *slots;</span>
+<span class="s1">} PyArrayMethod_Spec;</span>
+
+
+<span class="s2">typedef </span><span class="s1">PyObject *_ufunc_addloop_fromspec_func(</span>
+        <span class="s1">PyObject *ufunc, PyArrayMethod_Spec *spec);</span>
+<span class="s0">/* 
+ * The main ufunc registration function.  This adds a new implementation/loop 
+ * to a ufunc.  It replaces `PyUFunc_RegisterLoopForType`. 
+ */</span>
+<span class="s2">#define </span><span class="s1">PyUFunc_AddLoopFromSpec \</span>
+    <span class="s1">(*(_ufunc_addloop_fromspec_func *)(__experimental_dtype_api_table[</span><span class="s5">0</span><span class="s1">]))</span>
+
+
+<span class="s0">/* 
+ * Type of the C promoter function, which must be wrapped into a 
+ * PyCapsule with name &quot;numpy._ufunc_promoter&quot;. 
+ * 
+ * Note that currently the output dtypes are always NULL unless they are 
+ * also part of the signature.  This is an implementation detail and could 
+ * change in the future.  However, in general promoters should not have a 
+ * need for output dtypes. 
+ * (There are potential use-cases, these are currently unsupported.) 
+ */</span>
+<span class="s2">typedef int </span><span class="s1">promoter_function(PyObject *ufunc,</span>
+        <span class="s1">PyArray_DTypeMeta *op_dtypes[], PyArray_DTypeMeta *signature[],</span>
+        <span class="s1">PyArray_DTypeMeta *new_op_dtypes[]);</span>
+
+<span class="s0">/* 
+ * Function to register a promoter. 
+ * 
+ * @param ufunc The ufunc object to register the promoter with. 
+ * @param DType_tuple A Python tuple containing DTypes or None matching the 
+ *        number of inputs and outputs of the ufunc. 
+ * @param promoter A PyCapsule with name &quot;numpy._ufunc_promoter&quot; containing 
+ *        a pointer to a `promoter_function`. 
+ */</span>
+<span class="s2">typedef int </span><span class="s1">_ufunc_addpromoter_func(</span>
+        <span class="s1">PyObject *ufunc, PyObject *DType_tuple, PyObject *promoter);</span>
+<span class="s2">#define </span><span class="s1">PyUFunc_AddPromoter \</span>
+    <span class="s1">(*(_ufunc_addpromoter_func *)(__experimental_dtype_api_table[</span><span class="s5">1</span><span class="s1">]))</span>
+
+<span class="s0">/* 
+ * In addition to the normal casting levels, NPY_CAST_IS_VIEW indicates 
+ * that no cast operation is necessary at all (although a copy usually will be) 
+ * 
+ * NOTE: The most likely modification here is to add an additional 
+ *       `view_offset` output to resolve_descriptors.  If set, it would 
+ *       indicate both that it is a view and what offset to use.  This means that 
+ *       e.g. `arr.imag` could be implemented by an ArrayMethod. 
+ */</span>
+<span class="s2">#define </span><span class="s1">NPY_CAST_IS_VIEW _NPY_CAST_IS_VIEW</span>
+
+<span class="s0">/* 
+ * The resolve descriptors function, must be able to handle NULL values for 
+ * all output (but not input) `given_descrs` and fill `loop_descrs`. 
+ * Return -1 on error or 0 if the operation is not possible without an error 
+ * set.  (This may still be in flux.) 
+ * Otherwise must return the &quot;casting safety&quot;, for normal functions, this is 
+ * almost always &quot;safe&quot; (or even &quot;equivalent&quot;?). 
+ * 
+ * `resolve_descriptors` is optional if all output DTypes are non-parametric. 
+ */</span>
+<span class="s2">#define </span><span class="s1">NPY_METH_resolve_descriptors </span><span class="s5">1</span>
+<span class="s2">typedef </span><span class="s1">NPY_CASTING (resolve_descriptors_function)(</span>
+        <span class="s0">/* &quot;method&quot; is currently opaque (necessary e.g. to wrap Python) */</span>
+        <span class="s1">PyObject *method,</span>
+        <span class="s0">/* DTypes the method was created for */</span>
+        <span class="s1">PyObject **dtypes,</span>
+        <span class="s0">/* Input descriptors (instances).  Outputs may be NULL. */</span>
+        <span class="s1">PyArray_Descr **given_descrs,</span>
+        <span class="s0">/* Exact loop descriptors to use, must not hold references on error */</span>
+        <span class="s1">PyArray_Descr **loop_descrs);</span>
+
+<span class="s0">/* NOT public yet: Signature needs adapting as external API. */</span>
+<span class="s2">#define </span><span class="s1">_NPY_METH_get_loop </span><span class="s5">2</span>
+
+<span class="s0">/* 
+ * Current public API to define fast inner-loops.  You must provide a 
+ * strided loop.  If this is a cast between two &quot;versions&quot; of the same dtype 
+ * you must also provide an unaligned strided loop. 
+ * Other loops are useful to optimize the very common contiguous case. 
+ * 
+ * NOTE: As of now, NumPy will NOT use unaligned loops in ufuncs! 
+ */</span>
+<span class="s2">#define </span><span class="s1">NPY_METH_strided_loop </span><span class="s5">3</span>
+<span class="s2">#define </span><span class="s1">NPY_METH_contiguous_loop </span><span class="s5">4</span>
+<span class="s2">#define </span><span class="s1">NPY_METH_unaligned_strided_loop </span><span class="s5">5</span>
+<span class="s2">#define </span><span class="s1">NPY_METH_unaligned_contiguous_loop </span><span class="s5">6</span>
+
+
+<span class="s2">typedef struct </span><span class="s1">{</span>
+    <span class="s1">PyObject *caller;  </span><span class="s0">/* E.g. the original ufunc, may be NULL */</span>
+    <span class="s1">PyObject *method;  </span><span class="s0">/* The method &quot;self&quot;. Currently an opaque object */</span>
+
+    <span class="s0">/* Operand descriptors, filled in by resolve_descriptors */</span>
+    <span class="s1">PyArray_Descr **descriptors;</span>
+    <span class="s0">/* Structure may grow (this is harmless for DType authors) */</span>
+<span class="s1">} PyArrayMethod_Context;</span>
+
+<span class="s2">typedef int </span><span class="s1">(PyArrayMethod_StridedLoop)(PyArrayMethod_Context *context,</span>
+        <span class="s2">char </span><span class="s1">*</span><span class="s2">const </span><span class="s1">*data, </span><span class="s2">const </span><span class="s1">npy_intp *dimensions, </span><span class="s2">const </span><span class="s1">npy_intp *strides,</span>
+        <span class="s1">NpyAuxData *transferdata);</span>
+
+
+
+<span class="s0">/* 
+ * **************************** 
+ *          DTYPE API 
+ * **************************** 
+ */</span>
+
+<span class="s2">#define </span><span class="s1">NPY_DT_ABSTRACT </span><span class="s5">1 </span><span class="s1">&lt;&lt; </span><span class="s5">1</span>
+<span class="s2">#define </span><span class="s1">NPY_DT_PARAMETRIC </span><span class="s5">1 </span><span class="s1">&lt;&lt; </span><span class="s5">2</span>
+
+<span class="s2">#define </span><span class="s1">NPY_DT_discover_descr_from_pyobject </span><span class="s5">1</span>
+<span class="s2">#define </span><span class="s1">_NPY_DT_is_known_scalar_type </span><span class="s5">2</span>
+<span class="s2">#define </span><span class="s1">NPY_DT_default_descr </span><span class="s5">3</span>
+<span class="s2">#define </span><span class="s1">NPY_DT_common_dtype </span><span class="s5">4</span>
+<span class="s2">#define </span><span class="s1">NPY_DT_common_instance </span><span class="s5">5</span>
+<span class="s2">#define </span><span class="s1">NPY_DT_setitem </span><span class="s5">6</span>
+<span class="s2">#define </span><span class="s1">NPY_DT_getitem </span><span class="s5">7</span>
+
+
+<span class="s0">// TODO: These slots probably still need some thought, and/or a way to &quot;grow&quot;?</span>
+<span class="s2">typedef struct</span><span class="s1">{</span>
+    <span class="s1">PyTypeObject *typeobj;    </span><span class="s0">/* type of python scalar or NULL */</span>
+    <span class="s2">int </span><span class="s1">flags;                </span><span class="s0">/* flags, including parametric and abstract */</span>
+    <span class="s0">/* NULL terminated cast definitions. Use NULL for the newly created DType */</span>
+    <span class="s1">PyArrayMethod_Spec **casts;</span>
+    <span class="s1">PyType_Slot *slots;</span>
+    <span class="s0">/* Baseclass or NULL (will always subclass `np.dtype`) */</span>
+    <span class="s1">PyTypeObject *baseclass;</span>
+<span class="s1">} PyArrayDTypeMeta_Spec;</span>
+
+
+<span class="s2">#define </span><span class="s1">PyArrayDTypeMeta_Type \</span>
+    <span class="s1">(*(PyTypeObject *)__experimental_dtype_api_table[</span><span class="s5">2</span><span class="s1">])</span>
+<span class="s2">typedef int </span><span class="s1">__dtypemeta_fromspec(</span>
+        <span class="s1">PyArray_DTypeMeta *DType, PyArrayDTypeMeta_Spec *dtype_spec);</span>
+<span class="s0">/* 
+ * Finalize creation of a DTypeMeta.  You must ensure that the DTypeMeta is 
+ * a proper subclass.  The DTypeMeta object has additional fields compared to 
+ * a normal PyTypeObject! 
+ * The only (easy) creation of a new DType is to create a static Type which 
+ * inherits `PyArray_DescrType`, sets its type to `PyArrayDTypeMeta_Type` and 
+ * uses `PyArray_DTypeMeta` defined above as the C-structure. 
+ */</span>
+<span class="s2">#define </span><span class="s1">PyArrayInitDTypeMeta_FromSpec \</span>
+    <span class="s1">((__dtypemeta_fromspec *)(__experimental_dtype_api_table[</span><span class="s5">3</span><span class="s1">]))</span>
+
+
+<span class="s0">/* 
+ * ************************************* 
+ *          WORKING WITH DTYPES 
+ * ************************************* 
+ */</span>
+
+<span class="s2">typedef </span><span class="s1">PyArray_DTypeMeta *__common_dtype(</span>
+        <span class="s1">PyArray_DTypeMeta *DType1, PyArray_DTypeMeta *DType2);</span>
+<span class="s2">#define </span><span class="s1">PyArray_CommonDType \</span>
+    <span class="s1">((__common_dtype *)(__experimental_dtype_api_table[</span><span class="s5">4</span><span class="s1">]))</span>
+
+
+<span class="s2">typedef </span><span class="s1">PyArray_DTypeMeta *__promote_dtype_sequence(</span>
+        <span class="s1">npy_intp num, PyArray_DTypeMeta *DTypes[]);</span>
+<span class="s2">#define </span><span class="s1">PyArray_PromoteDTypeSequence \</span>
+    <span class="s1">((__promote_dtype_sequence *)(__experimental_dtype_api_table[</span><span class="s5">5</span><span class="s1">]))</span>
+
+
+<span class="s0">/* 
+ * ******************************** 
+ *         Initialization 
+ * ******************************** 
+ * 
+ * Import the experimental API, the version must match the one defined in 
+ * the header to ensure changes are taken into account. NumPy will further 
+ * runtime-check this. 
+ * You must call this function to use the symbols defined in this file. 
+ */</span>
+<span class="s2">#define </span><span class="s1">__EXPERIMENTAL_DTYPE_VERSION </span><span class="s5">2</span>
+
+<span class="s2">static int</span>
+<span class="s1">import_experimental_dtype_api(</span><span class="s2">int </span><span class="s1">version)</span>
+<span class="s1">{</span>
+    <span class="s2">if </span><span class="s1">(version != __EXPERIMENTAL_DTYPE_VERSION) {</span>
+        <span class="s1">PyErr_Format(PyExc_RuntimeError,</span>
+                <span class="s3">&quot;DType API version %d did not match header version %d. Please &quot;</span>
+                <span class="s3">&quot;update the import statement and check for API changes.&quot;</span><span class="s1">,</span>
+                <span class="s1">version, __EXPERIMENTAL_DTYPE_VERSION);</span>
+        <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span><span class="s1">;</span>
+    <span class="s1">}</span>
+    <span class="s2">if </span><span class="s1">(__experimental_dtype_api_table != __uninitialized_table) {</span>
+        <span class="s0">/* already imported. */</span>
+        <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">PyObject *multiarray = PyImport_ImportModule(</span><span class="s3">&quot;numpy.core._multiarray_umath&quot;</span><span class="s1">);</span>
+    <span class="s2">if </span><span class="s1">(multiarray == NULL) {</span>
+        <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">PyObject *api = PyObject_CallMethod(multiarray,</span>
+        <span class="s3">&quot;_get_experimental_dtype_api&quot;</span><span class="s1">, </span><span class="s3">&quot;i&quot;</span><span class="s1">, version);</span>
+    <span class="s1">Py_DECREF(multiarray);</span>
+    <span class="s2">if </span><span class="s1">(api == NULL) {</span>
+        <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span><span class="s1">;</span>
+    <span class="s1">}</span>
+    <span class="s1">__experimental_dtype_api_table = PyCapsule_GetPointer(api,</span>
+            <span class="s3">&quot;experimental_dtype_api_table&quot;</span><span class="s1">);</span>
+    <span class="s1">Py_DECREF(api);</span>
+
+    <span class="s2">if </span><span class="s1">(__experimental_dtype_api_table == NULL) {</span>
+        <span class="s1">__experimental_dtype_api_table = __uninitialized_table;</span>
+        <span class="s2">return </span><span class="s1">-</span><span class="s5">1</span><span class="s1">;</span>
+    <span class="s1">}</span>
+    <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+<span class="s1">}</span>
+
+<span class="s2">#endif  </span><span class="s0">/* NUMPY_CORE_INCLUDE_NUMPY_EXPERIMENTAL_DTYPE_API_H_ */</span>
+</pre>
+</body>
+</html>

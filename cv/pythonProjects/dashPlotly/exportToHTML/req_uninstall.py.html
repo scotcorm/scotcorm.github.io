@@ -1,0 +1,656 @@
+<html>
+<head>
+<title>req_uninstall.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #808080;}
+.s6 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+req_uninstall.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">functools</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">import </span><span class="s1">sysconfig</span>
+<span class="s0">from </span><span class="s1">importlib.util </span><span class="s0">import </span><span class="s1">cache_from_source</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">Any</span><span class="s0">, </span><span class="s1">Callable</span><span class="s0">, </span><span class="s1">Dict</span><span class="s0">, </span><span class="s1">Iterable</span><span class="s0">, </span><span class="s1">Iterator</span><span class="s0">, </span><span class="s1">List</span><span class="s0">, </span><span class="s1">Optional</span><span class="s0">, </span><span class="s1">Set</span><span class="s0">, </span><span class="s1">Tuple</span>
+
+<span class="s0">from </span><span class="s1">pip._internal.exceptions </span><span class="s0">import </span><span class="s1">UninstallationError</span>
+<span class="s0">from </span><span class="s1">pip._internal.locations </span><span class="s0">import </span><span class="s1">get_bin_prefix</span><span class="s0">, </span><span class="s1">get_bin_user</span>
+<span class="s0">from </span><span class="s1">pip._internal.metadata </span><span class="s0">import </span><span class="s1">BaseDistribution</span>
+<span class="s0">from </span><span class="s1">pip._internal.utils.compat </span><span class="s0">import </span><span class="s1">WINDOWS</span>
+<span class="s0">from </span><span class="s1">pip._internal.utils.egg_link </span><span class="s0">import </span><span class="s1">egg_link_path_from_location</span>
+<span class="s0">from </span><span class="s1">pip._internal.utils.logging </span><span class="s0">import </span><span class="s1">getLogger</span><span class="s0">, </span><span class="s1">indent_log</span>
+<span class="s0">from </span><span class="s1">pip._internal.utils.misc </span><span class="s0">import </span><span class="s1">ask</span><span class="s0">, </span><span class="s1">is_local</span><span class="s0">, </span><span class="s1">normalize_path</span><span class="s0">, </span><span class="s1">renames</span><span class="s0">, </span><span class="s1">rmtree</span>
+<span class="s0">from </span><span class="s1">pip._internal.utils.temp_dir </span><span class="s0">import </span><span class="s1">AdjacentTempDirectory</span><span class="s0">, </span><span class="s1">TempDirectory</span>
+
+<span class="s1">logger = getLogger(__name__)</span>
+
+
+<span class="s0">def </span><span class="s1">_script_names(bin_dir: str</span><span class="s0">, </span><span class="s1">script_name: str</span><span class="s0">, </span><span class="s1">is_gui: bool) -&gt; Iterator[str]:</span>
+    <span class="s2">&quot;&quot;&quot;Create the fully qualified name of the files created by 
+    {console,gui}_scripts for the given ``dist``. 
+    Returns the list of file names 
+    &quot;&quot;&quot;</span>
+    <span class="s1">exe_name = os.path.join(bin_dir</span><span class="s0">, </span><span class="s1">script_name)</span>
+    <span class="s0">yield </span><span class="s1">exe_name</span>
+    <span class="s0">if not </span><span class="s1">WINDOWS:</span>
+        <span class="s0">return</span>
+    <span class="s0">yield </span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">exe_name</span><span class="s0">}</span><span class="s3">.exe&quot;</span>
+    <span class="s0">yield </span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">exe_name</span><span class="s0">}</span><span class="s3">.exe.manifest&quot;</span>
+    <span class="s0">if </span><span class="s1">is_gui:</span>
+        <span class="s0">yield </span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">exe_name</span><span class="s0">}</span><span class="s3">-script.pyw&quot;</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s0">yield </span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">exe_name</span><span class="s0">}</span><span class="s3">-script.py&quot;</span>
+
+
+<span class="s0">def </span><span class="s1">_unique(fn: Callable[...</span><span class="s0">, </span><span class="s1">Iterator[Any]]) -&gt; Callable[...</span><span class="s0">, </span><span class="s1">Iterator[Any]]:</span>
+    <span class="s1">@functools.wraps(fn)</span>
+    <span class="s0">def </span><span class="s1">unique(*args: Any</span><span class="s0">, </span><span class="s1">**kw: Any) -&gt; Iterator[Any]:</span>
+        <span class="s1">seen: Set[Any] = set()</span>
+        <span class="s0">for </span><span class="s1">item </span><span class="s0">in </span><span class="s1">fn(*args</span><span class="s0">, </span><span class="s1">**kw):</span>
+            <span class="s0">if </span><span class="s1">item </span><span class="s0">not in </span><span class="s1">seen:</span>
+                <span class="s1">seen.add(item)</span>
+                <span class="s0">yield </span><span class="s1">item</span>
+
+    <span class="s0">return </span><span class="s1">unique</span>
+
+
+<span class="s1">@_unique</span>
+<span class="s0">def </span><span class="s1">uninstallation_paths(dist: BaseDistribution) -&gt; Iterator[str]:</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Yield all the uninstallation paths for dist based on RECORD-without-.py[co] 
+ 
+    Yield paths to all the files in RECORD. For each .py file in RECORD, add 
+    the .pyc and .pyo in the same directory. 
+ 
+    UninstallPathSet.add() takes care of the __pycache__ .py[co]. 
+ 
+    If RECORD is not found, raises UninstallationError, 
+    with possible information from the INSTALLER file. 
+ 
+    https://packaging.python.org/specifications/recording-installed-packages/ 
+    &quot;&quot;&quot;</span>
+    <span class="s1">location = dist.location</span>
+    <span class="s0">assert </span><span class="s1">location </span><span class="s0">is not None, </span><span class="s3">&quot;not installed&quot;</span>
+
+    <span class="s1">entries = dist.iter_declared_entries()</span>
+    <span class="s0">if </span><span class="s1">entries </span><span class="s0">is None</span><span class="s1">:</span>
+        <span class="s1">msg = </span><span class="s3">&quot;Cannot uninstall {dist}, RECORD file not found.&quot;</span><span class="s1">.format(dist=dist)</span>
+        <span class="s1">installer = dist.installer</span>
+        <span class="s0">if not </span><span class="s1">installer </span><span class="s0">or </span><span class="s1">installer == </span><span class="s3">&quot;pip&quot;</span><span class="s1">:</span>
+            <span class="s1">dep = </span><span class="s3">&quot;{}=={}&quot;</span><span class="s1">.format(dist.raw_name</span><span class="s0">, </span><span class="s1">dist.version)</span>
+            <span class="s1">msg += (</span>
+                <span class="s3">&quot; You might be able to recover from this via: &quot;</span>
+                <span class="s3">&quot;'pip install --force-reinstall --no-deps {}'.&quot;</span><span class="s1">.format(dep)</span>
+            <span class="s1">)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">msg += </span><span class="s3">&quot; Hint: The package was installed by {}.&quot;</span><span class="s1">.format(installer)</span>
+        <span class="s0">raise </span><span class="s1">UninstallationError(msg)</span>
+
+    <span class="s0">for </span><span class="s1">entry </span><span class="s0">in </span><span class="s1">entries:</span>
+        <span class="s1">path = os.path.join(location</span><span class="s0">, </span><span class="s1">entry)</span>
+        <span class="s0">yield </span><span class="s1">path</span>
+        <span class="s0">if </span><span class="s1">path.endswith(</span><span class="s3">&quot;.py&quot;</span><span class="s1">):</span>
+            <span class="s1">dn</span><span class="s0">, </span><span class="s1">fn = os.path.split(path)</span>
+            <span class="s1">base = fn[:-</span><span class="s4">3</span><span class="s1">]</span>
+            <span class="s1">path = os.path.join(dn</span><span class="s0">, </span><span class="s1">base + </span><span class="s3">&quot;.pyc&quot;</span><span class="s1">)</span>
+            <span class="s0">yield </span><span class="s1">path</span>
+            <span class="s1">path = os.path.join(dn</span><span class="s0">, </span><span class="s1">base + </span><span class="s3">&quot;.pyo&quot;</span><span class="s1">)</span>
+            <span class="s0">yield </span><span class="s1">path</span>
+
+
+<span class="s0">def </span><span class="s1">compact(paths: Iterable[str]) -&gt; Set[str]:</span>
+    <span class="s2">&quot;&quot;&quot;Compact a path set to contain the minimal number of paths 
+    necessary to contain all paths in the set. If /a/path/ and 
+    /a/path/to/a/file.txt are both in the set, leave only the 
+    shorter path.&quot;&quot;&quot;</span>
+
+    <span class="s1">sep = os.path.sep</span>
+    <span class="s1">short_paths: Set[str] = set()</span>
+    <span class="s0">for </span><span class="s1">path </span><span class="s0">in </span><span class="s1">sorted(paths</span><span class="s0">, </span><span class="s1">key=len):</span>
+        <span class="s1">should_skip = any(</span>
+            <span class="s1">path.startswith(shortpath.rstrip(</span><span class="s3">&quot;*&quot;</span><span class="s1">))</span>
+            <span class="s0">and </span><span class="s1">path[len(shortpath.rstrip(</span><span class="s3">&quot;*&quot;</span><span class="s1">).rstrip(sep))] == sep</span>
+            <span class="s0">for </span><span class="s1">shortpath </span><span class="s0">in </span><span class="s1">short_paths</span>
+        <span class="s1">)</span>
+        <span class="s0">if not </span><span class="s1">should_skip:</span>
+            <span class="s1">short_paths.add(path)</span>
+    <span class="s0">return </span><span class="s1">short_paths</span>
+
+
+<span class="s0">def </span><span class="s1">compress_for_rename(paths: Iterable[str]) -&gt; Set[str]:</span>
+    <span class="s2">&quot;&quot;&quot;Returns a set containing the paths that need to be renamed. 
+ 
+    This set may include directories when the original sequence of paths 
+    included every file on disk. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">case_map = {os.path.normcase(p): p </span><span class="s0">for </span><span class="s1">p </span><span class="s0">in </span><span class="s1">paths}</span>
+    <span class="s1">remaining = set(case_map)</span>
+    <span class="s1">unchecked = sorted({os.path.split(p)[</span><span class="s4">0</span><span class="s1">] </span><span class="s0">for </span><span class="s1">p </span><span class="s0">in </span><span class="s1">case_map.values()}</span><span class="s0">, </span><span class="s1">key=len)</span>
+    <span class="s1">wildcards: Set[str] = set()</span>
+
+    <span class="s0">def </span><span class="s1">norm_join(*a: str) -&gt; str:</span>
+        <span class="s0">return </span><span class="s1">os.path.normcase(os.path.join(*a))</span>
+
+    <span class="s0">for </span><span class="s1">root </span><span class="s0">in </span><span class="s1">unchecked:</span>
+        <span class="s0">if </span><span class="s1">any(os.path.normcase(root).startswith(w) </span><span class="s0">for </span><span class="s1">w </span><span class="s0">in </span><span class="s1">wildcards):</span>
+            <span class="s5"># This directory has already been handled.</span>
+            <span class="s0">continue</span>
+
+        <span class="s1">all_files: Set[str] = set()</span>
+        <span class="s1">all_subdirs: Set[str] = set()</span>
+        <span class="s0">for </span><span class="s1">dirname</span><span class="s0">, </span><span class="s1">subdirs</span><span class="s0">, </span><span class="s1">files </span><span class="s0">in </span><span class="s1">os.walk(root):</span>
+            <span class="s1">all_subdirs.update(norm_join(root</span><span class="s0">, </span><span class="s1">dirname</span><span class="s0">, </span><span class="s1">d) </span><span class="s0">for </span><span class="s1">d </span><span class="s0">in </span><span class="s1">subdirs)</span>
+            <span class="s1">all_files.update(norm_join(root</span><span class="s0">, </span><span class="s1">dirname</span><span class="s0">, </span><span class="s1">f) </span><span class="s0">for </span><span class="s1">f </span><span class="s0">in </span><span class="s1">files)</span>
+        <span class="s5"># If all the files we found are in our remaining set of files to</span>
+        <span class="s5"># remove, then remove them from the latter set and add a wildcard</span>
+        <span class="s5"># for the directory.</span>
+        <span class="s0">if not </span><span class="s1">(all_files - remaining):</span>
+            <span class="s1">remaining.difference_update(all_files)</span>
+            <span class="s1">wildcards.add(root + os.sep)</span>
+
+    <span class="s0">return </span><span class="s1">set(map(case_map.__getitem__</span><span class="s0">, </span><span class="s1">remaining)) | wildcards</span>
+
+
+<span class="s0">def </span><span class="s1">compress_for_output_listing(paths: Iterable[str]) -&gt; Tuple[Set[str]</span><span class="s0">, </span><span class="s1">Set[str]]:</span>
+    <span class="s2">&quot;&quot;&quot;Returns a tuple of 2 sets of which paths to display to user 
+ 
+    The first set contains paths that would be deleted. Files of a package 
+    are not added and the top-level directory of the package has a '*' added 
+    at the end - to signify that all it's contents are removed. 
+ 
+    The second set contains files that would have been skipped in the above 
+    folders. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">will_remove = set(paths)</span>
+    <span class="s1">will_skip = set()</span>
+
+    <span class="s5"># Determine folders and files</span>
+    <span class="s1">folders = set()</span>
+    <span class="s1">files = set()</span>
+    <span class="s0">for </span><span class="s1">path </span><span class="s0">in </span><span class="s1">will_remove:</span>
+        <span class="s0">if </span><span class="s1">path.endswith(</span><span class="s3">&quot;.pyc&quot;</span><span class="s1">):</span>
+            <span class="s0">continue</span>
+        <span class="s0">if </span><span class="s1">path.endswith(</span><span class="s3">&quot;__init__.py&quot;</span><span class="s1">) </span><span class="s0">or </span><span class="s3">&quot;.dist-info&quot; </span><span class="s0">in </span><span class="s1">path:</span>
+            <span class="s1">folders.add(os.path.dirname(path))</span>
+        <span class="s1">files.add(path)</span>
+
+    <span class="s5"># probably this one https://github.com/python/mypy/issues/390</span>
+    <span class="s1">_normcased_files = set(map(os.path.normcase</span><span class="s0">, </span><span class="s1">files))  </span><span class="s5"># type: ignore</span>
+
+    <span class="s1">folders = compact(folders)</span>
+
+    <span class="s5"># This walks the tree using os.walk to not miss extra folders</span>
+    <span class="s5"># that might get added.</span>
+    <span class="s0">for </span><span class="s1">folder </span><span class="s0">in </span><span class="s1">folders:</span>
+        <span class="s0">for </span><span class="s1">dirpath</span><span class="s0">, </span><span class="s1">_</span><span class="s0">, </span><span class="s1">dirfiles </span><span class="s0">in </span><span class="s1">os.walk(folder):</span>
+            <span class="s0">for </span><span class="s1">fname </span><span class="s0">in </span><span class="s1">dirfiles:</span>
+                <span class="s0">if </span><span class="s1">fname.endswith(</span><span class="s3">&quot;.pyc&quot;</span><span class="s1">):</span>
+                    <span class="s0">continue</span>
+
+                <span class="s1">file_ = os.path.join(dirpath</span><span class="s0">, </span><span class="s1">fname)</span>
+                <span class="s0">if </span><span class="s1">(</span>
+                    <span class="s1">os.path.isfile(file_)</span>
+                    <span class="s0">and </span><span class="s1">os.path.normcase(file_) </span><span class="s0">not in </span><span class="s1">_normcased_files</span>
+                <span class="s1">):</span>
+                    <span class="s5"># We are skipping this file. Add it to the set.</span>
+                    <span class="s1">will_skip.add(file_)</span>
+
+    <span class="s1">will_remove = files | {os.path.join(folder</span><span class="s0">, </span><span class="s3">&quot;*&quot;</span><span class="s1">) </span><span class="s0">for </span><span class="s1">folder </span><span class="s0">in </span><span class="s1">folders}</span>
+
+    <span class="s0">return </span><span class="s1">will_remove</span><span class="s0">, </span><span class="s1">will_skip</span>
+
+
+<span class="s0">class </span><span class="s1">StashedUninstallPathSet:</span>
+    <span class="s2">&quot;&quot;&quot;A set of file rename operations to stash files while 
+    tentatively uninstalling them.&quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s5"># Mapping from source file root to [Adjacent]TempDirectory</span>
+        <span class="s5"># for files under that directory.</span>
+        <span class="s1">self._save_dirs: Dict[str</span><span class="s0">, </span><span class="s1">TempDirectory] = {}</span>
+        <span class="s5"># (old path, new path) tuples for each move that may need</span>
+        <span class="s5"># to be undone.</span>
+        <span class="s1">self._moves: List[Tuple[str</span><span class="s0">, </span><span class="s1">str]] = []</span>
+
+    <span class="s0">def </span><span class="s1">_get_directory_stash(self</span><span class="s0">, </span><span class="s1">path: str) -&gt; str:</span>
+        <span class="s2">&quot;&quot;&quot;Stashes a directory. 
+ 
+        Directories are stashed adjacent to their original location if 
+        possible, or else moved/copied into the user's temp dir.&quot;&quot;&quot;</span>
+
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">save_dir: TempDirectory = AdjacentTempDirectory(path)</span>
+        <span class="s0">except </span><span class="s1">OSError:</span>
+            <span class="s1">save_dir = TempDirectory(kind=</span><span class="s3">&quot;uninstall&quot;</span><span class="s1">)</span>
+        <span class="s1">self._save_dirs[os.path.normcase(path)] = save_dir</span>
+
+        <span class="s0">return </span><span class="s1">save_dir.path</span>
+
+    <span class="s0">def </span><span class="s1">_get_file_stash(self</span><span class="s0">, </span><span class="s1">path: str) -&gt; str:</span>
+        <span class="s2">&quot;&quot;&quot;Stashes a file. 
+ 
+        If no root has been provided, one will be created for the directory 
+        in the user's temp directory.&quot;&quot;&quot;</span>
+        <span class="s1">path = os.path.normcase(path)</span>
+        <span class="s1">head</span><span class="s0">, </span><span class="s1">old_head = os.path.dirname(path)</span><span class="s0">, None</span>
+        <span class="s1">save_dir = </span><span class="s0">None</span>
+
+        <span class="s0">while </span><span class="s1">head != old_head:</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">save_dir = self._save_dirs[head]</span>
+                <span class="s0">break</span>
+            <span class="s0">except </span><span class="s1">KeyError:</span>
+                <span class="s0">pass</span>
+            <span class="s1">head</span><span class="s0">, </span><span class="s1">old_head = os.path.dirname(head)</span><span class="s0">, </span><span class="s1">head</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s5"># Did not find any suitable root</span>
+            <span class="s1">head = os.path.dirname(path)</span>
+            <span class="s1">save_dir = TempDirectory(kind=</span><span class="s3">&quot;uninstall&quot;</span><span class="s1">)</span>
+            <span class="s1">self._save_dirs[head] = save_dir</span>
+
+        <span class="s1">relpath = os.path.relpath(path</span><span class="s0">, </span><span class="s1">head)</span>
+        <span class="s0">if </span><span class="s1">relpath </span><span class="s0">and </span><span class="s1">relpath != os.path.curdir:</span>
+            <span class="s0">return </span><span class="s1">os.path.join(save_dir.path</span><span class="s0">, </span><span class="s1">relpath)</span>
+        <span class="s0">return </span><span class="s1">save_dir.path</span>
+
+    <span class="s0">def </span><span class="s1">stash(self</span><span class="s0">, </span><span class="s1">path: str) -&gt; str:</span>
+        <span class="s2">&quot;&quot;&quot;Stashes the directory or file and returns its new location. 
+        Handle symlinks as files to avoid modifying the symlink targets. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">path_is_dir = os.path.isdir(path) </span><span class="s0">and not </span><span class="s1">os.path.islink(path)</span>
+        <span class="s0">if </span><span class="s1">path_is_dir:</span>
+            <span class="s1">new_path = self._get_directory_stash(path)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">new_path = self._get_file_stash(path)</span>
+
+        <span class="s1">self._moves.append((path</span><span class="s0">, </span><span class="s1">new_path))</span>
+        <span class="s0">if </span><span class="s1">path_is_dir </span><span class="s0">and </span><span class="s1">os.path.isdir(new_path):</span>
+            <span class="s5"># If we're moving a directory, we need to</span>
+            <span class="s5"># remove the destination first or else it will be</span>
+            <span class="s5"># moved to inside the existing directory.</span>
+            <span class="s5"># We just created new_path ourselves, so it will</span>
+            <span class="s5"># be removable.</span>
+            <span class="s1">os.rmdir(new_path)</span>
+        <span class="s1">renames(path</span><span class="s0">, </span><span class="s1">new_path)</span>
+        <span class="s0">return </span><span class="s1">new_path</span>
+
+    <span class="s0">def </span><span class="s1">commit(self) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s2">&quot;&quot;&quot;Commits the uninstall by removing stashed files.&quot;&quot;&quot;</span>
+        <span class="s0">for </span><span class="s1">_</span><span class="s0">, </span><span class="s1">save_dir </span><span class="s0">in </span><span class="s1">self._save_dirs.items():</span>
+            <span class="s1">save_dir.cleanup()</span>
+        <span class="s1">self._moves = []</span>
+        <span class="s1">self._save_dirs = {}</span>
+
+    <span class="s0">def </span><span class="s1">rollback(self) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s2">&quot;&quot;&quot;Undoes the uninstall by moving stashed files back.&quot;&quot;&quot;</span>
+        <span class="s0">for </span><span class="s1">p </span><span class="s0">in </span><span class="s1">self._moves:</span>
+            <span class="s1">logger.info(</span><span class="s3">&quot;Moving to %s</span><span class="s0">\n </span><span class="s3">from %s&quot;</span><span class="s0">, </span><span class="s1">*p)</span>
+
+        <span class="s0">for </span><span class="s1">new_path</span><span class="s0">, </span><span class="s1">path </span><span class="s0">in </span><span class="s1">self._moves:</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">logger.debug(</span><span class="s3">&quot;Replacing %s from %s&quot;</span><span class="s0">, </span><span class="s1">new_path</span><span class="s0">, </span><span class="s1">path)</span>
+                <span class="s0">if </span><span class="s1">os.path.isfile(new_path) </span><span class="s0">or </span><span class="s1">os.path.islink(new_path):</span>
+                    <span class="s1">os.unlink(new_path)</span>
+                <span class="s0">elif </span><span class="s1">os.path.isdir(new_path):</span>
+                    <span class="s1">rmtree(new_path)</span>
+                <span class="s1">renames(path</span><span class="s0">, </span><span class="s1">new_path)</span>
+            <span class="s0">except </span><span class="s1">OSError </span><span class="s0">as </span><span class="s1">ex:</span>
+                <span class="s1">logger.error(</span><span class="s3">&quot;Failed to restore %s&quot;</span><span class="s0">, </span><span class="s1">new_path)</span>
+                <span class="s1">logger.debug(</span><span class="s3">&quot;Exception: %s&quot;</span><span class="s0">, </span><span class="s1">ex)</span>
+
+        <span class="s1">self.commit()</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">can_rollback(self) -&gt; bool:</span>
+        <span class="s0">return </span><span class="s1">bool(self._moves)</span>
+
+
+<span class="s0">class </span><span class="s1">UninstallPathSet:</span>
+    <span class="s2">&quot;&quot;&quot;A set of file paths to be removed in the uninstallation of a 
+    requirement.&quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">dist: BaseDistribution) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self._paths: Set[str] = set()</span>
+        <span class="s1">self._refuse: Set[str] = set()</span>
+        <span class="s1">self._pth: Dict[str</span><span class="s0">, </span><span class="s1">UninstallPthEntries] = {}</span>
+        <span class="s1">self._dist = dist</span>
+        <span class="s1">self._moved_paths = StashedUninstallPathSet()</span>
+
+    <span class="s0">def </span><span class="s1">_permitted(self</span><span class="s0">, </span><span class="s1">path: str) -&gt; bool:</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return True if the given path is one we are permitted to 
+        remove/modify, False otherwise. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">is_local(path)</span>
+
+    <span class="s0">def </span><span class="s1">add(self</span><span class="s0">, </span><span class="s1">path: str) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">head</span><span class="s0">, </span><span class="s1">tail = os.path.split(path)</span>
+
+        <span class="s5"># we normalize the head to resolve parent directory symlinks, but not</span>
+        <span class="s5"># the tail, since we only want to uninstall symlinks, not their targets</span>
+        <span class="s1">path = os.path.join(normalize_path(head)</span><span class="s0">, </span><span class="s1">os.path.normcase(tail))</span>
+
+        <span class="s0">if not </span><span class="s1">os.path.exists(path):</span>
+            <span class="s0">return</span>
+        <span class="s0">if </span><span class="s1">self._permitted(path):</span>
+            <span class="s1">self._paths.add(path)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">self._refuse.add(path)</span>
+
+        <span class="s5"># __pycache__ files can show up after 'installed-files.txt' is created,</span>
+        <span class="s5"># due to imports</span>
+        <span class="s0">if </span><span class="s1">os.path.splitext(path)[</span><span class="s4">1</span><span class="s1">] == </span><span class="s3">&quot;.py&quot;</span><span class="s1">:</span>
+            <span class="s1">self.add(cache_from_source(path))</span>
+
+    <span class="s0">def </span><span class="s1">add_pth(self</span><span class="s0">, </span><span class="s1">pth_file: str</span><span class="s0">, </span><span class="s1">entry: str) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">pth_file = normalize_path(pth_file)</span>
+        <span class="s0">if </span><span class="s1">self._permitted(pth_file):</span>
+            <span class="s0">if </span><span class="s1">pth_file </span><span class="s0">not in </span><span class="s1">self._pth:</span>
+                <span class="s1">self._pth[pth_file] = UninstallPthEntries(pth_file)</span>
+            <span class="s1">self._pth[pth_file].add(entry)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">self._refuse.add(pth_file)</span>
+
+    <span class="s0">def </span><span class="s1">remove(self</span><span class="s0">, </span><span class="s1">auto_confirm: bool = </span><span class="s0">False, </span><span class="s1">verbose: bool = </span><span class="s0">False</span><span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s2">&quot;&quot;&quot;Remove paths in ``self._paths`` with confirmation (unless 
+        ``auto_confirm`` is True).&quot;&quot;&quot;</span>
+
+        <span class="s0">if not </span><span class="s1">self._paths:</span>
+            <span class="s1">logger.info(</span>
+                <span class="s3">&quot;Can't uninstall '%s'. No files were found to uninstall.&quot;</span><span class="s0">,</span>
+                <span class="s1">self._dist.raw_name</span><span class="s0">,</span>
+            <span class="s1">)</span>
+            <span class="s0">return</span>
+
+        <span class="s1">dist_name_version = </span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">self._dist.raw_name</span><span class="s0">}</span><span class="s3">-</span><span class="s0">{</span><span class="s1">self._dist.version</span><span class="s0">}</span><span class="s3">&quot;</span>
+        <span class="s1">logger.info(</span><span class="s3">&quot;Uninstalling %s:&quot;</span><span class="s0">, </span><span class="s1">dist_name_version)</span>
+
+        <span class="s0">with </span><span class="s1">indent_log():</span>
+            <span class="s0">if </span><span class="s1">auto_confirm </span><span class="s0">or </span><span class="s1">self._allowed_to_proceed(verbose):</span>
+                <span class="s1">moved = self._moved_paths</span>
+
+                <span class="s1">for_rename = compress_for_rename(self._paths)</span>
+
+                <span class="s0">for </span><span class="s1">path </span><span class="s0">in </span><span class="s1">sorted(compact(for_rename)):</span>
+                    <span class="s1">moved.stash(path)</span>
+                    <span class="s1">logger.verbose(</span><span class="s3">&quot;Removing file or directory %s&quot;</span><span class="s0">, </span><span class="s1">path)</span>
+
+                <span class="s0">for </span><span class="s1">pth </span><span class="s0">in </span><span class="s1">self._pth.values():</span>
+                    <span class="s1">pth.remove()</span>
+
+                <span class="s1">logger.info(</span><span class="s3">&quot;Successfully uninstalled %s&quot;</span><span class="s0">, </span><span class="s1">dist_name_version)</span>
+
+    <span class="s0">def </span><span class="s1">_allowed_to_proceed(self</span><span class="s0">, </span><span class="s1">verbose: bool) -&gt; bool:</span>
+        <span class="s2">&quot;&quot;&quot;Display which files would be deleted and prompt for confirmation&quot;&quot;&quot;</span>
+
+        <span class="s0">def </span><span class="s1">_display(msg: str</span><span class="s0">, </span><span class="s1">paths: Iterable[str]) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+            <span class="s0">if not </span><span class="s1">paths:</span>
+                <span class="s0">return</span>
+
+            <span class="s1">logger.info(msg)</span>
+            <span class="s0">with </span><span class="s1">indent_log():</span>
+                <span class="s0">for </span><span class="s1">path </span><span class="s0">in </span><span class="s1">sorted(compact(paths)):</span>
+                    <span class="s1">logger.info(path)</span>
+
+        <span class="s0">if not </span><span class="s1">verbose:</span>
+            <span class="s1">will_remove</span><span class="s0">, </span><span class="s1">will_skip = compress_for_output_listing(self._paths)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s5"># In verbose mode, display all the files that are going to be</span>
+            <span class="s5"># deleted.</span>
+            <span class="s1">will_remove = set(self._paths)</span>
+            <span class="s1">will_skip = set()</span>
+
+        <span class="s1">_display(</span><span class="s3">&quot;Would remove:&quot;</span><span class="s0">, </span><span class="s1">will_remove)</span>
+        <span class="s1">_display(</span><span class="s3">&quot;Would not remove (might be manually added):&quot;</span><span class="s0">, </span><span class="s1">will_skip)</span>
+        <span class="s1">_display(</span><span class="s3">&quot;Would not remove (outside of prefix):&quot;</span><span class="s0">, </span><span class="s1">self._refuse)</span>
+        <span class="s0">if </span><span class="s1">verbose:</span>
+            <span class="s1">_display(</span><span class="s3">&quot;Will actually move:&quot;</span><span class="s0">, </span><span class="s1">compress_for_rename(self._paths))</span>
+
+        <span class="s0">return </span><span class="s1">ask(</span><span class="s3">&quot;Proceed (Y/n)? &quot;</span><span class="s0">, </span><span class="s1">(</span><span class="s3">&quot;y&quot;</span><span class="s0">, </span><span class="s3">&quot;n&quot;</span><span class="s0">, </span><span class="s3">&quot;&quot;</span><span class="s1">)) != </span><span class="s3">&quot;n&quot;</span>
+
+    <span class="s0">def </span><span class="s1">rollback(self) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s2">&quot;&quot;&quot;Rollback the changes previously made by remove().&quot;&quot;&quot;</span>
+        <span class="s0">if not </span><span class="s1">self._moved_paths.can_rollback:</span>
+            <span class="s1">logger.error(</span>
+                <span class="s3">&quot;Can't roll back %s; was not uninstalled&quot;</span><span class="s0">,</span>
+                <span class="s1">self._dist.raw_name</span><span class="s0">,</span>
+            <span class="s1">)</span>
+            <span class="s0">return</span>
+        <span class="s1">logger.info(</span><span class="s3">&quot;Rolling back uninstall of %s&quot;</span><span class="s0">, </span><span class="s1">self._dist.raw_name)</span>
+        <span class="s1">self._moved_paths.rollback()</span>
+        <span class="s0">for </span><span class="s1">pth </span><span class="s0">in </span><span class="s1">self._pth.values():</span>
+            <span class="s1">pth.rollback()</span>
+
+    <span class="s0">def </span><span class="s1">commit(self) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s2">&quot;&quot;&quot;Remove temporary save dir: rollback will no longer be possible.&quot;&quot;&quot;</span>
+        <span class="s1">self._moved_paths.commit()</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s0">def </span><span class="s1">from_dist(cls</span><span class="s0">, </span><span class="s1">dist: BaseDistribution) -&gt; </span><span class="s3">&quot;UninstallPathSet&quot;</span><span class="s1">:</span>
+        <span class="s1">dist_location = dist.location</span>
+        <span class="s1">info_location = dist.info_location</span>
+        <span class="s0">if </span><span class="s1">dist_location </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">logger.info(</span>
+                <span class="s3">&quot;Not uninstalling %s since it is not installed&quot;</span><span class="s0">,</span>
+                <span class="s1">dist.canonical_name</span><span class="s0">,</span>
+            <span class="s1">)</span>
+            <span class="s0">return </span><span class="s1">cls(dist)</span>
+
+        <span class="s1">normalized_dist_location = normalize_path(dist_location)</span>
+        <span class="s0">if not </span><span class="s1">dist.local:</span>
+            <span class="s1">logger.info(</span>
+                <span class="s3">&quot;Not uninstalling %s at %s, outside environment %s&quot;</span><span class="s0">,</span>
+                <span class="s1">dist.canonical_name</span><span class="s0">,</span>
+                <span class="s1">normalized_dist_location</span><span class="s0">,</span>
+                <span class="s1">sys.prefix</span><span class="s0">,</span>
+            <span class="s1">)</span>
+            <span class="s0">return </span><span class="s1">cls(dist)</span>
+
+        <span class="s0">if </span><span class="s1">normalized_dist_location </span><span class="s0">in </span><span class="s1">{</span>
+            <span class="s1">p</span>
+            <span class="s0">for </span><span class="s1">p </span><span class="s0">in </span><span class="s1">{sysconfig.get_path(</span><span class="s3">&quot;stdlib&quot;</span><span class="s1">)</span><span class="s0">, </span><span class="s1">sysconfig.get_path(</span><span class="s3">&quot;platstdlib&quot;</span><span class="s1">)}</span>
+            <span class="s0">if </span><span class="s1">p</span>
+        <span class="s1">}:</span>
+            <span class="s1">logger.info(</span>
+                <span class="s3">&quot;Not uninstalling %s at %s, as it is in the standard library.&quot;</span><span class="s0">,</span>
+                <span class="s1">dist.canonical_name</span><span class="s0">,</span>
+                <span class="s1">normalized_dist_location</span><span class="s0">,</span>
+            <span class="s1">)</span>
+            <span class="s0">return </span><span class="s1">cls(dist)</span>
+
+        <span class="s1">paths_to_remove = cls(dist)</span>
+        <span class="s1">develop_egg_link = egg_link_path_from_location(dist.raw_name)</span>
+
+        <span class="s5"># Distribution is installed with metadata in a &quot;flat&quot; .egg-info</span>
+        <span class="s5"># directory. This means it is not a modern .dist-info installation, an</span>
+        <span class="s5"># egg, or legacy editable.</span>
+        <span class="s1">setuptools_flat_installation = (</span>
+            <span class="s1">dist.installed_with_setuptools_egg_info</span>
+            <span class="s0">and </span><span class="s1">info_location </span><span class="s0">is not None</span>
+            <span class="s0">and </span><span class="s1">os.path.exists(info_location)</span>
+            <span class="s5"># If dist is editable and the location points to a ``.egg-info``,</span>
+            <span class="s5"># we are in fact in the legacy editable case.</span>
+            <span class="s0">and not </span><span class="s1">info_location.endswith(</span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">dist.setuptools_filename</span><span class="s0">}</span><span class="s3">.egg-info&quot;</span><span class="s1">)</span>
+        <span class="s1">)</span>
+
+        <span class="s5"># Uninstall cases order do matter as in the case of 2 installs of the</span>
+        <span class="s5"># same package, pip needs to uninstall the currently detected version</span>
+        <span class="s0">if </span><span class="s1">setuptools_flat_installation:</span>
+            <span class="s0">if </span><span class="s1">info_location </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s1">paths_to_remove.add(info_location)</span>
+            <span class="s1">installed_files = dist.iter_declared_entries()</span>
+            <span class="s0">if </span><span class="s1">installed_files </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s0">for </span><span class="s1">installed_file </span><span class="s0">in </span><span class="s1">installed_files:</span>
+                    <span class="s1">paths_to_remove.add(os.path.join(dist_location</span><span class="s0">, </span><span class="s1">installed_file))</span>
+            <span class="s5"># FIXME: need a test for this elif block</span>
+            <span class="s5"># occurs with --single-version-externally-managed/--record outside</span>
+            <span class="s5"># of pip</span>
+            <span class="s0">elif </span><span class="s1">dist.is_file(</span><span class="s3">&quot;top_level.txt&quot;</span><span class="s1">):</span>
+                <span class="s0">try</span><span class="s1">:</span>
+                    <span class="s1">namespace_packages = dist.read_text(</span><span class="s3">&quot;namespace_packages.txt&quot;</span><span class="s1">)</span>
+                <span class="s0">except </span><span class="s1">FileNotFoundError:</span>
+                    <span class="s1">namespaces = []</span>
+                <span class="s0">else</span><span class="s1">:</span>
+                    <span class="s1">namespaces = namespace_packages.splitlines(keepends=</span><span class="s0">False</span><span class="s1">)</span>
+                <span class="s0">for </span><span class="s1">top_level_pkg </span><span class="s0">in </span><span class="s1">[</span>
+                    <span class="s1">p</span>
+                    <span class="s0">for </span><span class="s1">p </span><span class="s0">in </span><span class="s1">dist.read_text(</span><span class="s3">&quot;top_level.txt&quot;</span><span class="s1">).splitlines()</span>
+                    <span class="s0">if </span><span class="s1">p </span><span class="s0">and </span><span class="s1">p </span><span class="s0">not in </span><span class="s1">namespaces</span>
+                <span class="s1">]:</span>
+                    <span class="s1">path = os.path.join(dist_location</span><span class="s0">, </span><span class="s1">top_level_pkg)</span>
+                    <span class="s1">paths_to_remove.add(path)</span>
+                    <span class="s1">paths_to_remove.add(</span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">path</span><span class="s0">}</span><span class="s3">.py&quot;</span><span class="s1">)</span>
+                    <span class="s1">paths_to_remove.add(</span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">path</span><span class="s0">}</span><span class="s3">.pyc&quot;</span><span class="s1">)</span>
+                    <span class="s1">paths_to_remove.add(</span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">path</span><span class="s0">}</span><span class="s3">.pyo&quot;</span><span class="s1">)</span>
+
+        <span class="s0">elif </span><span class="s1">dist.installed_by_distutils:</span>
+            <span class="s0">raise </span><span class="s1">UninstallationError(</span>
+                <span class="s3">&quot;Cannot uninstall {!r}. It is a distutils installed project &quot;</span>
+                <span class="s3">&quot;and thus we cannot accurately determine which files belong &quot;</span>
+                <span class="s3">&quot;to it which would lead to only a partial uninstall.&quot;</span><span class="s1">.format(</span>
+                    <span class="s1">dist.raw_name</span><span class="s0">,</span>
+                <span class="s1">)</span>
+            <span class="s1">)</span>
+
+        <span class="s0">elif </span><span class="s1">dist.installed_as_egg:</span>
+            <span class="s5"># package installed by easy_install</span>
+            <span class="s5"># We cannot match on dist.egg_name because it can slightly vary</span>
+            <span class="s5"># i.e. setuptools-0.6c11-py2.6.egg vs setuptools-0.6rc11-py2.6.egg</span>
+            <span class="s1">paths_to_remove.add(dist_location)</span>
+            <span class="s1">easy_install_egg = os.path.split(dist_location)[</span><span class="s4">1</span><span class="s1">]</span>
+            <span class="s1">easy_install_pth = os.path.join(</span>
+                <span class="s1">os.path.dirname(dist_location)</span><span class="s0">,</span>
+                <span class="s3">&quot;easy-install.pth&quot;</span><span class="s0">,</span>
+            <span class="s1">)</span>
+            <span class="s1">paths_to_remove.add_pth(easy_install_pth</span><span class="s0">, </span><span class="s3">&quot;./&quot; </span><span class="s1">+ easy_install_egg)</span>
+
+        <span class="s0">elif </span><span class="s1">dist.installed_with_dist_info:</span>
+            <span class="s0">for </span><span class="s1">path </span><span class="s0">in </span><span class="s1">uninstallation_paths(dist):</span>
+                <span class="s1">paths_to_remove.add(path)</span>
+
+        <span class="s0">elif </span><span class="s1">develop_egg_link:</span>
+            <span class="s5"># PEP 660 modern editable is handled in the ``.dist-info`` case</span>
+            <span class="s5"># above, so this only covers the setuptools-style editable.</span>
+            <span class="s0">with </span><span class="s1">open(develop_egg_link) </span><span class="s0">as </span><span class="s1">fh:</span>
+                <span class="s1">link_pointer = os.path.normcase(fh.readline().strip())</span>
+            <span class="s0">assert </span><span class="s1">link_pointer == dist_location</span><span class="s0">, </span><span class="s1">(</span>
+                <span class="s3">f&quot;Egg-link </span><span class="s0">{</span><span class="s1">link_pointer</span><span class="s0">} </span><span class="s3">does not match installed location of &quot;</span>
+                <span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">dist.raw_name</span><span class="s0">} </span><span class="s3">(at </span><span class="s0">{</span><span class="s1">dist_location</span><span class="s0">}</span><span class="s3">)&quot;</span>
+            <span class="s1">)</span>
+            <span class="s1">paths_to_remove.add(develop_egg_link)</span>
+            <span class="s1">easy_install_pth = os.path.join(</span>
+                <span class="s1">os.path.dirname(develop_egg_link)</span><span class="s0">, </span><span class="s3">&quot;easy-install.pth&quot;</span>
+            <span class="s1">)</span>
+            <span class="s1">paths_to_remove.add_pth(easy_install_pth</span><span class="s0">, </span><span class="s1">dist_location)</span>
+
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">logger.debug(</span>
+                <span class="s3">&quot;Not sure how to uninstall: %s - Check: %s&quot;</span><span class="s0">,</span>
+                <span class="s1">dist</span><span class="s0">,</span>
+                <span class="s1">dist_location</span><span class="s0">,</span>
+            <span class="s1">)</span>
+
+        <span class="s0">if </span><span class="s1">dist.in_usersite:</span>
+            <span class="s1">bin_dir = get_bin_user()</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">bin_dir = get_bin_prefix()</span>
+
+        <span class="s5"># find distutils scripts= scripts</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">for </span><span class="s1">script </span><span class="s0">in </span><span class="s1">dist.iterdir(</span><span class="s3">&quot;scripts&quot;</span><span class="s1">):</span>
+                <span class="s1">paths_to_remove.add(os.path.join(bin_dir</span><span class="s0">, </span><span class="s1">script.name))</span>
+                <span class="s0">if </span><span class="s1">WINDOWS:</span>
+                    <span class="s1">paths_to_remove.add(os.path.join(bin_dir</span><span class="s0">, </span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">script.name</span><span class="s0">}</span><span class="s3">.bat&quot;</span><span class="s1">))</span>
+        <span class="s0">except </span><span class="s1">(FileNotFoundError</span><span class="s0">, </span><span class="s1">NotADirectoryError):</span>
+            <span class="s0">pass</span>
+
+        <span class="s5"># find console_scripts and gui_scripts</span>
+        <span class="s0">def </span><span class="s1">iter_scripts_to_remove(</span>
+            <span class="s1">dist: BaseDistribution</span><span class="s0">,</span>
+            <span class="s1">bin_dir: str</span><span class="s0">,</span>
+        <span class="s1">) -&gt; Iterator[str]:</span>
+            <span class="s0">for </span><span class="s1">entry_point </span><span class="s0">in </span><span class="s1">dist.iter_entry_points():</span>
+                <span class="s0">if </span><span class="s1">entry_point.group == </span><span class="s3">&quot;console_scripts&quot;</span><span class="s1">:</span>
+                    <span class="s0">yield from </span><span class="s1">_script_names(bin_dir</span><span class="s0">, </span><span class="s1">entry_point.name</span><span class="s0">, False</span><span class="s1">)</span>
+                <span class="s0">elif </span><span class="s1">entry_point.group == </span><span class="s3">&quot;gui_scripts&quot;</span><span class="s1">:</span>
+                    <span class="s0">yield from </span><span class="s1">_script_names(bin_dir</span><span class="s0">, </span><span class="s1">entry_point.name</span><span class="s0">, True</span><span class="s1">)</span>
+
+        <span class="s0">for </span><span class="s1">s </span><span class="s0">in </span><span class="s1">iter_scripts_to_remove(dist</span><span class="s0">, </span><span class="s1">bin_dir):</span>
+            <span class="s1">paths_to_remove.add(s)</span>
+
+        <span class="s0">return </span><span class="s1">paths_to_remove</span>
+
+
+<span class="s0">class </span><span class="s1">UninstallPthEntries:</span>
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">pth_file: str) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self.file = pth_file</span>
+        <span class="s1">self.entries: Set[str] = set()</span>
+        <span class="s1">self._saved_lines: Optional[List[bytes]] = </span><span class="s0">None</span>
+
+    <span class="s0">def </span><span class="s1">add(self</span><span class="s0">, </span><span class="s1">entry: str) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">entry = os.path.normcase(entry)</span>
+        <span class="s5"># On Windows, os.path.normcase converts the entry to use</span>
+        <span class="s5"># backslashes.  This is correct for entries that describe absolute</span>
+        <span class="s5"># paths outside of site-packages, but all the others use forward</span>
+        <span class="s5"># slashes.</span>
+        <span class="s5"># os.path.splitdrive is used instead of os.path.isabs because isabs</span>
+        <span class="s5"># treats non-absolute paths with drive letter markings like c:foo\bar</span>
+        <span class="s5"># as absolute paths. It also does not recognize UNC paths if they don't</span>
+        <span class="s5"># have more than &quot;\\sever\share&quot;. Valid examples: &quot;\\server\share\&quot; or</span>
+        <span class="s5"># &quot;\\server\share\folder&quot;.</span>
+        <span class="s0">if </span><span class="s1">WINDOWS </span><span class="s0">and not </span><span class="s1">os.path.splitdrive(entry)[</span><span class="s4">0</span><span class="s1">]:</span>
+            <span class="s1">entry = entry.replace(</span><span class="s3">&quot;</span><span class="s0">\\</span><span class="s3">&quot;</span><span class="s0">, </span><span class="s3">&quot;/&quot;</span><span class="s1">)</span>
+        <span class="s1">self.entries.add(entry)</span>
+
+    <span class="s0">def </span><span class="s1">remove(self) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">logger.verbose(</span><span class="s3">&quot;Removing pth entries from %s:&quot;</span><span class="s0">, </span><span class="s1">self.file)</span>
+
+        <span class="s5"># If the file doesn't exist, log a warning and return</span>
+        <span class="s0">if not </span><span class="s1">os.path.isfile(self.file):</span>
+            <span class="s1">logger.warning(</span><span class="s3">&quot;Cannot remove entries from nonexistent file %s&quot;</span><span class="s0">, </span><span class="s1">self.file)</span>
+            <span class="s0">return</span>
+        <span class="s0">with </span><span class="s1">open(self.file</span><span class="s0">, </span><span class="s3">&quot;rb&quot;</span><span class="s1">) </span><span class="s0">as </span><span class="s1">fh:</span>
+            <span class="s5"># windows uses '\r\n' with py3k, but uses '\n' with py2.x</span>
+            <span class="s1">lines = fh.readlines()</span>
+            <span class="s1">self._saved_lines = lines</span>
+        <span class="s0">if </span><span class="s1">any(</span><span class="s6">b&quot;</span><span class="s0">\r\n</span><span class="s6">&quot; </span><span class="s0">in </span><span class="s1">line </span><span class="s0">for </span><span class="s1">line </span><span class="s0">in </span><span class="s1">lines):</span>
+            <span class="s1">endline = </span><span class="s3">&quot;</span><span class="s0">\r\n</span><span class="s3">&quot;</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">endline = </span><span class="s3">&quot;</span><span class="s0">\n</span><span class="s3">&quot;</span>
+        <span class="s5"># handle missing trailing newline</span>
+        <span class="s0">if </span><span class="s1">lines </span><span class="s0">and not </span><span class="s1">lines[-</span><span class="s4">1</span><span class="s1">].endswith(endline.encode(</span><span class="s3">&quot;utf-8&quot;</span><span class="s1">)):</span>
+            <span class="s1">lines[-</span><span class="s4">1</span><span class="s1">] = lines[-</span><span class="s4">1</span><span class="s1">] + endline.encode(</span><span class="s3">&quot;utf-8&quot;</span><span class="s1">)</span>
+        <span class="s0">for </span><span class="s1">entry </span><span class="s0">in </span><span class="s1">self.entries:</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">logger.verbose(</span><span class="s3">&quot;Removing entry: %s&quot;</span><span class="s0">, </span><span class="s1">entry)</span>
+                <span class="s1">lines.remove((entry + endline).encode(</span><span class="s3">&quot;utf-8&quot;</span><span class="s1">))</span>
+            <span class="s0">except </span><span class="s1">ValueError:</span>
+                <span class="s0">pass</span>
+        <span class="s0">with </span><span class="s1">open(self.file</span><span class="s0">, </span><span class="s3">&quot;wb&quot;</span><span class="s1">) </span><span class="s0">as </span><span class="s1">fh:</span>
+            <span class="s1">fh.writelines(lines)</span>
+
+    <span class="s0">def </span><span class="s1">rollback(self) -&gt; bool:</span>
+        <span class="s0">if </span><span class="s1">self._saved_lines </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">logger.error(</span><span class="s3">&quot;Cannot roll back changes to %s, none were made&quot;</span><span class="s0">, </span><span class="s1">self.file)</span>
+            <span class="s0">return False</span>
+        <span class="s1">logger.debug(</span><span class="s3">&quot;Rolling %s back to previous state&quot;</span><span class="s0">, </span><span class="s1">self.file)</span>
+        <span class="s0">with </span><span class="s1">open(self.file</span><span class="s0">, </span><span class="s3">&quot;wb&quot;</span><span class="s1">) </span><span class="s0">as </span><span class="s1">fh:</span>
+            <span class="s1">fh.writelines(self._saved_lines)</span>
+        <span class="s0">return True</span>
+</pre>
+</body>
+</html>

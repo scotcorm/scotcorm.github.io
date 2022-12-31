@@ -1,0 +1,334 @@
+<html>
+<head>
+<title>tag.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #808080;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+tag.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+Tagged JSON 
+~~~~~~~~~~~ 
+ 
+A compact representation for lossless serialization of non-standard JSON 
+types. :class:`~flask.sessions.SecureCookieSessionInterface` uses this 
+to serialize the session data, but it may be useful in other places. It 
+can be extended to support other types. 
+ 
+.. autoclass:: TaggedJSONSerializer 
+    :members: 
+ 
+.. autoclass:: JSONTag 
+    :members: 
+ 
+Let's see an example that adds support for 
+:class:`~collections.OrderedDict`. Dicts don't have an order in JSON, so 
+to handle this we will dump the items as a list of ``[key, value]`` 
+pairs. Subclass :class:`JSONTag` and give it the new key ``' od'`` to 
+identify the type. The session serializer processes dicts first, so 
+insert the new tag at the front of the order since ``OrderedDict`` must 
+be processed before ``dict``. 
+ 
+.. code-block:: python 
+ 
+    from flask.json.tag import JSONTag 
+ 
+    class TagOrderedDict(JSONTag): 
+        __slots__ = ('serializer',) 
+        key = ' od' 
+ 
+        def check(self, value): 
+            return isinstance(value, OrderedDict) 
+ 
+        def to_json(self, value): 
+            return [[k, self.serializer.tag(v)] for k, v in iteritems(value)] 
+ 
+        def to_python(self, value): 
+            return OrderedDict(value) 
+ 
+    app.session_interface.serializer.register(TagOrderedDict, index=0) 
+&quot;&quot;&quot;</span>
+<span class="s2">import </span><span class="s1">typing </span><span class="s2">as </span><span class="s1">t</span>
+<span class="s2">from </span><span class="s1">base64 </span><span class="s2">import </span><span class="s1">b64decode</span>
+<span class="s2">from </span><span class="s1">base64 </span><span class="s2">import </span><span class="s1">b64encode</span>
+<span class="s2">from </span><span class="s1">datetime </span><span class="s2">import </span><span class="s1">datetime</span>
+<span class="s2">from </span><span class="s1">uuid </span><span class="s2">import </span><span class="s1">UUID</span>
+
+<span class="s2">from </span><span class="s1">markupsafe </span><span class="s2">import </span><span class="s1">Markup</span>
+<span class="s2">from </span><span class="s1">werkzeug.http </span><span class="s2">import </span><span class="s1">http_date</span>
+<span class="s2">from </span><span class="s1">werkzeug.http </span><span class="s2">import </span><span class="s1">parse_date</span>
+
+<span class="s2">from </span><span class="s1">..json </span><span class="s2">import </span><span class="s1">dumps</span>
+<span class="s2">from </span><span class="s1">..json </span><span class="s2">import </span><span class="s1">loads</span>
+
+
+<span class="s2">class </span><span class="s1">JSONTag:</span>
+    <span class="s0">&quot;&quot;&quot;Base class for defining type tags for :class:`TaggedJSONSerializer`.&quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ = (</span><span class="s3">&quot;serializer&quot;</span><span class="s2">,</span><span class="s1">)</span>
+
+    <span class="s4">#: The tag to mark the serialized object with. If ``None``, this tag is</span>
+    <span class="s4">#: only used as an intermediate step during tagging.</span>
+    <span class="s1">key: t.Optional[str] = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">serializer: </span><span class="s3">&quot;TaggedJSONSerializer&quot;</span><span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Create a tagger for the given serializer.&quot;&quot;&quot;</span>
+        <span class="s1">self.serializer = serializer</span>
+
+    <span class="s2">def </span><span class="s1">check(self</span><span class="s2">, </span><span class="s1">value: t.Any) -&gt; bool:</span>
+        <span class="s0">&quot;&quot;&quot;Check if the given value should be tagged by this tag.&quot;&quot;&quot;</span>
+        <span class="s2">raise </span><span class="s1">NotImplementedError</span>
+
+    <span class="s2">def </span><span class="s1">to_json(self</span><span class="s2">, </span><span class="s1">value: t.Any) -&gt; t.Any:</span>
+        <span class="s0">&quot;&quot;&quot;Convert the Python object to an object that is a valid JSON type. 
+        The tag will be added later.&quot;&quot;&quot;</span>
+        <span class="s2">raise </span><span class="s1">NotImplementedError</span>
+
+    <span class="s2">def </span><span class="s1">to_python(self</span><span class="s2">, </span><span class="s1">value: t.Any) -&gt; t.Any:</span>
+        <span class="s0">&quot;&quot;&quot;Convert the JSON representation back to the correct type. The tag 
+        will already be removed.&quot;&quot;&quot;</span>
+        <span class="s2">raise </span><span class="s1">NotImplementedError</span>
+
+    <span class="s2">def </span><span class="s1">tag(self</span><span class="s2">, </span><span class="s1">value: t.Any) -&gt; t.Any:</span>
+        <span class="s0">&quot;&quot;&quot;Convert the value to a valid JSON type and add the tag structure 
+        around it.&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">{self.key: self.to_json(value)}</span>
+
+
+<span class="s2">class </span><span class="s1">TagDict(JSONTag):</span>
+    <span class="s0">&quot;&quot;&quot;Tag for 1-item dicts whose only key matches a registered tag. 
+ 
+    Internally, the dict key is suffixed with `__`, and the suffix is removed 
+    when deserializing. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ = ()</span>
+    <span class="s1">key = </span><span class="s3">&quot; di&quot;</span>
+
+    <span class="s2">def </span><span class="s1">check(self</span><span class="s2">, </span><span class="s1">value: t.Any) -&gt; bool:</span>
+        <span class="s2">return </span><span class="s1">(</span>
+            <span class="s1">isinstance(value</span><span class="s2">, </span><span class="s1">dict)</span>
+            <span class="s2">and </span><span class="s1">len(value) == </span><span class="s5">1</span>
+            <span class="s2">and </span><span class="s1">next(iter(value)) </span><span class="s2">in </span><span class="s1">self.serializer.tags</span>
+        <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">to_json(self</span><span class="s2">, </span><span class="s1">value: t.Any) -&gt; t.Any:</span>
+        <span class="s1">key = next(iter(value))</span>
+        <span class="s2">return </span><span class="s1">{</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">key</span><span class="s2">}</span><span class="s3">__&quot;</span><span class="s1">: self.serializer.tag(value[key])}</span>
+
+    <span class="s2">def </span><span class="s1">to_python(self</span><span class="s2">, </span><span class="s1">value: t.Any) -&gt; t.Any:</span>
+        <span class="s1">key = next(iter(value))</span>
+        <span class="s2">return </span><span class="s1">{key[:-</span><span class="s5">2</span><span class="s1">]: value[key]}</span>
+
+
+<span class="s2">class </span><span class="s1">PassDict(JSONTag):</span>
+    <span class="s1">__slots__ = ()</span>
+
+    <span class="s2">def </span><span class="s1">check(self</span><span class="s2">, </span><span class="s1">value: t.Any) -&gt; bool:</span>
+        <span class="s2">return </span><span class="s1">isinstance(value</span><span class="s2">, </span><span class="s1">dict)</span>
+
+    <span class="s2">def </span><span class="s1">to_json(self</span><span class="s2">, </span><span class="s1">value: t.Any) -&gt; t.Any:</span>
+        <span class="s4"># JSON objects may only have string keys, so don't bother tagging the</span>
+        <span class="s4"># key here.</span>
+        <span class="s2">return </span><span class="s1">{k: self.serializer.tag(v) </span><span class="s2">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">value.items()}</span>
+
+    <span class="s1">tag = to_json</span>
+
+
+<span class="s2">class </span><span class="s1">TagTuple(JSONTag):</span>
+    <span class="s1">__slots__ = ()</span>
+    <span class="s1">key = </span><span class="s3">&quot; t&quot;</span>
+
+    <span class="s2">def </span><span class="s1">check(self</span><span class="s2">, </span><span class="s1">value: t.Any) -&gt; bool:</span>
+        <span class="s2">return </span><span class="s1">isinstance(value</span><span class="s2">, </span><span class="s1">tuple)</span>
+
+    <span class="s2">def </span><span class="s1">to_json(self</span><span class="s2">, </span><span class="s1">value: t.Any) -&gt; t.Any:</span>
+        <span class="s2">return </span><span class="s1">[self.serializer.tag(item) </span><span class="s2">for </span><span class="s1">item </span><span class="s2">in </span><span class="s1">value]</span>
+
+    <span class="s2">def </span><span class="s1">to_python(self</span><span class="s2">, </span><span class="s1">value: t.Any) -&gt; t.Any:</span>
+        <span class="s2">return </span><span class="s1">tuple(value)</span>
+
+
+<span class="s2">class </span><span class="s1">PassList(JSONTag):</span>
+    <span class="s1">__slots__ = ()</span>
+
+    <span class="s2">def </span><span class="s1">check(self</span><span class="s2">, </span><span class="s1">value: t.Any) -&gt; bool:</span>
+        <span class="s2">return </span><span class="s1">isinstance(value</span><span class="s2">, </span><span class="s1">list)</span>
+
+    <span class="s2">def </span><span class="s1">to_json(self</span><span class="s2">, </span><span class="s1">value: t.Any) -&gt; t.Any:</span>
+        <span class="s2">return </span><span class="s1">[self.serializer.tag(item) </span><span class="s2">for </span><span class="s1">item </span><span class="s2">in </span><span class="s1">value]</span>
+
+    <span class="s1">tag = to_json</span>
+
+
+<span class="s2">class </span><span class="s1">TagBytes(JSONTag):</span>
+    <span class="s1">__slots__ = ()</span>
+    <span class="s1">key = </span><span class="s3">&quot; b&quot;</span>
+
+    <span class="s2">def </span><span class="s1">check(self</span><span class="s2">, </span><span class="s1">value: t.Any) -&gt; bool:</span>
+        <span class="s2">return </span><span class="s1">isinstance(value</span><span class="s2">, </span><span class="s1">bytes)</span>
+
+    <span class="s2">def </span><span class="s1">to_json(self</span><span class="s2">, </span><span class="s1">value: t.Any) -&gt; t.Any:</span>
+        <span class="s2">return </span><span class="s1">b64encode(value).decode(</span><span class="s3">&quot;ascii&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">to_python(self</span><span class="s2">, </span><span class="s1">value: t.Any) -&gt; t.Any:</span>
+        <span class="s2">return </span><span class="s1">b64decode(value)</span>
+
+
+<span class="s2">class </span><span class="s1">TagMarkup(JSONTag):</span>
+    <span class="s0">&quot;&quot;&quot;Serialize anything matching the :class:`~markupsafe.Markup` API by 
+    having a ``__html__`` method to the result of that method. Always 
+    deserializes to an instance of :class:`~markupsafe.Markup`.&quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ = ()</span>
+    <span class="s1">key = </span><span class="s3">&quot; m&quot;</span>
+
+    <span class="s2">def </span><span class="s1">check(self</span><span class="s2">, </span><span class="s1">value: t.Any) -&gt; bool:</span>
+        <span class="s2">return </span><span class="s1">callable(getattr(value</span><span class="s2">, </span><span class="s3">&quot;__html__&quot;</span><span class="s2">, None</span><span class="s1">))</span>
+
+    <span class="s2">def </span><span class="s1">to_json(self</span><span class="s2">, </span><span class="s1">value: t.Any) -&gt; t.Any:</span>
+        <span class="s2">return </span><span class="s1">str(value.__html__())</span>
+
+    <span class="s2">def </span><span class="s1">to_python(self</span><span class="s2">, </span><span class="s1">value: t.Any) -&gt; t.Any:</span>
+        <span class="s2">return </span><span class="s1">Markup(value)</span>
+
+
+<span class="s2">class </span><span class="s1">TagUUID(JSONTag):</span>
+    <span class="s1">__slots__ = ()</span>
+    <span class="s1">key = </span><span class="s3">&quot; u&quot;</span>
+
+    <span class="s2">def </span><span class="s1">check(self</span><span class="s2">, </span><span class="s1">value: t.Any) -&gt; bool:</span>
+        <span class="s2">return </span><span class="s1">isinstance(value</span><span class="s2">, </span><span class="s1">UUID)</span>
+
+    <span class="s2">def </span><span class="s1">to_json(self</span><span class="s2">, </span><span class="s1">value: t.Any) -&gt; t.Any:</span>
+        <span class="s2">return </span><span class="s1">value.hex</span>
+
+    <span class="s2">def </span><span class="s1">to_python(self</span><span class="s2">, </span><span class="s1">value: t.Any) -&gt; t.Any:</span>
+        <span class="s2">return </span><span class="s1">UUID(value)</span>
+
+
+<span class="s2">class </span><span class="s1">TagDateTime(JSONTag):</span>
+    <span class="s1">__slots__ = ()</span>
+    <span class="s1">key = </span><span class="s3">&quot; d&quot;</span>
+
+    <span class="s2">def </span><span class="s1">check(self</span><span class="s2">, </span><span class="s1">value: t.Any) -&gt; bool:</span>
+        <span class="s2">return </span><span class="s1">isinstance(value</span><span class="s2">, </span><span class="s1">datetime)</span>
+
+    <span class="s2">def </span><span class="s1">to_json(self</span><span class="s2">, </span><span class="s1">value: t.Any) -&gt; t.Any:</span>
+        <span class="s2">return </span><span class="s1">http_date(value)</span>
+
+    <span class="s2">def </span><span class="s1">to_python(self</span><span class="s2">, </span><span class="s1">value: t.Any) -&gt; t.Any:</span>
+        <span class="s2">return </span><span class="s1">parse_date(value)</span>
+
+
+<span class="s2">class </span><span class="s1">TaggedJSONSerializer:</span>
+    <span class="s0">&quot;&quot;&quot;Serializer that uses a tag system to compactly represent objects that 
+    are not JSON types. Passed as the intermediate serializer to 
+    :class:`itsdangerous.Serializer`. 
+ 
+    The following extra types are supported: 
+ 
+    * :class:`dict` 
+    * :class:`tuple` 
+    * :class:`bytes` 
+    * :class:`~markupsafe.Markup` 
+    * :class:`~uuid.UUID` 
+    * :class:`~datetime.datetime` 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ = (</span><span class="s3">&quot;tags&quot;</span><span class="s2">, </span><span class="s3">&quot;order&quot;</span><span class="s1">)</span>
+
+    <span class="s4">#: Tag classes to bind when creating the serializer. Other tags can be</span>
+    <span class="s4">#: added later using :meth:`~register`.</span>
+    <span class="s1">default_tags = [</span>
+        <span class="s1">TagDict</span><span class="s2">,</span>
+        <span class="s1">PassDict</span><span class="s2">,</span>
+        <span class="s1">TagTuple</span><span class="s2">,</span>
+        <span class="s1">PassList</span><span class="s2">,</span>
+        <span class="s1">TagBytes</span><span class="s2">,</span>
+        <span class="s1">TagMarkup</span><span class="s2">,</span>
+        <span class="s1">TagUUID</span><span class="s2">,</span>
+        <span class="s1">TagDateTime</span><span class="s2">,</span>
+    <span class="s1">]</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.tags: t.Dict[str</span><span class="s2">, </span><span class="s1">JSONTag] = {}</span>
+        <span class="s1">self.order: t.List[JSONTag] = []</span>
+
+        <span class="s2">for </span><span class="s1">cls </span><span class="s2">in </span><span class="s1">self.default_tags:</span>
+            <span class="s1">self.register(cls)</span>
+
+    <span class="s2">def </span><span class="s1">register(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">tag_class: t.Type[JSONTag]</span><span class="s2">,</span>
+        <span class="s1">force: bool = </span><span class="s2">False,</span>
+        <span class="s1">index: t.Optional[int] = </span><span class="s2">None,</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Register a new tag with this serializer. 
+ 
+        :param tag_class: tag class to register. Will be instantiated with this 
+            serializer instance. 
+        :param force: overwrite an existing tag. If false (default), a 
+            :exc:`KeyError` is raised. 
+        :param index: index to insert the new tag in the tag order. Useful when 
+            the new tag is a special case of an existing tag. If ``None`` 
+            (default), the tag is appended to the end of the order. 
+ 
+        :raise KeyError: if the tag key is already registered and ``force`` is 
+            not true. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">tag = tag_class(self)</span>
+        <span class="s1">key = tag.key</span>
+
+        <span class="s2">if </span><span class="s1">key </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">if not </span><span class="s1">force </span><span class="s2">and </span><span class="s1">key </span><span class="s2">in </span><span class="s1">self.tags:</span>
+                <span class="s2">raise </span><span class="s1">KeyError(</span><span class="s3">f&quot;Tag '</span><span class="s2">{</span><span class="s1">key</span><span class="s2">}</span><span class="s3">' is already registered.&quot;</span><span class="s1">)</span>
+
+            <span class="s1">self.tags[key] = tag</span>
+
+        <span class="s2">if </span><span class="s1">index </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">self.order.append(tag)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.order.insert(index</span><span class="s2">, </span><span class="s1">tag)</span>
+
+    <span class="s2">def </span><span class="s1">tag(self</span><span class="s2">, </span><span class="s1">value: t.Any) -&gt; t.Dict[str</span><span class="s2">, </span><span class="s1">t.Any]:</span>
+        <span class="s0">&quot;&quot;&quot;Convert a value to a tagged representation if necessary.&quot;&quot;&quot;</span>
+        <span class="s2">for </span><span class="s1">tag </span><span class="s2">in </span><span class="s1">self.order:</span>
+            <span class="s2">if </span><span class="s1">tag.check(value):</span>
+                <span class="s2">return </span><span class="s1">tag.tag(value)</span>
+
+        <span class="s2">return </span><span class="s1">value</span>
+
+    <span class="s2">def </span><span class="s1">untag(self</span><span class="s2">, </span><span class="s1">value: t.Dict[str</span><span class="s2">, </span><span class="s1">t.Any]) -&gt; t.Any:</span>
+        <span class="s0">&quot;&quot;&quot;Convert a tagged representation back to the original type.&quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">len(value) != </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">value</span>
+
+        <span class="s1">key = next(iter(value))</span>
+
+        <span class="s2">if </span><span class="s1">key </span><span class="s2">not in </span><span class="s1">self.tags:</span>
+            <span class="s2">return </span><span class="s1">value</span>
+
+        <span class="s2">return </span><span class="s1">self.tags[key].to_python(value[key])</span>
+
+    <span class="s2">def </span><span class="s1">dumps(self</span><span class="s2">, </span><span class="s1">value: t.Any) -&gt; str:</span>
+        <span class="s0">&quot;&quot;&quot;Tag the value and dump it to a compact JSON string.&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">dumps(self.tag(value)</span><span class="s2">, </span><span class="s1">separators=(</span><span class="s3">&quot;,&quot;</span><span class="s2">, </span><span class="s3">&quot;:&quot;</span><span class="s1">))</span>
+
+    <span class="s2">def </span><span class="s1">loads(self</span><span class="s2">, </span><span class="s1">value: str) -&gt; t.Any:</span>
+        <span class="s0">&quot;&quot;&quot;Load data from a JSON string and deserialized any tagged objects.&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">loads(value</span><span class="s2">, </span><span class="s1">object_hook=self.untag)</span>
+</pre>
+</body>
+</html>

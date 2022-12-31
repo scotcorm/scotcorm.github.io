@@ -1,0 +1,520 @@
+<html>
+<head>
+<title>parquet.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #808080;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+parquet.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; parquet compat &quot;&quot;&quot;</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">io</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Any</span>
+<span class="s2">from </span><span class="s1">warnings </span><span class="s2">import </span><span class="s1">catch_warnings</span>
+
+<span class="s2">from </span><span class="s1">pandas._typing </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">FilePath</span><span class="s2">,</span>
+    <span class="s1">ReadBuffer</span><span class="s2">,</span>
+    <span class="s1">StorageOptions</span><span class="s2">,</span>
+    <span class="s1">WriteBuffer</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas.compat._optional </span><span class="s2">import </span><span class="s1">import_optional_dependency</span>
+<span class="s2">from </span><span class="s1">pandas.errors </span><span class="s2">import </span><span class="s1">AbstractMethodError</span>
+<span class="s2">from </span><span class="s1">pandas.util._decorators </span><span class="s2">import </span><span class="s1">doc</span>
+
+<span class="s2">from </span><span class="s1">pandas </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">DataFrame</span><span class="s2">,</span>
+    <span class="s1">MultiIndex</span><span class="s2">,</span>
+    <span class="s1">get_option</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas.core.shared_docs </span><span class="s2">import </span><span class="s1">_shared_docs</span>
+<span class="s2">from </span><span class="s1">pandas.util.version </span><span class="s2">import </span><span class="s1">Version</span>
+
+<span class="s2">from </span><span class="s1">pandas.io.common </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">IOHandles</span><span class="s2">,</span>
+    <span class="s1">get_handle</span><span class="s2">,</span>
+    <span class="s1">is_fsspec_url</span><span class="s2">,</span>
+    <span class="s1">is_url</span><span class="s2">,</span>
+    <span class="s1">stringify_path</span><span class="s2">,</span>
+<span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">get_engine(engine: str) -&gt; BaseImpl:</span>
+    <span class="s0">&quot;&quot;&quot;return our implementation&quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">engine == </span><span class="s3">&quot;auto&quot;</span><span class="s1">:</span>
+        <span class="s1">engine = get_option(</span><span class="s3">&quot;io.parquet.engine&quot;</span><span class="s1">)</span>
+
+    <span class="s2">if </span><span class="s1">engine == </span><span class="s3">&quot;auto&quot;</span><span class="s1">:</span>
+        <span class="s4"># try engines in this order</span>
+        <span class="s1">engine_classes = [PyArrowImpl</span><span class="s2">, </span><span class="s1">FastParquetImpl]</span>
+
+        <span class="s1">error_msgs = </span><span class="s3">&quot;&quot;</span>
+        <span class="s2">for </span><span class="s1">engine_class </span><span class="s2">in </span><span class="s1">engine_classes:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">engine_class()</span>
+            <span class="s2">except </span><span class="s1">ImportError </span><span class="s2">as </span><span class="s1">err:</span>
+                <span class="s1">error_msgs += </span><span class="s3">&quot;</span><span class="s2">\n </span><span class="s3">- &quot; </span><span class="s1">+ str(err)</span>
+
+        <span class="s2">raise </span><span class="s1">ImportError(</span>
+            <span class="s3">&quot;Unable to find a usable engine; &quot;</span>
+            <span class="s3">&quot;tried using: 'pyarrow', 'fastparquet'.</span><span class="s2">\n</span><span class="s3">&quot;</span>
+            <span class="s3">&quot;A suitable version of &quot;</span>
+            <span class="s3">&quot;pyarrow or fastparquet is required for parquet &quot;</span>
+            <span class="s3">&quot;support.</span><span class="s2">\n</span><span class="s3">&quot;</span>
+            <span class="s3">&quot;Trying to import the above resulted in these errors:&quot;</span>
+            <span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">error_msgs</span><span class="s2">}</span><span class="s3">&quot;</span>
+        <span class="s1">)</span>
+
+    <span class="s2">if </span><span class="s1">engine == </span><span class="s3">&quot;pyarrow&quot;</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">PyArrowImpl()</span>
+    <span class="s2">elif </span><span class="s1">engine == </span><span class="s3">&quot;fastparquet&quot;</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">FastParquetImpl()</span>
+
+    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;engine must be one of 'pyarrow', 'fastparquet'&quot;</span><span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">_get_path_or_handle(</span>
+    <span class="s1">path: FilePath | ReadBuffer[bytes] | WriteBuffer[bytes]</span><span class="s2">,</span>
+    <span class="s1">fs: Any</span><span class="s2">,</span>
+    <span class="s1">storage_options: StorageOptions = </span><span class="s2">None,</span>
+    <span class="s1">mode: str = </span><span class="s3">&quot;rb&quot;</span><span class="s2">,</span>
+    <span class="s1">is_dir: bool = </span><span class="s2">False,</span>
+<span class="s1">) -&gt; tuple[</span>
+    <span class="s1">FilePath | ReadBuffer[bytes] | WriteBuffer[bytes]</span><span class="s2">, </span><span class="s1">IOHandles[bytes] | </span><span class="s2">None, </span><span class="s1">Any</span>
+<span class="s1">]:</span>
+    <span class="s0">&quot;&quot;&quot;File handling for PyArrow.&quot;&quot;&quot;</span>
+    <span class="s1">path_or_handle = stringify_path(path)</span>
+    <span class="s2">if </span><span class="s1">is_fsspec_url(path_or_handle) </span><span class="s2">and </span><span class="s1">fs </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">fsspec = import_optional_dependency(</span><span class="s3">&quot;fsspec&quot;</span><span class="s1">)</span>
+
+        <span class="s1">fs</span><span class="s2">, </span><span class="s1">path_or_handle = fsspec.core.url_to_fs(</span>
+            <span class="s1">path_or_handle</span><span class="s2">, </span><span class="s1">**(storage_options </span><span class="s2">or </span><span class="s1">{})</span>
+        <span class="s1">)</span>
+    <span class="s2">elif </span><span class="s1">storage_options </span><span class="s2">and </span><span class="s1">(</span><span class="s2">not </span><span class="s1">is_url(path_or_handle) </span><span class="s2">or </span><span class="s1">mode != </span><span class="s3">&quot;rb&quot;</span><span class="s1">):</span>
+        <span class="s4"># can't write to a remote url</span>
+        <span class="s4"># without making use of fsspec at the moment</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;storage_options passed with buffer, or non-supported URL&quot;</span><span class="s1">)</span>
+
+    <span class="s1">handles = </span><span class="s2">None</span>
+    <span class="s2">if </span><span class="s1">(</span>
+        <span class="s2">not </span><span class="s1">fs</span>
+        <span class="s2">and not </span><span class="s1">is_dir</span>
+        <span class="s2">and </span><span class="s1">isinstance(path_or_handle</span><span class="s2">, </span><span class="s1">str)</span>
+        <span class="s2">and not </span><span class="s1">os.path.isdir(path_or_handle)</span>
+    <span class="s1">):</span>
+        <span class="s4"># use get_handle only when we are very certain that it is not a directory</span>
+        <span class="s4"># fsspec resources can also point to directories</span>
+        <span class="s4"># this branch is used for example when reading from non-fsspec URLs</span>
+        <span class="s1">handles = get_handle(</span>
+            <span class="s1">path_or_handle</span><span class="s2">, </span><span class="s1">mode</span><span class="s2">, </span><span class="s1">is_text=</span><span class="s2">False, </span><span class="s1">storage_options=storage_options</span>
+        <span class="s1">)</span>
+        <span class="s1">fs = </span><span class="s2">None</span>
+        <span class="s1">path_or_handle = handles.handle</span>
+    <span class="s2">return </span><span class="s1">path_or_handle</span><span class="s2">, </span><span class="s1">handles</span><span class="s2">, </span><span class="s1">fs</span>
+
+
+<span class="s2">class </span><span class="s1">BaseImpl:</span>
+    <span class="s1">@staticmethod</span>
+    <span class="s2">def </span><span class="s1">validate_dataframe(df: DataFrame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+
+        <span class="s2">if not </span><span class="s1">isinstance(df</span><span class="s2">, </span><span class="s1">DataFrame):</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;to_parquet only supports IO with DataFrames&quot;</span><span class="s1">)</span>
+
+        <span class="s4"># must have value column names for all index levels (strings only)</span>
+        <span class="s2">if </span><span class="s1">isinstance(df.columns</span><span class="s2">, </span><span class="s1">MultiIndex):</span>
+            <span class="s2">if not </span><span class="s1">all(</span>
+                <span class="s1">x.inferred_type </span><span class="s2">in </span><span class="s1">{</span><span class="s3">&quot;string&quot;</span><span class="s2">, </span><span class="s3">&quot;empty&quot;</span><span class="s1">} </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">df.columns.levels</span>
+            <span class="s1">):</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span>
+                    <span class="s3">&quot;&quot;&quot; 
+                    parquet must have string column names for all values in 
+                     each level of the MultiIndex 
+                    &quot;&quot;&quot;</span>
+                <span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">df.columns.inferred_type </span><span class="s2">not in </span><span class="s1">{</span><span class="s3">&quot;string&quot;</span><span class="s2">, </span><span class="s3">&quot;empty&quot;</span><span class="s1">}:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;parquet must have string column names&quot;</span><span class="s1">)</span>
+
+        <span class="s4"># index level names must be strings</span>
+        <span class="s1">valid_names = all(</span>
+            <span class="s1">isinstance(name</span><span class="s2">, </span><span class="s1">str) </span><span class="s2">for </span><span class="s1">name </span><span class="s2">in </span><span class="s1">df.index.names </span><span class="s2">if </span><span class="s1">name </span><span class="s2">is not None</span>
+        <span class="s1">)</span>
+        <span class="s2">if not </span><span class="s1">valid_names:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;Index level names must be strings&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">write(self</span><span class="s2">, </span><span class="s1">df: DataFrame</span><span class="s2">, </span><span class="s1">path</span><span class="s2">, </span><span class="s1">compression</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+        <span class="s2">raise </span><span class="s1">AbstractMethodError(self)</span>
+
+    <span class="s2">def </span><span class="s1">read(self</span><span class="s2">, </span><span class="s1">path</span><span class="s2">, </span><span class="s1">columns=</span><span class="s2">None, </span><span class="s1">**kwargs) -&gt; DataFrame:</span>
+        <span class="s2">raise </span><span class="s1">AbstractMethodError(self)</span>
+
+
+<span class="s2">class </span><span class="s1">PyArrowImpl(BaseImpl):</span>
+    <span class="s2">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">import_optional_dependency(</span>
+            <span class="s3">&quot;pyarrow&quot;</span><span class="s2">, </span><span class="s1">extra=</span><span class="s3">&quot;pyarrow is required for parquet support.&quot;</span>
+        <span class="s1">)</span>
+        <span class="s2">import </span><span class="s1">pyarrow.parquet</span>
+
+        <span class="s4"># import utils to register the pyarrow extension types</span>
+        <span class="s2">import </span><span class="s1">pandas.core.arrays._arrow_utils  </span><span class="s4"># noqa:F401</span>
+
+        <span class="s1">self.api = pyarrow</span>
+
+    <span class="s2">def </span><span class="s1">write(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">df: DataFrame</span><span class="s2">,</span>
+        <span class="s1">path: FilePath | WriteBuffer[bytes]</span><span class="s2">,</span>
+        <span class="s1">compression: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s3">&quot;snappy&quot;</span><span class="s2">,</span>
+        <span class="s1">index: bool | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+        <span class="s1">storage_options: StorageOptions = </span><span class="s2">None,</span>
+        <span class="s1">partition_cols: list[str] | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+        <span class="s1">**kwargs</span><span class="s2">,</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.validate_dataframe(df)</span>
+
+        <span class="s1">from_pandas_kwargs: dict[str</span><span class="s2">, </span><span class="s1">Any] = {</span><span class="s3">&quot;schema&quot;</span><span class="s1">: kwargs.pop(</span><span class="s3">&quot;schema&quot;</span><span class="s2">, None</span><span class="s1">)}</span>
+        <span class="s2">if </span><span class="s1">index </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">from_pandas_kwargs[</span><span class="s3">&quot;preserve_index&quot;</span><span class="s1">] = index</span>
+
+        <span class="s1">table = self.api.Table.from_pandas(df</span><span class="s2">, </span><span class="s1">**from_pandas_kwargs)</span>
+
+        <span class="s1">path_or_handle</span><span class="s2">, </span><span class="s1">handles</span><span class="s2">, </span><span class="s1">kwargs[</span><span class="s3">&quot;filesystem&quot;</span><span class="s1">] = _get_path_or_handle(</span>
+            <span class="s1">path</span><span class="s2">,</span>
+            <span class="s1">kwargs.pop(</span><span class="s3">&quot;filesystem&quot;</span><span class="s2">, None</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s1">storage_options=storage_options</span><span class="s2">,</span>
+            <span class="s1">mode=</span><span class="s3">&quot;wb&quot;</span><span class="s2">,</span>
+            <span class="s1">is_dir=partition_cols </span><span class="s2">is not None,</span>
+        <span class="s1">)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">partition_cols </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s4"># writes to multiple files under the given path</span>
+                <span class="s1">self.api.parquet.write_to_dataset(</span>
+                    <span class="s1">table</span><span class="s2">,</span>
+                    <span class="s1">path_or_handle</span><span class="s2">,</span>
+                    <span class="s1">compression=compression</span><span class="s2">,</span>
+                    <span class="s1">partition_cols=partition_cols</span><span class="s2">,</span>
+                    <span class="s1">**kwargs</span><span class="s2">,</span>
+                <span class="s1">)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s4"># write to single output file</span>
+                <span class="s1">self.api.parquet.write_table(</span>
+                    <span class="s1">table</span><span class="s2">, </span><span class="s1">path_or_handle</span><span class="s2">, </span><span class="s1">compression=compression</span><span class="s2">, </span><span class="s1">**kwargs</span>
+                <span class="s1">)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">handles </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s1">handles.close()</span>
+
+    <span class="s2">def </span><span class="s1">read(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">path</span><span class="s2">,</span>
+        <span class="s1">columns=</span><span class="s2">None,</span>
+        <span class="s1">use_nullable_dtypes=</span><span class="s2">False,</span>
+        <span class="s1">storage_options: StorageOptions = </span><span class="s2">None,</span>
+        <span class="s1">**kwargs</span><span class="s2">,</span>
+    <span class="s1">) -&gt; DataFrame:</span>
+        <span class="s1">kwargs[</span><span class="s3">&quot;use_pandas_metadata&quot;</span><span class="s1">] = </span><span class="s2">True</span>
+
+        <span class="s1">to_pandas_kwargs = {}</span>
+        <span class="s2">if </span><span class="s1">use_nullable_dtypes:</span>
+            <span class="s2">import </span><span class="s1">pandas </span><span class="s2">as </span><span class="s1">pd</span>
+
+            <span class="s1">mapping = {</span>
+                <span class="s1">self.api.int8(): pd.Int8Dtype()</span><span class="s2">,</span>
+                <span class="s1">self.api.int16(): pd.Int16Dtype()</span><span class="s2">,</span>
+                <span class="s1">self.api.int32(): pd.Int32Dtype()</span><span class="s2">,</span>
+                <span class="s1">self.api.int64(): pd.Int64Dtype()</span><span class="s2">,</span>
+                <span class="s1">self.api.uint8(): pd.UInt8Dtype()</span><span class="s2">,</span>
+                <span class="s1">self.api.uint16(): pd.UInt16Dtype()</span><span class="s2">,</span>
+                <span class="s1">self.api.uint32(): pd.UInt32Dtype()</span><span class="s2">,</span>
+                <span class="s1">self.api.uint64(): pd.UInt64Dtype()</span><span class="s2">,</span>
+                <span class="s1">self.api.bool_(): pd.BooleanDtype()</span><span class="s2">,</span>
+                <span class="s1">self.api.string(): pd.StringDtype()</span><span class="s2">,</span>
+            <span class="s1">}</span>
+            <span class="s1">to_pandas_kwargs[</span><span class="s3">&quot;types_mapper&quot;</span><span class="s1">] = mapping.get</span>
+        <span class="s1">manager = get_option(</span><span class="s3">&quot;mode.data_manager&quot;</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">manager == </span><span class="s3">&quot;array&quot;</span><span class="s1">:</span>
+            <span class="s1">to_pandas_kwargs[</span><span class="s3">&quot;split_blocks&quot;</span><span class="s1">] = </span><span class="s2">True  </span><span class="s4"># type: ignore[assignment]</span>
+
+        <span class="s1">path_or_handle</span><span class="s2">, </span><span class="s1">handles</span><span class="s2">, </span><span class="s1">kwargs[</span><span class="s3">&quot;filesystem&quot;</span><span class="s1">] = _get_path_or_handle(</span>
+            <span class="s1">path</span><span class="s2">,</span>
+            <span class="s1">kwargs.pop(</span><span class="s3">&quot;filesystem&quot;</span><span class="s2">, None</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s1">storage_options=storage_options</span><span class="s2">,</span>
+            <span class="s1">mode=</span><span class="s3">&quot;rb&quot;</span><span class="s2">,</span>
+        <span class="s1">)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">result = self.api.parquet.read_table(</span>
+                <span class="s1">path_or_handle</span><span class="s2">, </span><span class="s1">columns=columns</span><span class="s2">, </span><span class="s1">**kwargs</span>
+            <span class="s1">).to_pandas(**to_pandas_kwargs)</span>
+            <span class="s2">if </span><span class="s1">manager == </span><span class="s3">&quot;array&quot;</span><span class="s1">:</span>
+                <span class="s1">result = result._as_manager(</span><span class="s3">&quot;array&quot;</span><span class="s2">, </span><span class="s1">copy=</span><span class="s2">False</span><span class="s1">)</span>
+            <span class="s2">return </span><span class="s1">result</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">handles </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s1">handles.close()</span>
+
+
+<span class="s2">class </span><span class="s1">FastParquetImpl(BaseImpl):</span>
+    <span class="s2">def </span><span class="s1">__init__(self):</span>
+        <span class="s4"># since pandas is a dependency of fastparquet</span>
+        <span class="s4"># we need to import on first use</span>
+        <span class="s1">fastparquet = import_optional_dependency(</span>
+            <span class="s3">&quot;fastparquet&quot;</span><span class="s2">, </span><span class="s1">extra=</span><span class="s3">&quot;fastparquet is required for parquet support.&quot;</span>
+        <span class="s1">)</span>
+        <span class="s1">self.api = fastparquet</span>
+
+    <span class="s2">def </span><span class="s1">write(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">df: DataFrame</span><span class="s2">,</span>
+        <span class="s1">path</span><span class="s2">,</span>
+        <span class="s1">compression=</span><span class="s3">&quot;snappy&quot;</span><span class="s2">,</span>
+        <span class="s1">index=</span><span class="s2">None,</span>
+        <span class="s1">partition_cols=</span><span class="s2">None,</span>
+        <span class="s1">storage_options: StorageOptions = </span><span class="s2">None,</span>
+        <span class="s1">**kwargs</span><span class="s2">,</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.validate_dataframe(df)</span>
+        <span class="s4"># thriftpy/protocol/compact.py:339:</span>
+        <span class="s4"># DeprecationWarning: tostring() is deprecated.</span>
+        <span class="s4"># Use tobytes() instead.</span>
+
+        <span class="s2">if </span><span class="s3">&quot;partition_on&quot; </span><span class="s2">in </span><span class="s1">kwargs </span><span class="s2">and </span><span class="s1">partition_cols </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span>
+                <span class="s3">&quot;Cannot use both partition_on and &quot;</span>
+                <span class="s3">&quot;partition_cols. Use partition_cols for partitioning data&quot;</span>
+            <span class="s1">)</span>
+        <span class="s2">elif </span><span class="s3">&quot;partition_on&quot; </span><span class="s2">in </span><span class="s1">kwargs:</span>
+            <span class="s1">partition_cols = kwargs.pop(</span><span class="s3">&quot;partition_on&quot;</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">partition_cols </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">kwargs[</span><span class="s3">&quot;file_scheme&quot;</span><span class="s1">] = </span><span class="s3">&quot;hive&quot;</span>
+
+        <span class="s4"># cannot use get_handle as write() does not accept file buffers</span>
+        <span class="s1">path = stringify_path(path)</span>
+        <span class="s2">if </span><span class="s1">is_fsspec_url(path):</span>
+            <span class="s1">fsspec = import_optional_dependency(</span><span class="s3">&quot;fsspec&quot;</span><span class="s1">)</span>
+
+            <span class="s4"># if filesystem is provided by fsspec, file must be opened in 'wb' mode.</span>
+            <span class="s1">kwargs[</span><span class="s3">&quot;open_with&quot;</span><span class="s1">] = </span><span class="s2">lambda </span><span class="s1">path</span><span class="s2">, </span><span class="s1">_: fsspec.open(</span>
+                <span class="s1">path</span><span class="s2">, </span><span class="s3">&quot;wb&quot;</span><span class="s2">, </span><span class="s1">**(storage_options </span><span class="s2">or </span><span class="s1">{})</span>
+            <span class="s1">).open()</span>
+        <span class="s2">elif </span><span class="s1">storage_options:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span>
+                <span class="s3">&quot;storage_options passed with file object or non-fsspec file path&quot;</span>
+            <span class="s1">)</span>
+
+        <span class="s2">with </span><span class="s1">catch_warnings(record=</span><span class="s2">True</span><span class="s1">):</span>
+            <span class="s1">self.api.write(</span>
+                <span class="s1">path</span><span class="s2">,</span>
+                <span class="s1">df</span><span class="s2">,</span>
+                <span class="s1">compression=compression</span><span class="s2">,</span>
+                <span class="s1">write_index=index</span><span class="s2">,</span>
+                <span class="s1">partition_on=partition_cols</span><span class="s2">,</span>
+                <span class="s1">**kwargs</span><span class="s2">,</span>
+            <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">read(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">path</span><span class="s2">, </span><span class="s1">columns=</span><span class="s2">None, </span><span class="s1">storage_options: StorageOptions = </span><span class="s2">None, </span><span class="s1">**kwargs</span>
+    <span class="s1">) -&gt; DataFrame:</span>
+        <span class="s1">parquet_kwargs: dict[str</span><span class="s2">, </span><span class="s1">Any] = {}</span>
+        <span class="s1">use_nullable_dtypes = kwargs.pop(</span><span class="s3">&quot;use_nullable_dtypes&quot;</span><span class="s2">, False</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">Version(self.api.__version__) &gt;= Version(</span><span class="s3">&quot;0.7.1&quot;</span><span class="s1">):</span>
+            <span class="s4"># We are disabling nullable dtypes for fastparquet pending discussion</span>
+            <span class="s1">parquet_kwargs[</span><span class="s3">&quot;pandas_nulls&quot;</span><span class="s1">] = </span><span class="s2">False</span>
+        <span class="s2">if </span><span class="s1">use_nullable_dtypes:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span>
+                <span class="s3">&quot;The 'use_nullable_dtypes' argument is not supported for the &quot;</span>
+                <span class="s3">&quot;fastparquet engine&quot;</span>
+            <span class="s1">)</span>
+        <span class="s1">path = stringify_path(path)</span>
+        <span class="s1">handles = </span><span class="s2">None</span>
+        <span class="s2">if </span><span class="s1">is_fsspec_url(path):</span>
+            <span class="s1">fsspec = import_optional_dependency(</span><span class="s3">&quot;fsspec&quot;</span><span class="s1">)</span>
+
+            <span class="s2">if </span><span class="s1">Version(self.api.__version__) &gt; Version(</span><span class="s3">&quot;0.6.1&quot;</span><span class="s1">):</span>
+                <span class="s1">parquet_kwargs[</span><span class="s3">&quot;fs&quot;</span><span class="s1">] = fsspec.open(</span>
+                    <span class="s1">path</span><span class="s2">, </span><span class="s3">&quot;rb&quot;</span><span class="s2">, </span><span class="s1">**(storage_options </span><span class="s2">or </span><span class="s1">{})</span>
+                <span class="s1">).fs</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">parquet_kwargs[</span><span class="s3">&quot;open_with&quot;</span><span class="s1">] = </span><span class="s2">lambda </span><span class="s1">path</span><span class="s2">, </span><span class="s1">_: fsspec.open(</span>
+                    <span class="s1">path</span><span class="s2">, </span><span class="s3">&quot;rb&quot;</span><span class="s2">, </span><span class="s1">**(storage_options </span><span class="s2">or </span><span class="s1">{})</span>
+                <span class="s1">).open()</span>
+        <span class="s2">elif </span><span class="s1">isinstance(path</span><span class="s2">, </span><span class="s1">str) </span><span class="s2">and not </span><span class="s1">os.path.isdir(path):</span>
+            <span class="s4"># use get_handle only when we are very certain that it is not a directory</span>
+            <span class="s4"># fsspec resources can also point to directories</span>
+            <span class="s4"># this branch is used for example when reading from non-fsspec URLs</span>
+            <span class="s1">handles = get_handle(</span>
+                <span class="s1">path</span><span class="s2">, </span><span class="s3">&quot;rb&quot;</span><span class="s2">, </span><span class="s1">is_text=</span><span class="s2">False, </span><span class="s1">storage_options=storage_options</span>
+            <span class="s1">)</span>
+            <span class="s1">path = handles.handle</span>
+
+        <span class="s1">parquet_file = self.api.ParquetFile(path</span><span class="s2">, </span><span class="s1">**parquet_kwargs)</span>
+
+        <span class="s1">result = parquet_file.to_pandas(columns=columns</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+
+        <span class="s2">if </span><span class="s1">handles </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">handles.close()</span>
+        <span class="s2">return </span><span class="s1">result</span>
+
+
+<span class="s1">@doc(storage_options=_shared_docs[</span><span class="s3">&quot;storage_options&quot;</span><span class="s1">])</span>
+<span class="s2">def </span><span class="s1">to_parquet(</span>
+    <span class="s1">df: DataFrame</span><span class="s2">,</span>
+    <span class="s1">path: FilePath | WriteBuffer[bytes] | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">engine: str = </span><span class="s3">&quot;auto&quot;</span><span class="s2">,</span>
+    <span class="s1">compression: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s3">&quot;snappy&quot;</span><span class="s2">,</span>
+    <span class="s1">index: bool | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">storage_options: StorageOptions = </span><span class="s2">None,</span>
+    <span class="s1">partition_cols: list[str] | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">**kwargs</span><span class="s2">,</span>
+<span class="s1">) -&gt; bytes | </span><span class="s2">None</span><span class="s1">:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Write a DataFrame to the parquet format. 
+ 
+    Parameters 
+    ---------- 
+    df : DataFrame 
+    path : str, path object, file-like object, or None, default None 
+        String, path object (implementing ``os.PathLike[str]``), or file-like 
+        object implementing a binary ``write()`` function. If None, the result is 
+        returned as bytes. If a string, it will be used as Root Directory path 
+        when writing a partitioned dataset. The engine fastparquet does not 
+        accept file-like objects. 
+ 
+        .. versionchanged:: 1.2.0 
+ 
+    engine : {{'auto', 'pyarrow', 'fastparquet'}}, default 'auto' 
+        Parquet library to use. If 'auto', then the option 
+        ``io.parquet.engine`` is used. The default ``io.parquet.engine`` 
+        behavior is to try 'pyarrow', falling back to 'fastparquet' if 
+        'pyarrow' is unavailable. 
+    compression : {{'snappy', 'gzip', 'brotli', 'lz4', 'zstd', None}}, 
+        default 'snappy'. Name of the compression to use. Use ``None`` 
+        for no compression. The supported compression methods actually 
+        depend on which engine is used. For 'pyarrow', 'snappy', 'gzip', 
+        'brotli', 'lz4', 'zstd' are all supported. For 'fastparquet', 
+        only 'gzip' and 'snappy' are supported. 
+    index : bool, default None 
+        If ``True``, include the dataframe's index(es) in the file output. If 
+        ``False``, they will not be written to the file. 
+        If ``None``, similar to ``True`` the dataframe's index(es) 
+        will be saved. However, instead of being saved as values, 
+        the RangeIndex will be stored as a range in the metadata so it 
+        doesn't require much space and is faster. Other indexes will 
+        be included as columns in the file output. 
+    partition_cols : str or list, optional, default None 
+        Column names by which to partition the dataset. 
+        Columns are partitioned in the order they are given. 
+        Must be None if path is not a string. 
+    {storage_options} 
+ 
+        .. versionadded:: 1.2.0 
+ 
+    kwargs 
+        Additional keyword arguments passed to the engine 
+ 
+    Returns 
+    ------- 
+    bytes if no path argument is provided else None 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">isinstance(partition_cols</span><span class="s2">, </span><span class="s1">str):</span>
+        <span class="s1">partition_cols = [partition_cols]</span>
+    <span class="s1">impl = get_engine(engine)</span>
+
+    <span class="s1">path_or_buf: FilePath | WriteBuffer[bytes] = io.BytesIO() </span><span class="s2">if </span><span class="s1">path </span><span class="s2">is None else </span><span class="s1">path</span>
+
+    <span class="s1">impl.write(</span>
+        <span class="s1">df</span><span class="s2">,</span>
+        <span class="s1">path_or_buf</span><span class="s2">,</span>
+        <span class="s1">compression=compression</span><span class="s2">,</span>
+        <span class="s1">index=index</span><span class="s2">,</span>
+        <span class="s1">partition_cols=partition_cols</span><span class="s2">,</span>
+        <span class="s1">storage_options=storage_options</span><span class="s2">,</span>
+        <span class="s1">**kwargs</span><span class="s2">,</span>
+    <span class="s1">)</span>
+
+    <span class="s2">if </span><span class="s1">path </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">assert </span><span class="s1">isinstance(path_or_buf</span><span class="s2">, </span><span class="s1">io.BytesIO)</span>
+        <span class="s2">return </span><span class="s1">path_or_buf.getvalue()</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">return None</span>
+
+
+<span class="s1">@doc(storage_options=_shared_docs[</span><span class="s3">&quot;storage_options&quot;</span><span class="s1">])</span>
+<span class="s2">def </span><span class="s1">read_parquet(</span>
+    <span class="s1">path</span><span class="s2">,</span>
+    <span class="s1">engine: str = </span><span class="s3">&quot;auto&quot;</span><span class="s2">,</span>
+    <span class="s1">columns=</span><span class="s2">None,</span>
+    <span class="s1">storage_options: StorageOptions = </span><span class="s2">None,</span>
+    <span class="s1">use_nullable_dtypes: bool = </span><span class="s2">False,</span>
+    <span class="s1">**kwargs</span><span class="s2">,</span>
+<span class="s1">) -&gt; DataFrame:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Load a parquet object from the file path, returning a DataFrame. 
+ 
+    Parameters 
+    ---------- 
+    path : str, path object or file-like object 
+        String, path object (implementing ``os.PathLike[str]``), or file-like 
+        object implementing a binary ``read()`` function. 
+        The string could be a URL. Valid URL schemes include http, ftp, s3, 
+        gs, and file. For file URLs, a host is expected. A local file could be: 
+        ``file://localhost/path/to/table.parquet``. 
+        A file URL can also be a path to a directory that contains multiple 
+        partitioned parquet files. Both pyarrow and fastparquet support 
+        paths to directories as well as file URLs. A directory path could be: 
+        ``file://localhost/path/to/tables`` or ``s3://bucket/partition_dir``. 
+    engine : {{'auto', 'pyarrow', 'fastparquet'}}, default 'auto' 
+        Parquet library to use. If 'auto', then the option 
+        ``io.parquet.engine`` is used. The default ``io.parquet.engine`` 
+        behavior is to try 'pyarrow', falling back to 'fastparquet' if 
+        'pyarrow' is unavailable. 
+    columns : list, default=None 
+        If not None, only these columns will be read from the file. 
+ 
+    {storage_options} 
+ 
+        .. versionadded:: 1.3.0 
+ 
+    use_nullable_dtypes : bool, default False 
+        If True, use dtypes that use ``pd.NA`` as missing value indicator 
+        for the resulting DataFrame. (only applicable for the ``pyarrow`` 
+        engine) 
+        As new dtypes are added that support ``pd.NA`` in the future, the 
+        output with this option will change to use those dtypes. 
+        Note: this is an experimental option, and behaviour (e.g. additional 
+        support dtypes) may change without notice. 
+ 
+        .. versionadded:: 1.2.0 
+ 
+    **kwargs 
+        Any additional kwargs are passed to the engine. 
+ 
+    Returns 
+    ------- 
+    DataFrame 
+    &quot;&quot;&quot;</span>
+    <span class="s1">impl = get_engine(engine)</span>
+
+    <span class="s2">return </span><span class="s1">impl.read(</span>
+        <span class="s1">path</span><span class="s2">,</span>
+        <span class="s1">columns=columns</span><span class="s2">,</span>
+        <span class="s1">storage_options=storage_options</span><span class="s2">,</span>
+        <span class="s1">use_nullable_dtypes=use_nullable_dtypes</span><span class="s2">,</span>
+        <span class="s1">**kwargs</span><span class="s2">,</span>
+    <span class="s1">)</span>
+</pre>
+</body>
+</html>

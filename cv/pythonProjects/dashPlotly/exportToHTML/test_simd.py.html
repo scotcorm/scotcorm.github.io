@@ -1,0 +1,1003 @@
+<html>
+<head>
+<title>test_simd.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #629755; font-style: italic;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test_simd.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># NOTE: Please avoid the use of numpy.testing since NPYV intrinsics</span>
+<span class="s0"># may be involved in their functionality.</span>
+<span class="s2">import </span><span class="s1">pytest</span><span class="s2">, </span><span class="s1">math</span><span class="s2">, </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">itertools</span>
+<span class="s2">from </span><span class="s1">numpy.core._simd </span><span class="s2">import </span><span class="s1">targets</span>
+<span class="s2">from </span><span class="s1">numpy.core._multiarray_umath </span><span class="s2">import </span><span class="s1">__cpu_baseline__</span>
+
+<span class="s2">class </span><span class="s1">_Test_Utility:</span>
+    <span class="s0"># submodule of the desired SIMD extension, e.g. targets[&quot;AVX512F&quot;]</span>
+    <span class="s1">npyv = </span><span class="s2">None</span>
+    <span class="s0"># the current data type suffix e.g. 's8'</span>
+    <span class="s1">sfx  = </span><span class="s2">None</span>
+    <span class="s0"># target name can be 'baseline' or one or more of CPU features</span>
+    <span class="s1">target_name = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">__getattr__(self</span><span class="s2">, </span><span class="s1">attr):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        To call NPV intrinsics without the attribute 'npyv' and 
+        auto suffixing intrinsics according to class attribute 'sfx' 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">getattr(self.npyv</span><span class="s2">, </span><span class="s1">attr + </span><span class="s4">&quot;_&quot; </span><span class="s1">+ self.sfx)</span>
+
+    <span class="s2">def </span><span class="s1">_data(self</span><span class="s2">, </span><span class="s1">start=</span><span class="s2">None, </span><span class="s1">count=</span><span class="s2">None, </span><span class="s1">reverse=</span><span class="s2">False</span><span class="s1">):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Create list of consecutive numbers according to number of vector's lanes. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">start </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">start = </span><span class="s5">1</span>
+        <span class="s2">if </span><span class="s1">count </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">count = self.nlanes</span>
+        <span class="s1">rng = range(start</span><span class="s2">, </span><span class="s1">start + count)</span>
+        <span class="s2">if </span><span class="s1">reverse:</span>
+            <span class="s1">rng = reversed(rng)</span>
+        <span class="s2">if </span><span class="s1">self._is_fp():</span>
+            <span class="s2">return </span><span class="s1">[x / </span><span class="s5">1.0 </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">rng]</span>
+        <span class="s2">return </span><span class="s1">list(rng)</span>
+
+    <span class="s2">def </span><span class="s1">_is_unsigned(self):</span>
+        <span class="s2">return </span><span class="s1">self.sfx[</span><span class="s5">0</span><span class="s1">] == </span><span class="s4">'u'</span>
+
+    <span class="s2">def </span><span class="s1">_is_signed(self):</span>
+        <span class="s2">return </span><span class="s1">self.sfx[</span><span class="s5">0</span><span class="s1">] == </span><span class="s4">'s'</span>
+
+    <span class="s2">def </span><span class="s1">_is_fp(self):</span>
+        <span class="s2">return </span><span class="s1">self.sfx[</span><span class="s5">0</span><span class="s1">] == </span><span class="s4">'f'</span>
+
+    <span class="s2">def </span><span class="s1">_scalar_size(self):</span>
+        <span class="s2">return </span><span class="s1">int(self.sfx[</span><span class="s5">1</span><span class="s1">:])</span>
+
+    <span class="s2">def </span><span class="s1">_int_clip(self</span><span class="s2">, </span><span class="s1">seq):</span>
+        <span class="s2">if </span><span class="s1">self._is_fp():</span>
+            <span class="s2">return </span><span class="s1">seq</span>
+        <span class="s1">max_int = self._int_max()</span>
+        <span class="s1">min_int = self._int_min()</span>
+        <span class="s2">return </span><span class="s1">[min(max(v</span><span class="s2">, </span><span class="s1">min_int)</span><span class="s2">, </span><span class="s1">max_int) </span><span class="s2">for </span><span class="s1">v </span><span class="s2">in </span><span class="s1">seq]</span>
+
+    <span class="s2">def </span><span class="s1">_int_max(self):</span>
+        <span class="s2">if </span><span class="s1">self._is_fp():</span>
+            <span class="s2">return None</span>
+        <span class="s1">max_u = self._to_unsigned(self.setall(-</span><span class="s5">1</span><span class="s1">))[</span><span class="s5">0</span><span class="s1">]</span>
+        <span class="s2">if </span><span class="s1">self._is_signed():</span>
+            <span class="s2">return </span><span class="s1">max_u // </span><span class="s5">2</span>
+        <span class="s2">return </span><span class="s1">max_u</span>
+
+    <span class="s2">def </span><span class="s1">_int_min(self):</span>
+        <span class="s2">if </span><span class="s1">self._is_fp():</span>
+            <span class="s2">return None</span>
+        <span class="s2">if </span><span class="s1">self._is_unsigned():</span>
+            <span class="s2">return </span><span class="s5">0</span>
+        <span class="s2">return </span><span class="s1">-(self._int_max() + </span><span class="s5">1</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">_true_mask(self):</span>
+        <span class="s1">max_unsig = getattr(self.npyv</span><span class="s2">, </span><span class="s4">&quot;setall_u&quot; </span><span class="s1">+ self.sfx[</span><span class="s5">1</span><span class="s1">:])(-</span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">max_unsig[</span><span class="s5">0</span><span class="s1">]</span>
+
+    <span class="s2">def </span><span class="s1">_to_unsigned(self</span><span class="s2">, </span><span class="s1">vector):</span>
+        <span class="s2">if </span><span class="s1">isinstance(vector</span><span class="s2">, </span><span class="s1">(list</span><span class="s2">, </span><span class="s1">tuple)):</span>
+            <span class="s2">return </span><span class="s1">getattr(self.npyv</span><span class="s2">, </span><span class="s4">&quot;load_u&quot; </span><span class="s1">+ self.sfx[</span><span class="s5">1</span><span class="s1">:])(vector)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">sfx = vector.__name__.replace(</span><span class="s4">&quot;npyv_&quot;</span><span class="s2">, </span><span class="s4">&quot;&quot;</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">sfx[</span><span class="s5">0</span><span class="s1">] == </span><span class="s4">&quot;b&quot;</span><span class="s1">:</span>
+                <span class="s1">cvt_intrin = </span><span class="s4">&quot;cvt_u{0}_b{0}&quot;</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">cvt_intrin = </span><span class="s4">&quot;reinterpret_u{0}_{1}&quot;</span>
+            <span class="s2">return </span><span class="s1">getattr(self.npyv</span><span class="s2">, </span><span class="s1">cvt_intrin.format(sfx[</span><span class="s5">1</span><span class="s1">:]</span><span class="s2">, </span><span class="s1">sfx))(vector)</span>
+
+    <span class="s2">def </span><span class="s1">_pinfinity(self):</span>
+        <span class="s1">v = self.npyv.setall_u32(</span><span class="s5">0x7f800000</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">self.npyv.reinterpret_f32_u32(v)[</span><span class="s5">0</span><span class="s1">]</span>
+
+    <span class="s2">def </span><span class="s1">_ninfinity(self):</span>
+        <span class="s1">v = self.npyv.setall_u32(</span><span class="s5">0xff800000</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">self.npyv.reinterpret_f32_u32(v)[</span><span class="s5">0</span><span class="s1">]</span>
+
+    <span class="s2">def </span><span class="s1">_nan(self):</span>
+        <span class="s1">v = self.npyv.setall_u32(</span><span class="s5">0x7fc00000</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">self.npyv.reinterpret_f32_u32(v)[</span><span class="s5">0</span><span class="s1">]</span>
+
+    <span class="s2">def </span><span class="s1">_cpu_features(self):</span>
+        <span class="s1">target = self.target_name</span>
+        <span class="s2">if </span><span class="s1">target == </span><span class="s4">&quot;baseline&quot;</span><span class="s1">:</span>
+            <span class="s1">target = __cpu_baseline__</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">target = target.split(</span><span class="s4">'__'</span><span class="s1">) </span><span class="s0"># multi-target separator</span>
+        <span class="s2">return </span><span class="s4">' '</span><span class="s1">.join(target)</span>
+
+<span class="s2">class </span><span class="s1">_SIMD_BOOL(_Test_Utility):</span>
+    <span class="s3">&quot;&quot;&quot; 
+    To test all boolean vector types at once 
+    &quot;&quot;&quot;</span>
+    <span class="s2">def </span><span class="s1">_data(self</span><span class="s2">, </span><span class="s1">start=</span><span class="s2">None, </span><span class="s1">count=</span><span class="s2">None, </span><span class="s1">reverse=</span><span class="s2">False</span><span class="s1">):</span>
+        <span class="s1">nlanes = getattr(self.npyv</span><span class="s2">, </span><span class="s4">&quot;nlanes_u&quot; </span><span class="s1">+ self.sfx[</span><span class="s5">1</span><span class="s1">:])</span>
+        <span class="s1">true_mask = self._true_mask()</span>
+        <span class="s1">rng = range(nlanes)</span>
+        <span class="s2">if </span><span class="s1">reverse:</span>
+            <span class="s1">rng = reversed(rng)</span>
+        <span class="s2">return </span><span class="s1">[true_mask </span><span class="s2">if </span><span class="s1">x % </span><span class="s5">2 </span><span class="s2">else </span><span class="s5">0 </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">rng]</span>
+
+    <span class="s2">def </span><span class="s1">_load_b(self</span><span class="s2">, </span><span class="s1">data):</span>
+        <span class="s1">len_str = self.sfx[</span><span class="s5">1</span><span class="s1">:]</span>
+        <span class="s1">load = getattr(self.npyv</span><span class="s2">, </span><span class="s4">&quot;load_u&quot; </span><span class="s1">+ len_str)</span>
+        <span class="s1">cvt = getattr(self.npyv</span><span class="s2">, </span><span class="s4">f&quot;cvt_b</span><span class="s2">{</span><span class="s1">len_str</span><span class="s2">}</span><span class="s4">_u</span><span class="s2">{</span><span class="s1">len_str</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">cvt(load(data))</span>
+
+    <span class="s2">def </span><span class="s1">test_operators_logical(self):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Logical operations for boolean types. 
+        Test intrinsics: 
+            npyv_xor_##SFX, npyv_and_##SFX, npyv_or_##SFX, npyv_not_##SFX 
+        &quot;&quot;&quot;</span>
+        <span class="s1">data_a = self._data()</span>
+        <span class="s1">data_b = self._data(reverse=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s1">vdata_a = self._load_b(data_a)</span>
+        <span class="s1">vdata_b = self._load_b(data_b)</span>
+
+        <span class="s1">data_and = [a &amp; b </span><span class="s2">for </span><span class="s1">a</span><span class="s2">, </span><span class="s1">b </span><span class="s2">in </span><span class="s1">zip(data_a</span><span class="s2">, </span><span class="s1">data_b)]</span>
+        <span class="s1">vand = getattr(self</span><span class="s2">, </span><span class="s4">&quot;and&quot;</span><span class="s1">)(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+        <span class="s2">assert </span><span class="s1">vand == data_and</span>
+
+        <span class="s1">data_or = [a | b </span><span class="s2">for </span><span class="s1">a</span><span class="s2">, </span><span class="s1">b </span><span class="s2">in </span><span class="s1">zip(data_a</span><span class="s2">, </span><span class="s1">data_b)]</span>
+        <span class="s1">vor = getattr(self</span><span class="s2">, </span><span class="s4">&quot;or&quot;</span><span class="s1">)(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+        <span class="s2">assert </span><span class="s1">vor == data_or</span>
+
+        <span class="s1">data_xor = [a ^ b </span><span class="s2">for </span><span class="s1">a</span><span class="s2">, </span><span class="s1">b </span><span class="s2">in </span><span class="s1">zip(data_a</span><span class="s2">, </span><span class="s1">data_b)]</span>
+        <span class="s1">vxor = getattr(self</span><span class="s2">, </span><span class="s4">&quot;xor&quot;</span><span class="s1">)(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+        <span class="s2">assert </span><span class="s1">vxor == data_xor</span>
+
+        <span class="s1">vnot = getattr(self</span><span class="s2">, </span><span class="s4">&quot;not&quot;</span><span class="s1">)(vdata_a)</span>
+        <span class="s2">assert </span><span class="s1">vnot == data_b</span>
+
+    <span class="s2">def </span><span class="s1">test_tobits(self):</span>
+        <span class="s1">data2bits = </span><span class="s2">lambda </span><span class="s1">data: sum([int(x != </span><span class="s5">0</span><span class="s1">) &lt;&lt; i </span><span class="s2">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">x </span><span class="s2">in </span><span class="s1">enumerate(data</span><span class="s2">, </span><span class="s5">0</span><span class="s1">)])</span>
+        <span class="s2">for </span><span class="s1">data </span><span class="s2">in </span><span class="s1">(self._data()</span><span class="s2">, </span><span class="s1">self._data(reverse=</span><span class="s2">True</span><span class="s1">)):</span>
+            <span class="s1">vdata = self._load_b(data)</span>
+            <span class="s1">data_bits = data2bits(data)</span>
+            <span class="s1">tobits = bin(self.tobits(vdata))</span>
+            <span class="s2">assert </span><span class="s1">tobits == bin(data_bits)</span>
+
+<span class="s2">class </span><span class="s1">_SIMD_INT(_Test_Utility):</span>
+    <span class="s3">&quot;&quot;&quot; 
+    To test all integer vector types at once 
+    &quot;&quot;&quot;</span>
+    <span class="s2">def </span><span class="s1">test_operators_shift(self):</span>
+        <span class="s2">if </span><span class="s1">self.sfx </span><span class="s2">in </span><span class="s1">(</span><span class="s4">&quot;u8&quot;</span><span class="s2">, </span><span class="s4">&quot;s8&quot;</span><span class="s1">):</span>
+            <span class="s2">return</span>
+
+        <span class="s1">data_a = self._data(self._int_max() - self.nlanes)</span>
+        <span class="s1">data_b = self._data(self._int_min()</span><span class="s2">, </span><span class="s1">reverse=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s1">vdata_a</span><span class="s2">, </span><span class="s1">vdata_b = self.load(data_a)</span><span class="s2">, </span><span class="s1">self.load(data_b)</span>
+
+        <span class="s2">for </span><span class="s1">count </span><span class="s2">in </span><span class="s1">range(self._scalar_size()):</span>
+            <span class="s0"># load to cast</span>
+            <span class="s1">data_shl_a = self.load([a &lt;&lt; count </span><span class="s2">for </span><span class="s1">a </span><span class="s2">in </span><span class="s1">data_a])</span>
+            <span class="s0"># left shift</span>
+            <span class="s1">shl = self.shl(vdata_a</span><span class="s2">, </span><span class="s1">count)</span>
+            <span class="s2">assert </span><span class="s1">shl == data_shl_a</span>
+            <span class="s0"># load to cast</span>
+            <span class="s1">data_shr_a = self.load([a &gt;&gt; count </span><span class="s2">for </span><span class="s1">a </span><span class="s2">in </span><span class="s1">data_a])</span>
+            <span class="s0"># right shift</span>
+            <span class="s1">shr = self.shr(vdata_a</span><span class="s2">, </span><span class="s1">count)</span>
+            <span class="s2">assert </span><span class="s1">shr == data_shr_a</span>
+
+        <span class="s0"># shift by zero or max or out-range immediate constant is not applicable and illogical</span>
+        <span class="s2">for </span><span class="s1">count </span><span class="s2">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s2">, </span><span class="s1">self._scalar_size()):</span>
+            <span class="s0"># load to cast</span>
+            <span class="s1">data_shl_a = self.load([a &lt;&lt; count </span><span class="s2">for </span><span class="s1">a </span><span class="s2">in </span><span class="s1">data_a])</span>
+            <span class="s0"># left shift by an immediate constant</span>
+            <span class="s1">shli = self.shli(vdata_a</span><span class="s2">, </span><span class="s1">count)</span>
+            <span class="s2">assert </span><span class="s1">shli == data_shl_a</span>
+            <span class="s0"># load to cast</span>
+            <span class="s1">data_shr_a = self.load([a &gt;&gt; count </span><span class="s2">for </span><span class="s1">a </span><span class="s2">in </span><span class="s1">data_a])</span>
+            <span class="s0"># right shift by an immediate constant</span>
+            <span class="s1">shri = self.shri(vdata_a</span><span class="s2">, </span><span class="s1">count)</span>
+            <span class="s2">assert </span><span class="s1">shri == data_shr_a</span>
+
+    <span class="s2">def </span><span class="s1">test_arithmetic_subadd_saturated(self):</span>
+        <span class="s2">if </span><span class="s1">self.sfx </span><span class="s2">in </span><span class="s1">(</span><span class="s4">&quot;u32&quot;</span><span class="s2">, </span><span class="s4">&quot;s32&quot;</span><span class="s2">, </span><span class="s4">&quot;u64&quot;</span><span class="s2">, </span><span class="s4">&quot;s64&quot;</span><span class="s1">):</span>
+            <span class="s2">return</span>
+
+        <span class="s1">data_a = self._data(self._int_max() - self.nlanes)</span>
+        <span class="s1">data_b = self._data(self._int_min()</span><span class="s2">, </span><span class="s1">reverse=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s1">vdata_a</span><span class="s2">, </span><span class="s1">vdata_b = self.load(data_a)</span><span class="s2">, </span><span class="s1">self.load(data_b)</span>
+
+        <span class="s1">data_adds = self._int_clip([a + b </span><span class="s2">for </span><span class="s1">a</span><span class="s2">, </span><span class="s1">b </span><span class="s2">in </span><span class="s1">zip(data_a</span><span class="s2">, </span><span class="s1">data_b)])</span>
+        <span class="s1">adds = self.adds(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+        <span class="s2">assert </span><span class="s1">adds == data_adds</span>
+
+        <span class="s1">data_subs = self._int_clip([a - b </span><span class="s2">for </span><span class="s1">a</span><span class="s2">, </span><span class="s1">b </span><span class="s2">in </span><span class="s1">zip(data_a</span><span class="s2">, </span><span class="s1">data_b)])</span>
+        <span class="s1">subs = self.subs(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+        <span class="s2">assert </span><span class="s1">subs == data_subs</span>
+
+    <span class="s2">def </span><span class="s1">test_math_max_min(self):</span>
+        <span class="s1">data_a = self._data()</span>
+        <span class="s1">data_b = self._data(self.nlanes)</span>
+        <span class="s1">vdata_a</span><span class="s2">, </span><span class="s1">vdata_b = self.load(data_a)</span><span class="s2">, </span><span class="s1">self.load(data_b)</span>
+
+        <span class="s1">data_max = [max(a</span><span class="s2">, </span><span class="s1">b) </span><span class="s2">for </span><span class="s1">a</span><span class="s2">, </span><span class="s1">b </span><span class="s2">in </span><span class="s1">zip(data_a</span><span class="s2">, </span><span class="s1">data_b)]</span>
+        <span class="s1">simd_max = self.max(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+        <span class="s2">assert </span><span class="s1">simd_max == data_max</span>
+
+        <span class="s1">data_min = [min(a</span><span class="s2">, </span><span class="s1">b) </span><span class="s2">for </span><span class="s1">a</span><span class="s2">, </span><span class="s1">b </span><span class="s2">in </span><span class="s1">zip(data_a</span><span class="s2">, </span><span class="s1">data_b)]</span>
+        <span class="s1">simd_min = self.min(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+        <span class="s2">assert </span><span class="s1">simd_min == data_min</span>
+
+<span class="s2">class </span><span class="s1">_SIMD_FP32(_Test_Utility):</span>
+    <span class="s3">&quot;&quot;&quot; 
+    To only test single precision 
+    &quot;&quot;&quot;</span>
+    <span class="s2">def </span><span class="s1">test_conversions(self):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Round to nearest even integer, assume CPU control register is set to rounding. 
+        Test intrinsics: 
+            npyv_round_s32_##SFX 
+        &quot;&quot;&quot;</span>
+        <span class="s1">features = self._cpu_features()</span>
+        <span class="s2">if not </span><span class="s1">self.npyv.simd_f64 </span><span class="s2">and </span><span class="s1">re.match(</span><span class="s4">r&quot;.*(NEON|ASIMD)&quot;</span><span class="s2">, </span><span class="s1">features):</span>
+            <span class="s0"># very costly to emulate nearest even on Armv7</span>
+            <span class="s0"># instead we round halves to up. e.g. 0.5 -&gt; 1, -0.5 -&gt; -1</span>
+            <span class="s1">_round = </span><span class="s2">lambda </span><span class="s1">v: int(v + (</span><span class="s5">0.5 </span><span class="s2">if </span><span class="s1">v &gt;= </span><span class="s5">0 </span><span class="s2">else </span><span class="s1">-</span><span class="s5">0.5</span><span class="s1">))</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">_round = round</span>
+        <span class="s1">vdata_a = self.load(self._data())</span>
+        <span class="s1">vdata_a = self.sub(vdata_a</span><span class="s2">, </span><span class="s1">self.setall(</span><span class="s5">0.5</span><span class="s1">))</span>
+        <span class="s1">data_round = [_round(x) </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">vdata_a]</span>
+        <span class="s1">vround = self.round_s32(vdata_a)</span>
+        <span class="s2">assert </span><span class="s1">vround == data_round</span>
+
+<span class="s2">class </span><span class="s1">_SIMD_FP64(_Test_Utility):</span>
+    <span class="s3">&quot;&quot;&quot; 
+    To only test double precision 
+    &quot;&quot;&quot;</span>
+    <span class="s2">def </span><span class="s1">test_conversions(self):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Round to nearest even integer, assume CPU control register is set to rounding. 
+        Test intrinsics: 
+            npyv_round_s32_##SFX 
+        &quot;&quot;&quot;</span>
+        <span class="s1">vdata_a = self.load(self._data())</span>
+        <span class="s1">vdata_a = self.sub(vdata_a</span><span class="s2">, </span><span class="s1">self.setall(</span><span class="s5">0.5</span><span class="s1">))</span>
+        <span class="s1">vdata_b = self.mul(vdata_a</span><span class="s2">, </span><span class="s1">self.setall(-</span><span class="s5">1.5</span><span class="s1">))</span>
+        <span class="s1">data_round = [round(x) </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">list(vdata_a) + list(vdata_b)]</span>
+        <span class="s1">vround = self.round_s32(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+        <span class="s2">assert </span><span class="s1">vround == data_round</span>
+
+<span class="s2">class </span><span class="s1">_SIMD_FP(_Test_Utility):</span>
+    <span class="s3">&quot;&quot;&quot; 
+    To test all float vector types at once 
+    &quot;&quot;&quot;</span>
+    <span class="s2">def </span><span class="s1">test_arithmetic_fused(self):</span>
+        <span class="s1">vdata_a</span><span class="s2">, </span><span class="s1">vdata_b</span><span class="s2">, </span><span class="s1">vdata_c = [self.load(self._data())]*</span><span class="s5">3</span>
+        <span class="s1">vdata_cx2 = self.add(vdata_c</span><span class="s2">, </span><span class="s1">vdata_c)</span>
+        <span class="s0"># multiply and add, a*b + c</span>
+        <span class="s1">data_fma = self.load([a * b + c </span><span class="s2">for </span><span class="s1">a</span><span class="s2">, </span><span class="s1">b</span><span class="s2">, </span><span class="s1">c </span><span class="s2">in </span><span class="s1">zip(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b</span><span class="s2">, </span><span class="s1">vdata_c)])</span>
+        <span class="s1">fma = self.muladd(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b</span><span class="s2">, </span><span class="s1">vdata_c)</span>
+        <span class="s2">assert </span><span class="s1">fma == data_fma</span>
+        <span class="s0"># multiply and subtract, a*b - c</span>
+        <span class="s1">fms = self.mulsub(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b</span><span class="s2">, </span><span class="s1">vdata_c)</span>
+        <span class="s1">data_fms = self.sub(data_fma</span><span class="s2">, </span><span class="s1">vdata_cx2)</span>
+        <span class="s2">assert </span><span class="s1">fms == data_fms</span>
+        <span class="s0"># negate multiply and add, -(a*b) + c</span>
+        <span class="s1">nfma = self.nmuladd(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b</span><span class="s2">, </span><span class="s1">vdata_c)</span>
+        <span class="s1">data_nfma = self.sub(vdata_cx2</span><span class="s2">, </span><span class="s1">data_fma)</span>
+        <span class="s2">assert </span><span class="s1">nfma == data_nfma</span>
+        <span class="s0"># negate multiply and subtract, -(a*b) - c</span>
+        <span class="s1">nfms = self.nmulsub(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b</span><span class="s2">, </span><span class="s1">vdata_c)</span>
+        <span class="s1">data_nfms = self.mul(data_fma</span><span class="s2">, </span><span class="s1">self.setall(-</span><span class="s5">1</span><span class="s1">))</span>
+        <span class="s2">assert </span><span class="s1">nfms == data_nfms</span>
+
+    <span class="s2">def </span><span class="s1">test_abs(self):</span>
+        <span class="s1">pinf</span><span class="s2">, </span><span class="s1">ninf</span><span class="s2">, </span><span class="s1">nan = self._pinfinity()</span><span class="s2">, </span><span class="s1">self._ninfinity()</span><span class="s2">, </span><span class="s1">self._nan()</span>
+        <span class="s1">data = self._data()</span>
+        <span class="s1">vdata = self.load(self._data())</span>
+
+        <span class="s1">abs_cases = ((-</span><span class="s5">0</span><span class="s2">, </span><span class="s5">0</span><span class="s1">)</span><span class="s2">, </span><span class="s1">(ninf</span><span class="s2">, </span><span class="s1">pinf)</span><span class="s2">, </span><span class="s1">(pinf</span><span class="s2">, </span><span class="s1">pinf)</span><span class="s2">, </span><span class="s1">(nan</span><span class="s2">, </span><span class="s1">nan))</span>
+        <span class="s2">for </span><span class="s1">case</span><span class="s2">, </span><span class="s1">desired </span><span class="s2">in </span><span class="s1">abs_cases:</span>
+            <span class="s1">data_abs = [desired]*self.nlanes</span>
+            <span class="s1">vabs = self.abs(self.setall(case))</span>
+            <span class="s2">assert </span><span class="s1">vabs == pytest.approx(data_abs</span><span class="s2">, </span><span class="s1">nan_ok=</span><span class="s2">True</span><span class="s1">)</span>
+
+        <span class="s1">vabs = self.abs(self.mul(vdata</span><span class="s2">, </span><span class="s1">self.setall(-</span><span class="s5">1</span><span class="s1">)))</span>
+        <span class="s2">assert </span><span class="s1">vabs == data</span>
+
+    <span class="s2">def </span><span class="s1">test_sqrt(self):</span>
+        <span class="s1">pinf</span><span class="s2">, </span><span class="s1">ninf</span><span class="s2">, </span><span class="s1">nan = self._pinfinity()</span><span class="s2">, </span><span class="s1">self._ninfinity()</span><span class="s2">, </span><span class="s1">self._nan()</span>
+        <span class="s1">data = self._data()</span>
+        <span class="s1">vdata = self.load(self._data())</span>
+
+        <span class="s1">sqrt_cases = ((-</span><span class="s5">0.0</span><span class="s2">, </span><span class="s1">-</span><span class="s5">0.0</span><span class="s1">)</span><span class="s2">, </span><span class="s1">(</span><span class="s5">0.0</span><span class="s2">, </span><span class="s5">0.0</span><span class="s1">)</span><span class="s2">, </span><span class="s1">(-</span><span class="s5">1.0</span><span class="s2">, </span><span class="s1">nan)</span><span class="s2">, </span><span class="s1">(ninf</span><span class="s2">, </span><span class="s1">nan)</span><span class="s2">, </span><span class="s1">(pinf</span><span class="s2">, </span><span class="s1">pinf))</span>
+        <span class="s2">for </span><span class="s1">case</span><span class="s2">, </span><span class="s1">desired </span><span class="s2">in </span><span class="s1">sqrt_cases:</span>
+            <span class="s1">data_sqrt = [desired]*self.nlanes</span>
+            <span class="s1">sqrt  = self.sqrt(self.setall(case))</span>
+            <span class="s2">assert </span><span class="s1">sqrt == pytest.approx(data_sqrt</span><span class="s2">, </span><span class="s1">nan_ok=</span><span class="s2">True</span><span class="s1">)</span>
+
+        <span class="s1">data_sqrt = self.load([math.sqrt(x) </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">data]) </span><span class="s0"># load to truncate precision</span>
+        <span class="s1">sqrt = self.sqrt(vdata)</span>
+        <span class="s2">assert </span><span class="s1">sqrt == data_sqrt</span>
+
+    <span class="s2">def </span><span class="s1">test_square(self):</span>
+        <span class="s1">pinf</span><span class="s2">, </span><span class="s1">ninf</span><span class="s2">, </span><span class="s1">nan = self._pinfinity()</span><span class="s2">, </span><span class="s1">self._ninfinity()</span><span class="s2">, </span><span class="s1">self._nan()</span>
+        <span class="s1">data = self._data()</span>
+        <span class="s1">vdata = self.load(self._data())</span>
+        <span class="s0"># square</span>
+        <span class="s1">square_cases = ((nan</span><span class="s2">, </span><span class="s1">nan)</span><span class="s2">, </span><span class="s1">(pinf</span><span class="s2">, </span><span class="s1">pinf)</span><span class="s2">, </span><span class="s1">(ninf</span><span class="s2">, </span><span class="s1">pinf))</span>
+        <span class="s2">for </span><span class="s1">case</span><span class="s2">, </span><span class="s1">desired </span><span class="s2">in </span><span class="s1">square_cases:</span>
+            <span class="s1">data_square = [desired]*self.nlanes</span>
+            <span class="s1">square  = self.square(self.setall(case))</span>
+            <span class="s2">assert </span><span class="s1">square == pytest.approx(data_square</span><span class="s2">, </span><span class="s1">nan_ok=</span><span class="s2">True</span><span class="s1">)</span>
+
+        <span class="s1">data_square = [x*x </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">data]</span>
+        <span class="s1">square = self.square(vdata)</span>
+        <span class="s2">assert </span><span class="s1">square == data_square</span>
+
+    <span class="s1">@pytest.mark.parametrize(</span><span class="s4">&quot;intrin, func&quot;</span><span class="s2">, </span><span class="s1">[(</span><span class="s4">&quot;self.ceil&quot;</span><span class="s2">, </span><span class="s1">math.ceil)</span><span class="s2">,</span>
+    <span class="s1">(</span><span class="s4">&quot;self.trunc&quot;</span><span class="s2">, </span><span class="s1">math.trunc)])</span>
+    <span class="s2">def </span><span class="s1">test_rounding(self</span><span class="s2">, </span><span class="s1">intrin</span><span class="s2">, </span><span class="s1">func):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Test intrinsics: 
+            npyv_ceil_##SFX 
+            npyv_trunc_##SFX 
+        &quot;&quot;&quot;</span>
+        <span class="s1">intrin_name = intrin</span>
+        <span class="s1">intrin = eval(intrin)</span>
+        <span class="s1">pinf</span><span class="s2">, </span><span class="s1">ninf</span><span class="s2">, </span><span class="s1">nan = self._pinfinity()</span><span class="s2">, </span><span class="s1">self._ninfinity()</span><span class="s2">, </span><span class="s1">self._nan()</span>
+        <span class="s0"># special cases</span>
+        <span class="s1">round_cases = ((nan</span><span class="s2">, </span><span class="s1">nan)</span><span class="s2">, </span><span class="s1">(pinf</span><span class="s2">, </span><span class="s1">pinf)</span><span class="s2">, </span><span class="s1">(ninf</span><span class="s2">, </span><span class="s1">ninf))</span>
+        <span class="s2">for </span><span class="s1">case</span><span class="s2">, </span><span class="s1">desired </span><span class="s2">in </span><span class="s1">round_cases:</span>
+            <span class="s1">data_round = [desired]*self.nlanes</span>
+            <span class="s1">_round = intrin(self.setall(case))</span>
+            <span class="s2">assert </span><span class="s1">_round == pytest.approx(data_round</span><span class="s2">, </span><span class="s1">nan_ok=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">range(</span><span class="s5">0</span><span class="s2">, </span><span class="s5">2</span><span class="s1">**</span><span class="s5">20</span><span class="s2">, </span><span class="s5">256</span><span class="s1">**</span><span class="s5">2</span><span class="s1">):</span>
+            <span class="s2">for </span><span class="s1">w </span><span class="s2">in </span><span class="s1">(-</span><span class="s5">1.05</span><span class="s2">, </span><span class="s1">-</span><span class="s5">1.10</span><span class="s2">, </span><span class="s1">-</span><span class="s5">1.15</span><span class="s2">, </span><span class="s5">1.05</span><span class="s2">, </span><span class="s5">1.10</span><span class="s2">, </span><span class="s5">1.15</span><span class="s1">):</span>
+                <span class="s1">data = [x*w+a </span><span class="s2">for </span><span class="s1">a </span><span class="s2">in </span><span class="s1">range(self.nlanes)]</span>
+                <span class="s1">vdata = self.load(data)</span>
+                <span class="s1">data_round = [func(x) </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">data]</span>
+                <span class="s1">_round = intrin(vdata)</span>
+                <span class="s2">assert </span><span class="s1">_round == data_round</span>
+        <span class="s0"># signed zero</span>
+        <span class="s2">if </span><span class="s4">&quot;ceil&quot; </span><span class="s2">in </span><span class="s1">intrin_name </span><span class="s2">or </span><span class="s4">&quot;trunc&quot; </span><span class="s2">in </span><span class="s1">intrin_name:</span>
+            <span class="s2">for </span><span class="s1">w </span><span class="s2">in </span><span class="s1">(-</span><span class="s5">0.25</span><span class="s2">, </span><span class="s1">-</span><span class="s5">0.30</span><span class="s2">, </span><span class="s1">-</span><span class="s5">0.45</span><span class="s1">):</span>
+                <span class="s1">_round = self._to_unsigned(intrin(self.setall(w)))</span>
+                <span class="s1">data_round = self._to_unsigned(self.setall(-</span><span class="s5">0.0</span><span class="s1">))</span>
+                <span class="s2">assert </span><span class="s1">_round == data_round</span>
+    
+    <span class="s2">def </span><span class="s1">test_max(self):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Test intrinsics: 
+            npyv_max_##SFX 
+            npyv_maxp_##SFX 
+        &quot;&quot;&quot;</span>
+        <span class="s1">data_a = self._data()</span>
+        <span class="s1">data_b = self._data(self.nlanes)</span>
+        <span class="s1">vdata_a</span><span class="s2">, </span><span class="s1">vdata_b = self.load(data_a)</span><span class="s2">, </span><span class="s1">self.load(data_b)</span>
+        <span class="s1">data_max = [max(a</span><span class="s2">, </span><span class="s1">b) </span><span class="s2">for </span><span class="s1">a</span><span class="s2">, </span><span class="s1">b </span><span class="s2">in </span><span class="s1">zip(data_a</span><span class="s2">, </span><span class="s1">data_b)]</span>
+        <span class="s1">_max = self.max(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+        <span class="s2">assert </span><span class="s1">_max == data_max</span>
+        <span class="s1">maxp = self.maxp(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+        <span class="s2">assert </span><span class="s1">maxp == data_max</span>
+        <span class="s0"># test IEEE standards</span>
+        <span class="s1">pinf</span><span class="s2">, </span><span class="s1">ninf</span><span class="s2">, </span><span class="s1">nan = self._pinfinity()</span><span class="s2">, </span><span class="s1">self._ninfinity()</span><span class="s2">, </span><span class="s1">self._nan()</span>
+        <span class="s1">max_cases = ((nan</span><span class="s2">, </span><span class="s1">nan</span><span class="s2">, </span><span class="s1">nan)</span><span class="s2">, </span><span class="s1">(nan</span><span class="s2">, </span><span class="s5">10</span><span class="s2">, </span><span class="s5">10</span><span class="s1">)</span><span class="s2">, </span><span class="s1">(</span><span class="s5">10</span><span class="s2">, </span><span class="s1">nan</span><span class="s2">, </span><span class="s5">10</span><span class="s1">)</span><span class="s2">,</span>
+                     <span class="s1">(pinf</span><span class="s2">, </span><span class="s1">pinf</span><span class="s2">, </span><span class="s1">pinf)</span><span class="s2">, </span><span class="s1">(pinf</span><span class="s2">, </span><span class="s5">10</span><span class="s2">, </span><span class="s1">pinf)</span><span class="s2">, </span><span class="s1">(</span><span class="s5">10</span><span class="s2">, </span><span class="s1">pinf</span><span class="s2">, </span><span class="s1">pinf)</span><span class="s2">,</span>
+                     <span class="s1">(ninf</span><span class="s2">, </span><span class="s1">ninf</span><span class="s2">, </span><span class="s1">ninf)</span><span class="s2">, </span><span class="s1">(ninf</span><span class="s2">, </span><span class="s5">10</span><span class="s2">, </span><span class="s5">10</span><span class="s1">)</span><span class="s2">, </span><span class="s1">(</span><span class="s5">10</span><span class="s2">, </span><span class="s1">ninf</span><span class="s2">, </span><span class="s5">10</span><span class="s1">)</span><span class="s2">,</span>
+                     <span class="s1">(</span><span class="s5">10</span><span class="s2">, </span><span class="s5">0</span><span class="s2">, </span><span class="s5">10</span><span class="s1">)</span><span class="s2">, </span><span class="s1">(</span><span class="s5">10</span><span class="s2">, </span><span class="s1">-</span><span class="s5">10</span><span class="s2">, </span><span class="s5">10</span><span class="s1">))</span>
+        <span class="s2">for </span><span class="s1">case_operand1</span><span class="s2">, </span><span class="s1">case_operand2</span><span class="s2">, </span><span class="s1">desired </span><span class="s2">in </span><span class="s1">max_cases:</span>
+            <span class="s1">data_max = [desired]*self.nlanes</span>
+            <span class="s1">vdata_a = self.setall(case_operand1)</span>
+            <span class="s1">vdata_b = self.setall(case_operand2)</span>
+            <span class="s1">maxp = self.maxp(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+            <span class="s2">assert </span><span class="s1">maxp == pytest.approx(data_max</span><span class="s2">, </span><span class="s1">nan_ok=</span><span class="s2">True</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">nan </span><span class="s2">in </span><span class="s1">(case_operand1</span><span class="s2">, </span><span class="s1">case_operand2</span><span class="s2">, </span><span class="s1">desired):</span>
+                <span class="s2">continue</span>
+            <span class="s1">_max = self.max(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+            <span class="s2">assert </span><span class="s1">_max == data_max</span>
+
+    <span class="s2">def </span><span class="s1">test_min(self):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Test intrinsics: 
+            npyv_min_##SFX 
+            npyv_minp_##SFX 
+        &quot;&quot;&quot;</span>
+        <span class="s1">data_a = self._data()</span>
+        <span class="s1">data_b = self._data(self.nlanes)</span>
+        <span class="s1">vdata_a</span><span class="s2">, </span><span class="s1">vdata_b = self.load(data_a)</span><span class="s2">, </span><span class="s1">self.load(data_b)</span>
+        <span class="s1">data_min = [min(a</span><span class="s2">, </span><span class="s1">b) </span><span class="s2">for </span><span class="s1">a</span><span class="s2">, </span><span class="s1">b </span><span class="s2">in </span><span class="s1">zip(data_a</span><span class="s2">, </span><span class="s1">data_b)]</span>
+        <span class="s1">_min = self.min(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+        <span class="s2">assert </span><span class="s1">_min == data_min</span>
+        <span class="s1">minp = self.minp(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+        <span class="s2">assert </span><span class="s1">minp == data_min</span>
+        <span class="s0"># test IEEE standards</span>
+        <span class="s1">pinf</span><span class="s2">, </span><span class="s1">ninf</span><span class="s2">, </span><span class="s1">nan = self._pinfinity()</span><span class="s2">, </span><span class="s1">self._ninfinity()</span><span class="s2">, </span><span class="s1">self._nan()</span>
+        <span class="s1">min_cases = ((nan</span><span class="s2">, </span><span class="s1">nan</span><span class="s2">, </span><span class="s1">nan)</span><span class="s2">, </span><span class="s1">(nan</span><span class="s2">, </span><span class="s5">10</span><span class="s2">, </span><span class="s5">10</span><span class="s1">)</span><span class="s2">, </span><span class="s1">(</span><span class="s5">10</span><span class="s2">, </span><span class="s1">nan</span><span class="s2">, </span><span class="s5">10</span><span class="s1">)</span><span class="s2">,</span>
+                     <span class="s1">(pinf</span><span class="s2">, </span><span class="s1">pinf</span><span class="s2">, </span><span class="s1">pinf)</span><span class="s2">, </span><span class="s1">(pinf</span><span class="s2">, </span><span class="s5">10</span><span class="s2">, </span><span class="s5">10</span><span class="s1">)</span><span class="s2">, </span><span class="s1">(</span><span class="s5">10</span><span class="s2">, </span><span class="s1">pinf</span><span class="s2">, </span><span class="s5">10</span><span class="s1">)</span><span class="s2">,</span>
+                     <span class="s1">(ninf</span><span class="s2">, </span><span class="s1">ninf</span><span class="s2">, </span><span class="s1">ninf)</span><span class="s2">, </span><span class="s1">(ninf</span><span class="s2">, </span><span class="s5">10</span><span class="s2">, </span><span class="s1">ninf)</span><span class="s2">, </span><span class="s1">(</span><span class="s5">10</span><span class="s2">, </span><span class="s1">ninf</span><span class="s2">, </span><span class="s1">ninf)</span><span class="s2">,</span>
+                     <span class="s1">(</span><span class="s5">10</span><span class="s2">, </span><span class="s5">0</span><span class="s2">, </span><span class="s5">0</span><span class="s1">)</span><span class="s2">, </span><span class="s1">(</span><span class="s5">10</span><span class="s2">, </span><span class="s1">-</span><span class="s5">10</span><span class="s2">, </span><span class="s1">-</span><span class="s5">10</span><span class="s1">))</span>
+        <span class="s2">for </span><span class="s1">case_operand1</span><span class="s2">, </span><span class="s1">case_operand2</span><span class="s2">, </span><span class="s1">desired </span><span class="s2">in </span><span class="s1">min_cases:</span>
+            <span class="s1">data_min = [desired]*self.nlanes</span>
+            <span class="s1">vdata_a = self.setall(case_operand1)</span>
+            <span class="s1">vdata_b = self.setall(case_operand2)</span>
+            <span class="s1">minp = self.minp(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+            <span class="s2">assert </span><span class="s1">minp == pytest.approx(data_min</span><span class="s2">, </span><span class="s1">nan_ok=</span><span class="s2">True</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">nan </span><span class="s2">in </span><span class="s1">(case_operand1</span><span class="s2">, </span><span class="s1">case_operand2</span><span class="s2">, </span><span class="s1">desired):</span>
+                <span class="s2">continue</span>
+            <span class="s1">_min = self.min(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+            <span class="s2">assert </span><span class="s1">_min == data_min</span>
+
+    <span class="s2">def </span><span class="s1">test_reciprocal(self):</span>
+        <span class="s1">pinf</span><span class="s2">, </span><span class="s1">ninf</span><span class="s2">, </span><span class="s1">nan = self._pinfinity()</span><span class="s2">, </span><span class="s1">self._ninfinity()</span><span class="s2">, </span><span class="s1">self._nan()</span>
+        <span class="s1">data = self._data()</span>
+        <span class="s1">vdata = self.load(self._data())</span>
+
+        <span class="s1">recip_cases = ((nan</span><span class="s2">, </span><span class="s1">nan)</span><span class="s2">, </span><span class="s1">(pinf</span><span class="s2">, </span><span class="s5">0.0</span><span class="s1">)</span><span class="s2">, </span><span class="s1">(ninf</span><span class="s2">, </span><span class="s1">-</span><span class="s5">0.0</span><span class="s1">)</span><span class="s2">, </span><span class="s1">(</span><span class="s5">0.0</span><span class="s2">, </span><span class="s1">pinf)</span><span class="s2">, </span><span class="s1">(-</span><span class="s5">0.0</span><span class="s2">, </span><span class="s1">ninf))</span>
+        <span class="s2">for </span><span class="s1">case</span><span class="s2">, </span><span class="s1">desired </span><span class="s2">in </span><span class="s1">recip_cases:</span>
+            <span class="s1">data_recip = [desired]*self.nlanes</span>
+            <span class="s1">recip = self.recip(self.setall(case))</span>
+            <span class="s2">assert </span><span class="s1">recip == pytest.approx(data_recip</span><span class="s2">, </span><span class="s1">nan_ok=</span><span class="s2">True</span><span class="s1">)</span>
+
+        <span class="s1">data_recip = self.load([</span><span class="s5">1</span><span class="s1">/x </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">data]) </span><span class="s0"># load to truncate precision</span>
+        <span class="s1">recip = self.recip(vdata)</span>
+        <span class="s2">assert </span><span class="s1">recip == data_recip</span>
+
+    <span class="s2">def </span><span class="s1">test_special_cases(self):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Compare Not NaN. Test intrinsics: 
+            npyv_notnan_##SFX 
+        &quot;&quot;&quot;</span>
+        <span class="s1">nnan = self.notnan(self.setall(self._nan()))</span>
+        <span class="s2">assert </span><span class="s1">nnan == [</span><span class="s5">0</span><span class="s1">]*self.nlanes</span>
+
+<span class="s2">class </span><span class="s1">_SIMD_ALL(_Test_Utility):</span>
+    <span class="s3">&quot;&quot;&quot; 
+    To test all vector types at once 
+    &quot;&quot;&quot;</span>
+    <span class="s2">def </span><span class="s1">test_memory_load(self):</span>
+        <span class="s1">data = self._data()</span>
+        <span class="s0"># unaligned load</span>
+        <span class="s1">load_data = self.load(data)</span>
+        <span class="s2">assert </span><span class="s1">load_data == data</span>
+        <span class="s0"># aligned load</span>
+        <span class="s1">loada_data = self.loada(data)</span>
+        <span class="s2">assert </span><span class="s1">loada_data == data</span>
+        <span class="s0"># stream load</span>
+        <span class="s1">loads_data = self.loads(data)</span>
+        <span class="s2">assert </span><span class="s1">loads_data == data</span>
+        <span class="s0"># load lower part</span>
+        <span class="s1">loadl = self.loadl(data)</span>
+        <span class="s1">loadl_half = list(loadl)[:self.nlanes//</span><span class="s5">2</span><span class="s1">]</span>
+        <span class="s1">data_half = data[:self.nlanes//</span><span class="s5">2</span><span class="s1">]</span>
+        <span class="s2">assert </span><span class="s1">loadl_half == data_half</span>
+        <span class="s2">assert </span><span class="s1">loadl != data </span><span class="s0"># detect overflow</span>
+
+    <span class="s2">def </span><span class="s1">test_memory_store(self):</span>
+        <span class="s1">data = self._data()</span>
+        <span class="s1">vdata = self.load(data)</span>
+        <span class="s0"># unaligned store</span>
+        <span class="s1">store = [</span><span class="s5">0</span><span class="s1">] * self.nlanes</span>
+        <span class="s1">self.store(store</span><span class="s2">, </span><span class="s1">vdata)</span>
+        <span class="s2">assert </span><span class="s1">store == data</span>
+        <span class="s0"># aligned store</span>
+        <span class="s1">store_a = [</span><span class="s5">0</span><span class="s1">] * self.nlanes</span>
+        <span class="s1">self.storea(store_a</span><span class="s2">, </span><span class="s1">vdata)</span>
+        <span class="s2">assert </span><span class="s1">store_a == data</span>
+        <span class="s0"># stream store</span>
+        <span class="s1">store_s = [</span><span class="s5">0</span><span class="s1">] * self.nlanes</span>
+        <span class="s1">self.stores(store_s</span><span class="s2">, </span><span class="s1">vdata)</span>
+        <span class="s2">assert </span><span class="s1">store_s == data</span>
+        <span class="s0"># store lower part</span>
+        <span class="s1">store_l = [</span><span class="s5">0</span><span class="s1">] * self.nlanes</span>
+        <span class="s1">self.storel(store_l</span><span class="s2">, </span><span class="s1">vdata)</span>
+        <span class="s2">assert </span><span class="s1">store_l[:self.nlanes//</span><span class="s5">2</span><span class="s1">] == data[:self.nlanes//</span><span class="s5">2</span><span class="s1">]</span>
+        <span class="s2">assert </span><span class="s1">store_l != vdata </span><span class="s0"># detect overflow</span>
+        <span class="s0"># store higher part</span>
+        <span class="s1">store_h = [</span><span class="s5">0</span><span class="s1">] * self.nlanes</span>
+        <span class="s1">self.storeh(store_h</span><span class="s2">, </span><span class="s1">vdata)</span>
+        <span class="s2">assert </span><span class="s1">store_h[:self.nlanes//</span><span class="s5">2</span><span class="s1">] == data[self.nlanes//</span><span class="s5">2</span><span class="s1">:]</span>
+        <span class="s2">assert </span><span class="s1">store_h != vdata  </span><span class="s0"># detect overflow</span>
+
+    <span class="s2">def </span><span class="s1">test_memory_partial_load(self):</span>
+        <span class="s2">if </span><span class="s1">self.sfx </span><span class="s2">in </span><span class="s1">(</span><span class="s4">&quot;u8&quot;</span><span class="s2">, </span><span class="s4">&quot;s8&quot;</span><span class="s2">, </span><span class="s4">&quot;u16&quot;</span><span class="s2">, </span><span class="s4">&quot;s16&quot;</span><span class="s1">):</span>
+            <span class="s2">return</span>
+
+        <span class="s1">data = self._data()</span>
+        <span class="s1">lanes = list(range(</span><span class="s5">1</span><span class="s2">, </span><span class="s1">self.nlanes + </span><span class="s5">1</span><span class="s1">))</span>
+        <span class="s1">lanes += [self.nlanes**</span><span class="s5">2</span><span class="s2">, </span><span class="s1">self.nlanes**</span><span class="s5">4</span><span class="s1">] </span><span class="s0"># test out of range</span>
+        <span class="s2">for </span><span class="s1">n </span><span class="s2">in </span><span class="s1">lanes:</span>
+            <span class="s1">load_till  = self.load_till(data</span><span class="s2">, </span><span class="s1">n</span><span class="s2">, </span><span class="s5">15</span><span class="s1">)</span>
+            <span class="s1">data_till  = data[:n] + [</span><span class="s5">15</span><span class="s1">] * (self.nlanes-n)</span>
+            <span class="s2">assert </span><span class="s1">load_till == data_till</span>
+            <span class="s1">load_tillz = self.load_tillz(data</span><span class="s2">, </span><span class="s1">n)</span>
+            <span class="s1">data_tillz = data[:n] + [</span><span class="s5">0</span><span class="s1">] * (self.nlanes-n)</span>
+            <span class="s2">assert </span><span class="s1">load_tillz == data_tillz</span>
+
+    <span class="s2">def </span><span class="s1">test_memory_partial_store(self):</span>
+        <span class="s2">if </span><span class="s1">self.sfx </span><span class="s2">in </span><span class="s1">(</span><span class="s4">&quot;u8&quot;</span><span class="s2">, </span><span class="s4">&quot;s8&quot;</span><span class="s2">, </span><span class="s4">&quot;u16&quot;</span><span class="s2">, </span><span class="s4">&quot;s16&quot;</span><span class="s1">):</span>
+            <span class="s2">return</span>
+
+        <span class="s1">data = self._data()</span>
+        <span class="s1">data_rev = self._data(reverse=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s1">vdata = self.load(data)</span>
+        <span class="s1">lanes = list(range(</span><span class="s5">1</span><span class="s2">, </span><span class="s1">self.nlanes + </span><span class="s5">1</span><span class="s1">))</span>
+        <span class="s1">lanes += [self.nlanes**</span><span class="s5">2</span><span class="s2">, </span><span class="s1">self.nlanes**</span><span class="s5">4</span><span class="s1">]</span>
+        <span class="s2">for </span><span class="s1">n </span><span class="s2">in </span><span class="s1">lanes:</span>
+            <span class="s1">data_till = data_rev.copy()</span>
+            <span class="s1">data_till[:n] = data[:n]</span>
+            <span class="s1">store_till = self._data(reverse=</span><span class="s2">True</span><span class="s1">)</span>
+            <span class="s1">self.store_till(store_till</span><span class="s2">, </span><span class="s1">n</span><span class="s2">, </span><span class="s1">vdata)</span>
+            <span class="s2">assert </span><span class="s1">store_till == data_till</span>
+
+    <span class="s2">def </span><span class="s1">test_memory_noncont_load(self):</span>
+        <span class="s2">if </span><span class="s1">self.sfx </span><span class="s2">in </span><span class="s1">(</span><span class="s4">&quot;u8&quot;</span><span class="s2">, </span><span class="s4">&quot;s8&quot;</span><span class="s2">, </span><span class="s4">&quot;u16&quot;</span><span class="s2">, </span><span class="s4">&quot;s16&quot;</span><span class="s1">):</span>
+            <span class="s2">return</span>
+
+        <span class="s2">for </span><span class="s1">stride </span><span class="s2">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s2">, </span><span class="s5">64</span><span class="s1">):</span>
+            <span class="s1">data = self._data(count=stride*self.nlanes)</span>
+            <span class="s1">data_stride = data[::stride]</span>
+            <span class="s1">loadn = self.loadn(data</span><span class="s2">, </span><span class="s1">stride)</span>
+            <span class="s2">assert </span><span class="s1">loadn == data_stride</span>
+
+        <span class="s2">for </span><span class="s1">stride </span><span class="s2">in </span><span class="s1">range(-</span><span class="s5">64</span><span class="s2">, </span><span class="s5">0</span><span class="s1">):</span>
+            <span class="s1">data = self._data(stride</span><span class="s2">, </span><span class="s1">-stride*self.nlanes)</span>
+            <span class="s1">data_stride = self.load(data[::stride]) </span><span class="s0"># cast unsigned</span>
+            <span class="s1">loadn = self.loadn(data</span><span class="s2">, </span><span class="s1">stride)</span>
+            <span class="s2">assert </span><span class="s1">loadn == data_stride</span>
+
+    <span class="s2">def </span><span class="s1">test_memory_noncont_partial_load(self):</span>
+        <span class="s2">if </span><span class="s1">self.sfx </span><span class="s2">in </span><span class="s1">(</span><span class="s4">&quot;u8&quot;</span><span class="s2">, </span><span class="s4">&quot;s8&quot;</span><span class="s2">, </span><span class="s4">&quot;u16&quot;</span><span class="s2">, </span><span class="s4">&quot;s16&quot;</span><span class="s1">):</span>
+            <span class="s2">return</span>
+
+        <span class="s1">lanes = list(range(</span><span class="s5">1</span><span class="s2">, </span><span class="s1">self.nlanes + </span><span class="s5">1</span><span class="s1">))</span>
+        <span class="s1">lanes += [self.nlanes**</span><span class="s5">2</span><span class="s2">, </span><span class="s1">self.nlanes**</span><span class="s5">4</span><span class="s1">]</span>
+        <span class="s2">for </span><span class="s1">stride </span><span class="s2">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s2">, </span><span class="s5">64</span><span class="s1">):</span>
+            <span class="s1">data = self._data(count=stride*self.nlanes)</span>
+            <span class="s1">data_stride = data[::stride]</span>
+            <span class="s2">for </span><span class="s1">n </span><span class="s2">in </span><span class="s1">lanes:</span>
+                <span class="s1">data_stride_till = data_stride[:n] + [</span><span class="s5">15</span><span class="s1">] * (self.nlanes-n)</span>
+                <span class="s1">loadn_till = self.loadn_till(data</span><span class="s2">, </span><span class="s1">stride</span><span class="s2">, </span><span class="s1">n</span><span class="s2">, </span><span class="s5">15</span><span class="s1">)</span>
+                <span class="s2">assert </span><span class="s1">loadn_till == data_stride_till</span>
+                <span class="s1">data_stride_tillz = data_stride[:n] + [</span><span class="s5">0</span><span class="s1">] * (self.nlanes-n)</span>
+                <span class="s1">loadn_tillz = self.loadn_tillz(data</span><span class="s2">, </span><span class="s1">stride</span><span class="s2">, </span><span class="s1">n)</span>
+                <span class="s2">assert </span><span class="s1">loadn_tillz == data_stride_tillz</span>
+
+        <span class="s2">for </span><span class="s1">stride </span><span class="s2">in </span><span class="s1">range(-</span><span class="s5">64</span><span class="s2">, </span><span class="s5">0</span><span class="s1">):</span>
+            <span class="s1">data = self._data(stride</span><span class="s2">, </span><span class="s1">-stride*self.nlanes)</span>
+            <span class="s1">data_stride = list(self.load(data[::stride])) </span><span class="s0"># cast unsigned</span>
+            <span class="s2">for </span><span class="s1">n </span><span class="s2">in </span><span class="s1">lanes:</span>
+                <span class="s1">data_stride_till = data_stride[:n] + [</span><span class="s5">15</span><span class="s1">] * (self.nlanes-n)</span>
+                <span class="s1">loadn_till = self.loadn_till(data</span><span class="s2">, </span><span class="s1">stride</span><span class="s2">, </span><span class="s1">n</span><span class="s2">, </span><span class="s5">15</span><span class="s1">)</span>
+                <span class="s2">assert </span><span class="s1">loadn_till == data_stride_till</span>
+                <span class="s1">data_stride_tillz = data_stride[:n] + [</span><span class="s5">0</span><span class="s1">] * (self.nlanes-n)</span>
+                <span class="s1">loadn_tillz = self.loadn_tillz(data</span><span class="s2">, </span><span class="s1">stride</span><span class="s2">, </span><span class="s1">n)</span>
+                <span class="s2">assert </span><span class="s1">loadn_tillz == data_stride_tillz</span>
+
+    <span class="s2">def </span><span class="s1">test_memory_noncont_store(self):</span>
+        <span class="s2">if </span><span class="s1">self.sfx </span><span class="s2">in </span><span class="s1">(</span><span class="s4">&quot;u8&quot;</span><span class="s2">, </span><span class="s4">&quot;s8&quot;</span><span class="s2">, </span><span class="s4">&quot;u16&quot;</span><span class="s2">, </span><span class="s4">&quot;s16&quot;</span><span class="s1">):</span>
+            <span class="s2">return</span>
+
+        <span class="s1">vdata = self.load(self._data())</span>
+        <span class="s2">for </span><span class="s1">stride </span><span class="s2">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s2">, </span><span class="s5">64</span><span class="s1">):</span>
+            <span class="s1">data = [</span><span class="s5">15</span><span class="s1">] * stride * self.nlanes</span>
+            <span class="s1">data[::stride] = vdata</span>
+            <span class="s1">storen = [</span><span class="s5">15</span><span class="s1">] * stride * self.nlanes</span>
+            <span class="s1">storen += [</span><span class="s5">127</span><span class="s1">]*</span><span class="s5">64</span>
+            <span class="s1">self.storen(storen</span><span class="s2">, </span><span class="s1">stride</span><span class="s2">, </span><span class="s1">vdata)</span>
+            <span class="s2">assert </span><span class="s1">storen[:-</span><span class="s5">64</span><span class="s1">] == data</span>
+            <span class="s2">assert </span><span class="s1">storen[-</span><span class="s5">64</span><span class="s1">:] == [</span><span class="s5">127</span><span class="s1">]*</span><span class="s5">64 </span><span class="s0"># detect overflow</span>
+
+        <span class="s2">for </span><span class="s1">stride </span><span class="s2">in </span><span class="s1">range(-</span><span class="s5">64</span><span class="s2">, </span><span class="s5">0</span><span class="s1">):</span>
+            <span class="s1">data = [</span><span class="s5">15</span><span class="s1">] * -stride * self.nlanes</span>
+            <span class="s1">data[::stride] = vdata</span>
+            <span class="s1">storen = [</span><span class="s5">127</span><span class="s1">]*</span><span class="s5">64</span>
+            <span class="s1">storen += [</span><span class="s5">15</span><span class="s1">] * -stride * self.nlanes</span>
+            <span class="s1">self.storen(storen</span><span class="s2">, </span><span class="s1">stride</span><span class="s2">, </span><span class="s1">vdata)</span>
+            <span class="s2">assert </span><span class="s1">storen[</span><span class="s5">64</span><span class="s1">:] == data</span>
+            <span class="s2">assert </span><span class="s1">storen[:</span><span class="s5">64</span><span class="s1">] == [</span><span class="s5">127</span><span class="s1">]*</span><span class="s5">64 </span><span class="s0"># detect overflow</span>
+
+    <span class="s2">def </span><span class="s1">test_memory_noncont_partial_store(self):</span>
+        <span class="s2">if </span><span class="s1">self.sfx </span><span class="s2">in </span><span class="s1">(</span><span class="s4">&quot;u8&quot;</span><span class="s2">, </span><span class="s4">&quot;s8&quot;</span><span class="s2">, </span><span class="s4">&quot;u16&quot;</span><span class="s2">, </span><span class="s4">&quot;s16&quot;</span><span class="s1">):</span>
+            <span class="s2">return</span>
+
+        <span class="s1">data = self._data()</span>
+        <span class="s1">vdata = self.load(data)</span>
+        <span class="s1">lanes = list(range(</span><span class="s5">1</span><span class="s2">, </span><span class="s1">self.nlanes + </span><span class="s5">1</span><span class="s1">))</span>
+        <span class="s1">lanes += [self.nlanes**</span><span class="s5">2</span><span class="s2">, </span><span class="s1">self.nlanes**</span><span class="s5">4</span><span class="s1">]</span>
+        <span class="s2">for </span><span class="s1">stride </span><span class="s2">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s2">, </span><span class="s5">64</span><span class="s1">):</span>
+            <span class="s2">for </span><span class="s1">n </span><span class="s2">in </span><span class="s1">lanes:</span>
+                <span class="s1">data_till = [</span><span class="s5">15</span><span class="s1">] * stride * self.nlanes</span>
+                <span class="s1">data_till[::stride] = data[:n] + [</span><span class="s5">15</span><span class="s1">] * (self.nlanes-n)</span>
+                <span class="s1">storen_till = [</span><span class="s5">15</span><span class="s1">] * stride * self.nlanes</span>
+                <span class="s1">storen_till += [</span><span class="s5">127</span><span class="s1">]*</span><span class="s5">64</span>
+                <span class="s1">self.storen_till(storen_till</span><span class="s2">, </span><span class="s1">stride</span><span class="s2">, </span><span class="s1">n</span><span class="s2">, </span><span class="s1">vdata)</span>
+                <span class="s2">assert </span><span class="s1">storen_till[:-</span><span class="s5">64</span><span class="s1">] == data_till</span>
+                <span class="s2">assert </span><span class="s1">storen_till[-</span><span class="s5">64</span><span class="s1">:] == [</span><span class="s5">127</span><span class="s1">]*</span><span class="s5">64 </span><span class="s0"># detect overflow</span>
+
+        <span class="s2">for </span><span class="s1">stride </span><span class="s2">in </span><span class="s1">range(-</span><span class="s5">64</span><span class="s2">, </span><span class="s5">0</span><span class="s1">):</span>
+            <span class="s2">for </span><span class="s1">n </span><span class="s2">in </span><span class="s1">lanes:</span>
+                <span class="s1">data_till = [</span><span class="s5">15</span><span class="s1">] * -stride * self.nlanes</span>
+                <span class="s1">data_till[::stride] = data[:n] + [</span><span class="s5">15</span><span class="s1">] * (self.nlanes-n)</span>
+                <span class="s1">storen_till = [</span><span class="s5">127</span><span class="s1">]*</span><span class="s5">64</span>
+                <span class="s1">storen_till += [</span><span class="s5">15</span><span class="s1">] * -stride * self.nlanes</span>
+                <span class="s1">self.storen_till(storen_till</span><span class="s2">, </span><span class="s1">stride</span><span class="s2">, </span><span class="s1">n</span><span class="s2">, </span><span class="s1">vdata)</span>
+                <span class="s2">assert </span><span class="s1">storen_till[</span><span class="s5">64</span><span class="s1">:] == data_till</span>
+                <span class="s2">assert </span><span class="s1">storen_till[:</span><span class="s5">64</span><span class="s1">] == [</span><span class="s5">127</span><span class="s1">]*</span><span class="s5">64 </span><span class="s0"># detect overflow</span>
+
+    <span class="s2">def </span><span class="s1">test_misc(self):</span>
+        <span class="s1">broadcast_zero = self.zero()</span>
+        <span class="s2">assert </span><span class="s1">broadcast_zero == [</span><span class="s5">0</span><span class="s1">] * self.nlanes</span>
+        <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s2">, </span><span class="s5">10</span><span class="s1">):</span>
+            <span class="s1">broadcasti = self.setall(i)</span>
+            <span class="s2">assert </span><span class="s1">broadcasti == [i] * self.nlanes</span>
+
+        <span class="s1">data_a</span><span class="s2">, </span><span class="s1">data_b = self._data()</span><span class="s2">, </span><span class="s1">self._data(reverse=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s1">vdata_a</span><span class="s2">, </span><span class="s1">vdata_b = self.load(data_a)</span><span class="s2">, </span><span class="s1">self.load(data_b)</span>
+
+        <span class="s0"># py level of npyv_set_* don't support ignoring the extra specified lanes or</span>
+        <span class="s0"># fill non-specified lanes with zero.</span>
+        <span class="s1">vset = self.set(*data_a)</span>
+        <span class="s2">assert </span><span class="s1">vset == data_a</span>
+        <span class="s0"># py level of npyv_setf_* don't support ignoring the extra specified lanes or</span>
+        <span class="s0"># fill non-specified lanes with the specified scalar.</span>
+        <span class="s1">vsetf = self.setf(</span><span class="s5">10</span><span class="s2">, </span><span class="s1">*data_a)</span>
+        <span class="s2">assert </span><span class="s1">vsetf == data_a</span>
+
+        <span class="s0"># We're testing the sanity of _simd's type-vector,</span>
+        <span class="s0"># reinterpret* intrinsics itself are tested via compiler</span>
+        <span class="s0"># during the build of _simd module</span>
+        <span class="s1">sfxes = [</span><span class="s4">&quot;u8&quot;</span><span class="s2">, </span><span class="s4">&quot;s8&quot;</span><span class="s2">, </span><span class="s4">&quot;u16&quot;</span><span class="s2">, </span><span class="s4">&quot;s16&quot;</span><span class="s2">, </span><span class="s4">&quot;u32&quot;</span><span class="s2">, </span><span class="s4">&quot;s32&quot;</span><span class="s2">, </span><span class="s4">&quot;u64&quot;</span><span class="s2">, </span><span class="s4">&quot;s64&quot;</span><span class="s2">, </span><span class="s4">&quot;f32&quot;</span><span class="s1">]</span>
+        <span class="s2">if </span><span class="s1">self.npyv.simd_f64:</span>
+            <span class="s1">sfxes.append(</span><span class="s4">&quot;f64&quot;</span><span class="s1">)</span>
+        <span class="s2">for </span><span class="s1">sfx </span><span class="s2">in </span><span class="s1">sfxes:</span>
+            <span class="s1">vec_name = getattr(self</span><span class="s2">, </span><span class="s4">&quot;reinterpret_&quot; </span><span class="s1">+ sfx)(vdata_a).__name__</span>
+            <span class="s2">assert </span><span class="s1">vec_name == </span><span class="s4">&quot;npyv_&quot; </span><span class="s1">+ sfx</span>
+
+        <span class="s0"># select &amp; mask operations</span>
+        <span class="s1">select_a = self.select(self.cmpeq(self.zero()</span><span class="s2">, </span><span class="s1">self.zero())</span><span class="s2">, </span><span class="s1">vdata_a</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+        <span class="s2">assert </span><span class="s1">select_a == data_a</span>
+        <span class="s1">select_b = self.select(self.cmpneq(self.zero()</span><span class="s2">, </span><span class="s1">self.zero())</span><span class="s2">, </span><span class="s1">vdata_a</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+        <span class="s2">assert </span><span class="s1">select_b == data_b</span>
+
+        <span class="s0"># cleanup intrinsic is only used with AVX for</span>
+        <span class="s0"># zeroing registers to avoid the AVX-SSE transition penalty,</span>
+        <span class="s0"># so nothing to test here</span>
+        <span class="s1">self.npyv.cleanup()</span>
+
+    <span class="s2">def </span><span class="s1">test_reorder(self):</span>
+        <span class="s1">data_a</span><span class="s2">, </span><span class="s1">data_b  = self._data()</span><span class="s2">, </span><span class="s1">self._data(reverse=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s1">vdata_a</span><span class="s2">, </span><span class="s1">vdata_b = self.load(data_a)</span><span class="s2">, </span><span class="s1">self.load(data_b)</span>
+        <span class="s0"># lower half part</span>
+        <span class="s1">data_a_lo = data_a[:self.nlanes//</span><span class="s5">2</span><span class="s1">]</span>
+        <span class="s1">data_b_lo = data_b[:self.nlanes//</span><span class="s5">2</span><span class="s1">]</span>
+        <span class="s0"># higher half part</span>
+        <span class="s1">data_a_hi = data_a[self.nlanes//</span><span class="s5">2</span><span class="s1">:]</span>
+        <span class="s1">data_b_hi = data_b[self.nlanes//</span><span class="s5">2</span><span class="s1">:]</span>
+        <span class="s0"># combine two lower parts</span>
+        <span class="s1">combinel = self.combinel(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+        <span class="s2">assert </span><span class="s1">combinel == data_a_lo + data_b_lo</span>
+        <span class="s0"># combine two higher parts</span>
+        <span class="s1">combineh = self.combineh(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+        <span class="s2">assert </span><span class="s1">combineh == data_a_hi + data_b_hi</span>
+        <span class="s0"># combine x2</span>
+        <span class="s1">combine  = self.combine(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+        <span class="s2">assert </span><span class="s1">combine == (data_a_lo + data_b_lo</span><span class="s2">, </span><span class="s1">data_a_hi + data_b_hi)</span>
+        <span class="s0"># zip(interleave)</span>
+        <span class="s1">data_zipl = [v </span><span class="s2">for </span><span class="s1">p </span><span class="s2">in </span><span class="s1">zip(data_a_lo</span><span class="s2">, </span><span class="s1">data_b_lo) </span><span class="s2">for </span><span class="s1">v </span><span class="s2">in </span><span class="s1">p]</span>
+        <span class="s1">data_ziph = [v </span><span class="s2">for </span><span class="s1">p </span><span class="s2">in </span><span class="s1">zip(data_a_hi</span><span class="s2">, </span><span class="s1">data_b_hi) </span><span class="s2">for </span><span class="s1">v </span><span class="s2">in </span><span class="s1">p]</span>
+        <span class="s1">vzip  = self.zip(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+        <span class="s2">assert </span><span class="s1">vzip == (data_zipl</span><span class="s2">, </span><span class="s1">data_ziph)</span>
+
+    <span class="s2">def </span><span class="s1">test_reorder_rev64(self):</span>
+        <span class="s0"># Reverse elements of each 64-bit lane</span>
+        <span class="s1">ssize = self._scalar_size()</span>
+        <span class="s2">if </span><span class="s1">ssize == </span><span class="s5">64</span><span class="s1">:</span>
+            <span class="s2">return</span>
+        <span class="s1">data_rev64 = [</span>
+            <span class="s1">y </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">range(</span><span class="s5">0</span><span class="s2">, </span><span class="s1">self.nlanes</span><span class="s2">, </span><span class="s5">64</span><span class="s1">//ssize)</span>
+              <span class="s2">for </span><span class="s1">y </span><span class="s2">in </span><span class="s1">reversed(range(x</span><span class="s2">, </span><span class="s1">x + </span><span class="s5">64</span><span class="s1">//ssize))</span>
+        <span class="s1">]</span>
+        <span class="s1">rev64 = self.rev64(self.load(range(self.nlanes)))</span>
+        <span class="s2">assert </span><span class="s1">rev64 == data_rev64</span>
+
+    <span class="s2">def </span><span class="s1">test_operators_comparison(self):</span>
+        <span class="s2">if </span><span class="s1">self._is_fp():</span>
+            <span class="s1">data_a = self._data()</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">data_a = self._data(self._int_max() - self.nlanes)</span>
+        <span class="s1">data_b = self._data(self._int_min()</span><span class="s2">, </span><span class="s1">reverse=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s1">vdata_a</span><span class="s2">, </span><span class="s1">vdata_b = self.load(data_a)</span><span class="s2">, </span><span class="s1">self.load(data_b)</span>
+
+        <span class="s1">mask_true = self._true_mask()</span>
+        <span class="s2">def </span><span class="s1">to_bool(vector):</span>
+            <span class="s2">return </span><span class="s1">[lane == mask_true </span><span class="s2">for </span><span class="s1">lane </span><span class="s2">in </span><span class="s1">vector]</span>
+        <span class="s0"># equal</span>
+        <span class="s1">data_eq = [a == b </span><span class="s2">for </span><span class="s1">a</span><span class="s2">, </span><span class="s1">b </span><span class="s2">in </span><span class="s1">zip(data_a</span><span class="s2">, </span><span class="s1">data_b)]</span>
+        <span class="s1">cmpeq = to_bool(self.cmpeq(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b))</span>
+        <span class="s2">assert </span><span class="s1">cmpeq == data_eq</span>
+        <span class="s0"># not equal</span>
+        <span class="s1">data_neq = [a != b </span><span class="s2">for </span><span class="s1">a</span><span class="s2">, </span><span class="s1">b </span><span class="s2">in </span><span class="s1">zip(data_a</span><span class="s2">, </span><span class="s1">data_b)]</span>
+        <span class="s1">cmpneq = to_bool(self.cmpneq(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b))</span>
+        <span class="s2">assert </span><span class="s1">cmpneq == data_neq</span>
+        <span class="s0"># greater than</span>
+        <span class="s1">data_gt = [a &gt; b </span><span class="s2">for </span><span class="s1">a</span><span class="s2">, </span><span class="s1">b </span><span class="s2">in </span><span class="s1">zip(data_a</span><span class="s2">, </span><span class="s1">data_b)]</span>
+        <span class="s1">cmpgt = to_bool(self.cmpgt(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b))</span>
+        <span class="s2">assert </span><span class="s1">cmpgt == data_gt</span>
+        <span class="s0"># greater than and equal</span>
+        <span class="s1">data_ge = [a &gt;= b </span><span class="s2">for </span><span class="s1">a</span><span class="s2">, </span><span class="s1">b </span><span class="s2">in </span><span class="s1">zip(data_a</span><span class="s2">, </span><span class="s1">data_b)]</span>
+        <span class="s1">cmpge = to_bool(self.cmpge(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b))</span>
+        <span class="s2">assert </span><span class="s1">cmpge == data_ge</span>
+        <span class="s0"># less than</span>
+        <span class="s1">data_lt  = [a &lt; b </span><span class="s2">for </span><span class="s1">a</span><span class="s2">, </span><span class="s1">b </span><span class="s2">in </span><span class="s1">zip(data_a</span><span class="s2">, </span><span class="s1">data_b)]</span>
+        <span class="s1">cmplt = to_bool(self.cmplt(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b))</span>
+        <span class="s2">assert </span><span class="s1">cmplt == data_lt</span>
+        <span class="s0"># less than and equal</span>
+        <span class="s1">data_le  = [a &lt;= b </span><span class="s2">for </span><span class="s1">a</span><span class="s2">, </span><span class="s1">b </span><span class="s2">in </span><span class="s1">zip(data_a</span><span class="s2">, </span><span class="s1">data_b)]</span>
+        <span class="s1">cmple = to_bool(self.cmple(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b))</span>
+        <span class="s2">assert </span><span class="s1">cmple == data_le</span>
+
+    <span class="s2">def </span><span class="s1">test_operators_logical(self):</span>
+        <span class="s2">if </span><span class="s1">self._is_fp():</span>
+            <span class="s1">data_a = self._data()</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">data_a = self._data(self._int_max() - self.nlanes)</span>
+        <span class="s1">data_b = self._data(self._int_min()</span><span class="s2">, </span><span class="s1">reverse=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s1">vdata_a</span><span class="s2">, </span><span class="s1">vdata_b = self.load(data_a)</span><span class="s2">, </span><span class="s1">self.load(data_b)</span>
+
+        <span class="s2">if </span><span class="s1">self._is_fp():</span>
+            <span class="s1">data_cast_a = self._to_unsigned(vdata_a)</span>
+            <span class="s1">data_cast_b = self._to_unsigned(vdata_b)</span>
+            <span class="s1">cast</span><span class="s2">, </span><span class="s1">cast_data = self._to_unsigned</span><span class="s2">, </span><span class="s1">self._to_unsigned</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">data_cast_a</span><span class="s2">, </span><span class="s1">data_cast_b = data_a</span><span class="s2">, </span><span class="s1">data_b</span>
+            <span class="s1">cast</span><span class="s2">, </span><span class="s1">cast_data = </span><span class="s2">lambda </span><span class="s1">a: a</span><span class="s2">, </span><span class="s1">self.load</span>
+
+        <span class="s1">data_xor = cast_data([a ^ b </span><span class="s2">for </span><span class="s1">a</span><span class="s2">, </span><span class="s1">b </span><span class="s2">in </span><span class="s1">zip(data_cast_a</span><span class="s2">, </span><span class="s1">data_cast_b)])</span>
+        <span class="s1">vxor = cast(self.xor(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b))</span>
+        <span class="s2">assert </span><span class="s1">vxor == data_xor</span>
+
+        <span class="s1">data_or  = cast_data([a | b </span><span class="s2">for </span><span class="s1">a</span><span class="s2">, </span><span class="s1">b </span><span class="s2">in </span><span class="s1">zip(data_cast_a</span><span class="s2">, </span><span class="s1">data_cast_b)])</span>
+        <span class="s1">vor  = cast(getattr(self</span><span class="s2">, </span><span class="s4">&quot;or&quot;</span><span class="s1">)(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b))</span>
+        <span class="s2">assert </span><span class="s1">vor == data_or</span>
+
+        <span class="s1">data_and = cast_data([a &amp; b </span><span class="s2">for </span><span class="s1">a</span><span class="s2">, </span><span class="s1">b </span><span class="s2">in </span><span class="s1">zip(data_cast_a</span><span class="s2">, </span><span class="s1">data_cast_b)])</span>
+        <span class="s1">vand = cast(getattr(self</span><span class="s2">, </span><span class="s4">&quot;and&quot;</span><span class="s1">)(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b))</span>
+        <span class="s2">assert </span><span class="s1">vand == data_and</span>
+
+        <span class="s1">data_not = cast_data([~a </span><span class="s2">for </span><span class="s1">a </span><span class="s2">in </span><span class="s1">data_cast_a])</span>
+        <span class="s1">vnot = cast(getattr(self</span><span class="s2">, </span><span class="s4">&quot;not&quot;</span><span class="s1">)(vdata_a))</span>
+        <span class="s2">assert </span><span class="s1">vnot == data_not</span>
+
+    <span class="s2">def </span><span class="s1">test_conversion_boolean(self):</span>
+        <span class="s1">bsfx = </span><span class="s4">&quot;b&quot; </span><span class="s1">+ self.sfx[</span><span class="s5">1</span><span class="s1">:]</span>
+        <span class="s1">to_boolean = getattr(self.npyv</span><span class="s2">, </span><span class="s4">&quot;cvt_%s_%s&quot; </span><span class="s1">% (bsfx</span><span class="s2">, </span><span class="s1">self.sfx))</span>
+        <span class="s1">from_boolean = getattr(self.npyv</span><span class="s2">, </span><span class="s4">&quot;cvt_%s_%s&quot; </span><span class="s1">% (self.sfx</span><span class="s2">, </span><span class="s1">bsfx))</span>
+
+        <span class="s1">false_vb = to_boolean(self.setall(</span><span class="s5">0</span><span class="s1">))</span>
+        <span class="s1">true_vb  = self.cmpeq(self.setall(</span><span class="s5">0</span><span class="s1">)</span><span class="s2">, </span><span class="s1">self.setall(</span><span class="s5">0</span><span class="s1">))</span>
+        <span class="s2">assert </span><span class="s1">false_vb != true_vb</span>
+
+        <span class="s1">false_vsfx = from_boolean(false_vb)</span>
+        <span class="s1">true_vsfx = from_boolean(true_vb)</span>
+        <span class="s2">assert </span><span class="s1">false_vsfx != true_vsfx</span>
+
+    <span class="s2">def </span><span class="s1">test_conversion_expand(self):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Test expand intrinsics: 
+            npyv_expand_u16_u8 
+            npyv_expand_u32_u16 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self.sfx </span><span class="s2">not in </span><span class="s1">(</span><span class="s4">&quot;u8&quot;</span><span class="s2">, </span><span class="s4">&quot;u16&quot;</span><span class="s1">):</span>
+            <span class="s2">return</span>
+        <span class="s1">totype = self.sfx[</span><span class="s5">0</span><span class="s1">]+str(int(self.sfx[</span><span class="s5">1</span><span class="s1">:])*</span><span class="s5">2</span><span class="s1">)</span>
+        <span class="s1">expand = getattr(self.npyv</span><span class="s2">, </span><span class="s4">f&quot;expand_</span><span class="s2">{</span><span class="s1">totype</span><span class="s2">}</span><span class="s4">_</span><span class="s2">{</span><span class="s1">self.sfx</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+        <span class="s0"># close enough from the edge to detect any deviation</span>
+        <span class="s1">data  = self._data(self._int_max() - self.nlanes)</span>
+        <span class="s1">vdata = self.load(data)</span>
+        <span class="s1">edata = expand(vdata)</span>
+        <span class="s0"># lower half part</span>
+        <span class="s1">data_lo = data[:self.nlanes//</span><span class="s5">2</span><span class="s1">]</span>
+        <span class="s0"># higher half part</span>
+        <span class="s1">data_hi = data[self.nlanes//</span><span class="s5">2</span><span class="s1">:]</span>
+        <span class="s2">assert </span><span class="s1">edata == (data_lo</span><span class="s2">, </span><span class="s1">data_hi)</span>
+
+    <span class="s2">def </span><span class="s1">test_arithmetic_subadd(self):</span>
+        <span class="s2">if </span><span class="s1">self._is_fp():</span>
+            <span class="s1">data_a = self._data()</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">data_a = self._data(self._int_max() - self.nlanes)</span>
+        <span class="s1">data_b = self._data(self._int_min()</span><span class="s2">, </span><span class="s1">reverse=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s1">vdata_a</span><span class="s2">, </span><span class="s1">vdata_b = self.load(data_a)</span><span class="s2">, </span><span class="s1">self.load(data_b)</span>
+
+        <span class="s0"># non-saturated</span>
+        <span class="s1">data_add = self.load([a + b </span><span class="s2">for </span><span class="s1">a</span><span class="s2">, </span><span class="s1">b </span><span class="s2">in </span><span class="s1">zip(data_a</span><span class="s2">, </span><span class="s1">data_b)]) </span><span class="s0"># load to cast</span>
+        <span class="s1">add  = self.add(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+        <span class="s2">assert </span><span class="s1">add == data_add</span>
+        <span class="s1">data_sub  = self.load([a - b </span><span class="s2">for </span><span class="s1">a</span><span class="s2">, </span><span class="s1">b </span><span class="s2">in </span><span class="s1">zip(data_a</span><span class="s2">, </span><span class="s1">data_b)])</span>
+        <span class="s1">sub  = self.sub(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+        <span class="s2">assert </span><span class="s1">sub == data_sub</span>
+
+    <span class="s2">def </span><span class="s1">test_arithmetic_mul(self):</span>
+        <span class="s2">if </span><span class="s1">self.sfx </span><span class="s2">in </span><span class="s1">(</span><span class="s4">&quot;u64&quot;</span><span class="s2">, </span><span class="s4">&quot;s64&quot;</span><span class="s1">):</span>
+            <span class="s2">return</span>
+
+        <span class="s2">if </span><span class="s1">self._is_fp():</span>
+            <span class="s1">data_a = self._data()</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">data_a = self._data(self._int_max() - self.nlanes)</span>
+        <span class="s1">data_b = self._data(self._int_min()</span><span class="s2">, </span><span class="s1">reverse=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s1">vdata_a</span><span class="s2">, </span><span class="s1">vdata_b = self.load(data_a)</span><span class="s2">, </span><span class="s1">self.load(data_b)</span>
+
+        <span class="s1">data_mul = self.load([a * b </span><span class="s2">for </span><span class="s1">a</span><span class="s2">, </span><span class="s1">b </span><span class="s2">in </span><span class="s1">zip(data_a</span><span class="s2">, </span><span class="s1">data_b)])</span>
+        <span class="s1">mul = self.mul(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+        <span class="s2">assert </span><span class="s1">mul == data_mul</span>
+
+    <span class="s2">def </span><span class="s1">test_arithmetic_div(self):</span>
+        <span class="s2">if not </span><span class="s1">self._is_fp():</span>
+            <span class="s2">return</span>
+
+        <span class="s1">data_a</span><span class="s2">, </span><span class="s1">data_b = self._data()</span><span class="s2">, </span><span class="s1">self._data(reverse=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s1">vdata_a</span><span class="s2">, </span><span class="s1">vdata_b = self.load(data_a)</span><span class="s2">, </span><span class="s1">self.load(data_b)</span>
+
+        <span class="s0"># load to truncate f64 to precision of f32</span>
+        <span class="s1">data_div = self.load([a / b </span><span class="s2">for </span><span class="s1">a</span><span class="s2">, </span><span class="s1">b </span><span class="s2">in </span><span class="s1">zip(data_a</span><span class="s2">, </span><span class="s1">data_b)])</span>
+        <span class="s1">div = self.div(vdata_a</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+        <span class="s2">assert </span><span class="s1">div == data_div</span>
+
+    <span class="s2">def </span><span class="s1">test_arithmetic_intdiv(self):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Test integer division intrinsics: 
+            npyv_divisor_##sfx 
+            npyv_divc_##sfx 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self._is_fp():</span>
+            <span class="s2">return</span>
+
+        <span class="s1">int_min = self._int_min()</span>
+        <span class="s2">def </span><span class="s1">trunc_div(a</span><span class="s2">, </span><span class="s1">d):</span>
+            <span class="s3">&quot;&quot;&quot; 
+            Divide towards zero works with large integers &gt; 2^53, 
+            and wrap around overflow similar to what C does. 
+            &quot;&quot;&quot;</span>
+            <span class="s2">if </span><span class="s1">d == -</span><span class="s5">1 </span><span class="s2">and </span><span class="s1">a == int_min:</span>
+                <span class="s2">return </span><span class="s1">a</span>
+            <span class="s1">sign_a</span><span class="s2">, </span><span class="s1">sign_d = a &lt; </span><span class="s5">0</span><span class="s2">, </span><span class="s1">d &lt; </span><span class="s5">0</span>
+            <span class="s2">if </span><span class="s1">a == </span><span class="s5">0 </span><span class="s2">or </span><span class="s1">sign_a == sign_d:</span>
+                <span class="s2">return </span><span class="s1">a // d</span>
+            <span class="s2">return </span><span class="s1">(a + sign_d - sign_a) // d + </span><span class="s5">1</span>
+
+        <span class="s1">data = [</span><span class="s5">1</span><span class="s2">, </span><span class="s1">-int_min]  </span><span class="s0"># to test overflow</span>
+        <span class="s1">data += range(</span><span class="s5">0</span><span class="s2">, </span><span class="s5">2</span><span class="s1">**</span><span class="s5">8</span><span class="s2">, </span><span class="s5">2</span><span class="s1">**</span><span class="s5">5</span><span class="s1">)</span>
+        <span class="s1">data += range(</span><span class="s5">0</span><span class="s2">, </span><span class="s5">2</span><span class="s1">**</span><span class="s5">8</span><span class="s2">, </span><span class="s5">2</span><span class="s1">**</span><span class="s5">5</span><span class="s1">-</span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s1">bsize = self._scalar_size()</span>
+        <span class="s2">if </span><span class="s1">bsize &gt; </span><span class="s5">8</span><span class="s1">:</span>
+            <span class="s1">data += range(</span><span class="s5">2</span><span class="s1">**</span><span class="s5">8</span><span class="s2">, </span><span class="s5">2</span><span class="s1">**</span><span class="s5">16</span><span class="s2">, </span><span class="s5">2</span><span class="s1">**</span><span class="s5">13</span><span class="s1">)</span>
+            <span class="s1">data += range(</span><span class="s5">2</span><span class="s1">**</span><span class="s5">8</span><span class="s2">, </span><span class="s5">2</span><span class="s1">**</span><span class="s5">16</span><span class="s2">, </span><span class="s5">2</span><span class="s1">**</span><span class="s5">13</span><span class="s1">-</span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">bsize &gt; </span><span class="s5">16</span><span class="s1">:</span>
+            <span class="s1">data += range(</span><span class="s5">2</span><span class="s1">**</span><span class="s5">16</span><span class="s2">, </span><span class="s5">2</span><span class="s1">**</span><span class="s5">32</span><span class="s2">, </span><span class="s5">2</span><span class="s1">**</span><span class="s5">29</span><span class="s1">)</span>
+            <span class="s1">data += range(</span><span class="s5">2</span><span class="s1">**</span><span class="s5">16</span><span class="s2">, </span><span class="s5">2</span><span class="s1">**</span><span class="s5">32</span><span class="s2">, </span><span class="s5">2</span><span class="s1">**</span><span class="s5">29</span><span class="s1">-</span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">bsize &gt; </span><span class="s5">32</span><span class="s1">:</span>
+            <span class="s1">data += range(</span><span class="s5">2</span><span class="s1">**</span><span class="s5">32</span><span class="s2">, </span><span class="s5">2</span><span class="s1">**</span><span class="s5">64</span><span class="s2">, </span><span class="s5">2</span><span class="s1">**</span><span class="s5">61</span><span class="s1">)</span>
+            <span class="s1">data += range(</span><span class="s5">2</span><span class="s1">**</span><span class="s5">32</span><span class="s2">, </span><span class="s5">2</span><span class="s1">**</span><span class="s5">64</span><span class="s2">, </span><span class="s5">2</span><span class="s1">**</span><span class="s5">61</span><span class="s1">-</span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s0"># negate</span>
+        <span class="s1">data += [-x </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">data]</span>
+        <span class="s2">for </span><span class="s1">dividend</span><span class="s2">, </span><span class="s1">divisor </span><span class="s2">in </span><span class="s1">itertools.product(data</span><span class="s2">, </span><span class="s1">data):</span>
+            <span class="s1">divisor = self.setall(divisor)[</span><span class="s5">0</span><span class="s1">]  </span><span class="s0"># cast</span>
+            <span class="s2">if </span><span class="s1">divisor == </span><span class="s5">0</span><span class="s1">:</span>
+                <span class="s2">continue</span>
+            <span class="s1">dividend = self.load(self._data(dividend))</span>
+            <span class="s1">data_divc = [trunc_div(a</span><span class="s2">, </span><span class="s1">divisor) </span><span class="s2">for </span><span class="s1">a </span><span class="s2">in </span><span class="s1">dividend]</span>
+            <span class="s1">divisor_parms = self.divisor(divisor)</span>
+            <span class="s1">divc = self.divc(dividend</span><span class="s2">, </span><span class="s1">divisor_parms)</span>
+            <span class="s2">assert </span><span class="s1">divc == data_divc</span>
+
+    <span class="s2">def </span><span class="s1">test_arithmetic_reduce_sum(self):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Test reduce sum intrinsics: 
+            npyv_sum_##sfx 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self.sfx </span><span class="s2">not in </span><span class="s1">(</span><span class="s4">&quot;u32&quot;</span><span class="s2">, </span><span class="s4">&quot;u64&quot;</span><span class="s2">, </span><span class="s4">&quot;f32&quot;</span><span class="s2">, </span><span class="s4">&quot;f64&quot;</span><span class="s1">):</span>
+            <span class="s2">return</span>
+        <span class="s0"># reduce sum</span>
+        <span class="s1">data = self._data()</span>
+        <span class="s1">vdata = self.load(data)</span>
+
+        <span class="s1">data_sum = sum(data)</span>
+        <span class="s1">vsum = self.sum(vdata)</span>
+        <span class="s2">assert </span><span class="s1">vsum == data_sum</span>
+
+    <span class="s2">def </span><span class="s1">test_arithmetic_reduce_sumup(self):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Test extend reduce sum intrinsics: 
+            npyv_sumup_##sfx 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self.sfx </span><span class="s2">not in </span><span class="s1">(</span><span class="s4">&quot;u8&quot;</span><span class="s2">, </span><span class="s4">&quot;u16&quot;</span><span class="s1">):</span>
+            <span class="s2">return</span>
+        <span class="s1">rdata = (</span><span class="s5">0</span><span class="s2">, </span><span class="s1">self.nlanes</span><span class="s2">, </span><span class="s1">self._int_min()</span><span class="s2">, </span><span class="s1">self._int_max()-self.nlanes)</span>
+        <span class="s2">for </span><span class="s1">r </span><span class="s2">in </span><span class="s1">rdata:</span>
+            <span class="s1">data = self._data(r)</span>
+            <span class="s1">vdata = self.load(data)</span>
+            <span class="s1">data_sum = sum(data)</span>
+            <span class="s1">vsum = self.sumup(vdata)</span>
+            <span class="s2">assert </span><span class="s1">vsum == data_sum</span>
+
+    <span class="s2">def </span><span class="s1">test_mask_conditional(self):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Conditional addition and subtraction for all supported data types. 
+        Test intrinsics: 
+            npyv_ifadd_##SFX, npyv_ifsub_##SFX 
+        &quot;&quot;&quot;</span>
+        <span class="s1">vdata_a = self.load(self._data())</span>
+        <span class="s1">vdata_b = self.load(self._data(reverse=</span><span class="s2">True</span><span class="s1">))</span>
+        <span class="s1">true_mask  = self.cmpeq(self.zero()</span><span class="s2">, </span><span class="s1">self.zero())</span>
+        <span class="s1">false_mask = self.cmpneq(self.zero()</span><span class="s2">, </span><span class="s1">self.zero())</span>
+
+        <span class="s1">data_sub = self.sub(vdata_b</span><span class="s2">, </span><span class="s1">vdata_a)</span>
+        <span class="s1">ifsub = self.ifsub(true_mask</span><span class="s2">, </span><span class="s1">vdata_b</span><span class="s2">, </span><span class="s1">vdata_a</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+        <span class="s2">assert </span><span class="s1">ifsub == data_sub</span>
+        <span class="s1">ifsub = self.ifsub(false_mask</span><span class="s2">, </span><span class="s1">vdata_a</span><span class="s2">, </span><span class="s1">vdata_b</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+        <span class="s2">assert </span><span class="s1">ifsub == vdata_b</span>
+
+        <span class="s1">data_add = self.add(vdata_b</span><span class="s2">, </span><span class="s1">vdata_a)</span>
+        <span class="s1">ifadd = self.ifadd(true_mask</span><span class="s2">, </span><span class="s1">vdata_b</span><span class="s2">, </span><span class="s1">vdata_a</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+        <span class="s2">assert </span><span class="s1">ifadd == data_add</span>
+        <span class="s1">ifadd = self.ifadd(false_mask</span><span class="s2">, </span><span class="s1">vdata_a</span><span class="s2">, </span><span class="s1">vdata_b</span><span class="s2">, </span><span class="s1">vdata_b)</span>
+        <span class="s2">assert </span><span class="s1">ifadd == vdata_b</span>
+
+<span class="s1">bool_sfx = (</span><span class="s4">&quot;b8&quot;</span><span class="s2">, </span><span class="s4">&quot;b16&quot;</span><span class="s2">, </span><span class="s4">&quot;b32&quot;</span><span class="s2">, </span><span class="s4">&quot;b64&quot;</span><span class="s1">)</span>
+<span class="s1">int_sfx = (</span><span class="s4">&quot;u8&quot;</span><span class="s2">, </span><span class="s4">&quot;s8&quot;</span><span class="s2">, </span><span class="s4">&quot;u16&quot;</span><span class="s2">, </span><span class="s4">&quot;s16&quot;</span><span class="s2">, </span><span class="s4">&quot;u32&quot;</span><span class="s2">, </span><span class="s4">&quot;s32&quot;</span><span class="s2">, </span><span class="s4">&quot;u64&quot;</span><span class="s2">, </span><span class="s4">&quot;s64&quot;</span><span class="s1">)</span>
+<span class="s1">fp_sfx  = (</span><span class="s4">&quot;f32&quot;</span><span class="s2">, </span><span class="s4">&quot;f64&quot;</span><span class="s1">)</span>
+<span class="s1">all_sfx = int_sfx + fp_sfx</span>
+<span class="s1">tests_registry = {</span>
+    <span class="s1">bool_sfx: _SIMD_BOOL</span><span class="s2">,</span>
+    <span class="s1">int_sfx : _SIMD_INT</span><span class="s2">,</span>
+    <span class="s1">fp_sfx  : _SIMD_FP</span><span class="s2">,</span>
+    <span class="s1">(</span><span class="s4">&quot;f32&quot;</span><span class="s2">,</span><span class="s1">): _SIMD_FP32</span><span class="s2">,</span>
+    <span class="s1">(</span><span class="s4">&quot;f64&quot;</span><span class="s2">,</span><span class="s1">): _SIMD_FP64</span><span class="s2">,</span>
+    <span class="s1">all_sfx : _SIMD_ALL</span>
+<span class="s1">}</span>
+<span class="s2">for </span><span class="s1">target_name</span><span class="s2">, </span><span class="s1">npyv </span><span class="s2">in </span><span class="s1">targets.items():</span>
+    <span class="s1">simd_width = npyv.simd </span><span class="s2">if </span><span class="s1">npyv </span><span class="s2">else </span><span class="s4">''</span>
+    <span class="s1">pretty_name = target_name.split(</span><span class="s4">'__'</span><span class="s1">) </span><span class="s0"># multi-target separator</span>
+    <span class="s2">if </span><span class="s1">len(pretty_name) &gt; </span><span class="s5">1</span><span class="s1">:</span>
+        <span class="s0"># multi-target</span>
+        <span class="s1">pretty_name = </span><span class="s4">f&quot;(</span><span class="s2">{</span><span class="s4">' '</span><span class="s1">.join(pretty_name)</span><span class="s2">}</span><span class="s4">)&quot;</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">pretty_name = pretty_name[</span><span class="s5">0</span><span class="s1">]</span>
+
+    <span class="s1">skip = </span><span class="s4">&quot;&quot;</span>
+    <span class="s1">skip_sfx = dict()</span>
+    <span class="s2">if not </span><span class="s1">npyv:</span>
+        <span class="s1">skip = </span><span class="s4">f&quot;target '</span><span class="s2">{</span><span class="s1">pretty_name</span><span class="s2">}</span><span class="s4">' isn't supported by current machine&quot;</span>
+    <span class="s2">elif not </span><span class="s1">npyv.simd:</span>
+        <span class="s1">skip = </span><span class="s4">f&quot;target '</span><span class="s2">{</span><span class="s1">pretty_name</span><span class="s2">}</span><span class="s4">' isn't supported by NPYV&quot;</span>
+    <span class="s2">elif not </span><span class="s1">npyv.simd_f64:</span>
+        <span class="s1">skip_sfx[</span><span class="s4">&quot;f64&quot;</span><span class="s1">] = </span><span class="s4">f&quot;target '</span><span class="s2">{</span><span class="s1">pretty_name</span><span class="s2">}</span><span class="s4">' doesn't support double-precision&quot;</span>
+
+    <span class="s2">for </span><span class="s1">sfxes</span><span class="s2">, </span><span class="s1">cls </span><span class="s2">in </span><span class="s1">tests_registry.items():</span>
+        <span class="s2">for </span><span class="s1">sfx </span><span class="s2">in </span><span class="s1">sfxes:</span>
+            <span class="s1">skip_m = skip_sfx.get(sfx</span><span class="s2">, </span><span class="s1">skip)</span>
+            <span class="s1">inhr = (cls</span><span class="s2">,</span><span class="s1">)</span>
+            <span class="s1">attr = dict(npyv=targets[target_name]</span><span class="s2">, </span><span class="s1">sfx=sfx</span><span class="s2">, </span><span class="s1">target_name=target_name)</span>
+            <span class="s1">tcls = type(</span><span class="s4">f&quot;Test</span><span class="s2">{</span><span class="s1">cls.__name__</span><span class="s2">}</span><span class="s4">_</span><span class="s2">{</span><span class="s1">simd_width</span><span class="s2">}</span><span class="s4">_</span><span class="s2">{</span><span class="s1">target_name</span><span class="s2">}</span><span class="s4">_</span><span class="s2">{</span><span class="s1">sfx</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s2">, </span><span class="s1">inhr</span><span class="s2">, </span><span class="s1">attr)</span>
+            <span class="s2">if </span><span class="s1">skip_m:</span>
+                <span class="s1">pytest.mark.skip(reason=skip_m)(tcls)</span>
+            <span class="s1">globals()[tcls.__name__] = tcls</span>
+</pre>
+</body>
+</html>

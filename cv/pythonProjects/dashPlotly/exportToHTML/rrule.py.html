@@ -1,0 +1,1759 @@
+<html>
+<head>
+<title>rrule.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+rrule.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># -*- coding: utf-8 -*-</span>
+<span class="s2">&quot;&quot;&quot; 
+The rrule module offers a small, complete, and very fast, implementation of 
+the recurrence rules documented in the 
+`iCalendar RFC &lt;https://tools.ietf.org/html/rfc5545&gt;`_, 
+including support for caching of results. 
+&quot;&quot;&quot;</span>
+<span class="s3">import </span><span class="s1">calendar</span>
+<span class="s3">import </span><span class="s1">datetime</span>
+<span class="s3">import </span><span class="s1">heapq</span>
+<span class="s3">import </span><span class="s1">itertools</span>
+<span class="s3">import </span><span class="s1">re</span>
+<span class="s3">import </span><span class="s1">sys</span>
+<span class="s3">from </span><span class="s1">functools </span><span class="s3">import </span><span class="s1">wraps</span>
+<span class="s0"># For warning about deprecation of until and count</span>
+<span class="s3">from </span><span class="s1">warnings </span><span class="s3">import </span><span class="s1">warn</span>
+
+<span class="s3">from </span><span class="s1">six </span><span class="s3">import </span><span class="s1">advance_iterator</span><span class="s3">, </span><span class="s1">integer_types</span>
+
+<span class="s3">from </span><span class="s1">six.moves </span><span class="s3">import </span><span class="s1">_thread</span><span class="s3">, </span><span class="s1">range</span>
+
+<span class="s3">from </span><span class="s1">._common </span><span class="s3">import </span><span class="s1">weekday </span><span class="s3">as </span><span class="s1">weekdaybase</span>
+
+<span class="s3">try</span><span class="s1">:</span>
+    <span class="s3">from </span><span class="s1">math </span><span class="s3">import </span><span class="s1">gcd</span>
+<span class="s3">except </span><span class="s1">ImportError:</span>
+    <span class="s3">from </span><span class="s1">fractions </span><span class="s3">import </span><span class="s1">gcd</span>
+
+<span class="s1">__all__ = [</span><span class="s4">&quot;rrule&quot;</span><span class="s3">, </span><span class="s4">&quot;rruleset&quot;</span><span class="s3">, </span><span class="s4">&quot;rrulestr&quot;</span><span class="s3">,</span>
+           <span class="s4">&quot;YEARLY&quot;</span><span class="s3">, </span><span class="s4">&quot;MONTHLY&quot;</span><span class="s3">, </span><span class="s4">&quot;WEEKLY&quot;</span><span class="s3">, </span><span class="s4">&quot;DAILY&quot;</span><span class="s3">,</span>
+           <span class="s4">&quot;HOURLY&quot;</span><span class="s3">, </span><span class="s4">&quot;MINUTELY&quot;</span><span class="s3">, </span><span class="s4">&quot;SECONDLY&quot;</span><span class="s3">,</span>
+           <span class="s4">&quot;MO&quot;</span><span class="s3">, </span><span class="s4">&quot;TU&quot;</span><span class="s3">, </span><span class="s4">&quot;WE&quot;</span><span class="s3">, </span><span class="s4">&quot;TH&quot;</span><span class="s3">, </span><span class="s4">&quot;FR&quot;</span><span class="s3">, </span><span class="s4">&quot;SA&quot;</span><span class="s3">, </span><span class="s4">&quot;SU&quot;</span><span class="s1">]</span>
+
+<span class="s0"># Every mask is 7 days longer to handle cross-year weekly periods.</span>
+<span class="s1">M366MASK = tuple([</span><span class="s5">1</span><span class="s1">]*</span><span class="s5">31</span><span class="s1">+[</span><span class="s5">2</span><span class="s1">]*</span><span class="s5">29</span><span class="s1">+[</span><span class="s5">3</span><span class="s1">]*</span><span class="s5">31</span><span class="s1">+[</span><span class="s5">4</span><span class="s1">]*</span><span class="s5">30</span><span class="s1">+[</span><span class="s5">5</span><span class="s1">]*</span><span class="s5">31</span><span class="s1">+[</span><span class="s5">6</span><span class="s1">]*</span><span class="s5">30 </span><span class="s1">+</span>
+                 <span class="s1">[</span><span class="s5">7</span><span class="s1">]*</span><span class="s5">31</span><span class="s1">+[</span><span class="s5">8</span><span class="s1">]*</span><span class="s5">31</span><span class="s1">+[</span><span class="s5">9</span><span class="s1">]*</span><span class="s5">30</span><span class="s1">+[</span><span class="s5">10</span><span class="s1">]*</span><span class="s5">31</span><span class="s1">+[</span><span class="s5">11</span><span class="s1">]*</span><span class="s5">30</span><span class="s1">+[</span><span class="s5">12</span><span class="s1">]*</span><span class="s5">31</span><span class="s1">+[</span><span class="s5">1</span><span class="s1">]*</span><span class="s5">7</span><span class="s1">)</span>
+<span class="s1">M365MASK = list(M366MASK)</span>
+<span class="s1">M29</span><span class="s3">, </span><span class="s1">M30</span><span class="s3">, </span><span class="s1">M31 = list(range(</span><span class="s5">1</span><span class="s3">, </span><span class="s5">30</span><span class="s1">))</span><span class="s3">, </span><span class="s1">list(range(</span><span class="s5">1</span><span class="s3">, </span><span class="s5">31</span><span class="s1">))</span><span class="s3">, </span><span class="s1">list(range(</span><span class="s5">1</span><span class="s3">, </span><span class="s5">32</span><span class="s1">))</span>
+<span class="s1">MDAY366MASK = tuple(M31+M29+M31+M30+M31+M30+M31+M31+M30+M31+M30+M31+M31[:</span><span class="s5">7</span><span class="s1">])</span>
+<span class="s1">MDAY365MASK = list(MDAY366MASK)</span>
+<span class="s1">M29</span><span class="s3">, </span><span class="s1">M30</span><span class="s3">, </span><span class="s1">M31 = list(range(-</span><span class="s5">29</span><span class="s3">, </span><span class="s5">0</span><span class="s1">))</span><span class="s3">, </span><span class="s1">list(range(-</span><span class="s5">30</span><span class="s3">, </span><span class="s5">0</span><span class="s1">))</span><span class="s3">, </span><span class="s1">list(range(-</span><span class="s5">31</span><span class="s3">, </span><span class="s5">0</span><span class="s1">))</span>
+<span class="s1">NMDAY366MASK = tuple(M31+M29+M31+M30+M31+M30+M31+M31+M30+M31+M30+M31+M31[:</span><span class="s5">7</span><span class="s1">])</span>
+<span class="s1">NMDAY365MASK = list(NMDAY366MASK)</span>
+<span class="s1">M366RANGE = (</span><span class="s5">0</span><span class="s3">, </span><span class="s5">31</span><span class="s3">, </span><span class="s5">60</span><span class="s3">, </span><span class="s5">91</span><span class="s3">, </span><span class="s5">121</span><span class="s3">, </span><span class="s5">152</span><span class="s3">, </span><span class="s5">182</span><span class="s3">, </span><span class="s5">213</span><span class="s3">, </span><span class="s5">244</span><span class="s3">, </span><span class="s5">274</span><span class="s3">, </span><span class="s5">305</span><span class="s3">, </span><span class="s5">335</span><span class="s3">, </span><span class="s5">366</span><span class="s1">)</span>
+<span class="s1">M365RANGE = (</span><span class="s5">0</span><span class="s3">, </span><span class="s5">31</span><span class="s3">, </span><span class="s5">59</span><span class="s3">, </span><span class="s5">90</span><span class="s3">, </span><span class="s5">120</span><span class="s3">, </span><span class="s5">151</span><span class="s3">, </span><span class="s5">181</span><span class="s3">, </span><span class="s5">212</span><span class="s3">, </span><span class="s5">243</span><span class="s3">, </span><span class="s5">273</span><span class="s3">, </span><span class="s5">304</span><span class="s3">, </span><span class="s5">334</span><span class="s3">, </span><span class="s5">365</span><span class="s1">)</span>
+<span class="s1">WDAYMASK = [</span><span class="s5">0</span><span class="s3">, </span><span class="s5">1</span><span class="s3">, </span><span class="s5">2</span><span class="s3">, </span><span class="s5">3</span><span class="s3">, </span><span class="s5">4</span><span class="s3">, </span><span class="s5">5</span><span class="s3">, </span><span class="s5">6</span><span class="s1">]*</span><span class="s5">55</span>
+<span class="s3">del </span><span class="s1">M29</span><span class="s3">, </span><span class="s1">M30</span><span class="s3">, </span><span class="s1">M31</span><span class="s3">, </span><span class="s1">M365MASK[</span><span class="s5">59</span><span class="s1">]</span><span class="s3">, </span><span class="s1">MDAY365MASK[</span><span class="s5">59</span><span class="s1">]</span><span class="s3">, </span><span class="s1">NMDAY365MASK[</span><span class="s5">31</span><span class="s1">]</span>
+<span class="s1">MDAY365MASK = tuple(MDAY365MASK)</span>
+<span class="s1">M365MASK = tuple(M365MASK)</span>
+
+<span class="s1">FREQNAMES = [</span><span class="s4">'YEARLY'</span><span class="s3">, </span><span class="s4">'MONTHLY'</span><span class="s3">, </span><span class="s4">'WEEKLY'</span><span class="s3">, </span><span class="s4">'DAILY'</span><span class="s3">, </span><span class="s4">'HOURLY'</span><span class="s3">, </span><span class="s4">'MINUTELY'</span><span class="s3">, </span><span class="s4">'SECONDLY'</span><span class="s1">]</span>
+
+<span class="s1">(YEARLY</span><span class="s3">,</span>
+ <span class="s1">MONTHLY</span><span class="s3">,</span>
+ <span class="s1">WEEKLY</span><span class="s3">,</span>
+ <span class="s1">DAILY</span><span class="s3">,</span>
+ <span class="s1">HOURLY</span><span class="s3">,</span>
+ <span class="s1">MINUTELY</span><span class="s3">,</span>
+ <span class="s1">SECONDLY) = list(range(</span><span class="s5">7</span><span class="s1">))</span>
+
+<span class="s0"># Imported on demand.</span>
+<span class="s1">easter = </span><span class="s3">None</span>
+<span class="s1">parser = </span><span class="s3">None</span>
+
+
+<span class="s3">class </span><span class="s1">weekday(weekdaybase):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    This version of weekday does not allow n = 0. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">wkday</span><span class="s3">, </span><span class="s1">n=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s3">if </span><span class="s1">n == </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Can't create weekday with n==0&quot;</span><span class="s1">)</span>
+
+        <span class="s1">super(weekday</span><span class="s3">, </span><span class="s1">self).__init__(wkday</span><span class="s3">, </span><span class="s1">n)</span>
+
+
+<span class="s1">MO</span><span class="s3">, </span><span class="s1">TU</span><span class="s3">, </span><span class="s1">WE</span><span class="s3">, </span><span class="s1">TH</span><span class="s3">, </span><span class="s1">FR</span><span class="s3">, </span><span class="s1">SA</span><span class="s3">, </span><span class="s1">SU = weekdays = tuple(weekday(x) </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">7</span><span class="s1">))</span>
+
+
+<span class="s3">def </span><span class="s1">_invalidates_cache(f):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Decorator for rruleset methods which may invalidate the 
+    cached length. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">@wraps(f)</span>
+    <span class="s3">def </span><span class="s1">inner_func(self</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">rv = f(self</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">**kwargs)</span>
+        <span class="s1">self._invalidate_cache()</span>
+        <span class="s3">return </span><span class="s1">rv</span>
+
+    <span class="s3">return </span><span class="s1">inner_func</span>
+
+
+<span class="s3">class </span><span class="s1">rrulebase(object):</span>
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">cache=</span><span class="s3">False</span><span class="s1">):</span>
+        <span class="s3">if </span><span class="s1">cache:</span>
+            <span class="s1">self._cache = []</span>
+            <span class="s1">self._cache_lock = _thread.allocate_lock()</span>
+            <span class="s1">self._invalidate_cache()</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">self._cache = </span><span class="s3">None</span>
+            <span class="s1">self._cache_complete = </span><span class="s3">False</span>
+            <span class="s1">self._len = </span><span class="s3">None</span>
+
+    <span class="s3">def </span><span class="s1">__iter__(self):</span>
+        <span class="s3">if </span><span class="s1">self._cache_complete:</span>
+            <span class="s3">return </span><span class="s1">iter(self._cache)</span>
+        <span class="s3">elif </span><span class="s1">self._cache </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">self._iter()</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">self._iter_cached()</span>
+
+    <span class="s3">def </span><span class="s1">_invalidate_cache(self):</span>
+        <span class="s3">if </span><span class="s1">self._cache </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">self._cache = []</span>
+            <span class="s1">self._cache_complete = </span><span class="s3">False</span>
+            <span class="s1">self._cache_gen = self._iter()</span>
+
+            <span class="s3">if </span><span class="s1">self._cache_lock.locked():</span>
+                <span class="s1">self._cache_lock.release()</span>
+
+        <span class="s1">self._len = </span><span class="s3">None</span>
+
+    <span class="s3">def </span><span class="s1">_iter_cached(self):</span>
+        <span class="s1">i = </span><span class="s5">0</span>
+        <span class="s1">gen = self._cache_gen</span>
+        <span class="s1">cache = self._cache</span>
+        <span class="s1">acquire = self._cache_lock.acquire</span>
+        <span class="s1">release = self._cache_lock.release</span>
+        <span class="s3">while </span><span class="s1">gen:</span>
+            <span class="s3">if </span><span class="s1">i == len(cache):</span>
+                <span class="s1">acquire()</span>
+                <span class="s3">if </span><span class="s1">self._cache_complete:</span>
+                    <span class="s3">break</span>
+                <span class="s3">try</span><span class="s1">:</span>
+                    <span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">10</span><span class="s1">):</span>
+                        <span class="s1">cache.append(advance_iterator(gen))</span>
+                <span class="s3">except </span><span class="s1">StopIteration:</span>
+                    <span class="s1">self._cache_gen = gen = </span><span class="s3">None</span>
+                    <span class="s1">self._cache_complete = </span><span class="s3">True</span>
+                    <span class="s3">break</span>
+                <span class="s1">release()</span>
+            <span class="s3">yield </span><span class="s1">cache[i]</span>
+            <span class="s1">i += </span><span class="s5">1</span>
+        <span class="s3">while </span><span class="s1">i &lt; self._len:</span>
+            <span class="s3">yield </span><span class="s1">cache[i]</span>
+            <span class="s1">i += </span><span class="s5">1</span>
+
+    <span class="s3">def </span><span class="s1">__getitem__(self</span><span class="s3">, </span><span class="s1">item):</span>
+        <span class="s3">if </span><span class="s1">self._cache_complete:</span>
+            <span class="s3">return </span><span class="s1">self._cache[item]</span>
+        <span class="s3">elif </span><span class="s1">isinstance(item</span><span class="s3">, </span><span class="s1">slice):</span>
+            <span class="s3">if </span><span class="s1">item.step </span><span class="s3">and </span><span class="s1">item.step &lt; </span><span class="s5">0</span><span class="s1">:</span>
+                <span class="s3">return </span><span class="s1">list(iter(self))[item]</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s3">return </span><span class="s1">list(itertools.islice(self</span><span class="s3">,</span>
+                                             <span class="s1">item.start </span><span class="s3">or </span><span class="s5">0</span><span class="s3">,</span>
+                                             <span class="s1">item.stop </span><span class="s3">or </span><span class="s1">sys.maxsize</span><span class="s3">,</span>
+                                             <span class="s1">item.step </span><span class="s3">or </span><span class="s5">1</span><span class="s1">))</span>
+        <span class="s3">elif </span><span class="s1">item &gt;= </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s1">gen = iter(self)</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">range(item+</span><span class="s5">1</span><span class="s1">):</span>
+                    <span class="s1">res = advance_iterator(gen)</span>
+            <span class="s3">except </span><span class="s1">StopIteration:</span>
+                <span class="s3">raise </span><span class="s1">IndexError</span>
+            <span class="s3">return </span><span class="s1">res</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">list(iter(self))[item]</span>
+
+    <span class="s3">def </span><span class="s1">__contains__(self</span><span class="s3">, </span><span class="s1">item):</span>
+        <span class="s3">if </span><span class="s1">self._cache_complete:</span>
+            <span class="s3">return </span><span class="s1">item </span><span class="s3">in </span><span class="s1">self._cache</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">self:</span>
+                <span class="s3">if </span><span class="s1">i == item:</span>
+                    <span class="s3">return True</span>
+                <span class="s3">elif </span><span class="s1">i &gt; item:</span>
+                    <span class="s3">return False</span>
+        <span class="s3">return False</span>
+
+    <span class="s0"># __len__() introduces a large performance penalty.</span>
+    <span class="s3">def </span><span class="s1">count(self):</span>
+        <span class="s2">&quot;&quot;&quot; Returns the number of recurrences in this set. It will have go 
+            trough the whole recurrence, if this hasn't been done before. &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">self._len </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">self:</span>
+                <span class="s3">pass</span>
+        <span class="s3">return </span><span class="s1">self._len</span>
+
+    <span class="s3">def </span><span class="s1">before(self</span><span class="s3">, </span><span class="s1">dt</span><span class="s3">, </span><span class="s1">inc=</span><span class="s3">False</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; Returns the last recurrence before the given datetime instance. The 
+            inc keyword defines what happens if dt is an occurrence. With 
+            inc=True, if dt itself is an occurrence, it will be returned. &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">self._cache_complete:</span>
+            <span class="s1">gen = self._cache</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">gen = self</span>
+        <span class="s1">last = </span><span class="s3">None</span>
+        <span class="s3">if </span><span class="s1">inc:</span>
+            <span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">gen:</span>
+                <span class="s3">if </span><span class="s1">i &gt; dt:</span>
+                    <span class="s3">break</span>
+                <span class="s1">last = i</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">gen:</span>
+                <span class="s3">if </span><span class="s1">i &gt;= dt:</span>
+                    <span class="s3">break</span>
+                <span class="s1">last = i</span>
+        <span class="s3">return </span><span class="s1">last</span>
+
+    <span class="s3">def </span><span class="s1">after(self</span><span class="s3">, </span><span class="s1">dt</span><span class="s3">, </span><span class="s1">inc=</span><span class="s3">False</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; Returns the first recurrence after the given datetime instance. The 
+            inc keyword defines what happens if dt is an occurrence. With 
+            inc=True, if dt itself is an occurrence, it will be returned.  &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">self._cache_complete:</span>
+            <span class="s1">gen = self._cache</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">gen = self</span>
+        <span class="s3">if </span><span class="s1">inc:</span>
+            <span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">gen:</span>
+                <span class="s3">if </span><span class="s1">i &gt;= dt:</span>
+                    <span class="s3">return </span><span class="s1">i</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">gen:</span>
+                <span class="s3">if </span><span class="s1">i &gt; dt:</span>
+                    <span class="s3">return </span><span class="s1">i</span>
+        <span class="s3">return None</span>
+
+    <span class="s3">def </span><span class="s1">xafter(self</span><span class="s3">, </span><span class="s1">dt</span><span class="s3">, </span><span class="s1">count=</span><span class="s3">None, </span><span class="s1">inc=</span><span class="s3">False</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Generator which yields up to `count` recurrences after the given 
+        datetime instance, equivalent to `after`. 
+ 
+        :param dt: 
+            The datetime at which to start generating recurrences. 
+ 
+        :param count: 
+            The maximum number of recurrences to generate. If `None` (default), 
+            dates are generated until the recurrence rule is exhausted. 
+ 
+        :param inc: 
+            If `dt` is an instance of the rule and `inc` is `True`, it is 
+            included in the output. 
+ 
+        :yields: Yields a sequence of `datetime` objects. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s3">if </span><span class="s1">self._cache_complete:</span>
+            <span class="s1">gen = self._cache</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">gen = self</span>
+
+        <span class="s0"># Select the comparison function</span>
+        <span class="s3">if </span><span class="s1">inc:</span>
+            <span class="s1">comp = </span><span class="s3">lambda </span><span class="s1">dc</span><span class="s3">, </span><span class="s1">dtc: dc &gt;= dtc</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">comp = </span><span class="s3">lambda </span><span class="s1">dc</span><span class="s3">, </span><span class="s1">dtc: dc &gt; dtc</span>
+
+        <span class="s0"># Generate dates</span>
+        <span class="s1">n = </span><span class="s5">0</span>
+        <span class="s3">for </span><span class="s1">d </span><span class="s3">in </span><span class="s1">gen:</span>
+            <span class="s3">if </span><span class="s1">comp(d</span><span class="s3">, </span><span class="s1">dt):</span>
+                <span class="s3">if </span><span class="s1">count </span><span class="s3">is not None</span><span class="s1">:</span>
+                    <span class="s1">n += </span><span class="s5">1</span>
+                    <span class="s3">if </span><span class="s1">n &gt; count:</span>
+                        <span class="s3">break</span>
+
+                <span class="s3">yield </span><span class="s1">d</span>
+
+    <span class="s3">def </span><span class="s1">between(self</span><span class="s3">, </span><span class="s1">after</span><span class="s3">, </span><span class="s1">before</span><span class="s3">, </span><span class="s1">inc=</span><span class="s3">False, </span><span class="s1">count=</span><span class="s5">1</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; Returns all the occurrences of the rrule between after and before. 
+        The inc keyword defines what happens if after and/or before are 
+        themselves occurrences. With inc=True, they will be included in the 
+        list, if they are found in the recurrence set. &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">self._cache_complete:</span>
+            <span class="s1">gen = self._cache</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">gen = self</span>
+        <span class="s1">started = </span><span class="s3">False</span>
+        <span class="s1">l = []</span>
+        <span class="s3">if </span><span class="s1">inc:</span>
+            <span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">gen:</span>
+                <span class="s3">if </span><span class="s1">i &gt; before:</span>
+                    <span class="s3">break</span>
+                <span class="s3">elif not </span><span class="s1">started:</span>
+                    <span class="s3">if </span><span class="s1">i &gt;= after:</span>
+                        <span class="s1">started = </span><span class="s3">True</span>
+                        <span class="s1">l.append(i)</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">l.append(i)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">gen:</span>
+                <span class="s3">if </span><span class="s1">i &gt;= before:</span>
+                    <span class="s3">break</span>
+                <span class="s3">elif not </span><span class="s1">started:</span>
+                    <span class="s3">if </span><span class="s1">i &gt; after:</span>
+                        <span class="s1">started = </span><span class="s3">True</span>
+                        <span class="s1">l.append(i)</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">l.append(i)</span>
+        <span class="s3">return </span><span class="s1">l</span>
+
+
+<span class="s3">class </span><span class="s1">rrule(rrulebase):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    That's the base of the rrule operation. It accepts all the keywords 
+    defined in the RFC as its constructor parameters (except byday, 
+    which was renamed to byweekday) and more. The constructor prototype is:: 
+ 
+            rrule(freq) 
+ 
+    Where freq must be one of YEARLY, MONTHLY, WEEKLY, DAILY, HOURLY, MINUTELY, 
+    or SECONDLY. 
+ 
+    .. note:: 
+        Per RFC section 3.3.10, recurrence instances falling on invalid dates 
+        and times are ignored rather than coerced: 
+ 
+            Recurrence rules may generate recurrence instances with an invalid 
+            date (e.g., February 30) or nonexistent local time (e.g., 1:30 AM 
+            on a day where the local time is moved forward by an hour at 1:00 
+            AM).  Such recurrence instances MUST be ignored and MUST NOT be 
+            counted as part of the recurrence set. 
+ 
+        This can lead to possibly surprising behavior when, for example, the 
+        start date occurs at the end of the month: 
+ 
+        &gt;&gt;&gt; from dateutil.rrule import rrule, MONTHLY 
+        &gt;&gt;&gt; from datetime import datetime 
+        &gt;&gt;&gt; start_date = datetime(2014, 12, 31) 
+        &gt;&gt;&gt; list(rrule(freq=MONTHLY, count=4, dtstart=start_date)) 
+        ... # doctest: +NORMALIZE_WHITESPACE 
+        [datetime.datetime(2014, 12, 31, 0, 0), 
+         datetime.datetime(2015, 1, 31, 0, 0), 
+         datetime.datetime(2015, 3, 31, 0, 0), 
+         datetime.datetime(2015, 5, 31, 0, 0)] 
+ 
+    Additionally, it supports the following keyword arguments: 
+ 
+    :param dtstart: 
+        The recurrence start. Besides being the base for the recurrence, 
+        missing parameters in the final recurrence instances will also be 
+        extracted from this date. If not given, datetime.now() will be used 
+        instead. 
+    :param interval: 
+        The interval between each freq iteration. For example, when using 
+        YEARLY, an interval of 2 means once every two years, but with HOURLY, 
+        it means once every two hours. The default interval is 1. 
+    :param wkst: 
+        The week start day. Must be one of the MO, TU, WE constants, or an 
+        integer, specifying the first day of the week. This will affect 
+        recurrences based on weekly periods. The default week start is got 
+        from calendar.firstweekday(), and may be modified by 
+        calendar.setfirstweekday(). 
+    :param count: 
+        If given, this determines how many occurrences will be generated. 
+ 
+        .. note:: 
+            As of version 2.5.0, the use of the keyword ``until`` in conjunction 
+            with ``count`` is deprecated, to make sure ``dateutil`` is fully 
+            compliant with `RFC-5545 Sec. 3.3.10 &lt;https://tools.ietf.org/ 
+            html/rfc5545#section-3.3.10&gt;`_. Therefore, ``until`` and ``count`` 
+            **must not** occur in the same call to ``rrule``. 
+    :param until: 
+        If given, this must be a datetime instance specifying the upper-bound 
+        limit of the recurrence. The last recurrence in the rule is the greatest 
+        datetime that is less than or equal to the value specified in the 
+        ``until`` parameter. 
+ 
+        .. note:: 
+            As of version 2.5.0, the use of the keyword ``until`` in conjunction 
+            with ``count`` is deprecated, to make sure ``dateutil`` is fully 
+            compliant with `RFC-5545 Sec. 3.3.10 &lt;https://tools.ietf.org/ 
+            html/rfc5545#section-3.3.10&gt;`_. Therefore, ``until`` and ``count`` 
+            **must not** occur in the same call to ``rrule``. 
+    :param bysetpos: 
+        If given, it must be either an integer, or a sequence of integers, 
+        positive or negative. Each given integer will specify an occurrence 
+        number, corresponding to the nth occurrence of the rule inside the 
+        frequency period. For example, a bysetpos of -1 if combined with a 
+        MONTHLY frequency, and a byweekday of (MO, TU, WE, TH, FR), will 
+        result in the last work day of every month. 
+    :param bymonth: 
+        If given, it must be either an integer, or a sequence of integers, 
+        meaning the months to apply the recurrence to. 
+    :param bymonthday: 
+        If given, it must be either an integer, or a sequence of integers, 
+        meaning the month days to apply the recurrence to. 
+    :param byyearday: 
+        If given, it must be either an integer, or a sequence of integers, 
+        meaning the year days to apply the recurrence to. 
+    :param byeaster: 
+        If given, it must be either an integer, or a sequence of integers, 
+        positive or negative. Each integer will define an offset from the 
+        Easter Sunday. Passing the offset 0 to byeaster will yield the Easter 
+        Sunday itself. This is an extension to the RFC specification. 
+    :param byweekno: 
+        If given, it must be either an integer, or a sequence of integers, 
+        meaning the week numbers to apply the recurrence to. Week numbers 
+        have the meaning described in ISO8601, that is, the first week of 
+        the year is that containing at least four days of the new year. 
+    :param byweekday: 
+        If given, it must be either an integer (0 == MO), a sequence of 
+        integers, one of the weekday constants (MO, TU, etc), or a sequence 
+        of these constants. When given, these variables will define the 
+        weekdays where the recurrence will be applied. It's also possible to 
+        use an argument n for the weekday instances, which will mean the nth 
+        occurrence of this weekday in the period. For example, with MONTHLY, 
+        or with YEARLY and BYMONTH, using FR(+1) in byweekday will specify the 
+        first friday of the month where the recurrence happens. Notice that in 
+        the RFC documentation, this is specified as BYDAY, but was renamed to 
+        avoid the ambiguity of that keyword. 
+    :param byhour: 
+        If given, it must be either an integer, or a sequence of integers, 
+        meaning the hours to apply the recurrence to. 
+    :param byminute: 
+        If given, it must be either an integer, or a sequence of integers, 
+        meaning the minutes to apply the recurrence to. 
+    :param bysecond: 
+        If given, it must be either an integer, or a sequence of integers, 
+        meaning the seconds to apply the recurrence to. 
+    :param cache: 
+        If given, it must be a boolean value specifying to enable or disable 
+        caching of results. If you will use the same rrule instance multiple 
+        times, enabling caching will improve the performance considerably. 
+     &quot;&quot;&quot;</span>
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">freq</span><span class="s3">, </span><span class="s1">dtstart=</span><span class="s3">None,</span>
+                 <span class="s1">interval=</span><span class="s5">1</span><span class="s3">, </span><span class="s1">wkst=</span><span class="s3">None, </span><span class="s1">count=</span><span class="s3">None, </span><span class="s1">until=</span><span class="s3">None, </span><span class="s1">bysetpos=</span><span class="s3">None,</span>
+                 <span class="s1">bymonth=</span><span class="s3">None, </span><span class="s1">bymonthday=</span><span class="s3">None, </span><span class="s1">byyearday=</span><span class="s3">None, </span><span class="s1">byeaster=</span><span class="s3">None,</span>
+                 <span class="s1">byweekno=</span><span class="s3">None, </span><span class="s1">byweekday=</span><span class="s3">None,</span>
+                 <span class="s1">byhour=</span><span class="s3">None, </span><span class="s1">byminute=</span><span class="s3">None, </span><span class="s1">bysecond=</span><span class="s3">None,</span>
+                 <span class="s1">cache=</span><span class="s3">False</span><span class="s1">):</span>
+        <span class="s1">super(rrule</span><span class="s3">, </span><span class="s1">self).__init__(cache)</span>
+        <span class="s3">global </span><span class="s1">easter</span>
+        <span class="s3">if not </span><span class="s1">dtstart:</span>
+            <span class="s3">if </span><span class="s1">until </span><span class="s3">and </span><span class="s1">until.tzinfo:</span>
+                <span class="s1">dtstart = datetime.datetime.now(tz=until.tzinfo).replace(microsecond=</span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">dtstart = datetime.datetime.now().replace(microsecond=</span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s3">elif not </span><span class="s1">isinstance(dtstart</span><span class="s3">, </span><span class="s1">datetime.datetime):</span>
+            <span class="s1">dtstart = datetime.datetime.fromordinal(dtstart.toordinal())</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">dtstart = dtstart.replace(microsecond=</span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s1">self._dtstart = dtstart</span>
+        <span class="s1">self._tzinfo = dtstart.tzinfo</span>
+        <span class="s1">self._freq = freq</span>
+        <span class="s1">self._interval = interval</span>
+        <span class="s1">self._count = count</span>
+
+        <span class="s0"># Cache the original byxxx rules, if they are provided, as the _byxxx</span>
+        <span class="s0"># attributes do not necessarily map to the inputs, and this can be</span>
+        <span class="s0"># a problem in generating the strings. Only store things if they've</span>
+        <span class="s0"># been supplied (the string retrieval will just use .get())</span>
+        <span class="s1">self._original_rule = {}</span>
+
+        <span class="s3">if </span><span class="s1">until </span><span class="s3">and not </span><span class="s1">isinstance(until</span><span class="s3">, </span><span class="s1">datetime.datetime):</span>
+            <span class="s1">until = datetime.datetime.fromordinal(until.toordinal())</span>
+        <span class="s1">self._until = until</span>
+
+        <span class="s3">if </span><span class="s1">self._dtstart </span><span class="s3">and </span><span class="s1">self._until:</span>
+            <span class="s3">if </span><span class="s1">(self._dtstart.tzinfo </span><span class="s3">is not None</span><span class="s1">) != (self._until.tzinfo </span><span class="s3">is not None</span><span class="s1">):</span>
+                <span class="s0"># According to RFC5545 Section 3.3.10:</span>
+                <span class="s0"># https://tools.ietf.org/html/rfc5545#section-3.3.10</span>
+                <span class="s0">#</span>
+                <span class="s0"># &gt; If the &quot;DTSTART&quot; property is specified as a date with UTC</span>
+                <span class="s0"># &gt; time or a date with local time and time zone reference,</span>
+                <span class="s0"># &gt; then the UNTIL rule part MUST be specified as a date with</span>
+                <span class="s0"># &gt; UTC time.</span>
+                <span class="s3">raise </span><span class="s1">ValueError(</span>
+                    <span class="s4">'RRULE UNTIL values must be specified in UTC when DTSTART '</span>
+                    <span class="s4">'is timezone-aware'</span>
+                <span class="s1">)</span>
+
+        <span class="s3">if </span><span class="s1">count </span><span class="s3">is not None and </span><span class="s1">until:</span>
+            <span class="s1">warn(</span><span class="s4">&quot;Using both 'count' and 'until' is inconsistent with RFC 5545&quot;</span>
+                 <span class="s4">&quot; and has been deprecated in dateutil. Future versions will &quot;</span>
+                 <span class="s4">&quot;raise an error.&quot;</span><span class="s3">, </span><span class="s1">DeprecationWarning)</span>
+
+        <span class="s3">if </span><span class="s1">wkst </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">self._wkst = calendar.firstweekday()</span>
+        <span class="s3">elif </span><span class="s1">isinstance(wkst</span><span class="s3">, </span><span class="s1">integer_types):</span>
+            <span class="s1">self._wkst = wkst</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">self._wkst = wkst.weekday</span>
+
+        <span class="s3">if </span><span class="s1">bysetpos </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">self._bysetpos = </span><span class="s3">None</span>
+        <span class="s3">elif </span><span class="s1">isinstance(bysetpos</span><span class="s3">, </span><span class="s1">integer_types):</span>
+            <span class="s3">if </span><span class="s1">bysetpos == </span><span class="s5">0 </span><span class="s3">or not </span><span class="s1">(-</span><span class="s5">366 </span><span class="s1">&lt;= bysetpos &lt;= </span><span class="s5">366</span><span class="s1">):</span>
+                <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;bysetpos must be between 1 and 366, &quot;</span>
+                                 <span class="s4">&quot;or between -366 and -1&quot;</span><span class="s1">)</span>
+            <span class="s1">self._bysetpos = (bysetpos</span><span class="s3">,</span><span class="s1">)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">self._bysetpos = tuple(bysetpos)</span>
+            <span class="s3">for </span><span class="s1">pos </span><span class="s3">in </span><span class="s1">self._bysetpos:</span>
+                <span class="s3">if </span><span class="s1">pos == </span><span class="s5">0 </span><span class="s3">or not </span><span class="s1">(-</span><span class="s5">366 </span><span class="s1">&lt;= pos &lt;= </span><span class="s5">366</span><span class="s1">):</span>
+                    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;bysetpos must be between 1 and 366, &quot;</span>
+                                     <span class="s4">&quot;or between -366 and -1&quot;</span><span class="s1">)</span>
+
+        <span class="s3">if </span><span class="s1">self._bysetpos:</span>
+            <span class="s1">self._original_rule[</span><span class="s4">'bysetpos'</span><span class="s1">] = self._bysetpos</span>
+
+        <span class="s3">if </span><span class="s1">(byweekno </span><span class="s3">is None and </span><span class="s1">byyearday </span><span class="s3">is None and </span><span class="s1">bymonthday </span><span class="s3">is None and</span>
+                <span class="s1">byweekday </span><span class="s3">is None and </span><span class="s1">byeaster </span><span class="s3">is None</span><span class="s1">):</span>
+            <span class="s3">if </span><span class="s1">freq == YEARLY:</span>
+                <span class="s3">if </span><span class="s1">bymonth </span><span class="s3">is None</span><span class="s1">:</span>
+                    <span class="s1">bymonth = dtstart.month</span>
+                    <span class="s1">self._original_rule[</span><span class="s4">'bymonth'</span><span class="s1">] = </span><span class="s3">None</span>
+                <span class="s1">bymonthday = dtstart.day</span>
+                <span class="s1">self._original_rule[</span><span class="s4">'bymonthday'</span><span class="s1">] = </span><span class="s3">None</span>
+            <span class="s3">elif </span><span class="s1">freq == MONTHLY:</span>
+                <span class="s1">bymonthday = dtstart.day</span>
+                <span class="s1">self._original_rule[</span><span class="s4">'bymonthday'</span><span class="s1">] = </span><span class="s3">None</span>
+            <span class="s3">elif </span><span class="s1">freq == WEEKLY:</span>
+                <span class="s1">byweekday = dtstart.weekday()</span>
+                <span class="s1">self._original_rule[</span><span class="s4">'byweekday'</span><span class="s1">] = </span><span class="s3">None</span>
+
+        <span class="s0"># bymonth</span>
+        <span class="s3">if </span><span class="s1">bymonth </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">self._bymonth = </span><span class="s3">None</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">isinstance(bymonth</span><span class="s3">, </span><span class="s1">integer_types):</span>
+                <span class="s1">bymonth = (bymonth</span><span class="s3">,</span><span class="s1">)</span>
+
+            <span class="s1">self._bymonth = tuple(sorted(set(bymonth)))</span>
+
+            <span class="s3">if </span><span class="s4">'bymonth' </span><span class="s3">not in </span><span class="s1">self._original_rule:</span>
+                <span class="s1">self._original_rule[</span><span class="s4">'bymonth'</span><span class="s1">] = self._bymonth</span>
+
+        <span class="s0"># byyearday</span>
+        <span class="s3">if </span><span class="s1">byyearday </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">self._byyearday = </span><span class="s3">None</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">isinstance(byyearday</span><span class="s3">, </span><span class="s1">integer_types):</span>
+                <span class="s1">byyearday = (byyearday</span><span class="s3">,</span><span class="s1">)</span>
+
+            <span class="s1">self._byyearday = tuple(sorted(set(byyearday)))</span>
+            <span class="s1">self._original_rule[</span><span class="s4">'byyearday'</span><span class="s1">] = self._byyearday</span>
+
+        <span class="s0"># byeaster</span>
+        <span class="s3">if </span><span class="s1">byeaster </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s3">if not </span><span class="s1">easter:</span>
+                <span class="s3">from </span><span class="s1">dateutil </span><span class="s3">import </span><span class="s1">easter</span>
+            <span class="s3">if </span><span class="s1">isinstance(byeaster</span><span class="s3">, </span><span class="s1">integer_types):</span>
+                <span class="s1">self._byeaster = (byeaster</span><span class="s3">,</span><span class="s1">)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">self._byeaster = tuple(sorted(byeaster))</span>
+
+            <span class="s1">self._original_rule[</span><span class="s4">'byeaster'</span><span class="s1">] = self._byeaster</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">self._byeaster = </span><span class="s3">None</span>
+
+        <span class="s0"># bymonthday</span>
+        <span class="s3">if </span><span class="s1">bymonthday </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">self._bymonthday = ()</span>
+            <span class="s1">self._bynmonthday = ()</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">isinstance(bymonthday</span><span class="s3">, </span><span class="s1">integer_types):</span>
+                <span class="s1">bymonthday = (bymonthday</span><span class="s3">,</span><span class="s1">)</span>
+
+            <span class="s1">bymonthday = set(bymonthday)            </span><span class="s0"># Ensure it's unique</span>
+
+            <span class="s1">self._bymonthday = tuple(sorted(x </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">bymonthday </span><span class="s3">if </span><span class="s1">x &gt; </span><span class="s5">0</span><span class="s1">))</span>
+            <span class="s1">self._bynmonthday = tuple(sorted(x </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">bymonthday </span><span class="s3">if </span><span class="s1">x &lt; </span><span class="s5">0</span><span class="s1">))</span>
+
+            <span class="s0"># Storing positive numbers first, then negative numbers</span>
+            <span class="s3">if </span><span class="s4">'bymonthday' </span><span class="s3">not in </span><span class="s1">self._original_rule:</span>
+                <span class="s1">self._original_rule[</span><span class="s4">'bymonthday'</span><span class="s1">] = tuple(</span>
+                    <span class="s1">itertools.chain(self._bymonthday</span><span class="s3">, </span><span class="s1">self._bynmonthday))</span>
+
+        <span class="s0"># byweekno</span>
+        <span class="s3">if </span><span class="s1">byweekno </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">self._byweekno = </span><span class="s3">None</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">isinstance(byweekno</span><span class="s3">, </span><span class="s1">integer_types):</span>
+                <span class="s1">byweekno = (byweekno</span><span class="s3">,</span><span class="s1">)</span>
+
+            <span class="s1">self._byweekno = tuple(sorted(set(byweekno)))</span>
+
+            <span class="s1">self._original_rule[</span><span class="s4">'byweekno'</span><span class="s1">] = self._byweekno</span>
+
+        <span class="s0"># byweekday / bynweekday</span>
+        <span class="s3">if </span><span class="s1">byweekday </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">self._byweekday = </span><span class="s3">None</span>
+            <span class="s1">self._bynweekday = </span><span class="s3">None</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s0"># If it's one of the valid non-sequence types, convert to a</span>
+            <span class="s0"># single-element sequence before the iterator that builds the</span>
+            <span class="s0"># byweekday set.</span>
+            <span class="s3">if </span><span class="s1">isinstance(byweekday</span><span class="s3">, </span><span class="s1">integer_types) </span><span class="s3">or </span><span class="s1">hasattr(byweekday</span><span class="s3">, </span><span class="s4">&quot;n&quot;</span><span class="s1">):</span>
+                <span class="s1">byweekday = (byweekday</span><span class="s3">,</span><span class="s1">)</span>
+
+            <span class="s1">self._byweekday = set()</span>
+            <span class="s1">self._bynweekday = set()</span>
+            <span class="s3">for </span><span class="s1">wday </span><span class="s3">in </span><span class="s1">byweekday:</span>
+                <span class="s3">if </span><span class="s1">isinstance(wday</span><span class="s3">, </span><span class="s1">integer_types):</span>
+                    <span class="s1">self._byweekday.add(wday)</span>
+                <span class="s3">elif not </span><span class="s1">wday.n </span><span class="s3">or </span><span class="s1">freq &gt; MONTHLY:</span>
+                    <span class="s1">self._byweekday.add(wday.weekday)</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">self._bynweekday.add((wday.weekday</span><span class="s3">, </span><span class="s1">wday.n))</span>
+
+            <span class="s3">if not </span><span class="s1">self._byweekday:</span>
+                <span class="s1">self._byweekday = </span><span class="s3">None</span>
+            <span class="s3">elif not </span><span class="s1">self._bynweekday:</span>
+                <span class="s1">self._bynweekday = </span><span class="s3">None</span>
+
+            <span class="s3">if </span><span class="s1">self._byweekday </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s1">self._byweekday = tuple(sorted(self._byweekday))</span>
+                <span class="s1">orig_byweekday = [weekday(x) </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">self._byweekday]</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">orig_byweekday = ()</span>
+
+            <span class="s3">if </span><span class="s1">self._bynweekday </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s1">self._bynweekday = tuple(sorted(self._bynweekday))</span>
+                <span class="s1">orig_bynweekday = [weekday(*x) </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">self._bynweekday]</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">orig_bynweekday = ()</span>
+
+            <span class="s3">if </span><span class="s4">'byweekday' </span><span class="s3">not in </span><span class="s1">self._original_rule:</span>
+                <span class="s1">self._original_rule[</span><span class="s4">'byweekday'</span><span class="s1">] = tuple(itertools.chain(</span>
+                    <span class="s1">orig_byweekday</span><span class="s3">, </span><span class="s1">orig_bynweekday))</span>
+
+        <span class="s0"># byhour</span>
+        <span class="s3">if </span><span class="s1">byhour </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">freq &lt; HOURLY:</span>
+                <span class="s1">self._byhour = {dtstart.hour}</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">self._byhour = </span><span class="s3">None</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">isinstance(byhour</span><span class="s3">, </span><span class="s1">integer_types):</span>
+                <span class="s1">byhour = (byhour</span><span class="s3">,</span><span class="s1">)</span>
+
+            <span class="s3">if </span><span class="s1">freq == HOURLY:</span>
+                <span class="s1">self._byhour = self.__construct_byset(start=dtstart.hour</span><span class="s3">,</span>
+                                                      <span class="s1">byxxx=byhour</span><span class="s3">,</span>
+                                                      <span class="s1">base=</span><span class="s5">24</span><span class="s1">)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">self._byhour = set(byhour)</span>
+
+            <span class="s1">self._byhour = tuple(sorted(self._byhour))</span>
+            <span class="s1">self._original_rule[</span><span class="s4">'byhour'</span><span class="s1">] = self._byhour</span>
+
+        <span class="s0"># byminute</span>
+        <span class="s3">if </span><span class="s1">byminute </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">freq &lt; MINUTELY:</span>
+                <span class="s1">self._byminute = {dtstart.minute}</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">self._byminute = </span><span class="s3">None</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">isinstance(byminute</span><span class="s3">, </span><span class="s1">integer_types):</span>
+                <span class="s1">byminute = (byminute</span><span class="s3">,</span><span class="s1">)</span>
+
+            <span class="s3">if </span><span class="s1">freq == MINUTELY:</span>
+                <span class="s1">self._byminute = self.__construct_byset(start=dtstart.minute</span><span class="s3">,</span>
+                                                        <span class="s1">byxxx=byminute</span><span class="s3">,</span>
+                                                        <span class="s1">base=</span><span class="s5">60</span><span class="s1">)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">self._byminute = set(byminute)</span>
+
+            <span class="s1">self._byminute = tuple(sorted(self._byminute))</span>
+            <span class="s1">self._original_rule[</span><span class="s4">'byminute'</span><span class="s1">] = self._byminute</span>
+
+        <span class="s0"># bysecond</span>
+        <span class="s3">if </span><span class="s1">bysecond </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">freq &lt; SECONDLY:</span>
+                <span class="s1">self._bysecond = ((dtstart.second</span><span class="s3">,</span><span class="s1">))</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">self._bysecond = </span><span class="s3">None</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">isinstance(bysecond</span><span class="s3">, </span><span class="s1">integer_types):</span>
+                <span class="s1">bysecond = (bysecond</span><span class="s3">,</span><span class="s1">)</span>
+
+            <span class="s1">self._bysecond = set(bysecond)</span>
+
+            <span class="s3">if </span><span class="s1">freq == SECONDLY:</span>
+                <span class="s1">self._bysecond = self.__construct_byset(start=dtstart.second</span><span class="s3">,</span>
+                                                        <span class="s1">byxxx=bysecond</span><span class="s3">,</span>
+                                                        <span class="s1">base=</span><span class="s5">60</span><span class="s1">)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">self._bysecond = set(bysecond)</span>
+
+            <span class="s1">self._bysecond = tuple(sorted(self._bysecond))</span>
+            <span class="s1">self._original_rule[</span><span class="s4">'bysecond'</span><span class="s1">] = self._bysecond</span>
+
+        <span class="s3">if </span><span class="s1">self._freq &gt;= HOURLY:</span>
+            <span class="s1">self._timeset = </span><span class="s3">None</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">self._timeset = []</span>
+            <span class="s3">for </span><span class="s1">hour </span><span class="s3">in </span><span class="s1">self._byhour:</span>
+                <span class="s3">for </span><span class="s1">minute </span><span class="s3">in </span><span class="s1">self._byminute:</span>
+                    <span class="s3">for </span><span class="s1">second </span><span class="s3">in </span><span class="s1">self._bysecond:</span>
+                        <span class="s1">self._timeset.append(</span>
+                            <span class="s1">datetime.time(hour</span><span class="s3">, </span><span class="s1">minute</span><span class="s3">, </span><span class="s1">second</span><span class="s3">,</span>
+                                          <span class="s1">tzinfo=self._tzinfo))</span>
+            <span class="s1">self._timeset.sort()</span>
+            <span class="s1">self._timeset = tuple(self._timeset)</span>
+
+    <span class="s3">def </span><span class="s1">__str__(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Output a string that would generate this RRULE if passed to rrulestr. 
+        This is mostly compatible with RFC5545, except for the 
+        dateutil-specific extension BYEASTER. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s1">output = []</span>
+        <span class="s1">h</span><span class="s3">, </span><span class="s1">m</span><span class="s3">, </span><span class="s1">s = [</span><span class="s3">None</span><span class="s1">] * </span><span class="s5">3</span>
+        <span class="s3">if </span><span class="s1">self._dtstart:</span>
+            <span class="s1">output.append(self._dtstart.strftime(</span><span class="s4">'DTSTART:%Y%m%dT%H%M%S'</span><span class="s1">))</span>
+            <span class="s1">h</span><span class="s3">, </span><span class="s1">m</span><span class="s3">, </span><span class="s1">s = self._dtstart.timetuple()[</span><span class="s5">3</span><span class="s1">:</span><span class="s5">6</span><span class="s1">]</span>
+
+        <span class="s1">parts = [</span><span class="s4">'FREQ=' </span><span class="s1">+ FREQNAMES[self._freq]]</span>
+        <span class="s3">if </span><span class="s1">self._interval != </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s1">parts.append(</span><span class="s4">'INTERVAL=' </span><span class="s1">+ str(self._interval))</span>
+
+        <span class="s3">if </span><span class="s1">self._wkst:</span>
+            <span class="s1">parts.append(</span><span class="s4">'WKST=' </span><span class="s1">+ repr(weekday(self._wkst))[</span><span class="s5">0</span><span class="s1">:</span><span class="s5">2</span><span class="s1">])</span>
+
+        <span class="s3">if </span><span class="s1">self._count </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">parts.append(</span><span class="s4">'COUNT=' </span><span class="s1">+ str(self._count))</span>
+
+        <span class="s3">if </span><span class="s1">self._until:</span>
+            <span class="s1">parts.append(self._until.strftime(</span><span class="s4">'UNTIL=%Y%m%dT%H%M%S'</span><span class="s1">))</span>
+
+        <span class="s3">if </span><span class="s1">self._original_rule.get(</span><span class="s4">'byweekday'</span><span class="s1">) </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s0"># The str() method on weekday objects doesn't generate</span>
+            <span class="s0"># RFC5545-compliant strings, so we should modify that.</span>
+            <span class="s1">original_rule = dict(self._original_rule)</span>
+            <span class="s1">wday_strings = []</span>
+            <span class="s3">for </span><span class="s1">wday </span><span class="s3">in </span><span class="s1">original_rule[</span><span class="s4">'byweekday'</span><span class="s1">]:</span>
+                <span class="s3">if </span><span class="s1">wday.n:</span>
+                    <span class="s1">wday_strings.append(</span><span class="s4">'{n:+d}{wday}'</span><span class="s1">.format(</span>
+                        <span class="s1">n=wday.n</span><span class="s3">,</span>
+                        <span class="s1">wday=repr(wday)[</span><span class="s5">0</span><span class="s1">:</span><span class="s5">2</span><span class="s1">]))</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">wday_strings.append(repr(wday))</span>
+
+            <span class="s1">original_rule[</span><span class="s4">'byweekday'</span><span class="s1">] = wday_strings</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">original_rule = self._original_rule</span>
+
+        <span class="s1">partfmt = </span><span class="s4">'{name}={vals}'</span>
+        <span class="s3">for </span><span class="s1">name</span><span class="s3">, </span><span class="s1">key </span><span class="s3">in </span><span class="s1">[(</span><span class="s4">'BYSETPOS'</span><span class="s3">, </span><span class="s4">'bysetpos'</span><span class="s1">)</span><span class="s3">,</span>
+                          <span class="s1">(</span><span class="s4">'BYMONTH'</span><span class="s3">, </span><span class="s4">'bymonth'</span><span class="s1">)</span><span class="s3">,</span>
+                          <span class="s1">(</span><span class="s4">'BYMONTHDAY'</span><span class="s3">, </span><span class="s4">'bymonthday'</span><span class="s1">)</span><span class="s3">,</span>
+                          <span class="s1">(</span><span class="s4">'BYYEARDAY'</span><span class="s3">, </span><span class="s4">'byyearday'</span><span class="s1">)</span><span class="s3">,</span>
+                          <span class="s1">(</span><span class="s4">'BYWEEKNO'</span><span class="s3">, </span><span class="s4">'byweekno'</span><span class="s1">)</span><span class="s3">,</span>
+                          <span class="s1">(</span><span class="s4">'BYDAY'</span><span class="s3">, </span><span class="s4">'byweekday'</span><span class="s1">)</span><span class="s3">,</span>
+                          <span class="s1">(</span><span class="s4">'BYHOUR'</span><span class="s3">, </span><span class="s4">'byhour'</span><span class="s1">)</span><span class="s3">,</span>
+                          <span class="s1">(</span><span class="s4">'BYMINUTE'</span><span class="s3">, </span><span class="s4">'byminute'</span><span class="s1">)</span><span class="s3">,</span>
+                          <span class="s1">(</span><span class="s4">'BYSECOND'</span><span class="s3">, </span><span class="s4">'bysecond'</span><span class="s1">)</span><span class="s3">,</span>
+                          <span class="s1">(</span><span class="s4">'BYEASTER'</span><span class="s3">, </span><span class="s4">'byeaster'</span><span class="s1">)]:</span>
+            <span class="s1">value = original_rule.get(key)</span>
+            <span class="s3">if </span><span class="s1">value:</span>
+                <span class="s1">parts.append(partfmt.format(name=name</span><span class="s3">, </span><span class="s1">vals=(</span><span class="s4">','</span><span class="s1">.join(str(v)</span>
+                                                             <span class="s3">for </span><span class="s1">v </span><span class="s3">in </span><span class="s1">value))))</span>
+
+        <span class="s1">output.append(</span><span class="s4">'RRULE:' </span><span class="s1">+ </span><span class="s4">';'</span><span class="s1">.join(parts))</span>
+        <span class="s3">return </span><span class="s4">'</span><span class="s3">\n</span><span class="s4">'</span><span class="s1">.join(output)</span>
+
+    <span class="s3">def </span><span class="s1">replace(self</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+        <span class="s2">&quot;&quot;&quot;Return new rrule with same attributes except for those attributes given new 
+           values by whichever keyword arguments are specified.&quot;&quot;&quot;</span>
+        <span class="s1">new_kwargs = {</span><span class="s4">&quot;interval&quot;</span><span class="s1">: self._interval</span><span class="s3">,</span>
+                      <span class="s4">&quot;count&quot;</span><span class="s1">: self._count</span><span class="s3">,</span>
+                      <span class="s4">&quot;dtstart&quot;</span><span class="s1">: self._dtstart</span><span class="s3">,</span>
+                      <span class="s4">&quot;freq&quot;</span><span class="s1">: self._freq</span><span class="s3">,</span>
+                      <span class="s4">&quot;until&quot;</span><span class="s1">: self._until</span><span class="s3">,</span>
+                      <span class="s4">&quot;wkst&quot;</span><span class="s1">: self._wkst</span><span class="s3">,</span>
+                      <span class="s4">&quot;cache&quot;</span><span class="s1">: </span><span class="s3">False if </span><span class="s1">self._cache </span><span class="s3">is None else True </span><span class="s1">}</span>
+        <span class="s1">new_kwargs.update(self._original_rule)</span>
+        <span class="s1">new_kwargs.update(kwargs)</span>
+        <span class="s3">return </span><span class="s1">rrule(**new_kwargs)</span>
+
+    <span class="s3">def </span><span class="s1">_iter(self):</span>
+        <span class="s1">year</span><span class="s3">, </span><span class="s1">month</span><span class="s3">, </span><span class="s1">day</span><span class="s3">, </span><span class="s1">hour</span><span class="s3">, </span><span class="s1">minute</span><span class="s3">, </span><span class="s1">second</span><span class="s3">, </span><span class="s1">weekday</span><span class="s3">, </span><span class="s1">yearday</span><span class="s3">, </span><span class="s1">_ = \</span>
+            <span class="s1">self._dtstart.timetuple()</span>
+
+        <span class="s0"># Some local variables to speed things up a bit</span>
+        <span class="s1">freq = self._freq</span>
+        <span class="s1">interval = self._interval</span>
+        <span class="s1">wkst = self._wkst</span>
+        <span class="s1">until = self._until</span>
+        <span class="s1">bymonth = self._bymonth</span>
+        <span class="s1">byweekno = self._byweekno</span>
+        <span class="s1">byyearday = self._byyearday</span>
+        <span class="s1">byweekday = self._byweekday</span>
+        <span class="s1">byeaster = self._byeaster</span>
+        <span class="s1">bymonthday = self._bymonthday</span>
+        <span class="s1">bynmonthday = self._bynmonthday</span>
+        <span class="s1">bysetpos = self._bysetpos</span>
+        <span class="s1">byhour = self._byhour</span>
+        <span class="s1">byminute = self._byminute</span>
+        <span class="s1">bysecond = self._bysecond</span>
+
+        <span class="s1">ii = _iterinfo(self)</span>
+        <span class="s1">ii.rebuild(year</span><span class="s3">, </span><span class="s1">month)</span>
+
+        <span class="s1">getdayset = {YEARLY: ii.ydayset</span><span class="s3">,</span>
+                     <span class="s1">MONTHLY: ii.mdayset</span><span class="s3">,</span>
+                     <span class="s1">WEEKLY: ii.wdayset</span><span class="s3">,</span>
+                     <span class="s1">DAILY: ii.ddayset</span><span class="s3">,</span>
+                     <span class="s1">HOURLY: ii.ddayset</span><span class="s3">,</span>
+                     <span class="s1">MINUTELY: ii.ddayset</span><span class="s3">,</span>
+                     <span class="s1">SECONDLY: ii.ddayset}[freq]</span>
+
+        <span class="s3">if </span><span class="s1">freq &lt; HOURLY:</span>
+            <span class="s1">timeset = self._timeset</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">gettimeset = {HOURLY: ii.htimeset</span><span class="s3">,</span>
+                          <span class="s1">MINUTELY: ii.mtimeset</span><span class="s3">,</span>
+                          <span class="s1">SECONDLY: ii.stimeset}[freq]</span>
+            <span class="s3">if </span><span class="s1">((freq &gt;= HOURLY </span><span class="s3">and</span>
+                 <span class="s1">self._byhour </span><span class="s3">and </span><span class="s1">hour </span><span class="s3">not in </span><span class="s1">self._byhour) </span><span class="s3">or</span>
+                <span class="s1">(freq &gt;= MINUTELY </span><span class="s3">and</span>
+                 <span class="s1">self._byminute </span><span class="s3">and </span><span class="s1">minute </span><span class="s3">not in </span><span class="s1">self._byminute) </span><span class="s3">or</span>
+                <span class="s1">(freq &gt;= SECONDLY </span><span class="s3">and</span>
+                 <span class="s1">self._bysecond </span><span class="s3">and </span><span class="s1">second </span><span class="s3">not in </span><span class="s1">self._bysecond)):</span>
+                <span class="s1">timeset = ()</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">timeset = gettimeset(hour</span><span class="s3">, </span><span class="s1">minute</span><span class="s3">, </span><span class="s1">second)</span>
+
+        <span class="s1">total = </span><span class="s5">0</span>
+        <span class="s1">count = self._count</span>
+        <span class="s3">while True</span><span class="s1">:</span>
+            <span class="s0"># Get dayset with the right frequency</span>
+            <span class="s1">dayset</span><span class="s3">, </span><span class="s1">start</span><span class="s3">, </span><span class="s1">end = getdayset(year</span><span class="s3">, </span><span class="s1">month</span><span class="s3">, </span><span class="s1">day)</span>
+
+            <span class="s0"># Do the &quot;hard&quot; work ;-)</span>
+            <span class="s1">filtered = </span><span class="s3">False</span>
+            <span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">dayset[start:end]:</span>
+                <span class="s3">if </span><span class="s1">((bymonth </span><span class="s3">and </span><span class="s1">ii.mmask[i] </span><span class="s3">not in </span><span class="s1">bymonth) </span><span class="s3">or</span>
+                    <span class="s1">(byweekno </span><span class="s3">and not </span><span class="s1">ii.wnomask[i]) </span><span class="s3">or</span>
+                    <span class="s1">(byweekday </span><span class="s3">and </span><span class="s1">ii.wdaymask[i] </span><span class="s3">not in </span><span class="s1">byweekday) </span><span class="s3">or</span>
+                    <span class="s1">(ii.nwdaymask </span><span class="s3">and not </span><span class="s1">ii.nwdaymask[i]) </span><span class="s3">or</span>
+                    <span class="s1">(byeaster </span><span class="s3">and not </span><span class="s1">ii.eastermask[i]) </span><span class="s3">or</span>
+                    <span class="s1">((bymonthday </span><span class="s3">or </span><span class="s1">bynmonthday) </span><span class="s3">and</span>
+                     <span class="s1">ii.mdaymask[i] </span><span class="s3">not in </span><span class="s1">bymonthday </span><span class="s3">and</span>
+                     <span class="s1">ii.nmdaymask[i] </span><span class="s3">not in </span><span class="s1">bynmonthday) </span><span class="s3">or</span>
+                    <span class="s1">(byyearday </span><span class="s3">and</span>
+                     <span class="s1">((i &lt; ii.yearlen </span><span class="s3">and </span><span class="s1">i+</span><span class="s5">1 </span><span class="s3">not in </span><span class="s1">byyearday </span><span class="s3">and</span>
+                       <span class="s1">-ii.yearlen+i </span><span class="s3">not in </span><span class="s1">byyearday) </span><span class="s3">or</span>
+                      <span class="s1">(i &gt;= ii.yearlen </span><span class="s3">and </span><span class="s1">i+</span><span class="s5">1</span><span class="s1">-ii.yearlen </span><span class="s3">not in </span><span class="s1">byyearday </span><span class="s3">and</span>
+                       <span class="s1">-ii.nextyearlen+i-ii.yearlen </span><span class="s3">not in </span><span class="s1">byyearday)))):</span>
+                    <span class="s1">dayset[i] = </span><span class="s3">None</span>
+                    <span class="s1">filtered = </span><span class="s3">True</span>
+
+            <span class="s0"># Output results</span>
+            <span class="s3">if </span><span class="s1">bysetpos </span><span class="s3">and </span><span class="s1">timeset:</span>
+                <span class="s1">poslist = []</span>
+                <span class="s3">for </span><span class="s1">pos </span><span class="s3">in </span><span class="s1">bysetpos:</span>
+                    <span class="s3">if </span><span class="s1">pos &lt; </span><span class="s5">0</span><span class="s1">:</span>
+                        <span class="s1">daypos</span><span class="s3">, </span><span class="s1">timepos = divmod(pos</span><span class="s3">, </span><span class="s1">len(timeset))</span>
+                    <span class="s3">else</span><span class="s1">:</span>
+                        <span class="s1">daypos</span><span class="s3">, </span><span class="s1">timepos = divmod(pos-</span><span class="s5">1</span><span class="s3">, </span><span class="s1">len(timeset))</span>
+                    <span class="s3">try</span><span class="s1">:</span>
+                        <span class="s1">i = [x </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">dayset[start:end]</span>
+                             <span class="s3">if </span><span class="s1">x </span><span class="s3">is not None</span><span class="s1">][daypos]</span>
+                        <span class="s1">time = timeset[timepos]</span>
+                    <span class="s3">except </span><span class="s1">IndexError:</span>
+                        <span class="s3">pass</span>
+                    <span class="s3">else</span><span class="s1">:</span>
+                        <span class="s1">date = datetime.date.fromordinal(ii.yearordinal+i)</span>
+                        <span class="s1">res = datetime.datetime.combine(date</span><span class="s3">, </span><span class="s1">time)</span>
+                        <span class="s3">if </span><span class="s1">res </span><span class="s3">not in </span><span class="s1">poslist:</span>
+                            <span class="s1">poslist.append(res)</span>
+                <span class="s1">poslist.sort()</span>
+                <span class="s3">for </span><span class="s1">res </span><span class="s3">in </span><span class="s1">poslist:</span>
+                    <span class="s3">if </span><span class="s1">until </span><span class="s3">and </span><span class="s1">res &gt; until:</span>
+                        <span class="s1">self._len = total</span>
+                        <span class="s3">return</span>
+                    <span class="s3">elif </span><span class="s1">res &gt;= self._dtstart:</span>
+                        <span class="s3">if </span><span class="s1">count </span><span class="s3">is not None</span><span class="s1">:</span>
+                            <span class="s1">count -= </span><span class="s5">1</span>
+                            <span class="s3">if </span><span class="s1">count &lt; </span><span class="s5">0</span><span class="s1">:</span>
+                                <span class="s1">self._len = total</span>
+                                <span class="s3">return</span>
+                        <span class="s1">total += </span><span class="s5">1</span>
+                        <span class="s3">yield </span><span class="s1">res</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">dayset[start:end]:</span>
+                    <span class="s3">if </span><span class="s1">i </span><span class="s3">is not None</span><span class="s1">:</span>
+                        <span class="s1">date = datetime.date.fromordinal(ii.yearordinal + i)</span>
+                        <span class="s3">for </span><span class="s1">time </span><span class="s3">in </span><span class="s1">timeset:</span>
+                            <span class="s1">res = datetime.datetime.combine(date</span><span class="s3">, </span><span class="s1">time)</span>
+                            <span class="s3">if </span><span class="s1">until </span><span class="s3">and </span><span class="s1">res &gt; until:</span>
+                                <span class="s1">self._len = total</span>
+                                <span class="s3">return</span>
+                            <span class="s3">elif </span><span class="s1">res &gt;= self._dtstart:</span>
+                                <span class="s3">if </span><span class="s1">count </span><span class="s3">is not None</span><span class="s1">:</span>
+                                    <span class="s1">count -= </span><span class="s5">1</span>
+                                    <span class="s3">if </span><span class="s1">count &lt; </span><span class="s5">0</span><span class="s1">:</span>
+                                        <span class="s1">self._len = total</span>
+                                        <span class="s3">return</span>
+
+                                <span class="s1">total += </span><span class="s5">1</span>
+                                <span class="s3">yield </span><span class="s1">res</span>
+
+            <span class="s0"># Handle frequency and interval</span>
+            <span class="s1">fixday = </span><span class="s3">False</span>
+            <span class="s3">if </span><span class="s1">freq == YEARLY:</span>
+                <span class="s1">year += interval</span>
+                <span class="s3">if </span><span class="s1">year &gt; datetime.MAXYEAR:</span>
+                    <span class="s1">self._len = total</span>
+                    <span class="s3">return</span>
+                <span class="s1">ii.rebuild(year</span><span class="s3">, </span><span class="s1">month)</span>
+            <span class="s3">elif </span><span class="s1">freq == MONTHLY:</span>
+                <span class="s1">month += interval</span>
+                <span class="s3">if </span><span class="s1">month &gt; </span><span class="s5">12</span><span class="s1">:</span>
+                    <span class="s1">div</span><span class="s3">, </span><span class="s1">mod = divmod(month</span><span class="s3">, </span><span class="s5">12</span><span class="s1">)</span>
+                    <span class="s1">month = mod</span>
+                    <span class="s1">year += div</span>
+                    <span class="s3">if </span><span class="s1">month == </span><span class="s5">0</span><span class="s1">:</span>
+                        <span class="s1">month = </span><span class="s5">12</span>
+                        <span class="s1">year -= </span><span class="s5">1</span>
+                    <span class="s3">if </span><span class="s1">year &gt; datetime.MAXYEAR:</span>
+                        <span class="s1">self._len = total</span>
+                        <span class="s3">return</span>
+                <span class="s1">ii.rebuild(year</span><span class="s3">, </span><span class="s1">month)</span>
+            <span class="s3">elif </span><span class="s1">freq == WEEKLY:</span>
+                <span class="s3">if </span><span class="s1">wkst &gt; weekday:</span>
+                    <span class="s1">day += -(weekday+</span><span class="s5">1</span><span class="s1">+(</span><span class="s5">6</span><span class="s1">-wkst))+self._interval*</span><span class="s5">7</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">day += -(weekday-wkst)+self._interval*</span><span class="s5">7</span>
+                <span class="s1">weekday = wkst</span>
+                <span class="s1">fixday = </span><span class="s3">True</span>
+            <span class="s3">elif </span><span class="s1">freq == DAILY:</span>
+                <span class="s1">day += interval</span>
+                <span class="s1">fixday = </span><span class="s3">True</span>
+            <span class="s3">elif </span><span class="s1">freq == HOURLY:</span>
+                <span class="s3">if </span><span class="s1">filtered:</span>
+                    <span class="s0"># Jump to one iteration before next day</span>
+                    <span class="s1">hour += ((</span><span class="s5">23</span><span class="s1">-hour)//interval)*interval</span>
+
+                <span class="s3">if </span><span class="s1">byhour:</span>
+                    <span class="s1">ndays</span><span class="s3">, </span><span class="s1">hour = self.__mod_distance(value=hour</span><span class="s3">,</span>
+                                                      <span class="s1">byxxx=self._byhour</span><span class="s3">,</span>
+                                                      <span class="s1">base=</span><span class="s5">24</span><span class="s1">)</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">ndays</span><span class="s3">, </span><span class="s1">hour = divmod(hour+interval</span><span class="s3">, </span><span class="s5">24</span><span class="s1">)</span>
+
+                <span class="s3">if </span><span class="s1">ndays:</span>
+                    <span class="s1">day += ndays</span>
+                    <span class="s1">fixday = </span><span class="s3">True</span>
+
+                <span class="s1">timeset = gettimeset(hour</span><span class="s3">, </span><span class="s1">minute</span><span class="s3">, </span><span class="s1">second)</span>
+            <span class="s3">elif </span><span class="s1">freq == MINUTELY:</span>
+                <span class="s3">if </span><span class="s1">filtered:</span>
+                    <span class="s0"># Jump to one iteration before next day</span>
+                    <span class="s1">minute += ((</span><span class="s5">1439</span><span class="s1">-(hour*</span><span class="s5">60</span><span class="s1">+minute))//interval)*interval</span>
+
+                <span class="s1">valid = </span><span class="s3">False</span>
+                <span class="s1">rep_rate = (</span><span class="s5">24</span><span class="s1">*</span><span class="s5">60</span><span class="s1">)</span>
+                <span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">range(rep_rate // gcd(interval</span><span class="s3">, </span><span class="s1">rep_rate)):</span>
+                    <span class="s3">if </span><span class="s1">byminute:</span>
+                        <span class="s1">nhours</span><span class="s3">, </span><span class="s1">minute = \</span>
+                            <span class="s1">self.__mod_distance(value=minute</span><span class="s3">,</span>
+                                                <span class="s1">byxxx=self._byminute</span><span class="s3">,</span>
+                                                <span class="s1">base=</span><span class="s5">60</span><span class="s1">)</span>
+                    <span class="s3">else</span><span class="s1">:</span>
+                        <span class="s1">nhours</span><span class="s3">, </span><span class="s1">minute = divmod(minute+interval</span><span class="s3">, </span><span class="s5">60</span><span class="s1">)</span>
+
+                    <span class="s1">div</span><span class="s3">, </span><span class="s1">hour = divmod(hour+nhours</span><span class="s3">, </span><span class="s5">24</span><span class="s1">)</span>
+                    <span class="s3">if </span><span class="s1">div:</span>
+                        <span class="s1">day += div</span>
+                        <span class="s1">fixday = </span><span class="s3">True</span>
+                        <span class="s1">filtered = </span><span class="s3">False</span>
+
+                    <span class="s3">if not </span><span class="s1">byhour </span><span class="s3">or </span><span class="s1">hour </span><span class="s3">in </span><span class="s1">byhour:</span>
+                        <span class="s1">valid = </span><span class="s3">True</span>
+                        <span class="s3">break</span>
+
+                <span class="s3">if not </span><span class="s1">valid:</span>
+                    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">'Invalid combination of interval and ' </span><span class="s1">+</span>
+                                     <span class="s4">'byhour resulting in empty rule.'</span><span class="s1">)</span>
+
+                <span class="s1">timeset = gettimeset(hour</span><span class="s3">, </span><span class="s1">minute</span><span class="s3">, </span><span class="s1">second)</span>
+            <span class="s3">elif </span><span class="s1">freq == SECONDLY:</span>
+                <span class="s3">if </span><span class="s1">filtered:</span>
+                    <span class="s0"># Jump to one iteration before next day</span>
+                    <span class="s1">second += (((</span><span class="s5">86399 </span><span class="s1">- (hour * </span><span class="s5">3600 </span><span class="s1">+ minute * </span><span class="s5">60 </span><span class="s1">+ second))</span>
+                                <span class="s1">// interval) * interval)</span>
+
+                <span class="s1">rep_rate = (</span><span class="s5">24 </span><span class="s1">* </span><span class="s5">3600</span><span class="s1">)</span>
+                <span class="s1">valid = </span><span class="s3">False</span>
+                <span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">0</span><span class="s3">, </span><span class="s1">rep_rate // gcd(interval</span><span class="s3">, </span><span class="s1">rep_rate)):</span>
+                    <span class="s3">if </span><span class="s1">bysecond:</span>
+                        <span class="s1">nminutes</span><span class="s3">, </span><span class="s1">second = \</span>
+                            <span class="s1">self.__mod_distance(value=second</span><span class="s3">,</span>
+                                                <span class="s1">byxxx=self._bysecond</span><span class="s3">,</span>
+                                                <span class="s1">base=</span><span class="s5">60</span><span class="s1">)</span>
+                    <span class="s3">else</span><span class="s1">:</span>
+                        <span class="s1">nminutes</span><span class="s3">, </span><span class="s1">second = divmod(second+interval</span><span class="s3">, </span><span class="s5">60</span><span class="s1">)</span>
+
+                    <span class="s1">div</span><span class="s3">, </span><span class="s1">minute = divmod(minute+nminutes</span><span class="s3">, </span><span class="s5">60</span><span class="s1">)</span>
+                    <span class="s3">if </span><span class="s1">div:</span>
+                        <span class="s1">hour += div</span>
+                        <span class="s1">div</span><span class="s3">, </span><span class="s1">hour = divmod(hour</span><span class="s3">, </span><span class="s5">24</span><span class="s1">)</span>
+                        <span class="s3">if </span><span class="s1">div:</span>
+                            <span class="s1">day += div</span>
+                            <span class="s1">fixday = </span><span class="s3">True</span>
+
+                    <span class="s3">if </span><span class="s1">((</span><span class="s3">not </span><span class="s1">byhour </span><span class="s3">or </span><span class="s1">hour </span><span class="s3">in </span><span class="s1">byhour) </span><span class="s3">and</span>
+                            <span class="s1">(</span><span class="s3">not </span><span class="s1">byminute </span><span class="s3">or </span><span class="s1">minute </span><span class="s3">in </span><span class="s1">byminute) </span><span class="s3">and</span>
+                            <span class="s1">(</span><span class="s3">not </span><span class="s1">bysecond </span><span class="s3">or </span><span class="s1">second </span><span class="s3">in </span><span class="s1">bysecond)):</span>
+                        <span class="s1">valid = </span><span class="s3">True</span>
+                        <span class="s3">break</span>
+
+                <span class="s3">if not </span><span class="s1">valid:</span>
+                    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">'Invalid combination of interval, ' </span><span class="s1">+</span>
+                                     <span class="s4">'byhour and byminute resulting in empty' </span><span class="s1">+</span>
+                                     <span class="s4">' rule.'</span><span class="s1">)</span>
+
+                <span class="s1">timeset = gettimeset(hour</span><span class="s3">, </span><span class="s1">minute</span><span class="s3">, </span><span class="s1">second)</span>
+
+            <span class="s3">if </span><span class="s1">fixday </span><span class="s3">and </span><span class="s1">day &gt; </span><span class="s5">28</span><span class="s1">:</span>
+                <span class="s1">daysinmonth = calendar.monthrange(year</span><span class="s3">, </span><span class="s1">month)[</span><span class="s5">1</span><span class="s1">]</span>
+                <span class="s3">if </span><span class="s1">day &gt; daysinmonth:</span>
+                    <span class="s3">while </span><span class="s1">day &gt; daysinmonth:</span>
+                        <span class="s1">day -= daysinmonth</span>
+                        <span class="s1">month += </span><span class="s5">1</span>
+                        <span class="s3">if </span><span class="s1">month == </span><span class="s5">13</span><span class="s1">:</span>
+                            <span class="s1">month = </span><span class="s5">1</span>
+                            <span class="s1">year += </span><span class="s5">1</span>
+                            <span class="s3">if </span><span class="s1">year &gt; datetime.MAXYEAR:</span>
+                                <span class="s1">self._len = total</span>
+                                <span class="s3">return</span>
+                        <span class="s1">daysinmonth = calendar.monthrange(year</span><span class="s3">, </span><span class="s1">month)[</span><span class="s5">1</span><span class="s1">]</span>
+                    <span class="s1">ii.rebuild(year</span><span class="s3">, </span><span class="s1">month)</span>
+
+    <span class="s3">def </span><span class="s1">__construct_byset(self</span><span class="s3">, </span><span class="s1">start</span><span class="s3">, </span><span class="s1">byxxx</span><span class="s3">, </span><span class="s1">base):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        If a `BYXXX` sequence is passed to the constructor at the same level as 
+        `FREQ` (e.g. `FREQ=HOURLY,BYHOUR={2,4,7},INTERVAL=3`), there are some 
+        specifications which cannot be reached given some starting conditions. 
+ 
+        This occurs whenever the interval is not coprime with the base of a 
+        given unit and the difference between the starting position and the 
+        ending position is not coprime with the greatest common denominator 
+        between the interval and the base. For example, with a FREQ of hourly 
+        starting at 17:00 and an interval of 4, the only valid values for 
+        BYHOUR would be {21, 1, 5, 9, 13, 17}, because 4 and 24 are not 
+        coprime. 
+ 
+        :param start: 
+            Specifies the starting position. 
+        :param byxxx: 
+            An iterable containing the list of allowed values. 
+        :param base: 
+            The largest allowable value for the specified frequency (e.g. 
+            24 hours, 60 minutes). 
+ 
+        This does not preserve the type of the iterable, returning a set, since 
+        the values should be unique and the order is irrelevant, this will 
+        speed up later lookups. 
+ 
+        In the event of an empty set, raises a :exception:`ValueError`, as this 
+        results in an empty rrule. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s1">cset = set()</span>
+
+        <span class="s0"># Support a single byxxx value.</span>
+        <span class="s3">if </span><span class="s1">isinstance(byxxx</span><span class="s3">, </span><span class="s1">integer_types):</span>
+            <span class="s1">byxxx = (byxxx</span><span class="s3">, </span><span class="s1">)</span>
+
+        <span class="s3">for </span><span class="s1">num </span><span class="s3">in </span><span class="s1">byxxx:</span>
+            <span class="s1">i_gcd = gcd(self._interval</span><span class="s3">, </span><span class="s1">base)</span>
+            <span class="s0"># Use divmod rather than % because we need to wrap negative nums.</span>
+            <span class="s3">if </span><span class="s1">i_gcd == </span><span class="s5">1 </span><span class="s3">or </span><span class="s1">divmod(num - start</span><span class="s3">, </span><span class="s1">i_gcd)[</span><span class="s5">1</span><span class="s1">] == </span><span class="s5">0</span><span class="s1">:</span>
+                <span class="s1">cset.add(num)</span>
+
+        <span class="s3">if </span><span class="s1">len(cset) == </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Invalid rrule byxxx generates an empty set.&quot;</span><span class="s1">)</span>
+
+        <span class="s3">return </span><span class="s1">cset</span>
+
+    <span class="s3">def </span><span class="s1">__mod_distance(self</span><span class="s3">, </span><span class="s1">value</span><span class="s3">, </span><span class="s1">byxxx</span><span class="s3">, </span><span class="s1">base):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Calculates the next value in a sequence where the `FREQ` parameter is 
+        specified along with a `BYXXX` parameter at the same &quot;level&quot; 
+        (e.g. `HOURLY` specified with `BYHOUR`). 
+ 
+        :param value: 
+            The old value of the component. 
+        :param byxxx: 
+            The `BYXXX` set, which should have been generated by 
+            `rrule._construct_byset`, or something else which checks that a 
+            valid rule is present. 
+        :param base: 
+            The largest allowable value for the specified frequency (e.g. 
+            24 hours, 60 minutes). 
+ 
+        If a valid value is not found after `base` iterations (the maximum 
+        number before the sequence would start to repeat), this raises a 
+        :exception:`ValueError`, as no valid values were found. 
+ 
+        This returns a tuple of `divmod(n*interval, base)`, where `n` is the 
+        smallest number of `interval` repetitions until the next specified 
+        value in `byxxx` is found. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">accumulator = </span><span class="s5">0</span>
+        <span class="s3">for </span><span class="s1">ii </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">1</span><span class="s3">, </span><span class="s1">base + </span><span class="s5">1</span><span class="s1">):</span>
+            <span class="s0"># Using divmod() over % to account for negative intervals</span>
+            <span class="s1">div</span><span class="s3">, </span><span class="s1">value = divmod(value + self._interval</span><span class="s3">, </span><span class="s1">base)</span>
+            <span class="s1">accumulator += div</span>
+            <span class="s3">if </span><span class="s1">value </span><span class="s3">in </span><span class="s1">byxxx:</span>
+                <span class="s3">return </span><span class="s1">(accumulator</span><span class="s3">, </span><span class="s1">value)</span>
+
+
+<span class="s3">class </span><span class="s1">_iterinfo(object):</span>
+    <span class="s1">__slots__ = [</span><span class="s4">&quot;rrule&quot;</span><span class="s3">, </span><span class="s4">&quot;lastyear&quot;</span><span class="s3">, </span><span class="s4">&quot;lastmonth&quot;</span><span class="s3">,</span>
+                 <span class="s4">&quot;yearlen&quot;</span><span class="s3">, </span><span class="s4">&quot;nextyearlen&quot;</span><span class="s3">, </span><span class="s4">&quot;yearordinal&quot;</span><span class="s3">, </span><span class="s4">&quot;yearweekday&quot;</span><span class="s3">,</span>
+                 <span class="s4">&quot;mmask&quot;</span><span class="s3">, </span><span class="s4">&quot;mrange&quot;</span><span class="s3">, </span><span class="s4">&quot;mdaymask&quot;</span><span class="s3">, </span><span class="s4">&quot;nmdaymask&quot;</span><span class="s3">,</span>
+                 <span class="s4">&quot;wdaymask&quot;</span><span class="s3">, </span><span class="s4">&quot;wnomask&quot;</span><span class="s3">, </span><span class="s4">&quot;nwdaymask&quot;</span><span class="s3">, </span><span class="s4">&quot;eastermask&quot;</span><span class="s1">]</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">rrule):</span>
+        <span class="s3">for </span><span class="s1">attr </span><span class="s3">in </span><span class="s1">self.__slots__:</span>
+            <span class="s1">setattr(self</span><span class="s3">, </span><span class="s1">attr</span><span class="s3">, None</span><span class="s1">)</span>
+        <span class="s1">self.rrule = rrule</span>
+
+    <span class="s3">def </span><span class="s1">rebuild(self</span><span class="s3">, </span><span class="s1">year</span><span class="s3">, </span><span class="s1">month):</span>
+        <span class="s0"># Every mask is 7 days longer to handle cross-year weekly periods.</span>
+        <span class="s1">rr = self.rrule</span>
+        <span class="s3">if </span><span class="s1">year != self.lastyear:</span>
+            <span class="s1">self.yearlen = </span><span class="s5">365 </span><span class="s1">+ calendar.isleap(year)</span>
+            <span class="s1">self.nextyearlen = </span><span class="s5">365 </span><span class="s1">+ calendar.isleap(year + </span><span class="s5">1</span><span class="s1">)</span>
+            <span class="s1">firstyday = datetime.date(year</span><span class="s3">, </span><span class="s5">1</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)</span>
+            <span class="s1">self.yearordinal = firstyday.toordinal()</span>
+            <span class="s1">self.yearweekday = firstyday.weekday()</span>
+
+            <span class="s1">wday = datetime.date(year</span><span class="s3">, </span><span class="s5">1</span><span class="s3">, </span><span class="s5">1</span><span class="s1">).weekday()</span>
+            <span class="s3">if </span><span class="s1">self.yearlen == </span><span class="s5">365</span><span class="s1">:</span>
+                <span class="s1">self.mmask = M365MASK</span>
+                <span class="s1">self.mdaymask = MDAY365MASK</span>
+                <span class="s1">self.nmdaymask = NMDAY365MASK</span>
+                <span class="s1">self.wdaymask = WDAYMASK[wday:]</span>
+                <span class="s1">self.mrange = M365RANGE</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">self.mmask = M366MASK</span>
+                <span class="s1">self.mdaymask = MDAY366MASK</span>
+                <span class="s1">self.nmdaymask = NMDAY366MASK</span>
+                <span class="s1">self.wdaymask = WDAYMASK[wday:]</span>
+                <span class="s1">self.mrange = M366RANGE</span>
+
+            <span class="s3">if not </span><span class="s1">rr._byweekno:</span>
+                <span class="s1">self.wnomask = </span><span class="s3">None</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">self.wnomask = [</span><span class="s5">0</span><span class="s1">]*(self.yearlen+</span><span class="s5">7</span><span class="s1">)</span>
+                <span class="s0"># no1wkst = firstwkst = self.wdaymask.index(rr._wkst)</span>
+                <span class="s1">no1wkst = firstwkst = (</span><span class="s5">7</span><span class="s1">-self.yearweekday+rr._wkst) % </span><span class="s5">7</span>
+                <span class="s3">if </span><span class="s1">no1wkst &gt;= </span><span class="s5">4</span><span class="s1">:</span>
+                    <span class="s1">no1wkst = </span><span class="s5">0</span>
+                    <span class="s0"># Number of days in the year, plus the days we got</span>
+                    <span class="s0"># from last year.</span>
+                    <span class="s1">wyearlen = self.yearlen+(self.yearweekday-rr._wkst) % </span><span class="s5">7</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s0"># Number of days in the year, minus the days we</span>
+                    <span class="s0"># left in last year.</span>
+                    <span class="s1">wyearlen = self.yearlen-no1wkst</span>
+                <span class="s1">div</span><span class="s3">, </span><span class="s1">mod = divmod(wyearlen</span><span class="s3">, </span><span class="s5">7</span><span class="s1">)</span>
+                <span class="s1">numweeks = div+mod//</span><span class="s5">4</span>
+                <span class="s3">for </span><span class="s1">n </span><span class="s3">in </span><span class="s1">rr._byweekno:</span>
+                    <span class="s3">if </span><span class="s1">n &lt; </span><span class="s5">0</span><span class="s1">:</span>
+                        <span class="s1">n += numweeks+</span><span class="s5">1</span>
+                    <span class="s3">if not </span><span class="s1">(</span><span class="s5">0 </span><span class="s1">&lt; n &lt;= numweeks):</span>
+                        <span class="s3">continue</span>
+                    <span class="s3">if </span><span class="s1">n &gt; </span><span class="s5">1</span><span class="s1">:</span>
+                        <span class="s1">i = no1wkst+(n-</span><span class="s5">1</span><span class="s1">)*</span><span class="s5">7</span>
+                        <span class="s3">if </span><span class="s1">no1wkst != firstwkst:</span>
+                            <span class="s1">i -= </span><span class="s5">7</span><span class="s1">-firstwkst</span>
+                    <span class="s3">else</span><span class="s1">:</span>
+                        <span class="s1">i = no1wkst</span>
+                    <span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">7</span><span class="s1">):</span>
+                        <span class="s1">self.wnomask[i] = </span><span class="s5">1</span>
+                        <span class="s1">i += </span><span class="s5">1</span>
+                        <span class="s3">if </span><span class="s1">self.wdaymask[i] == rr._wkst:</span>
+                            <span class="s3">break</span>
+                <span class="s3">if </span><span class="s5">1 </span><span class="s3">in </span><span class="s1">rr._byweekno:</span>
+                    <span class="s0"># Check week number 1 of next year as well</span>
+                    <span class="s0"># TODO: Check -numweeks for next year.</span>
+                    <span class="s1">i = no1wkst+numweeks*</span><span class="s5">7</span>
+                    <span class="s3">if </span><span class="s1">no1wkst != firstwkst:</span>
+                        <span class="s1">i -= </span><span class="s5">7</span><span class="s1">-firstwkst</span>
+                    <span class="s3">if </span><span class="s1">i &lt; self.yearlen:</span>
+                        <span class="s0"># If week starts in next year, we</span>
+                        <span class="s0"># don't care about it.</span>
+                        <span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">7</span><span class="s1">):</span>
+                            <span class="s1">self.wnomask[i] = </span><span class="s5">1</span>
+                            <span class="s1">i += </span><span class="s5">1</span>
+                            <span class="s3">if </span><span class="s1">self.wdaymask[i] == rr._wkst:</span>
+                                <span class="s3">break</span>
+                <span class="s3">if </span><span class="s1">no1wkst:</span>
+                    <span class="s0"># Check last week number of last year as</span>
+                    <span class="s0"># well. If no1wkst is 0, either the year</span>
+                    <span class="s0"># started on week start, or week number 1</span>
+                    <span class="s0"># got days from last year, so there are no</span>
+                    <span class="s0"># days from last year's last week number in</span>
+                    <span class="s0"># this year.</span>
+                    <span class="s3">if </span><span class="s1">-</span><span class="s5">1 </span><span class="s3">not in </span><span class="s1">rr._byweekno:</span>
+                        <span class="s1">lyearweekday = datetime.date(year-</span><span class="s5">1</span><span class="s3">, </span><span class="s5">1</span><span class="s3">, </span><span class="s5">1</span><span class="s1">).weekday()</span>
+                        <span class="s1">lno1wkst = (</span><span class="s5">7</span><span class="s1">-lyearweekday+rr._wkst) % </span><span class="s5">7</span>
+                        <span class="s1">lyearlen = </span><span class="s5">365</span><span class="s1">+calendar.isleap(year-</span><span class="s5">1</span><span class="s1">)</span>
+                        <span class="s3">if </span><span class="s1">lno1wkst &gt;= </span><span class="s5">4</span><span class="s1">:</span>
+                            <span class="s1">lno1wkst = </span><span class="s5">0</span>
+                            <span class="s1">lnumweeks = </span><span class="s5">52</span><span class="s1">+(lyearlen +</span>
+                                            <span class="s1">(lyearweekday-rr._wkst) % </span><span class="s5">7</span><span class="s1">) % </span><span class="s5">7</span><span class="s1">//</span><span class="s5">4</span>
+                        <span class="s3">else</span><span class="s1">:</span>
+                            <span class="s1">lnumweeks = </span><span class="s5">52</span><span class="s1">+(self.yearlen-no1wkst) % </span><span class="s5">7</span><span class="s1">//</span><span class="s5">4</span>
+                    <span class="s3">else</span><span class="s1">:</span>
+                        <span class="s1">lnumweeks = -</span><span class="s5">1</span>
+                    <span class="s3">if </span><span class="s1">lnumweeks </span><span class="s3">in </span><span class="s1">rr._byweekno:</span>
+                        <span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">range(no1wkst):</span>
+                            <span class="s1">self.wnomask[i] = </span><span class="s5">1</span>
+
+        <span class="s3">if </span><span class="s1">(rr._bynweekday </span><span class="s3">and </span><span class="s1">(month != self.lastmonth </span><span class="s3">or</span>
+                                <span class="s1">year != self.lastyear)):</span>
+            <span class="s1">ranges = []</span>
+            <span class="s3">if </span><span class="s1">rr._freq == YEARLY:</span>
+                <span class="s3">if </span><span class="s1">rr._bymonth:</span>
+                    <span class="s3">for </span><span class="s1">month </span><span class="s3">in </span><span class="s1">rr._bymonth:</span>
+                        <span class="s1">ranges.append(self.mrange[month-</span><span class="s5">1</span><span class="s1">:month+</span><span class="s5">1</span><span class="s1">])</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">ranges = [(</span><span class="s5">0</span><span class="s3">, </span><span class="s1">self.yearlen)]</span>
+            <span class="s3">elif </span><span class="s1">rr._freq == MONTHLY:</span>
+                <span class="s1">ranges = [self.mrange[month-</span><span class="s5">1</span><span class="s1">:month+</span><span class="s5">1</span><span class="s1">]]</span>
+            <span class="s3">if </span><span class="s1">ranges:</span>
+                <span class="s0"># Weekly frequency won't get here, so we may not</span>
+                <span class="s0"># care about cross-year weekly periods.</span>
+                <span class="s1">self.nwdaymask = [</span><span class="s5">0</span><span class="s1">]*self.yearlen</span>
+                <span class="s3">for </span><span class="s1">first</span><span class="s3">, </span><span class="s1">last </span><span class="s3">in </span><span class="s1">ranges:</span>
+                    <span class="s1">last -= </span><span class="s5">1</span>
+                    <span class="s3">for </span><span class="s1">wday</span><span class="s3">, </span><span class="s1">n </span><span class="s3">in </span><span class="s1">rr._bynweekday:</span>
+                        <span class="s3">if </span><span class="s1">n &lt; </span><span class="s5">0</span><span class="s1">:</span>
+                            <span class="s1">i = last+(n+</span><span class="s5">1</span><span class="s1">)*</span><span class="s5">7</span>
+                            <span class="s1">i -= (self.wdaymask[i]-wday) % </span><span class="s5">7</span>
+                        <span class="s3">else</span><span class="s1">:</span>
+                            <span class="s1">i = first+(n-</span><span class="s5">1</span><span class="s1">)*</span><span class="s5">7</span>
+                            <span class="s1">i += (</span><span class="s5">7</span><span class="s1">-self.wdaymask[i]+wday) % </span><span class="s5">7</span>
+                        <span class="s3">if </span><span class="s1">first &lt;= i &lt;= last:</span>
+                            <span class="s1">self.nwdaymask[i] = </span><span class="s5">1</span>
+
+        <span class="s3">if </span><span class="s1">rr._byeaster:</span>
+            <span class="s1">self.eastermask = [</span><span class="s5">0</span><span class="s1">]*(self.yearlen+</span><span class="s5">7</span><span class="s1">)</span>
+            <span class="s1">eyday = easter.easter(year).toordinal()-self.yearordinal</span>
+            <span class="s3">for </span><span class="s1">offset </span><span class="s3">in </span><span class="s1">rr._byeaster:</span>
+                <span class="s1">self.eastermask[eyday+offset] = </span><span class="s5">1</span>
+
+        <span class="s1">self.lastyear = year</span>
+        <span class="s1">self.lastmonth = month</span>
+
+    <span class="s3">def </span><span class="s1">ydayset(self</span><span class="s3">, </span><span class="s1">year</span><span class="s3">, </span><span class="s1">month</span><span class="s3">, </span><span class="s1">day):</span>
+        <span class="s3">return </span><span class="s1">list(range(self.yearlen))</span><span class="s3">, </span><span class="s5">0</span><span class="s3">, </span><span class="s1">self.yearlen</span>
+
+    <span class="s3">def </span><span class="s1">mdayset(self</span><span class="s3">, </span><span class="s1">year</span><span class="s3">, </span><span class="s1">month</span><span class="s3">, </span><span class="s1">day):</span>
+        <span class="s1">dset = [</span><span class="s3">None</span><span class="s1">]*self.yearlen</span>
+        <span class="s1">start</span><span class="s3">, </span><span class="s1">end = self.mrange[month-</span><span class="s5">1</span><span class="s1">:month+</span><span class="s5">1</span><span class="s1">]</span>
+        <span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">range(start</span><span class="s3">, </span><span class="s1">end):</span>
+            <span class="s1">dset[i] = i</span>
+        <span class="s3">return </span><span class="s1">dset</span><span class="s3">, </span><span class="s1">start</span><span class="s3">, </span><span class="s1">end</span>
+
+    <span class="s3">def </span><span class="s1">wdayset(self</span><span class="s3">, </span><span class="s1">year</span><span class="s3">, </span><span class="s1">month</span><span class="s3">, </span><span class="s1">day):</span>
+        <span class="s0"># We need to handle cross-year weeks here.</span>
+        <span class="s1">dset = [</span><span class="s3">None</span><span class="s1">]*(self.yearlen+</span><span class="s5">7</span><span class="s1">)</span>
+        <span class="s1">i = datetime.date(year</span><span class="s3">, </span><span class="s1">month</span><span class="s3">, </span><span class="s1">day).toordinal()-self.yearordinal</span>
+        <span class="s1">start = i</span>
+        <span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">7</span><span class="s1">):</span>
+            <span class="s1">dset[i] = i</span>
+            <span class="s1">i += </span><span class="s5">1</span>
+            <span class="s0"># if (not (0 &lt;= i &lt; self.yearlen) or</span>
+            <span class="s0">#    self.wdaymask[i] == self.rrule._wkst):</span>
+            <span class="s0"># This will cross the year boundary, if necessary.</span>
+            <span class="s3">if </span><span class="s1">self.wdaymask[i] == self.rrule._wkst:</span>
+                <span class="s3">break</span>
+        <span class="s3">return </span><span class="s1">dset</span><span class="s3">, </span><span class="s1">start</span><span class="s3">, </span><span class="s1">i</span>
+
+    <span class="s3">def </span><span class="s1">ddayset(self</span><span class="s3">, </span><span class="s1">year</span><span class="s3">, </span><span class="s1">month</span><span class="s3">, </span><span class="s1">day):</span>
+        <span class="s1">dset = [</span><span class="s3">None</span><span class="s1">] * self.yearlen</span>
+        <span class="s1">i = datetime.date(year</span><span class="s3">, </span><span class="s1">month</span><span class="s3">, </span><span class="s1">day).toordinal() - self.yearordinal</span>
+        <span class="s1">dset[i] = i</span>
+        <span class="s3">return </span><span class="s1">dset</span><span class="s3">, </span><span class="s1">i</span><span class="s3">, </span><span class="s1">i + </span><span class="s5">1</span>
+
+    <span class="s3">def </span><span class="s1">htimeset(self</span><span class="s3">, </span><span class="s1">hour</span><span class="s3">, </span><span class="s1">minute</span><span class="s3">, </span><span class="s1">second):</span>
+        <span class="s1">tset = []</span>
+        <span class="s1">rr = self.rrule</span>
+        <span class="s3">for </span><span class="s1">minute </span><span class="s3">in </span><span class="s1">rr._byminute:</span>
+            <span class="s3">for </span><span class="s1">second </span><span class="s3">in </span><span class="s1">rr._bysecond:</span>
+                <span class="s1">tset.append(datetime.time(hour</span><span class="s3">, </span><span class="s1">minute</span><span class="s3">, </span><span class="s1">second</span><span class="s3">,</span>
+                                          <span class="s1">tzinfo=rr._tzinfo))</span>
+        <span class="s1">tset.sort()</span>
+        <span class="s3">return </span><span class="s1">tset</span>
+
+    <span class="s3">def </span><span class="s1">mtimeset(self</span><span class="s3">, </span><span class="s1">hour</span><span class="s3">, </span><span class="s1">minute</span><span class="s3">, </span><span class="s1">second):</span>
+        <span class="s1">tset = []</span>
+        <span class="s1">rr = self.rrule</span>
+        <span class="s3">for </span><span class="s1">second </span><span class="s3">in </span><span class="s1">rr._bysecond:</span>
+            <span class="s1">tset.append(datetime.time(hour</span><span class="s3">, </span><span class="s1">minute</span><span class="s3">, </span><span class="s1">second</span><span class="s3">, </span><span class="s1">tzinfo=rr._tzinfo))</span>
+        <span class="s1">tset.sort()</span>
+        <span class="s3">return </span><span class="s1">tset</span>
+
+    <span class="s3">def </span><span class="s1">stimeset(self</span><span class="s3">, </span><span class="s1">hour</span><span class="s3">, </span><span class="s1">minute</span><span class="s3">, </span><span class="s1">second):</span>
+        <span class="s3">return </span><span class="s1">(datetime.time(hour</span><span class="s3">, </span><span class="s1">minute</span><span class="s3">, </span><span class="s1">second</span><span class="s3">,</span>
+                <span class="s1">tzinfo=self.rrule._tzinfo)</span><span class="s3">,</span><span class="s1">)</span>
+
+
+<span class="s3">class </span><span class="s1">rruleset(rrulebase):</span>
+    <span class="s2">&quot;&quot;&quot; The rruleset type allows more complex recurrence setups, mixing 
+    multiple rules, dates, exclusion rules, and exclusion dates. The type 
+    constructor takes the following keyword arguments: 
+ 
+    :param cache: If True, caching of results will be enabled, improving 
+                  performance of multiple queries considerably. &quot;&quot;&quot;</span>
+
+    <span class="s3">class </span><span class="s1">_genitem(object):</span>
+        <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">genlist</span><span class="s3">, </span><span class="s1">gen):</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">self.dt = advance_iterator(gen)</span>
+                <span class="s1">genlist.append(self)</span>
+            <span class="s3">except </span><span class="s1">StopIteration:</span>
+                <span class="s3">pass</span>
+            <span class="s1">self.genlist = genlist</span>
+            <span class="s1">self.gen = gen</span>
+
+        <span class="s3">def </span><span class="s1">__next__(self):</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">self.dt = advance_iterator(self.gen)</span>
+            <span class="s3">except </span><span class="s1">StopIteration:</span>
+                <span class="s3">if </span><span class="s1">self.genlist[</span><span class="s5">0</span><span class="s1">] </span><span class="s3">is </span><span class="s1">self:</span>
+                    <span class="s1">heapq.heappop(self.genlist)</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">self.genlist.remove(self)</span>
+                    <span class="s1">heapq.heapify(self.genlist)</span>
+
+        <span class="s1">next = __next__</span>
+
+        <span class="s3">def </span><span class="s1">__lt__(self</span><span class="s3">, </span><span class="s1">other):</span>
+            <span class="s3">return </span><span class="s1">self.dt &lt; other.dt</span>
+
+        <span class="s3">def </span><span class="s1">__gt__(self</span><span class="s3">, </span><span class="s1">other):</span>
+            <span class="s3">return </span><span class="s1">self.dt &gt; other.dt</span>
+
+        <span class="s3">def </span><span class="s1">__eq__(self</span><span class="s3">, </span><span class="s1">other):</span>
+            <span class="s3">return </span><span class="s1">self.dt == other.dt</span>
+
+        <span class="s3">def </span><span class="s1">__ne__(self</span><span class="s3">, </span><span class="s1">other):</span>
+            <span class="s3">return </span><span class="s1">self.dt != other.dt</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">cache=</span><span class="s3">False</span><span class="s1">):</span>
+        <span class="s1">super(rruleset</span><span class="s3">, </span><span class="s1">self).__init__(cache)</span>
+        <span class="s1">self._rrule = []</span>
+        <span class="s1">self._rdate = []</span>
+        <span class="s1">self._exrule = []</span>
+        <span class="s1">self._exdate = []</span>
+
+    <span class="s1">@_invalidates_cache</span>
+    <span class="s3">def </span><span class="s1">rrule(self</span><span class="s3">, </span><span class="s1">rrule):</span>
+        <span class="s2">&quot;&quot;&quot; Include the given :py:class:`rrule` instance in the recurrence set 
+            generation. &quot;&quot;&quot;</span>
+        <span class="s1">self._rrule.append(rrule)</span>
+
+    <span class="s1">@_invalidates_cache</span>
+    <span class="s3">def </span><span class="s1">rdate(self</span><span class="s3">, </span><span class="s1">rdate):</span>
+        <span class="s2">&quot;&quot;&quot; Include the given :py:class:`datetime` instance in the recurrence 
+            set generation. &quot;&quot;&quot;</span>
+        <span class="s1">self._rdate.append(rdate)</span>
+
+    <span class="s1">@_invalidates_cache</span>
+    <span class="s3">def </span><span class="s1">exrule(self</span><span class="s3">, </span><span class="s1">exrule):</span>
+        <span class="s2">&quot;&quot;&quot; Include the given rrule instance in the recurrence set exclusion 
+            list. Dates which are part of the given recurrence rules will not 
+            be generated, even if some inclusive rrule or rdate matches them. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self._exrule.append(exrule)</span>
+
+    <span class="s1">@_invalidates_cache</span>
+    <span class="s3">def </span><span class="s1">exdate(self</span><span class="s3">, </span><span class="s1">exdate):</span>
+        <span class="s2">&quot;&quot;&quot; Include the given datetime instance in the recurrence set 
+            exclusion list. Dates included that way will not be generated, 
+            even if some inclusive rrule or rdate matches them. &quot;&quot;&quot;</span>
+        <span class="s1">self._exdate.append(exdate)</span>
+
+    <span class="s3">def </span><span class="s1">_iter(self):</span>
+        <span class="s1">rlist = []</span>
+        <span class="s1">self._rdate.sort()</span>
+        <span class="s1">self._genitem(rlist</span><span class="s3">, </span><span class="s1">iter(self._rdate))</span>
+        <span class="s3">for </span><span class="s1">gen </span><span class="s3">in </span><span class="s1">[iter(x) </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">self._rrule]:</span>
+            <span class="s1">self._genitem(rlist</span><span class="s3">, </span><span class="s1">gen)</span>
+        <span class="s1">exlist = []</span>
+        <span class="s1">self._exdate.sort()</span>
+        <span class="s1">self._genitem(exlist</span><span class="s3">, </span><span class="s1">iter(self._exdate))</span>
+        <span class="s3">for </span><span class="s1">gen </span><span class="s3">in </span><span class="s1">[iter(x) </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">self._exrule]:</span>
+            <span class="s1">self._genitem(exlist</span><span class="s3">, </span><span class="s1">gen)</span>
+        <span class="s1">lastdt = </span><span class="s3">None</span>
+        <span class="s1">total = </span><span class="s5">0</span>
+        <span class="s1">heapq.heapify(rlist)</span>
+        <span class="s1">heapq.heapify(exlist)</span>
+        <span class="s3">while </span><span class="s1">rlist:</span>
+            <span class="s1">ritem = rlist[</span><span class="s5">0</span><span class="s1">]</span>
+            <span class="s3">if not </span><span class="s1">lastdt </span><span class="s3">or </span><span class="s1">lastdt != ritem.dt:</span>
+                <span class="s3">while </span><span class="s1">exlist </span><span class="s3">and </span><span class="s1">exlist[</span><span class="s5">0</span><span class="s1">] &lt; ritem:</span>
+                    <span class="s1">exitem = exlist[</span><span class="s5">0</span><span class="s1">]</span>
+                    <span class="s1">advance_iterator(exitem)</span>
+                    <span class="s3">if </span><span class="s1">exlist </span><span class="s3">and </span><span class="s1">exlist[</span><span class="s5">0</span><span class="s1">] </span><span class="s3">is </span><span class="s1">exitem:</span>
+                        <span class="s1">heapq.heapreplace(exlist</span><span class="s3">, </span><span class="s1">exitem)</span>
+                <span class="s3">if not </span><span class="s1">exlist </span><span class="s3">or </span><span class="s1">ritem != exlist[</span><span class="s5">0</span><span class="s1">]:</span>
+                    <span class="s1">total += </span><span class="s5">1</span>
+                    <span class="s3">yield </span><span class="s1">ritem.dt</span>
+                <span class="s1">lastdt = ritem.dt</span>
+            <span class="s1">advance_iterator(ritem)</span>
+            <span class="s3">if </span><span class="s1">rlist </span><span class="s3">and </span><span class="s1">rlist[</span><span class="s5">0</span><span class="s1">] </span><span class="s3">is </span><span class="s1">ritem:</span>
+                <span class="s1">heapq.heapreplace(rlist</span><span class="s3">, </span><span class="s1">ritem)</span>
+        <span class="s1">self._len = total</span>
+
+
+
+
+<span class="s3">class </span><span class="s1">_rrulestr(object):</span>
+    <span class="s2">&quot;&quot;&quot; Parses a string representation of a recurrence rule or set of 
+    recurrence rules. 
+ 
+    :param s: 
+        Required, a string defining one or more recurrence rules. 
+ 
+    :param dtstart: 
+        If given, used as the default recurrence start if not specified in the 
+        rule string. 
+ 
+    :param cache: 
+        If set ``True`` caching of results will be enabled, improving 
+        performance of multiple queries considerably. 
+ 
+    :param unfold: 
+        If set ``True`` indicates that a rule string is split over more 
+        than one line and should be joined before processing. 
+ 
+    :param forceset: 
+        If set ``True`` forces a :class:`dateutil.rrule.rruleset` to 
+        be returned. 
+ 
+    :param compatible: 
+        If set ``True`` forces ``unfold`` and ``forceset`` to be ``True``. 
+ 
+    :param ignoretz: 
+        If set ``True``, time zones in parsed strings are ignored and a naive 
+        :class:`datetime.datetime` object is returned. 
+ 
+    :param tzids: 
+        If given, a callable or mapping used to retrieve a 
+        :class:`datetime.tzinfo` from a string representation. 
+        Defaults to :func:`dateutil.tz.gettz`. 
+ 
+    :param tzinfos: 
+        Additional time zone names / aliases which may be present in a string 
+        representation.  See :func:`dateutil.parser.parse` for more 
+        information. 
+ 
+    :return: 
+        Returns a :class:`dateutil.rrule.rruleset` or 
+        :class:`dateutil.rrule.rrule` 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">_freq_map = {</span><span class="s4">&quot;YEARLY&quot;</span><span class="s1">: YEARLY</span><span class="s3">,</span>
+                 <span class="s4">&quot;MONTHLY&quot;</span><span class="s1">: MONTHLY</span><span class="s3">,</span>
+                 <span class="s4">&quot;WEEKLY&quot;</span><span class="s1">: WEEKLY</span><span class="s3">,</span>
+                 <span class="s4">&quot;DAILY&quot;</span><span class="s1">: DAILY</span><span class="s3">,</span>
+                 <span class="s4">&quot;HOURLY&quot;</span><span class="s1">: HOURLY</span><span class="s3">,</span>
+                 <span class="s4">&quot;MINUTELY&quot;</span><span class="s1">: MINUTELY</span><span class="s3">,</span>
+                 <span class="s4">&quot;SECONDLY&quot;</span><span class="s1">: SECONDLY}</span>
+
+    <span class="s1">_weekday_map = {</span><span class="s4">&quot;MO&quot;</span><span class="s1">: </span><span class="s5">0</span><span class="s3">, </span><span class="s4">&quot;TU&quot;</span><span class="s1">: </span><span class="s5">1</span><span class="s3">, </span><span class="s4">&quot;WE&quot;</span><span class="s1">: </span><span class="s5">2</span><span class="s3">, </span><span class="s4">&quot;TH&quot;</span><span class="s1">: </span><span class="s5">3</span><span class="s3">,</span>
+                    <span class="s4">&quot;FR&quot;</span><span class="s1">: </span><span class="s5">4</span><span class="s3">, </span><span class="s4">&quot;SA&quot;</span><span class="s1">: </span><span class="s5">5</span><span class="s3">, </span><span class="s4">&quot;SU&quot;</span><span class="s1">: </span><span class="s5">6</span><span class="s1">}</span>
+
+    <span class="s3">def </span><span class="s1">_handle_int(self</span><span class="s3">, </span><span class="s1">rrkwargs</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">value</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">rrkwargs[name.lower()] = int(value)</span>
+
+    <span class="s3">def </span><span class="s1">_handle_int_list(self</span><span class="s3">, </span><span class="s1">rrkwargs</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">value</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">rrkwargs[name.lower()] = [int(x) </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">value.split(</span><span class="s4">','</span><span class="s1">)]</span>
+
+    <span class="s1">_handle_INTERVAL = _handle_int</span>
+    <span class="s1">_handle_COUNT = _handle_int</span>
+    <span class="s1">_handle_BYSETPOS = _handle_int_list</span>
+    <span class="s1">_handle_BYMONTH = _handle_int_list</span>
+    <span class="s1">_handle_BYMONTHDAY = _handle_int_list</span>
+    <span class="s1">_handle_BYYEARDAY = _handle_int_list</span>
+    <span class="s1">_handle_BYEASTER = _handle_int_list</span>
+    <span class="s1">_handle_BYWEEKNO = _handle_int_list</span>
+    <span class="s1">_handle_BYHOUR = _handle_int_list</span>
+    <span class="s1">_handle_BYMINUTE = _handle_int_list</span>
+    <span class="s1">_handle_BYSECOND = _handle_int_list</span>
+
+    <span class="s3">def </span><span class="s1">_handle_FREQ(self</span><span class="s3">, </span><span class="s1">rrkwargs</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">value</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">rrkwargs[</span><span class="s4">&quot;freq&quot;</span><span class="s1">] = self._freq_map[value]</span>
+
+    <span class="s3">def </span><span class="s1">_handle_UNTIL(self</span><span class="s3">, </span><span class="s1">rrkwargs</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">value</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+        <span class="s3">global </span><span class="s1">parser</span>
+        <span class="s3">if not </span><span class="s1">parser:</span>
+            <span class="s3">from </span><span class="s1">dateutil </span><span class="s3">import </span><span class="s1">parser</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">rrkwargs[</span><span class="s4">&quot;until&quot;</span><span class="s1">] = parser.parse(value</span><span class="s3">,</span>
+                                             <span class="s1">ignoretz=kwargs.get(</span><span class="s4">&quot;ignoretz&quot;</span><span class="s1">)</span><span class="s3">,</span>
+                                             <span class="s1">tzinfos=kwargs.get(</span><span class="s4">&quot;tzinfos&quot;</span><span class="s1">))</span>
+        <span class="s3">except </span><span class="s1">ValueError:</span>
+            <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;invalid until date&quot;</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">_handle_WKST(self</span><span class="s3">, </span><span class="s1">rrkwargs</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">value</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">rrkwargs[</span><span class="s4">&quot;wkst&quot;</span><span class="s1">] = self._weekday_map[value]</span>
+
+    <span class="s3">def </span><span class="s1">_handle_BYWEEKDAY(self</span><span class="s3">, </span><span class="s1">rrkwargs</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">value</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Two ways to specify this: +1MO or MO(+1) 
+        &quot;&quot;&quot;</span>
+        <span class="s1">l = []</span>
+        <span class="s3">for </span><span class="s1">wday </span><span class="s3">in </span><span class="s1">value.split(</span><span class="s4">','</span><span class="s1">):</span>
+            <span class="s3">if </span><span class="s4">'(' </span><span class="s3">in </span><span class="s1">wday:</span>
+                <span class="s0"># If it's of the form TH(+1), etc.</span>
+                <span class="s1">splt = wday.split(</span><span class="s4">'('</span><span class="s1">)</span>
+                <span class="s1">w = splt[</span><span class="s5">0</span><span class="s1">]</span>
+                <span class="s1">n = int(splt[</span><span class="s5">1</span><span class="s1">][:-</span><span class="s5">1</span><span class="s1">])</span>
+            <span class="s3">elif </span><span class="s1">len(wday):</span>
+                <span class="s0"># If it's of the form +1MO</span>
+                <span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">range(len(wday)):</span>
+                    <span class="s3">if </span><span class="s1">wday[i] </span><span class="s3">not in </span><span class="s4">'+-0123456789'</span><span class="s1">:</span>
+                        <span class="s3">break</span>
+                <span class="s1">n = wday[:i] </span><span class="s3">or None</span>
+                <span class="s1">w = wday[i:]</span>
+                <span class="s3">if </span><span class="s1">n:</span>
+                    <span class="s1">n = int(n)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Invalid (empty) BYDAY specification.&quot;</span><span class="s1">)</span>
+
+            <span class="s1">l.append(weekdays[self._weekday_map[w]](n))</span>
+        <span class="s1">rrkwargs[</span><span class="s4">&quot;byweekday&quot;</span><span class="s1">] = l</span>
+
+    <span class="s1">_handle_BYDAY = _handle_BYWEEKDAY</span>
+
+    <span class="s3">def </span><span class="s1">_parse_rfc_rrule(self</span><span class="s3">, </span><span class="s1">line</span><span class="s3">,</span>
+                         <span class="s1">dtstart=</span><span class="s3">None,</span>
+                         <span class="s1">cache=</span><span class="s3">False,</span>
+                         <span class="s1">ignoretz=</span><span class="s3">False,</span>
+                         <span class="s1">tzinfos=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s3">if </span><span class="s1">line.find(</span><span class="s4">':'</span><span class="s1">) != -</span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s1">name</span><span class="s3">, </span><span class="s1">value = line.split(</span><span class="s4">':'</span><span class="s1">)</span>
+            <span class="s3">if </span><span class="s1">name != </span><span class="s4">&quot;RRULE&quot;</span><span class="s1">:</span>
+                <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;unknown parameter name&quot;</span><span class="s1">)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">value = line</span>
+        <span class="s1">rrkwargs = {}</span>
+        <span class="s3">for </span><span class="s1">pair </span><span class="s3">in </span><span class="s1">value.split(</span><span class="s4">';'</span><span class="s1">):</span>
+            <span class="s1">name</span><span class="s3">, </span><span class="s1">value = pair.split(</span><span class="s4">'='</span><span class="s1">)</span>
+            <span class="s1">name = name.upper()</span>
+            <span class="s1">value = value.upper()</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">getattr(self</span><span class="s3">, </span><span class="s4">&quot;_handle_&quot;</span><span class="s1">+name)(rrkwargs</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">value</span><span class="s3">,</span>
+                                               <span class="s1">ignoretz=ignoretz</span><span class="s3">,</span>
+                                               <span class="s1">tzinfos=tzinfos)</span>
+            <span class="s3">except </span><span class="s1">AttributeError:</span>
+                <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;unknown parameter '%s'&quot; </span><span class="s1">% name)</span>
+            <span class="s3">except </span><span class="s1">(KeyError</span><span class="s3">, </span><span class="s1">ValueError):</span>
+                <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;invalid '%s': %s&quot; </span><span class="s1">% (name</span><span class="s3">, </span><span class="s1">value))</span>
+        <span class="s3">return </span><span class="s1">rrule(dtstart=dtstart</span><span class="s3">, </span><span class="s1">cache=cache</span><span class="s3">, </span><span class="s1">**rrkwargs)</span>
+
+    <span class="s3">def </span><span class="s1">_parse_date_value(self</span><span class="s3">, </span><span class="s1">date_value</span><span class="s3">, </span><span class="s1">parms</span><span class="s3">, </span><span class="s1">rule_tzids</span><span class="s3">,</span>
+                          <span class="s1">ignoretz</span><span class="s3">, </span><span class="s1">tzids</span><span class="s3">, </span><span class="s1">tzinfos):</span>
+        <span class="s3">global </span><span class="s1">parser</span>
+        <span class="s3">if not </span><span class="s1">parser:</span>
+            <span class="s3">from </span><span class="s1">dateutil </span><span class="s3">import </span><span class="s1">parser</span>
+
+        <span class="s1">datevals = []</span>
+        <span class="s1">value_found = </span><span class="s3">False</span>
+        <span class="s1">TZID = </span><span class="s3">None</span>
+
+        <span class="s3">for </span><span class="s1">parm </span><span class="s3">in </span><span class="s1">parms:</span>
+            <span class="s3">if </span><span class="s1">parm.startswith(</span><span class="s4">&quot;TZID=&quot;</span><span class="s1">):</span>
+                <span class="s3">try</span><span class="s1">:</span>
+                    <span class="s1">tzkey = rule_tzids[parm.split(</span><span class="s4">'TZID='</span><span class="s1">)[-</span><span class="s5">1</span><span class="s1">]]</span>
+                <span class="s3">except </span><span class="s1">KeyError:</span>
+                    <span class="s3">continue</span>
+                <span class="s3">if </span><span class="s1">tzids </span><span class="s3">is None</span><span class="s1">:</span>
+                    <span class="s3">from </span><span class="s1">. </span><span class="s3">import </span><span class="s1">tz</span>
+                    <span class="s1">tzlookup = tz.gettz</span>
+                <span class="s3">elif </span><span class="s1">callable(tzids):</span>
+                    <span class="s1">tzlookup = tzids</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">tzlookup = getattr(tzids</span><span class="s3">, </span><span class="s4">'get'</span><span class="s3">, None</span><span class="s1">)</span>
+                    <span class="s3">if </span><span class="s1">tzlookup </span><span class="s3">is None</span><span class="s1">:</span>
+                        <span class="s1">msg = (</span><span class="s4">'tzids must be a callable, mapping, or None, '</span>
+                               <span class="s4">'not %s' </span><span class="s1">% tzids)</span>
+                        <span class="s3">raise </span><span class="s1">ValueError(msg)</span>
+
+                <span class="s1">TZID = tzlookup(tzkey)</span>
+                <span class="s3">continue</span>
+
+            <span class="s0"># RFC 5445 3.8.2.4: The VALUE parameter is optional, but may be found</span>
+            <span class="s0"># only once.</span>
+            <span class="s3">if </span><span class="s1">parm </span><span class="s3">not in </span><span class="s1">{</span><span class="s4">&quot;VALUE=DATE-TIME&quot;</span><span class="s3">, </span><span class="s4">&quot;VALUE=DATE&quot;</span><span class="s1">}:</span>
+                <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;unsupported parm: &quot; </span><span class="s1">+ parm)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s3">if </span><span class="s1">value_found:</span>
+                    <span class="s1">msg = (</span><span class="s4">&quot;Duplicate value parameter found in: &quot; </span><span class="s1">+ parm)</span>
+                    <span class="s3">raise </span><span class="s1">ValueError(msg)</span>
+                <span class="s1">value_found = </span><span class="s3">True</span>
+
+        <span class="s3">for </span><span class="s1">datestr </span><span class="s3">in </span><span class="s1">date_value.split(</span><span class="s4">','</span><span class="s1">):</span>
+            <span class="s1">date = parser.parse(datestr</span><span class="s3">, </span><span class="s1">ignoretz=ignoretz</span><span class="s3">, </span><span class="s1">tzinfos=tzinfos)</span>
+            <span class="s3">if </span><span class="s1">TZID </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s3">if </span><span class="s1">date.tzinfo </span><span class="s3">is None</span><span class="s1">:</span>
+                    <span class="s1">date = date.replace(tzinfo=TZID)</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">'DTSTART/EXDATE specifies multiple timezone'</span><span class="s1">)</span>
+            <span class="s1">datevals.append(date)</span>
+
+        <span class="s3">return </span><span class="s1">datevals</span>
+
+    <span class="s3">def </span><span class="s1">_parse_rfc(self</span><span class="s3">, </span><span class="s1">s</span><span class="s3">,</span>
+                   <span class="s1">dtstart=</span><span class="s3">None,</span>
+                   <span class="s1">cache=</span><span class="s3">False,</span>
+                   <span class="s1">unfold=</span><span class="s3">False,</span>
+                   <span class="s1">forceset=</span><span class="s3">False,</span>
+                   <span class="s1">compatible=</span><span class="s3">False,</span>
+                   <span class="s1">ignoretz=</span><span class="s3">False,</span>
+                   <span class="s1">tzids=</span><span class="s3">None,</span>
+                   <span class="s1">tzinfos=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s3">global </span><span class="s1">parser</span>
+        <span class="s3">if </span><span class="s1">compatible:</span>
+            <span class="s1">forceset = </span><span class="s3">True</span>
+            <span class="s1">unfold = </span><span class="s3">True</span>
+
+        <span class="s1">TZID_NAMES = dict(map(</span>
+            <span class="s3">lambda </span><span class="s1">x: (x.upper()</span><span class="s3">, </span><span class="s1">x)</span><span class="s3">,</span>
+            <span class="s1">re.findall(</span><span class="s4">'TZID=(?P&lt;name&gt;[^:]+):'</span><span class="s3">, </span><span class="s1">s)</span>
+        <span class="s1">))</span>
+        <span class="s1">s = s.upper()</span>
+        <span class="s3">if not </span><span class="s1">s.strip():</span>
+            <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;empty string&quot;</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">unfold:</span>
+            <span class="s1">lines = s.splitlines()</span>
+            <span class="s1">i = </span><span class="s5">0</span>
+            <span class="s3">while </span><span class="s1">i &lt; len(lines):</span>
+                <span class="s1">line = lines[i].rstrip()</span>
+                <span class="s3">if not </span><span class="s1">line:</span>
+                    <span class="s3">del </span><span class="s1">lines[i]</span>
+                <span class="s3">elif </span><span class="s1">i &gt; </span><span class="s5">0 </span><span class="s3">and </span><span class="s1">line[</span><span class="s5">0</span><span class="s1">] == </span><span class="s4">&quot; &quot;</span><span class="s1">:</span>
+                    <span class="s1">lines[i-</span><span class="s5">1</span><span class="s1">] += line[</span><span class="s5">1</span><span class="s1">:]</span>
+                    <span class="s3">del </span><span class="s1">lines[i]</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">i += </span><span class="s5">1</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">lines = s.split()</span>
+        <span class="s3">if </span><span class="s1">(</span><span class="s3">not </span><span class="s1">forceset </span><span class="s3">and </span><span class="s1">len(lines) == </span><span class="s5">1 </span><span class="s3">and </span><span class="s1">(s.find(</span><span class="s4">':'</span><span class="s1">) == -</span><span class="s5">1 </span><span class="s3">or</span>
+                                                  <span class="s1">s.startswith(</span><span class="s4">'RRULE:'</span><span class="s1">))):</span>
+            <span class="s3">return </span><span class="s1">self._parse_rfc_rrule(lines[</span><span class="s5">0</span><span class="s1">]</span><span class="s3">, </span><span class="s1">cache=cache</span><span class="s3">,</span>
+                                         <span class="s1">dtstart=dtstart</span><span class="s3">, </span><span class="s1">ignoretz=ignoretz</span><span class="s3">,</span>
+                                         <span class="s1">tzinfos=tzinfos)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">rrulevals = []</span>
+            <span class="s1">rdatevals = []</span>
+            <span class="s1">exrulevals = []</span>
+            <span class="s1">exdatevals = []</span>
+            <span class="s3">for </span><span class="s1">line </span><span class="s3">in </span><span class="s1">lines:</span>
+                <span class="s3">if not </span><span class="s1">line:</span>
+                    <span class="s3">continue</span>
+                <span class="s3">if </span><span class="s1">line.find(</span><span class="s4">':'</span><span class="s1">) == -</span><span class="s5">1</span><span class="s1">:</span>
+                    <span class="s1">name = </span><span class="s4">&quot;RRULE&quot;</span>
+                    <span class="s1">value = line</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">name</span><span class="s3">, </span><span class="s1">value = line.split(</span><span class="s4">':'</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)</span>
+                <span class="s1">parms = name.split(</span><span class="s4">';'</span><span class="s1">)</span>
+                <span class="s3">if not </span><span class="s1">parms:</span>
+                    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;empty property name&quot;</span><span class="s1">)</span>
+                <span class="s1">name = parms[</span><span class="s5">0</span><span class="s1">]</span>
+                <span class="s1">parms = parms[</span><span class="s5">1</span><span class="s1">:]</span>
+                <span class="s3">if </span><span class="s1">name == </span><span class="s4">&quot;RRULE&quot;</span><span class="s1">:</span>
+                    <span class="s3">for </span><span class="s1">parm </span><span class="s3">in </span><span class="s1">parms:</span>
+                        <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;unsupported RRULE parm: &quot;</span><span class="s1">+parm)</span>
+                    <span class="s1">rrulevals.append(value)</span>
+                <span class="s3">elif </span><span class="s1">name == </span><span class="s4">&quot;RDATE&quot;</span><span class="s1">:</span>
+                    <span class="s3">for </span><span class="s1">parm </span><span class="s3">in </span><span class="s1">parms:</span>
+                        <span class="s3">if </span><span class="s1">parm != </span><span class="s4">&quot;VALUE=DATE-TIME&quot;</span><span class="s1">:</span>
+                            <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;unsupported RDATE parm: &quot;</span><span class="s1">+parm)</span>
+                    <span class="s1">rdatevals.append(value)</span>
+                <span class="s3">elif </span><span class="s1">name == </span><span class="s4">&quot;EXRULE&quot;</span><span class="s1">:</span>
+                    <span class="s3">for </span><span class="s1">parm </span><span class="s3">in </span><span class="s1">parms:</span>
+                        <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;unsupported EXRULE parm: &quot;</span><span class="s1">+parm)</span>
+                    <span class="s1">exrulevals.append(value)</span>
+                <span class="s3">elif </span><span class="s1">name == </span><span class="s4">&quot;EXDATE&quot;</span><span class="s1">:</span>
+                    <span class="s1">exdatevals.extend(</span>
+                        <span class="s1">self._parse_date_value(value</span><span class="s3">, </span><span class="s1">parms</span><span class="s3">,</span>
+                                               <span class="s1">TZID_NAMES</span><span class="s3">, </span><span class="s1">ignoretz</span><span class="s3">,</span>
+                                               <span class="s1">tzids</span><span class="s3">, </span><span class="s1">tzinfos)</span>
+                    <span class="s1">)</span>
+                <span class="s3">elif </span><span class="s1">name == </span><span class="s4">&quot;DTSTART&quot;</span><span class="s1">:</span>
+                    <span class="s1">dtvals = self._parse_date_value(value</span><span class="s3">, </span><span class="s1">parms</span><span class="s3">, </span><span class="s1">TZID_NAMES</span><span class="s3">,</span>
+                                                    <span class="s1">ignoretz</span><span class="s3">, </span><span class="s1">tzids</span><span class="s3">, </span><span class="s1">tzinfos)</span>
+                    <span class="s3">if </span><span class="s1">len(dtvals) != </span><span class="s5">1</span><span class="s1">:</span>
+                        <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Multiple DTSTART values specified:&quot; </span><span class="s1">+</span>
+                                         <span class="s1">value)</span>
+                    <span class="s1">dtstart = dtvals[</span><span class="s5">0</span><span class="s1">]</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;unsupported property: &quot;</span><span class="s1">+name)</span>
+            <span class="s3">if </span><span class="s1">(forceset </span><span class="s3">or </span><span class="s1">len(rrulevals) &gt; </span><span class="s5">1 </span><span class="s3">or </span><span class="s1">rdatevals</span>
+                    <span class="s3">or </span><span class="s1">exrulevals </span><span class="s3">or </span><span class="s1">exdatevals):</span>
+                <span class="s3">if not </span><span class="s1">parser </span><span class="s3">and </span><span class="s1">(rdatevals </span><span class="s3">or </span><span class="s1">exdatevals):</span>
+                    <span class="s3">from </span><span class="s1">dateutil </span><span class="s3">import </span><span class="s1">parser</span>
+                <span class="s1">rset = rruleset(cache=cache)</span>
+                <span class="s3">for </span><span class="s1">value </span><span class="s3">in </span><span class="s1">rrulevals:</span>
+                    <span class="s1">rset.rrule(self._parse_rfc_rrule(value</span><span class="s3">, </span><span class="s1">dtstart=dtstart</span><span class="s3">,</span>
+                                                     <span class="s1">ignoretz=ignoretz</span><span class="s3">,</span>
+                                                     <span class="s1">tzinfos=tzinfos))</span>
+                <span class="s3">for </span><span class="s1">value </span><span class="s3">in </span><span class="s1">rdatevals:</span>
+                    <span class="s3">for </span><span class="s1">datestr </span><span class="s3">in </span><span class="s1">value.split(</span><span class="s4">','</span><span class="s1">):</span>
+                        <span class="s1">rset.rdate(parser.parse(datestr</span><span class="s3">,</span>
+                                                <span class="s1">ignoretz=ignoretz</span><span class="s3">,</span>
+                                                <span class="s1">tzinfos=tzinfos))</span>
+                <span class="s3">for </span><span class="s1">value </span><span class="s3">in </span><span class="s1">exrulevals:</span>
+                    <span class="s1">rset.exrule(self._parse_rfc_rrule(value</span><span class="s3">, </span><span class="s1">dtstart=dtstart</span><span class="s3">,</span>
+                                                      <span class="s1">ignoretz=ignoretz</span><span class="s3">,</span>
+                                                      <span class="s1">tzinfos=tzinfos))</span>
+                <span class="s3">for </span><span class="s1">value </span><span class="s3">in </span><span class="s1">exdatevals:</span>
+                    <span class="s1">rset.exdate(value)</span>
+                <span class="s3">if </span><span class="s1">compatible </span><span class="s3">and </span><span class="s1">dtstart:</span>
+                    <span class="s1">rset.rdate(dtstart)</span>
+                <span class="s3">return </span><span class="s1">rset</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s3">return </span><span class="s1">self._parse_rfc_rrule(rrulevals[</span><span class="s5">0</span><span class="s1">]</span><span class="s3">,</span>
+                                             <span class="s1">dtstart=dtstart</span><span class="s3">,</span>
+                                             <span class="s1">cache=cache</span><span class="s3">,</span>
+                                             <span class="s1">ignoretz=ignoretz</span><span class="s3">,</span>
+                                             <span class="s1">tzinfos=tzinfos)</span>
+
+    <span class="s3">def </span><span class="s1">__call__(self</span><span class="s3">, </span><span class="s1">s</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+        <span class="s3">return </span><span class="s1">self._parse_rfc(s</span><span class="s3">, </span><span class="s1">**kwargs)</span>
+
+
+<span class="s1">rrulestr = _rrulestr()</span>
+
+<span class="s0"># vim:ts=4:sw=4:et</span>
+</pre>
+</body>
+</html>

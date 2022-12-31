@@ -1,0 +1,2378 @@
+<html>
+<head>
+<title>merge.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #808080;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+merge.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+SQL-style merge routines 
+&quot;&quot;&quot;</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">copy</span>
+<span class="s2">import </span><span class="s1">datetime</span>
+<span class="s2">from </span><span class="s1">functools </span><span class="s2">import </span><span class="s1">partial</span>
+<span class="s2">import </span><span class="s1">hashlib</span>
+<span class="s2">import </span><span class="s1">string</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">TYPE_CHECKING</span><span class="s2">,</span>
+    <span class="s1">Hashable</span><span class="s2">,</span>
+    <span class="s1">cast</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">import </span><span class="s1">warnings</span>
+
+<span class="s2">import </span><span class="s1">numpy </span><span class="s2">as </span><span class="s1">np</span>
+
+<span class="s2">from </span><span class="s1">pandas._libs </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">Timedelta</span><span class="s2">,</span>
+    <span class="s1">hashtable </span><span class="s2">as </span><span class="s1">libhashtable</span><span class="s2">,</span>
+    <span class="s1">join </span><span class="s2">as </span><span class="s1">libjoin</span><span class="s2">,</span>
+    <span class="s1">lib</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas._typing </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">ArrayLike</span><span class="s2">,</span>
+    <span class="s1">DtypeObj</span><span class="s2">,</span>
+    <span class="s1">IndexLabel</span><span class="s2">,</span>
+    <span class="s1">Suffixes</span><span class="s2">,</span>
+    <span class="s1">npt</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas.errors </span><span class="s2">import </span><span class="s1">MergeError</span>
+<span class="s2">from </span><span class="s1">pandas.util._decorators </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">Appender</span><span class="s2">,</span>
+    <span class="s1">Substitution</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas.util._exceptions </span><span class="s2">import </span><span class="s1">find_stack_level</span>
+
+<span class="s2">from </span><span class="s1">pandas.core.dtypes.cast </span><span class="s2">import </span><span class="s1">find_common_type</span>
+<span class="s2">from </span><span class="s1">pandas.core.dtypes.common </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">ensure_float64</span><span class="s2">,</span>
+    <span class="s1">ensure_int64</span><span class="s2">,</span>
+    <span class="s1">ensure_object</span><span class="s2">,</span>
+    <span class="s1">is_array_like</span><span class="s2">,</span>
+    <span class="s1">is_bool</span><span class="s2">,</span>
+    <span class="s1">is_bool_dtype</span><span class="s2">,</span>
+    <span class="s1">is_categorical_dtype</span><span class="s2">,</span>
+    <span class="s1">is_datetime64tz_dtype</span><span class="s2">,</span>
+    <span class="s1">is_dtype_equal</span><span class="s2">,</span>
+    <span class="s1">is_extension_array_dtype</span><span class="s2">,</span>
+    <span class="s1">is_float_dtype</span><span class="s2">,</span>
+    <span class="s1">is_integer</span><span class="s2">,</span>
+    <span class="s1">is_integer_dtype</span><span class="s2">,</span>
+    <span class="s1">is_list_like</span><span class="s2">,</span>
+    <span class="s1">is_number</span><span class="s2">,</span>
+    <span class="s1">is_numeric_dtype</span><span class="s2">,</span>
+    <span class="s1">is_object_dtype</span><span class="s2">,</span>
+    <span class="s1">needs_i8_conversion</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas.core.dtypes.generic </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">ABCDataFrame</span><span class="s2">,</span>
+    <span class="s1">ABCSeries</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas.core.dtypes.missing </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">isna</span><span class="s2">,</span>
+    <span class="s1">na_value_for_dtype</span><span class="s2">,</span>
+<span class="s1">)</span>
+
+<span class="s2">from </span><span class="s1">pandas </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">Categorical</span><span class="s2">,</span>
+    <span class="s1">Index</span><span class="s2">,</span>
+    <span class="s1">MultiIndex</span><span class="s2">,</span>
+    <span class="s1">Series</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas.core </span><span class="s2">import </span><span class="s1">groupby</span>
+<span class="s2">import </span><span class="s1">pandas.core.algorithms </span><span class="s2">as </span><span class="s1">algos</span>
+<span class="s2">from </span><span class="s1">pandas.core.arrays </span><span class="s2">import </span><span class="s1">ExtensionArray</span>
+<span class="s2">import </span><span class="s1">pandas.core.common </span><span class="s2">as </span><span class="s1">com</span>
+<span class="s2">from </span><span class="s1">pandas.core.construction </span><span class="s2">import </span><span class="s1">extract_array</span>
+<span class="s2">from </span><span class="s1">pandas.core.frame </span><span class="s2">import </span><span class="s1">_merge_doc</span>
+<span class="s2">from </span><span class="s1">pandas.core.internals </span><span class="s2">import </span><span class="s1">concatenate_managers</span>
+<span class="s2">from </span><span class="s1">pandas.core.sorting </span><span class="s2">import </span><span class="s1">is_int64_overflow_possible</span>
+
+<span class="s2">if </span><span class="s1">TYPE_CHECKING:</span>
+    <span class="s2">from </span><span class="s1">pandas </span><span class="s2">import </span><span class="s1">DataFrame</span>
+    <span class="s2">from </span><span class="s1">pandas.core.arrays </span><span class="s2">import </span><span class="s1">DatetimeArray</span>
+
+
+<span class="s1">@Substitution(</span><span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">left : DataFrame or named Series&quot;</span><span class="s1">)</span>
+<span class="s1">@Appender(_merge_doc</span><span class="s2">, </span><span class="s1">indents=</span><span class="s4">0</span><span class="s1">)</span>
+<span class="s2">def </span><span class="s1">merge(</span>
+    <span class="s1">left: DataFrame | Series</span><span class="s2">,</span>
+    <span class="s1">right: DataFrame | Series</span><span class="s2">,</span>
+    <span class="s1">how: str = </span><span class="s3">&quot;inner&quot;</span><span class="s2">,</span>
+    <span class="s1">on: IndexLabel | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">left_on: IndexLabel | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">right_on: IndexLabel | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">left_index: bool = </span><span class="s2">False,</span>
+    <span class="s1">right_index: bool = </span><span class="s2">False,</span>
+    <span class="s1">sort: bool = </span><span class="s2">False,</span>
+    <span class="s1">suffixes: Suffixes = (</span><span class="s3">&quot;_x&quot;</span><span class="s2">, </span><span class="s3">&quot;_y&quot;</span><span class="s1">)</span><span class="s2">,</span>
+    <span class="s1">copy: bool = </span><span class="s2">True,</span>
+    <span class="s1">indicator: bool = </span><span class="s2">False,</span>
+    <span class="s1">validate: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+<span class="s1">) -&gt; DataFrame:</span>
+    <span class="s1">op = _MergeOperation(</span>
+        <span class="s1">left</span><span class="s2">,</span>
+        <span class="s1">right</span><span class="s2">,</span>
+        <span class="s1">how=how</span><span class="s2">,</span>
+        <span class="s1">on=on</span><span class="s2">,</span>
+        <span class="s1">left_on=left_on</span><span class="s2">,</span>
+        <span class="s1">right_on=right_on</span><span class="s2">,</span>
+        <span class="s1">left_index=left_index</span><span class="s2">,</span>
+        <span class="s1">right_index=right_index</span><span class="s2">,</span>
+        <span class="s1">sort=sort</span><span class="s2">,</span>
+        <span class="s1">suffixes=suffixes</span><span class="s2">,</span>
+        <span class="s1">copy=copy</span><span class="s2">,</span>
+        <span class="s1">indicator=indicator</span><span class="s2">,</span>
+        <span class="s1">validate=validate</span><span class="s2">,</span>
+    <span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">op.get_result()</span>
+
+
+<span class="s2">if __debug__</span><span class="s1">:</span>
+    <span class="s1">merge.__doc__ = _merge_doc % </span><span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">left : DataFrame&quot;</span>
+
+
+<span class="s2">def </span><span class="s1">_groupby_and_merge(by</span><span class="s2">, </span><span class="s1">left: DataFrame</span><span class="s2">, </span><span class="s1">right: DataFrame</span><span class="s2">, </span><span class="s1">merge_pieces):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    groupby &amp; merge; we are always performing a left-by type operation 
+ 
+    Parameters 
+    ---------- 
+    by: field to group 
+    left: DataFrame 
+    right: DataFrame 
+    merge_pieces: function for merging 
+    &quot;&quot;&quot;</span>
+    <span class="s1">pieces = []</span>
+    <span class="s2">if not </span><span class="s1">isinstance(by</span><span class="s2">, </span><span class="s1">(list</span><span class="s2">, </span><span class="s1">tuple)):</span>
+        <span class="s1">by = [by]</span>
+
+    <span class="s1">lby = left.groupby(by</span><span class="s2">, </span><span class="s1">sort=</span><span class="s2">False</span><span class="s1">)</span>
+    <span class="s1">rby: groupby.DataFrameGroupBy | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None</span>
+
+    <span class="s5"># if we can groupby the rhs</span>
+    <span class="s5"># then we can get vastly better perf</span>
+    <span class="s2">if </span><span class="s1">all(item </span><span class="s2">in </span><span class="s1">right.columns </span><span class="s2">for </span><span class="s1">item </span><span class="s2">in </span><span class="s1">by):</span>
+        <span class="s1">rby = right.groupby(by</span><span class="s2">, </span><span class="s1">sort=</span><span class="s2">False</span><span class="s1">)</span>
+
+    <span class="s2">for </span><span class="s1">key</span><span class="s2">, </span><span class="s1">lhs </span><span class="s2">in </span><span class="s1">lby:</span>
+
+        <span class="s2">if </span><span class="s1">rby </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">rhs = right</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">rhs = right.take(rby.indices[key])</span>
+            <span class="s2">except </span><span class="s1">KeyError:</span>
+                <span class="s5"># key doesn't exist in left</span>
+                <span class="s1">lcols = lhs.columns.tolist()</span>
+                <span class="s1">cols = lcols + [r </span><span class="s2">for </span><span class="s1">r </span><span class="s2">in </span><span class="s1">right.columns </span><span class="s2">if </span><span class="s1">r </span><span class="s2">not in </span><span class="s1">set(lcols)]</span>
+                <span class="s1">merged = lhs.reindex(columns=cols)</span>
+                <span class="s1">merged.index = range(len(merged))</span>
+                <span class="s1">pieces.append(merged)</span>
+                <span class="s2">continue</span>
+
+        <span class="s1">merged = merge_pieces(lhs</span><span class="s2">, </span><span class="s1">rhs)</span>
+
+        <span class="s5"># make sure join keys are in the merged</span>
+        <span class="s5"># TODO, should merge_pieces do this?</span>
+        <span class="s1">merged[by] = key</span>
+
+        <span class="s1">pieces.append(merged)</span>
+
+    <span class="s5"># preserve the original order</span>
+    <span class="s5"># if we have a missing piece this can be reset</span>
+    <span class="s2">from </span><span class="s1">pandas.core.reshape.concat </span><span class="s2">import </span><span class="s1">concat</span>
+
+    <span class="s1">result = concat(pieces</span><span class="s2">, </span><span class="s1">ignore_index=</span><span class="s2">True</span><span class="s1">)</span>
+    <span class="s1">result = result.reindex(columns=pieces[</span><span class="s4">0</span><span class="s1">].columns</span><span class="s2">, </span><span class="s1">copy=</span><span class="s2">False</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">result</span><span class="s2">, </span><span class="s1">lby</span>
+
+
+<span class="s2">def </span><span class="s1">merge_ordered(</span>
+    <span class="s1">left: DataFrame</span><span class="s2">,</span>
+    <span class="s1">right: DataFrame</span><span class="s2">,</span>
+    <span class="s1">on: IndexLabel | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">left_on: IndexLabel | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">right_on: IndexLabel | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">left_by=</span><span class="s2">None,</span>
+    <span class="s1">right_by=</span><span class="s2">None,</span>
+    <span class="s1">fill_method: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">suffixes: Suffixes = (</span><span class="s3">&quot;_x&quot;</span><span class="s2">, </span><span class="s3">&quot;_y&quot;</span><span class="s1">)</span><span class="s2">,</span>
+    <span class="s1">how: str = </span><span class="s3">&quot;outer&quot;</span><span class="s2">,</span>
+<span class="s1">) -&gt; DataFrame:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Perform a merge for ordered data with optional filling/interpolation. 
+ 
+    Designed for ordered data like time series data. Optionally 
+    perform group-wise merge (see examples). 
+ 
+    Parameters 
+    ---------- 
+    left : DataFrame 
+    right : DataFrame 
+    on : label or list 
+        Field names to join on. Must be found in both DataFrames. 
+    left_on : label or list, or array-like 
+        Field names to join on in left DataFrame. Can be a vector or list of 
+        vectors of the length of the DataFrame to use a particular vector as 
+        the join key instead of columns. 
+    right_on : label or list, or array-like 
+        Field names to join on in right DataFrame or vector/list of vectors per 
+        left_on docs. 
+    left_by : column name or list of column names 
+        Group left DataFrame by group columns and merge piece by piece with 
+        right DataFrame. 
+    right_by : column name or list of column names 
+        Group right DataFrame by group columns and merge piece by piece with 
+        left DataFrame. 
+    fill_method : {'ffill', None}, default None 
+        Interpolation method for data. 
+    suffixes : list-like, default is (&quot;_x&quot;, &quot;_y&quot;) 
+        A length-2 sequence where each element is optionally a string 
+        indicating the suffix to add to overlapping column names in 
+        `left` and `right` respectively. Pass a value of `None` instead 
+        of a string to indicate that the column name from `left` or 
+        `right` should be left as-is, with no suffix. At least one of the 
+        values must not be None. 
+ 
+        .. versionchanged:: 0.25.0 
+    how : {'left', 'right', 'outer', 'inner'}, default 'outer' 
+        * left: use only keys from left frame (SQL: left outer join) 
+        * right: use only keys from right frame (SQL: right outer join) 
+        * outer: use union of keys from both frames (SQL: full outer join) 
+        * inner: use intersection of keys from both frames (SQL: inner join). 
+ 
+    Returns 
+    ------- 
+    DataFrame 
+        The merged DataFrame output type will the be same as 
+        'left', if it is a subclass of DataFrame. 
+ 
+    See Also 
+    -------- 
+    merge : Merge with a database-style join. 
+    merge_asof : Merge on nearest keys. 
+ 
+    Examples 
+    -------- 
+    &gt;&gt;&gt; df1 = pd.DataFrame( 
+    ...     { 
+    ...         &quot;key&quot;: [&quot;a&quot;, &quot;c&quot;, &quot;e&quot;, &quot;a&quot;, &quot;c&quot;, &quot;e&quot;], 
+    ...         &quot;lvalue&quot;: [1, 2, 3, 1, 2, 3], 
+    ...         &quot;group&quot;: [&quot;a&quot;, &quot;a&quot;, &quot;a&quot;, &quot;b&quot;, &quot;b&quot;, &quot;b&quot;] 
+    ...     } 
+    ... ) 
+    &gt;&gt;&gt; df1 
+          key  lvalue group 
+    0   a       1     a 
+    1   c       2     a 
+    2   e       3     a 
+    3   a       1     b 
+    4   c       2     b 
+    5   e       3     b 
+ 
+    &gt;&gt;&gt; df2 = pd.DataFrame({&quot;key&quot;: [&quot;b&quot;, &quot;c&quot;, &quot;d&quot;], &quot;rvalue&quot;: [1, 2, 3]}) 
+    &gt;&gt;&gt; df2 
+          key  rvalue 
+    0   b       1 
+    1   c       2 
+    2   d       3 
+ 
+    &gt;&gt;&gt; merge_ordered(df1, df2, fill_method=&quot;ffill&quot;, left_by=&quot;group&quot;) 
+      key  lvalue group  rvalue 
+    0   a       1     a     NaN 
+    1   b       1     a     1.0 
+    2   c       2     a     2.0 
+    3   d       2     a     3.0 
+    4   e       3     a     3.0 
+    5   a       1     b     NaN 
+    6   b       1     b     1.0 
+    7   c       2     b     2.0 
+    8   d       2     b     3.0 
+    9   e       3     b     3.0 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">_merger(x</span><span class="s2">, </span><span class="s1">y) -&gt; DataFrame:</span>
+        <span class="s5"># perform the ordered merge operation</span>
+        <span class="s1">op = _OrderedMerge(</span>
+            <span class="s1">x</span><span class="s2">,</span>
+            <span class="s1">y</span><span class="s2">,</span>
+            <span class="s1">on=on</span><span class="s2">,</span>
+            <span class="s1">left_on=left_on</span><span class="s2">,</span>
+            <span class="s1">right_on=right_on</span><span class="s2">,</span>
+            <span class="s1">suffixes=suffixes</span><span class="s2">,</span>
+            <span class="s1">fill_method=fill_method</span><span class="s2">,</span>
+            <span class="s1">how=how</span><span class="s2">,</span>
+        <span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">op.get_result()</span>
+
+    <span class="s2">if </span><span class="s1">left_by </span><span class="s2">is not None and </span><span class="s1">right_by </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;Can only group either left or right frames&quot;</span><span class="s1">)</span>
+    <span class="s2">elif </span><span class="s1">left_by </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">isinstance(left_by</span><span class="s2">, </span><span class="s1">str):</span>
+            <span class="s1">left_by = [left_by]</span>
+        <span class="s1">check = set(left_by).difference(left.columns)</span>
+        <span class="s2">if </span><span class="s1">len(check) != </span><span class="s4">0</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">KeyError(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">check</span><span class="s2">} </span><span class="s3">not found in left columns&quot;</span><span class="s1">)</span>
+        <span class="s1">result</span><span class="s2">, </span><span class="s1">_ = _groupby_and_merge(left_by</span><span class="s2">, </span><span class="s1">left</span><span class="s2">, </span><span class="s1">right</span><span class="s2">, lambda </span><span class="s1">x</span><span class="s2">, </span><span class="s1">y: _merger(x</span><span class="s2">, </span><span class="s1">y))</span>
+    <span class="s2">elif </span><span class="s1">right_by </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">isinstance(right_by</span><span class="s2">, </span><span class="s1">str):</span>
+            <span class="s1">right_by = [right_by]</span>
+        <span class="s1">check = set(right_by).difference(right.columns)</span>
+        <span class="s2">if </span><span class="s1">len(check) != </span><span class="s4">0</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">KeyError(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">check</span><span class="s2">} </span><span class="s3">not found in right columns&quot;</span><span class="s1">)</span>
+        <span class="s1">result</span><span class="s2">, </span><span class="s1">_ = _groupby_and_merge(</span>
+            <span class="s1">right_by</span><span class="s2">, </span><span class="s1">right</span><span class="s2">, </span><span class="s1">left</span><span class="s2">, lambda </span><span class="s1">x</span><span class="s2">, </span><span class="s1">y: _merger(y</span><span class="s2">, </span><span class="s1">x)</span>
+        <span class="s1">)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">result = _merger(left</span><span class="s2">, </span><span class="s1">right)</span>
+    <span class="s2">return </span><span class="s1">result</span>
+
+
+<span class="s2">def </span><span class="s1">merge_asof(</span>
+    <span class="s1">left: DataFrame | Series</span><span class="s2">,</span>
+    <span class="s1">right: DataFrame | Series</span><span class="s2">,</span>
+    <span class="s1">on: IndexLabel | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">left_on: IndexLabel | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">right_on: IndexLabel | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">left_index: bool = </span><span class="s2">False,</span>
+    <span class="s1">right_index: bool = </span><span class="s2">False,</span>
+    <span class="s1">by=</span><span class="s2">None,</span>
+    <span class="s1">left_by=</span><span class="s2">None,</span>
+    <span class="s1">right_by=</span><span class="s2">None,</span>
+    <span class="s1">suffixes: Suffixes = (</span><span class="s3">&quot;_x&quot;</span><span class="s2">, </span><span class="s3">&quot;_y&quot;</span><span class="s1">)</span><span class="s2">,</span>
+    <span class="s1">tolerance=</span><span class="s2">None,</span>
+    <span class="s1">allow_exact_matches: bool = </span><span class="s2">True,</span>
+    <span class="s1">direction: str = </span><span class="s3">&quot;backward&quot;</span><span class="s2">,</span>
+<span class="s1">) -&gt; DataFrame:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Perform a merge by key distance. 
+ 
+    This is similar to a left-join except that we match on nearest 
+    key rather than equal keys. Both DataFrames must be sorted by the key. 
+ 
+    For each row in the left DataFrame: 
+ 
+      - A &quot;backward&quot; search selects the last row in the right DataFrame whose 
+        'on' key is less than or equal to the left's key. 
+ 
+      - A &quot;forward&quot; search selects the first row in the right DataFrame whose 
+        'on' key is greater than or equal to the left's key. 
+ 
+      - A &quot;nearest&quot; search selects the row in the right DataFrame whose 'on' 
+        key is closest in absolute distance to the left's key. 
+ 
+    The default is &quot;backward&quot; and is compatible in versions below 0.20.0. 
+    The direction parameter was added in version 0.20.0 and introduces 
+    &quot;forward&quot; and &quot;nearest&quot;. 
+ 
+    Optionally match on equivalent keys with 'by' before searching with 'on'. 
+ 
+    Parameters 
+    ---------- 
+    left : DataFrame or named Series 
+    right : DataFrame or named Series 
+    on : label 
+        Field name to join on. Must be found in both DataFrames. 
+        The data MUST be ordered. Furthermore this must be a numeric column, 
+        such as datetimelike, integer, or float. On or left_on/right_on 
+        must be given. 
+    left_on : label 
+        Field name to join on in left DataFrame. 
+    right_on : label 
+        Field name to join on in right DataFrame. 
+    left_index : bool 
+        Use the index of the left DataFrame as the join key. 
+    right_index : bool 
+        Use the index of the right DataFrame as the join key. 
+    by : column name or list of column names 
+        Match on these columns before performing merge operation. 
+    left_by : column name 
+        Field names to match on in the left DataFrame. 
+    right_by : column name 
+        Field names to match on in the right DataFrame. 
+    suffixes : 2-length sequence (tuple, list, ...) 
+        Suffix to apply to overlapping column names in the left and right 
+        side, respectively. 
+    tolerance : int or Timedelta, optional, default None 
+        Select asof tolerance within this range; must be compatible 
+        with the merge index. 
+    allow_exact_matches : bool, default True 
+ 
+        - If True, allow matching with the same 'on' value 
+          (i.e. less-than-or-equal-to / greater-than-or-equal-to) 
+        - If False, don't match the same 'on' value 
+          (i.e., strictly less-than / strictly greater-than). 
+ 
+    direction : 'backward' (default), 'forward', or 'nearest' 
+        Whether to search for prior, subsequent, or closest matches. 
+ 
+    Returns 
+    ------- 
+    merged : DataFrame 
+ 
+    See Also 
+    -------- 
+    merge : Merge with a database-style join. 
+    merge_ordered : Merge with optional filling/interpolation. 
+ 
+    Examples 
+    -------- 
+    &gt;&gt;&gt; left = pd.DataFrame({&quot;a&quot;: [1, 5, 10], &quot;left_val&quot;: [&quot;a&quot;, &quot;b&quot;, &quot;c&quot;]}) 
+    &gt;&gt;&gt; left 
+        a left_val 
+    0   1        a 
+    1   5        b 
+    2  10        c 
+ 
+    &gt;&gt;&gt; right = pd.DataFrame({&quot;a&quot;: [1, 2, 3, 6, 7], &quot;right_val&quot;: [1, 2, 3, 6, 7]}) 
+    &gt;&gt;&gt; right 
+       a  right_val 
+    0  1          1 
+    1  2          2 
+    2  3          3 
+    3  6          6 
+    4  7          7 
+ 
+    &gt;&gt;&gt; pd.merge_asof(left, right, on=&quot;a&quot;) 
+        a left_val  right_val 
+    0   1        a          1 
+    1   5        b          3 
+    2  10        c          7 
+ 
+    &gt;&gt;&gt; pd.merge_asof(left, right, on=&quot;a&quot;, allow_exact_matches=False) 
+        a left_val  right_val 
+    0   1        a        NaN 
+    1   5        b        3.0 
+    2  10        c        7.0 
+ 
+    &gt;&gt;&gt; pd.merge_asof(left, right, on=&quot;a&quot;, direction=&quot;forward&quot;) 
+        a left_val  right_val 
+    0   1        a        1.0 
+    1   5        b        6.0 
+    2  10        c        NaN 
+ 
+    &gt;&gt;&gt; pd.merge_asof(left, right, on=&quot;a&quot;, direction=&quot;nearest&quot;) 
+        a left_val  right_val 
+    0   1        a          1 
+    1   5        b          6 
+    2  10        c          7 
+ 
+    We can use indexed DataFrames as well. 
+ 
+    &gt;&gt;&gt; left = pd.DataFrame({&quot;left_val&quot;: [&quot;a&quot;, &quot;b&quot;, &quot;c&quot;]}, index=[1, 5, 10]) 
+    &gt;&gt;&gt; left 
+       left_val 
+    1         a 
+    5         b 
+    10        c 
+ 
+    &gt;&gt;&gt; right = pd.DataFrame({&quot;right_val&quot;: [1, 2, 3, 6, 7]}, index=[1, 2, 3, 6, 7]) 
+    &gt;&gt;&gt; right 
+       right_val 
+    1          1 
+    2          2 
+    3          3 
+    6          6 
+    7          7 
+ 
+    &gt;&gt;&gt; pd.merge_asof(left, right, left_index=True, right_index=True) 
+       left_val  right_val 
+    1         a          1 
+    5         b          3 
+    10        c          7 
+ 
+    Here is a real-world times-series example 
+ 
+    &gt;&gt;&gt; quotes = pd.DataFrame( 
+    ...     { 
+    ...         &quot;time&quot;: [ 
+    ...             pd.Timestamp(&quot;2016-05-25 13:30:00.023&quot;), 
+    ...             pd.Timestamp(&quot;2016-05-25 13:30:00.023&quot;), 
+    ...             pd.Timestamp(&quot;2016-05-25 13:30:00.030&quot;), 
+    ...             pd.Timestamp(&quot;2016-05-25 13:30:00.041&quot;), 
+    ...             pd.Timestamp(&quot;2016-05-25 13:30:00.048&quot;), 
+    ...             pd.Timestamp(&quot;2016-05-25 13:30:00.049&quot;), 
+    ...             pd.Timestamp(&quot;2016-05-25 13:30:00.072&quot;), 
+    ...             pd.Timestamp(&quot;2016-05-25 13:30:00.075&quot;) 
+    ...         ], 
+    ...         &quot;ticker&quot;: [ 
+    ...                &quot;GOOG&quot;, 
+    ...                &quot;MSFT&quot;, 
+    ...                &quot;MSFT&quot;, 
+    ...                &quot;MSFT&quot;, 
+    ...                &quot;GOOG&quot;, 
+    ...                &quot;AAPL&quot;, 
+    ...                &quot;GOOG&quot;, 
+    ...                &quot;MSFT&quot; 
+    ...            ], 
+    ...            &quot;bid&quot;: [720.50, 51.95, 51.97, 51.99, 720.50, 97.99, 720.50, 52.01], 
+    ...            &quot;ask&quot;: [720.93, 51.96, 51.98, 52.00, 720.93, 98.01, 720.88, 52.03] 
+    ...     } 
+    ... ) 
+    &gt;&gt;&gt; quotes 
+                         time ticker     bid     ask 
+    0 2016-05-25 13:30:00.023   GOOG  720.50  720.93 
+    1 2016-05-25 13:30:00.023   MSFT   51.95   51.96 
+    2 2016-05-25 13:30:00.030   MSFT   51.97   51.98 
+    3 2016-05-25 13:30:00.041   MSFT   51.99   52.00 
+    4 2016-05-25 13:30:00.048   GOOG  720.50  720.93 
+    5 2016-05-25 13:30:00.049   AAPL   97.99   98.01 
+    6 2016-05-25 13:30:00.072   GOOG  720.50  720.88 
+    7 2016-05-25 13:30:00.075   MSFT   52.01   52.03 
+ 
+    &gt;&gt;&gt; trades = pd.DataFrame( 
+    ...        { 
+    ...            &quot;time&quot;: [ 
+    ...                pd.Timestamp(&quot;2016-05-25 13:30:00.023&quot;), 
+    ...                pd.Timestamp(&quot;2016-05-25 13:30:00.038&quot;), 
+    ...                pd.Timestamp(&quot;2016-05-25 13:30:00.048&quot;), 
+    ...                pd.Timestamp(&quot;2016-05-25 13:30:00.048&quot;), 
+    ...                pd.Timestamp(&quot;2016-05-25 13:30:00.048&quot;) 
+    ...            ], 
+    ...            &quot;ticker&quot;: [&quot;MSFT&quot;, &quot;MSFT&quot;, &quot;GOOG&quot;, &quot;GOOG&quot;, &quot;AAPL&quot;], 
+    ...            &quot;price&quot;: [51.95, 51.95, 720.77, 720.92, 98.0], 
+    ...            &quot;quantity&quot;: [75, 155, 100, 100, 100] 
+    ...        } 
+    ...    ) 
+    &gt;&gt;&gt; trades 
+                         time ticker   price  quantity 
+    0 2016-05-25 13:30:00.023   MSFT   51.95        75 
+    1 2016-05-25 13:30:00.038   MSFT   51.95       155 
+    2 2016-05-25 13:30:00.048   GOOG  720.77       100 
+    3 2016-05-25 13:30:00.048   GOOG  720.92       100 
+    4 2016-05-25 13:30:00.048   AAPL   98.00       100 
+ 
+    By default we are taking the asof of the quotes 
+ 
+    &gt;&gt;&gt; pd.merge_asof(trades, quotes, on=&quot;time&quot;, by=&quot;ticker&quot;) 
+                         time ticker   price  quantity     bid     ask 
+    0 2016-05-25 13:30:00.023   MSFT   51.95        75   51.95   51.96 
+    1 2016-05-25 13:30:00.038   MSFT   51.95       155   51.97   51.98 
+    2 2016-05-25 13:30:00.048   GOOG  720.77       100  720.50  720.93 
+    3 2016-05-25 13:30:00.048   GOOG  720.92       100  720.50  720.93 
+    4 2016-05-25 13:30:00.048   AAPL   98.00       100     NaN     NaN 
+ 
+    We only asof within 2ms between the quote time and the trade time 
+ 
+    &gt;&gt;&gt; pd.merge_asof( 
+    ...     trades, quotes, on=&quot;time&quot;, by=&quot;ticker&quot;, tolerance=pd.Timedelta(&quot;2ms&quot;) 
+    ... ) 
+                         time ticker   price  quantity     bid     ask 
+    0 2016-05-25 13:30:00.023   MSFT   51.95        75   51.95   51.96 
+    1 2016-05-25 13:30:00.038   MSFT   51.95       155     NaN     NaN 
+    2 2016-05-25 13:30:00.048   GOOG  720.77       100  720.50  720.93 
+    3 2016-05-25 13:30:00.048   GOOG  720.92       100  720.50  720.93 
+    4 2016-05-25 13:30:00.048   AAPL   98.00       100     NaN     NaN 
+ 
+    We only asof within 10ms between the quote time and the trade time 
+    and we exclude exact matches on time. However *prior* data will 
+    propagate forward 
+ 
+    &gt;&gt;&gt; pd.merge_asof( 
+    ...     trades, 
+    ...     quotes, 
+    ...     on=&quot;time&quot;, 
+    ...     by=&quot;ticker&quot;, 
+    ...     tolerance=pd.Timedelta(&quot;10ms&quot;), 
+    ...     allow_exact_matches=False 
+    ... ) 
+                         time ticker   price  quantity     bid     ask 
+    0 2016-05-25 13:30:00.023   MSFT   51.95        75     NaN     NaN 
+    1 2016-05-25 13:30:00.038   MSFT   51.95       155   51.97   51.98 
+    2 2016-05-25 13:30:00.048   GOOG  720.77       100     NaN     NaN 
+    3 2016-05-25 13:30:00.048   GOOG  720.92       100     NaN     NaN 
+    4 2016-05-25 13:30:00.048   AAPL   98.00       100     NaN     NaN 
+    &quot;&quot;&quot;</span>
+    <span class="s1">op = _AsOfMerge(</span>
+        <span class="s1">left</span><span class="s2">,</span>
+        <span class="s1">right</span><span class="s2">,</span>
+        <span class="s1">on=on</span><span class="s2">,</span>
+        <span class="s1">left_on=left_on</span><span class="s2">,</span>
+        <span class="s1">right_on=right_on</span><span class="s2">,</span>
+        <span class="s1">left_index=left_index</span><span class="s2">,</span>
+        <span class="s1">right_index=right_index</span><span class="s2">,</span>
+        <span class="s1">by=by</span><span class="s2">,</span>
+        <span class="s1">left_by=left_by</span><span class="s2">,</span>
+        <span class="s1">right_by=right_by</span><span class="s2">,</span>
+        <span class="s1">suffixes=suffixes</span><span class="s2">,</span>
+        <span class="s1">how=</span><span class="s3">&quot;asof&quot;</span><span class="s2">,</span>
+        <span class="s1">tolerance=tolerance</span><span class="s2">,</span>
+        <span class="s1">allow_exact_matches=allow_exact_matches</span><span class="s2">,</span>
+        <span class="s1">direction=direction</span><span class="s2">,</span>
+    <span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">op.get_result()</span>
+
+
+<span class="s5"># TODO: transformations??</span>
+<span class="s5"># TODO: only copy DataFrames when modification necessary</span>
+<span class="s2">class </span><span class="s1">_MergeOperation:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Perform a database (SQL) merge operation between two DataFrame or Series 
+    objects using either columns as keys or their row indexes 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">_merge_type = </span><span class="s3">&quot;merge&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">left: DataFrame | Series</span><span class="s2">,</span>
+        <span class="s1">right: DataFrame | Series</span><span class="s2">,</span>
+        <span class="s1">how: str = </span><span class="s3">&quot;inner&quot;</span><span class="s2">,</span>
+        <span class="s1">on: IndexLabel | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+        <span class="s1">left_on: IndexLabel | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+        <span class="s1">right_on: IndexLabel | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+        <span class="s1">axis: int = </span><span class="s4">1</span><span class="s2">,</span>
+        <span class="s1">left_index: bool = </span><span class="s2">False,</span>
+        <span class="s1">right_index: bool = </span><span class="s2">False,</span>
+        <span class="s1">sort: bool = </span><span class="s2">True,</span>
+        <span class="s1">suffixes: Suffixes = (</span><span class="s3">&quot;_x&quot;</span><span class="s2">, </span><span class="s3">&quot;_y&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">copy: bool = </span><span class="s2">True,</span>
+        <span class="s1">indicator: bool = </span><span class="s2">False,</span>
+        <span class="s1">validate: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">):</span>
+        <span class="s1">_left = _validate_operand(left)</span>
+        <span class="s1">_right = _validate_operand(right)</span>
+        <span class="s1">self.left = self.orig_left = _left</span>
+        <span class="s1">self.right = self.orig_right = _right</span>
+        <span class="s1">self.how = how</span>
+
+        <span class="s5"># bm_axis -&gt; the axis on the BlockManager</span>
+        <span class="s1">self.bm_axis = axis</span>
+        <span class="s5"># axis --&gt; the axis on the Series/DataFrame</span>
+        <span class="s1">self.axis = </span><span class="s4">1 </span><span class="s1">- axis </span><span class="s2">if </span><span class="s1">self.left.ndim == </span><span class="s4">2 </span><span class="s2">else </span><span class="s4">0</span>
+
+        <span class="s1">self.on = com.maybe_make_list(on)</span>
+        <span class="s1">self.left_on = com.maybe_make_list(left_on)</span>
+        <span class="s1">self.right_on = com.maybe_make_list(right_on)</span>
+
+        <span class="s1">self.copy = copy</span>
+        <span class="s1">self.suffixes = suffixes</span>
+        <span class="s1">self.sort = sort</span>
+
+        <span class="s1">self.left_index = left_index</span>
+        <span class="s1">self.right_index = right_index</span>
+
+        <span class="s1">self.indicator = indicator</span>
+
+        <span class="s1">self.indicator_name: str | </span><span class="s2">None</span>
+        <span class="s2">if </span><span class="s1">isinstance(self.indicator</span><span class="s2">, </span><span class="s1">str):</span>
+            <span class="s1">self.indicator_name = self.indicator</span>
+        <span class="s2">elif </span><span class="s1">isinstance(self.indicator</span><span class="s2">, </span><span class="s1">bool):</span>
+            <span class="s1">self.indicator_name = </span><span class="s3">&quot;_merge&quot; </span><span class="s2">if </span><span class="s1">self.indicator </span><span class="s2">else None</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span>
+                <span class="s3">&quot;indicator option can only accept boolean or string arguments&quot;</span>
+            <span class="s1">)</span>
+
+        <span class="s2">if not </span><span class="s1">is_bool(left_index):</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span>
+                <span class="s3">f&quot;left_index parameter must be of type bool, not </span><span class="s2">{</span><span class="s1">type(left_index)</span><span class="s2">}</span><span class="s3">&quot;</span>
+            <span class="s1">)</span>
+        <span class="s2">if not </span><span class="s1">is_bool(right_index):</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span>
+                <span class="s3">f&quot;right_index parameter must be of type bool, not </span><span class="s2">{</span><span class="s1">type(right_index)</span><span class="s2">}</span><span class="s3">&quot;</span>
+            <span class="s1">)</span>
+
+        <span class="s5"># warn user when merging between different levels</span>
+        <span class="s2">if </span><span class="s1">_left.columns.nlevels != _right.columns.nlevels:</span>
+            <span class="s1">msg = (</span>
+                <span class="s3">&quot;merging between different levels is deprecated and will be removed &quot;</span>
+                <span class="s3">f&quot;in a future version. (</span><span class="s2">{</span><span class="s1">left.columns.nlevels</span><span class="s2">} </span><span class="s3">levels on the left, &quot;</span>
+                <span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">right.columns.nlevels</span><span class="s2">} </span><span class="s3">on the right)&quot;</span>
+            <span class="s1">)</span>
+            <span class="s5"># stacklevel chosen to be correct when this is reached via pd.merge</span>
+            <span class="s5"># (and not DataFrame.join)</span>
+            <span class="s1">warnings.warn(msg</span><span class="s2">, </span><span class="s1">FutureWarning</span><span class="s2">, </span><span class="s1">stacklevel=find_stack_level())</span>
+
+        <span class="s1">self._validate_specification()</span>
+
+        <span class="s1">cross_col = </span><span class="s2">None</span>
+        <span class="s2">if </span><span class="s1">self.how == </span><span class="s3">&quot;cross&quot;</span><span class="s1">:</span>
+            <span class="s1">(</span>
+                <span class="s1">self.left</span><span class="s2">,</span>
+                <span class="s1">self.right</span><span class="s2">,</span>
+                <span class="s1">self.how</span><span class="s2">,</span>
+                <span class="s1">cross_col</span><span class="s2">,</span>
+            <span class="s1">) = self._create_cross_configuration(self.left</span><span class="s2">, </span><span class="s1">self.right)</span>
+            <span class="s1">self.left_on = self.right_on = [cross_col]</span>
+        <span class="s1">self._cross = cross_col</span>
+
+        <span class="s5"># note this function has side effects</span>
+        <span class="s1">(</span>
+            <span class="s1">self.left_join_keys</span><span class="s2">,</span>
+            <span class="s1">self.right_join_keys</span><span class="s2">,</span>
+            <span class="s1">self.join_names</span><span class="s2">,</span>
+        <span class="s1">) = self._get_merge_keys()</span>
+
+        <span class="s5"># validate the merge keys dtypes. We may need to coerce</span>
+        <span class="s5"># to avoid incompatible dtypes</span>
+        <span class="s1">self._maybe_coerce_merge_keys()</span>
+
+        <span class="s5"># If argument passed to validate,</span>
+        <span class="s5"># check if columns specified as unique</span>
+        <span class="s5"># are in fact unique.</span>
+        <span class="s2">if </span><span class="s1">validate </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self._validate(validate)</span>
+
+    <span class="s2">def </span><span class="s1">get_result(self) -&gt; DataFrame:</span>
+        <span class="s2">if </span><span class="s1">self.indicator:</span>
+            <span class="s1">self.left</span><span class="s2">, </span><span class="s1">self.right = self._indicator_pre_merge(self.left</span><span class="s2">, </span><span class="s1">self.right)</span>
+
+        <span class="s1">join_index</span><span class="s2">, </span><span class="s1">left_indexer</span><span class="s2">, </span><span class="s1">right_indexer = self._get_join_info()</span>
+
+        <span class="s1">llabels</span><span class="s2">, </span><span class="s1">rlabels = _items_overlap_with_suffix(</span>
+            <span class="s1">self.left._info_axis</span><span class="s2">, </span><span class="s1">self.right._info_axis</span><span class="s2">, </span><span class="s1">self.suffixes</span>
+        <span class="s1">)</span>
+
+        <span class="s1">lindexers = {</span><span class="s4">1</span><span class="s1">: left_indexer} </span><span class="s2">if </span><span class="s1">left_indexer </span><span class="s2">is not None else </span><span class="s1">{}</span>
+        <span class="s1">rindexers = {</span><span class="s4">1</span><span class="s1">: right_indexer} </span><span class="s2">if </span><span class="s1">right_indexer </span><span class="s2">is not None else </span><span class="s1">{}</span>
+
+        <span class="s1">result_data = concatenate_managers(</span>
+            <span class="s1">[(self.left._mgr</span><span class="s2">, </span><span class="s1">lindexers)</span><span class="s2">, </span><span class="s1">(self.right._mgr</span><span class="s2">, </span><span class="s1">rindexers)]</span><span class="s2">,</span>
+            <span class="s1">axes=[llabels.append(rlabels)</span><span class="s2">, </span><span class="s1">join_index]</span><span class="s2">,</span>
+            <span class="s1">concat_axis=</span><span class="s4">0</span><span class="s2">,</span>
+            <span class="s1">copy=self.copy</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+        <span class="s1">typ = self.left._constructor</span>
+        <span class="s1">result = typ(result_data).__finalize__(self</span><span class="s2">, </span><span class="s1">method=self._merge_type)</span>
+
+        <span class="s2">if </span><span class="s1">self.indicator:</span>
+            <span class="s1">result = self._indicator_post_merge(result)</span>
+
+        <span class="s1">self._maybe_add_join_keys(result</span><span class="s2">, </span><span class="s1">left_indexer</span><span class="s2">, </span><span class="s1">right_indexer)</span>
+
+        <span class="s1">self._maybe_restore_index_levels(result)</span>
+
+        <span class="s1">self._maybe_drop_cross_column(result</span><span class="s2">, </span><span class="s1">self._cross)</span>
+
+        <span class="s2">return </span><span class="s1">result.__finalize__(self</span><span class="s2">, </span><span class="s1">method=</span><span class="s3">&quot;merge&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">_maybe_drop_cross_column(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">result: DataFrame</span><span class="s2">, </span><span class="s1">cross_col: str | </span><span class="s2">None</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">cross_col </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">del </span><span class="s1">result[cross_col]</span>
+
+    <span class="s2">def </span><span class="s1">_indicator_pre_merge(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">left: DataFrame</span><span class="s2">, </span><span class="s1">right: DataFrame</span>
+    <span class="s1">) -&gt; tuple[DataFrame</span><span class="s2">, </span><span class="s1">DataFrame]:</span>
+
+        <span class="s1">columns = left.columns.union(right.columns)</span>
+
+        <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">[</span><span class="s3">&quot;_left_indicator&quot;</span><span class="s2">, </span><span class="s3">&quot;_right_indicator&quot;</span><span class="s1">]:</span>
+            <span class="s2">if </span><span class="s1">i </span><span class="s2">in </span><span class="s1">columns:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span>
+                    <span class="s3">&quot;Cannot use `indicator=True` option when &quot;</span>
+                    <span class="s3">f&quot;data contains a column named </span><span class="s2">{</span><span class="s1">i</span><span class="s2">}</span><span class="s3">&quot;</span>
+                <span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">self.indicator_name </span><span class="s2">in </span><span class="s1">columns:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span>
+                <span class="s3">&quot;Cannot use name of an existing column for indicator column&quot;</span>
+            <span class="s1">)</span>
+
+        <span class="s1">left = left.copy()</span>
+        <span class="s1">right = right.copy()</span>
+
+        <span class="s1">left[</span><span class="s3">&quot;_left_indicator&quot;</span><span class="s1">] = </span><span class="s4">1</span>
+        <span class="s1">left[</span><span class="s3">&quot;_left_indicator&quot;</span><span class="s1">] = left[</span><span class="s3">&quot;_left_indicator&quot;</span><span class="s1">].astype(</span><span class="s3">&quot;int8&quot;</span><span class="s1">)</span>
+
+        <span class="s1">right[</span><span class="s3">&quot;_right_indicator&quot;</span><span class="s1">] = </span><span class="s4">2</span>
+        <span class="s1">right[</span><span class="s3">&quot;_right_indicator&quot;</span><span class="s1">] = right[</span><span class="s3">&quot;_right_indicator&quot;</span><span class="s1">].astype(</span><span class="s3">&quot;int8&quot;</span><span class="s1">)</span>
+
+        <span class="s2">return </span><span class="s1">left</span><span class="s2">, </span><span class="s1">right</span>
+
+    <span class="s2">def </span><span class="s1">_indicator_post_merge(self</span><span class="s2">, </span><span class="s1">result: DataFrame) -&gt; DataFrame:</span>
+
+        <span class="s1">result[</span><span class="s3">&quot;_left_indicator&quot;</span><span class="s1">] = result[</span><span class="s3">&quot;_left_indicator&quot;</span><span class="s1">].fillna(</span><span class="s4">0</span><span class="s1">)</span>
+        <span class="s1">result[</span><span class="s3">&quot;_right_indicator&quot;</span><span class="s1">] = result[</span><span class="s3">&quot;_right_indicator&quot;</span><span class="s1">].fillna(</span><span class="s4">0</span><span class="s1">)</span>
+
+        <span class="s1">result[self.indicator_name] = Categorical(</span>
+            <span class="s1">(result[</span><span class="s3">&quot;_left_indicator&quot;</span><span class="s1">] + result[</span><span class="s3">&quot;_right_indicator&quot;</span><span class="s1">])</span><span class="s2">,</span>
+            <span class="s1">categories=[</span><span class="s4">1</span><span class="s2">, </span><span class="s4">2</span><span class="s2">, </span><span class="s4">3</span><span class="s1">]</span><span class="s2">,</span>
+        <span class="s1">)</span>
+        <span class="s1">result[self.indicator_name] = result[self.indicator_name].cat.rename_categories(</span>
+            <span class="s1">[</span><span class="s3">&quot;left_only&quot;</span><span class="s2">, </span><span class="s3">&quot;right_only&quot;</span><span class="s2">, </span><span class="s3">&quot;both&quot;</span><span class="s1">]</span>
+        <span class="s1">)</span>
+
+        <span class="s1">result = result.drop(labels=[</span><span class="s3">&quot;_left_indicator&quot;</span><span class="s2">, </span><span class="s3">&quot;_right_indicator&quot;</span><span class="s1">]</span><span class="s2">, </span><span class="s1">axis=</span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">result</span>
+
+    <span class="s2">def </span><span class="s1">_maybe_restore_index_levels(self</span><span class="s2">, </span><span class="s1">result: DataFrame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Restore index levels specified as `on` parameters 
+ 
+        Here we check for cases where `self.left_on` and `self.right_on` pairs 
+        each reference an index level in their respective DataFrames. The 
+        joined columns corresponding to these pairs are then restored to the 
+        index of `result`. 
+ 
+        **Note:** This method has side effects. It modifies `result` in-place 
+ 
+        Parameters 
+        ---------- 
+        result: DataFrame 
+            merge result 
+ 
+        Returns 
+        ------- 
+        None 
+        &quot;&quot;&quot;</span>
+        <span class="s1">names_to_restore = []</span>
+        <span class="s2">for </span><span class="s1">name</span><span class="s2">, </span><span class="s1">left_key</span><span class="s2">, </span><span class="s1">right_key </span><span class="s2">in </span><span class="s1">zip(</span>
+            <span class="s1">self.join_names</span><span class="s2">, </span><span class="s1">self.left_on</span><span class="s2">, </span><span class="s1">self.right_on</span>
+        <span class="s1">):</span>
+            <span class="s2">if </span><span class="s1">(</span>
+                <span class="s1">self.orig_left._is_level_reference(left_key)</span>
+                <span class="s2">and </span><span class="s1">self.orig_right._is_level_reference(right_key)</span>
+                <span class="s2">and </span><span class="s1">left_key == right_key</span>
+                <span class="s2">and </span><span class="s1">name </span><span class="s2">not in </span><span class="s1">result.index.names</span>
+            <span class="s1">):</span>
+
+                <span class="s1">names_to_restore.append(name)</span>
+
+        <span class="s2">if </span><span class="s1">names_to_restore:</span>
+            <span class="s1">result.set_index(names_to_restore</span><span class="s2">, </span><span class="s1">inplace=</span><span class="s2">True</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">_maybe_add_join_keys(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">result: DataFrame</span><span class="s2">,</span>
+        <span class="s1">left_indexer: np.ndarray | </span><span class="s2">None,</span>
+        <span class="s1">right_indexer: np.ndarray | </span><span class="s2">None,</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+
+        <span class="s1">left_has_missing = </span><span class="s2">None</span>
+        <span class="s1">right_has_missing = </span><span class="s2">None</span>
+
+        <span class="s1">keys = zip(self.join_names</span><span class="s2">, </span><span class="s1">self.left_on</span><span class="s2">, </span><span class="s1">self.right_on)</span>
+        <span class="s2">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">(name</span><span class="s2">, </span><span class="s1">lname</span><span class="s2">, </span><span class="s1">rname) </span><span class="s2">in </span><span class="s1">enumerate(keys):</span>
+            <span class="s2">if not </span><span class="s1">_should_fill(lname</span><span class="s2">, </span><span class="s1">rname):</span>
+                <span class="s2">continue</span>
+
+            <span class="s1">take_left</span><span class="s2">, </span><span class="s1">take_right = </span><span class="s2">None, None</span>
+
+            <span class="s2">if </span><span class="s1">name </span><span class="s2">in </span><span class="s1">result:</span>
+
+                <span class="s2">if </span><span class="s1">left_indexer </span><span class="s2">is not None and </span><span class="s1">right_indexer </span><span class="s2">is not None</span><span class="s1">:</span>
+                    <span class="s2">if </span><span class="s1">name </span><span class="s2">in </span><span class="s1">self.left:</span>
+
+                        <span class="s2">if </span><span class="s1">left_has_missing </span><span class="s2">is None</span><span class="s1">:</span>
+                            <span class="s1">left_has_missing = (left_indexer == -</span><span class="s4">1</span><span class="s1">).any()</span>
+
+                        <span class="s2">if </span><span class="s1">left_has_missing:</span>
+                            <span class="s1">take_right = self.right_join_keys[i]</span>
+
+                            <span class="s2">if not </span><span class="s1">is_dtype_equal(</span>
+                                <span class="s1">result[name].dtype</span><span class="s2">, </span><span class="s1">self.left[name].dtype</span>
+                            <span class="s1">):</span>
+                                <span class="s1">take_left = self.left[name]._values</span>
+
+                    <span class="s2">elif </span><span class="s1">name </span><span class="s2">in </span><span class="s1">self.right:</span>
+
+                        <span class="s2">if </span><span class="s1">right_has_missing </span><span class="s2">is None</span><span class="s1">:</span>
+                            <span class="s1">right_has_missing = (right_indexer == -</span><span class="s4">1</span><span class="s1">).any()</span>
+
+                        <span class="s2">if </span><span class="s1">right_has_missing:</span>
+                            <span class="s1">take_left = self.left_join_keys[i]</span>
+
+                            <span class="s2">if not </span><span class="s1">is_dtype_equal(</span>
+                                <span class="s1">result[name].dtype</span><span class="s2">, </span><span class="s1">self.right[name].dtype</span>
+                            <span class="s1">):</span>
+                                <span class="s1">take_right = self.right[name]._values</span>
+
+            <span class="s2">elif </span><span class="s1">left_indexer </span><span class="s2">is not None and </span><span class="s1">is_array_like(self.left_join_keys[i]):</span>
+                <span class="s1">take_left = self.left_join_keys[i]</span>
+                <span class="s1">take_right = self.right_join_keys[i]</span>
+
+            <span class="s2">if </span><span class="s1">take_left </span><span class="s2">is not None or </span><span class="s1">take_right </span><span class="s2">is not None</span><span class="s1">:</span>
+
+                <span class="s2">if </span><span class="s1">take_left </span><span class="s2">is None</span><span class="s1">:</span>
+                    <span class="s1">lvals = result[name]._values</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s5"># TODO: can we pin down take_left's type earlier?</span>
+                    <span class="s1">take_left = extract_array(take_left</span><span class="s2">, </span><span class="s1">extract_numpy=</span><span class="s2">True</span><span class="s1">)</span>
+                    <span class="s1">lfill = na_value_for_dtype(take_left.dtype)</span>
+                    <span class="s1">lvals = algos.take_nd(take_left</span><span class="s2">, </span><span class="s1">left_indexer</span><span class="s2">, </span><span class="s1">fill_value=lfill)</span>
+
+                <span class="s2">if </span><span class="s1">take_right </span><span class="s2">is None</span><span class="s1">:</span>
+                    <span class="s1">rvals = result[name]._values</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s5"># TODO: can we pin down take_right's type earlier?</span>
+                    <span class="s1">take_right = extract_array(take_right</span><span class="s2">, </span><span class="s1">extract_numpy=</span><span class="s2">True</span><span class="s1">)</span>
+                    <span class="s1">rfill = na_value_for_dtype(take_right.dtype)</span>
+                    <span class="s1">rvals = algos.take_nd(take_right</span><span class="s2">, </span><span class="s1">right_indexer</span><span class="s2">, </span><span class="s1">fill_value=rfill)</span>
+
+                <span class="s5"># if we have an all missing left_indexer</span>
+                <span class="s5"># make sure to just use the right values or vice-versa</span>
+                <span class="s1">mask_left = left_indexer == -</span><span class="s4">1</span>
+                <span class="s1">mask_right = right_indexer == -</span><span class="s4">1</span>
+                <span class="s5"># error: Item &quot;bool&quot; of &quot;Union[Any, bool]&quot; has no attribute &quot;all&quot;</span>
+                <span class="s2">if </span><span class="s1">mask_left.all():  </span><span class="s5"># type: ignore[union-attr]</span>
+                    <span class="s1">key_col = Index(rvals)</span>
+                    <span class="s1">result_dtype = rvals.dtype</span>
+                <span class="s5"># error: Item &quot;bool&quot; of &quot;Union[Any, bool]&quot; has no attribute &quot;all&quot;</span>
+                <span class="s2">elif </span><span class="s1">(</span>
+                    <span class="s1">right_indexer </span><span class="s2">is not None</span>
+                    <span class="s2">and </span><span class="s1">mask_right.all()  </span><span class="s5"># type: ignore[union-attr]</span>
+                <span class="s1">):</span>
+                    <span class="s1">key_col = Index(lvals)</span>
+                    <span class="s1">result_dtype = lvals.dtype</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">key_col = Index(lvals).where(~mask_left</span><span class="s2">, </span><span class="s1">rvals)</span>
+                    <span class="s1">result_dtype = find_common_type([lvals.dtype</span><span class="s2">, </span><span class="s1">rvals.dtype])</span>
+
+                <span class="s2">if </span><span class="s1">result._is_label_reference(name):</span>
+                    <span class="s1">result[name] = Series(</span>
+                        <span class="s1">key_col</span><span class="s2">, </span><span class="s1">dtype=result_dtype</span><span class="s2">, </span><span class="s1">index=result.index</span>
+                    <span class="s1">)</span>
+                <span class="s2">elif </span><span class="s1">result._is_level_reference(name):</span>
+                    <span class="s2">if </span><span class="s1">isinstance(result.index</span><span class="s2">, </span><span class="s1">MultiIndex):</span>
+                        <span class="s1">key_col.name = name</span>
+                        <span class="s1">idx_list = [</span>
+                            <span class="s1">result.index.get_level_values(level_name)</span>
+                            <span class="s2">if </span><span class="s1">level_name != name</span>
+                            <span class="s2">else </span><span class="s1">key_col</span>
+                            <span class="s2">for </span><span class="s1">level_name </span><span class="s2">in </span><span class="s1">result.index.names</span>
+                        <span class="s1">]</span>
+
+                        <span class="s1">result.set_index(idx_list</span><span class="s2">, </span><span class="s1">inplace=</span><span class="s2">True</span><span class="s1">)</span>
+                    <span class="s2">else</span><span class="s1">:</span>
+                        <span class="s1">result.index = Index(key_col</span><span class="s2">, </span><span class="s1">name=name)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">result.insert(i</span><span class="s2">, </span><span class="s1">name </span><span class="s2">or </span><span class="s3">f&quot;key_</span><span class="s2">{</span><span class="s1">i</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s2">, </span><span class="s1">key_col)</span>
+
+    <span class="s2">def </span><span class="s1">_get_join_indexers(self) -&gt; tuple[npt.NDArray[np.intp]</span><span class="s2">, </span><span class="s1">npt.NDArray[np.intp]]:</span>
+        <span class="s0">&quot;&quot;&quot;return the join indexers&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">get_join_indexers(</span>
+            <span class="s1">self.left_join_keys</span><span class="s2">, </span><span class="s1">self.right_join_keys</span><span class="s2">, </span><span class="s1">sort=self.sort</span><span class="s2">, </span><span class="s1">how=self.how</span>
+        <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">_get_join_info(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+    <span class="s1">) -&gt; tuple[Index</span><span class="s2">, </span><span class="s1">npt.NDArray[np.intp] | </span><span class="s2">None, </span><span class="s1">npt.NDArray[np.intp] | </span><span class="s2">None</span><span class="s1">]:</span>
+
+        <span class="s1">left_ax = self.left.axes[self.axis]</span>
+        <span class="s1">right_ax = self.right.axes[self.axis]</span>
+
+        <span class="s2">if </span><span class="s1">self.left_index </span><span class="s2">and </span><span class="s1">self.right_index </span><span class="s2">and </span><span class="s1">self.how != </span><span class="s3">&quot;asof&quot;</span><span class="s1">:</span>
+            <span class="s1">join_index</span><span class="s2">, </span><span class="s1">left_indexer</span><span class="s2">, </span><span class="s1">right_indexer = left_ax.join(</span>
+                <span class="s1">right_ax</span><span class="s2">, </span><span class="s1">how=self.how</span><span class="s2">, </span><span class="s1">return_indexers=</span><span class="s2">True, </span><span class="s1">sort=self.sort</span>
+            <span class="s1">)</span>
+
+        <span class="s2">elif </span><span class="s1">self.right_index </span><span class="s2">and </span><span class="s1">self.how == </span><span class="s3">&quot;left&quot;</span><span class="s1">:</span>
+            <span class="s1">join_index</span><span class="s2">, </span><span class="s1">left_indexer</span><span class="s2">, </span><span class="s1">right_indexer = _left_join_on_index(</span>
+                <span class="s1">left_ax</span><span class="s2">, </span><span class="s1">right_ax</span><span class="s2">, </span><span class="s1">self.left_join_keys</span><span class="s2">, </span><span class="s1">sort=self.sort</span>
+            <span class="s1">)</span>
+
+        <span class="s2">elif </span><span class="s1">self.left_index </span><span class="s2">and </span><span class="s1">self.how == </span><span class="s3">&quot;right&quot;</span><span class="s1">:</span>
+            <span class="s1">join_index</span><span class="s2">, </span><span class="s1">right_indexer</span><span class="s2">, </span><span class="s1">left_indexer = _left_join_on_index(</span>
+                <span class="s1">right_ax</span><span class="s2">, </span><span class="s1">left_ax</span><span class="s2">, </span><span class="s1">self.right_join_keys</span><span class="s2">, </span><span class="s1">sort=self.sort</span>
+            <span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">(left_indexer</span><span class="s2">, </span><span class="s1">right_indexer) = self._get_join_indexers()</span>
+
+            <span class="s2">if </span><span class="s1">self.right_index:</span>
+                <span class="s2">if </span><span class="s1">len(self.left) &gt; </span><span class="s4">0</span><span class="s1">:</span>
+                    <span class="s1">join_index = self._create_join_index(</span>
+                        <span class="s1">self.left.index</span><span class="s2">,</span>
+                        <span class="s1">self.right.index</span><span class="s2">,</span>
+                        <span class="s1">left_indexer</span><span class="s2">,</span>
+                        <span class="s1">how=</span><span class="s3">&quot;right&quot;</span><span class="s2">,</span>
+                    <span class="s1">)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">join_index = self.right.index.take(right_indexer)</span>
+                    <span class="s1">left_indexer = np.array([-</span><span class="s4">1</span><span class="s1">] * len(join_index)</span><span class="s2">, </span><span class="s1">dtype=np.intp)</span>
+            <span class="s2">elif </span><span class="s1">self.left_index:</span>
+                <span class="s2">if </span><span class="s1">self.how == </span><span class="s3">&quot;asof&quot;</span><span class="s1">:</span>
+                    <span class="s5"># GH#33463 asof should always behave like a left merge</span>
+                    <span class="s1">join_index = self._create_join_index(</span>
+                        <span class="s1">self.left.index</span><span class="s2">,</span>
+                        <span class="s1">self.right.index</span><span class="s2">,</span>
+                        <span class="s1">left_indexer</span><span class="s2">,</span>
+                        <span class="s1">how=</span><span class="s3">&quot;left&quot;</span><span class="s2">,</span>
+                    <span class="s1">)</span>
+
+                <span class="s2">elif </span><span class="s1">len(self.right) &gt; </span><span class="s4">0</span><span class="s1">:</span>
+                    <span class="s1">join_index = self._create_join_index(</span>
+                        <span class="s1">self.right.index</span><span class="s2">,</span>
+                        <span class="s1">self.left.index</span><span class="s2">,</span>
+                        <span class="s1">right_indexer</span><span class="s2">,</span>
+                        <span class="s1">how=</span><span class="s3">&quot;left&quot;</span><span class="s2">,</span>
+                    <span class="s1">)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">join_index = self.left.index.take(left_indexer)</span>
+                    <span class="s1">right_indexer = np.array([-</span><span class="s4">1</span><span class="s1">] * len(join_index)</span><span class="s2">, </span><span class="s1">dtype=np.intp)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">join_index = Index(np.arange(len(left_indexer)))</span>
+
+        <span class="s2">if </span><span class="s1">len(join_index) == </span><span class="s4">0</span><span class="s1">:</span>
+            <span class="s1">join_index = join_index.astype(object)</span>
+        <span class="s2">return </span><span class="s1">join_index</span><span class="s2">, </span><span class="s1">left_indexer</span><span class="s2">, </span><span class="s1">right_indexer</span>
+
+    <span class="s2">def </span><span class="s1">_create_join_index(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">index: Index</span><span class="s2">,</span>
+        <span class="s1">other_index: Index</span><span class="s2">,</span>
+        <span class="s1">indexer: npt.NDArray[np.intp]</span><span class="s2">,</span>
+        <span class="s1">how: str = </span><span class="s3">&quot;left&quot;</span><span class="s2">,</span>
+    <span class="s1">) -&gt; Index:</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Create a join index by rearranging one index to match another 
+ 
+        Parameters 
+        ---------- 
+        index : Index being rearranged 
+        other_index : Index used to supply values not found in index 
+        indexer : np.ndarray[np.intp] how to rearrange index 
+        how : str 
+            Replacement is only necessary if indexer based on other_index. 
+ 
+        Returns 
+        ------- 
+        Index 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self.how </span><span class="s2">in </span><span class="s1">(how</span><span class="s2">, </span><span class="s3">&quot;outer&quot;</span><span class="s1">) </span><span class="s2">and not </span><span class="s1">isinstance(other_index</span><span class="s2">, </span><span class="s1">MultiIndex):</span>
+            <span class="s5"># if final index requires values in other_index but not target</span>
+            <span class="s5"># index, indexer may hold missing (-1) values, causing Index.take</span>
+            <span class="s5"># to take the final value in target index. So, we set the last</span>
+            <span class="s5"># element to be the desired fill value. We do not use allow_fill</span>
+            <span class="s5"># and fill_value because it throws a ValueError on integer indices</span>
+            <span class="s1">mask = indexer == -</span><span class="s4">1</span>
+            <span class="s2">if </span><span class="s1">np.any(mask):</span>
+                <span class="s1">fill_value = na_value_for_dtype(index.dtype</span><span class="s2">, </span><span class="s1">compat=</span><span class="s2">False</span><span class="s1">)</span>
+                <span class="s1">index = index.append(Index([fill_value]))</span>
+        <span class="s2">return </span><span class="s1">index.take(indexer)</span>
+
+    <span class="s2">def </span><span class="s1">_get_merge_keys(self):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Note: has side effects (copy/delete key columns) 
+ 
+        Parameters 
+        ---------- 
+        left 
+        right 
+        on 
+ 
+        Returns 
+        ------- 
+        left_keys, right_keys 
+        &quot;&quot;&quot;</span>
+        <span class="s1">left_keys = []</span>
+        <span class="s1">right_keys = []</span>
+        <span class="s5"># error: Need type annotation for 'join_names' (hint: &quot;join_names: List[&lt;type&gt;]</span>
+        <span class="s5"># = ...&quot;)</span>
+        <span class="s1">join_names = []  </span><span class="s5"># type: ignore[var-annotated]</span>
+        <span class="s1">right_drop = []</span>
+        <span class="s1">left_drop = []</span>
+
+        <span class="s1">left</span><span class="s2">, </span><span class="s1">right = self.left</span><span class="s2">, </span><span class="s1">self.right</span>
+
+        <span class="s1">is_lkey = </span><span class="s2">lambda </span><span class="s1">x: is_array_like(x) </span><span class="s2">and </span><span class="s1">len(x) == len(left)</span>
+        <span class="s1">is_rkey = </span><span class="s2">lambda </span><span class="s1">x: is_array_like(x) </span><span class="s2">and </span><span class="s1">len(x) == len(right)</span>
+
+        <span class="s5"># Note that pd.merge_asof() has separate 'on' and 'by' parameters. A</span>
+        <span class="s5"># user could, for example, request 'left_index' and 'left_by'. In a</span>
+        <span class="s5"># regular pd.merge(), users cannot specify both 'left_index' and</span>
+        <span class="s5"># 'left_on'. (Instead, users have a MultiIndex). That means the</span>
+        <span class="s5"># self.left_on in this function is always empty in a pd.merge(), but</span>
+        <span class="s5"># a pd.merge_asof(left_index=True, left_by=...) will result in a</span>
+        <span class="s5"># self.left_on array with a None in the middle of it. This requires</span>
+        <span class="s5"># a work-around as designated in the code below.</span>
+        <span class="s5"># See _validate_specification() for where this happens.</span>
+
+        <span class="s5"># ugh, spaghetti re #733</span>
+        <span class="s2">if </span><span class="s1">_any(self.left_on) </span><span class="s2">and </span><span class="s1">_any(self.right_on):</span>
+            <span class="s2">for </span><span class="s1">lk</span><span class="s2">, </span><span class="s1">rk </span><span class="s2">in </span><span class="s1">zip(self.left_on</span><span class="s2">, </span><span class="s1">self.right_on):</span>
+                <span class="s2">if </span><span class="s1">is_lkey(lk):</span>
+                    <span class="s1">left_keys.append(lk)</span>
+                    <span class="s2">if </span><span class="s1">is_rkey(rk):</span>
+                        <span class="s1">right_keys.append(rk)</span>
+                        <span class="s1">join_names.append(</span><span class="s2">None</span><span class="s1">)  </span><span class="s5"># what to do?</span>
+                    <span class="s2">else</span><span class="s1">:</span>
+                        <span class="s2">if </span><span class="s1">rk </span><span class="s2">is not None</span><span class="s1">:</span>
+                            <span class="s1">right_keys.append(right._get_label_or_level_values(rk))</span>
+                            <span class="s1">join_names.append(rk)</span>
+                        <span class="s2">else</span><span class="s1">:</span>
+                            <span class="s5"># work-around for merge_asof(right_index=True)</span>
+                            <span class="s1">right_keys.append(right.index)</span>
+                            <span class="s1">join_names.append(right.index.name)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s2">if not </span><span class="s1">is_rkey(rk):</span>
+                        <span class="s2">if </span><span class="s1">rk </span><span class="s2">is not None</span><span class="s1">:</span>
+                            <span class="s1">right_keys.append(right._get_label_or_level_values(rk))</span>
+                        <span class="s2">else</span><span class="s1">:</span>
+                            <span class="s5"># work-around for merge_asof(right_index=True)</span>
+                            <span class="s1">right_keys.append(right.index)</span>
+                        <span class="s2">if </span><span class="s1">lk </span><span class="s2">is not None and </span><span class="s1">lk == rk:</span>
+                            <span class="s5"># avoid key upcast in corner case (length-0)</span>
+                            <span class="s2">if </span><span class="s1">len(left) &gt; </span><span class="s4">0</span><span class="s1">:</span>
+                                <span class="s1">right_drop.append(rk)</span>
+                            <span class="s2">else</span><span class="s1">:</span>
+                                <span class="s1">left_drop.append(lk)</span>
+                    <span class="s2">else</span><span class="s1">:</span>
+                        <span class="s1">right_keys.append(rk)</span>
+                    <span class="s2">if </span><span class="s1">lk </span><span class="s2">is not None</span><span class="s1">:</span>
+                        <span class="s1">left_keys.append(left._get_label_or_level_values(lk))</span>
+                        <span class="s1">join_names.append(lk)</span>
+                    <span class="s2">else</span><span class="s1">:</span>
+                        <span class="s5"># work-around for merge_asof(left_index=True)</span>
+                        <span class="s1">left_keys.append(left.index)</span>
+                        <span class="s1">join_names.append(left.index.name)</span>
+        <span class="s2">elif </span><span class="s1">_any(self.left_on):</span>
+            <span class="s2">for </span><span class="s1">k </span><span class="s2">in </span><span class="s1">self.left_on:</span>
+                <span class="s2">if </span><span class="s1">is_lkey(k):</span>
+                    <span class="s1">left_keys.append(k)</span>
+                    <span class="s1">join_names.append(</span><span class="s2">None</span><span class="s1">)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">left_keys.append(left._get_label_or_level_values(k))</span>
+                    <span class="s1">join_names.append(k)</span>
+            <span class="s2">if </span><span class="s1">isinstance(self.right.index</span><span class="s2">, </span><span class="s1">MultiIndex):</span>
+                <span class="s1">right_keys = [</span>
+                    <span class="s1">lev._values.take(lev_codes)</span>
+                    <span class="s2">for </span><span class="s1">lev</span><span class="s2">, </span><span class="s1">lev_codes </span><span class="s2">in </span><span class="s1">zip(</span>
+                        <span class="s1">self.right.index.levels</span><span class="s2">, </span><span class="s1">self.right.index.codes</span>
+                    <span class="s1">)</span>
+                <span class="s1">]</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">right_keys = [self.right.index._values]</span>
+        <span class="s2">elif </span><span class="s1">_any(self.right_on):</span>
+            <span class="s2">for </span><span class="s1">k </span><span class="s2">in </span><span class="s1">self.right_on:</span>
+                <span class="s2">if </span><span class="s1">is_rkey(k):</span>
+                    <span class="s1">right_keys.append(k)</span>
+                    <span class="s1">join_names.append(</span><span class="s2">None</span><span class="s1">)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">right_keys.append(right._get_label_or_level_values(k))</span>
+                    <span class="s1">join_names.append(k)</span>
+            <span class="s2">if </span><span class="s1">isinstance(self.left.index</span><span class="s2">, </span><span class="s1">MultiIndex):</span>
+                <span class="s1">left_keys = [</span>
+                    <span class="s1">lev._values.take(lev_codes)</span>
+                    <span class="s2">for </span><span class="s1">lev</span><span class="s2">, </span><span class="s1">lev_codes </span><span class="s2">in </span><span class="s1">zip(</span>
+                        <span class="s1">self.left.index.levels</span><span class="s2">, </span><span class="s1">self.left.index.codes</span>
+                    <span class="s1">)</span>
+                <span class="s1">]</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">left_keys = [self.left.index._values]</span>
+
+        <span class="s2">if </span><span class="s1">left_drop:</span>
+            <span class="s1">self.left = self.left._drop_labels_or_levels(left_drop)</span>
+
+        <span class="s2">if </span><span class="s1">right_drop:</span>
+            <span class="s1">self.right = self.right._drop_labels_or_levels(right_drop)</span>
+
+        <span class="s2">return </span><span class="s1">left_keys</span><span class="s2">, </span><span class="s1">right_keys</span><span class="s2">, </span><span class="s1">join_names</span>
+
+    <span class="s2">def </span><span class="s1">_maybe_coerce_merge_keys(self) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s5"># we have valid merges but we may have to further</span>
+        <span class="s5"># coerce these if they are originally incompatible types</span>
+        <span class="s5">#</span>
+        <span class="s5"># for example if these are categorical, but are not dtype_equal</span>
+        <span class="s5"># or if we have object and integer dtypes</span>
+
+        <span class="s2">for </span><span class="s1">lk</span><span class="s2">, </span><span class="s1">rk</span><span class="s2">, </span><span class="s1">name </span><span class="s2">in </span><span class="s1">zip(</span>
+            <span class="s1">self.left_join_keys</span><span class="s2">, </span><span class="s1">self.right_join_keys</span><span class="s2">, </span><span class="s1">self.join_names</span>
+        <span class="s1">):</span>
+            <span class="s2">if </span><span class="s1">(len(lk) </span><span class="s2">and not </span><span class="s1">len(rk)) </span><span class="s2">or </span><span class="s1">(</span><span class="s2">not </span><span class="s1">len(lk) </span><span class="s2">and </span><span class="s1">len(rk)):</span>
+                <span class="s2">continue</span>
+
+            <span class="s1">lk_is_cat = is_categorical_dtype(lk.dtype)</span>
+            <span class="s1">rk_is_cat = is_categorical_dtype(rk.dtype)</span>
+            <span class="s1">lk_is_object = is_object_dtype(lk.dtype)</span>
+            <span class="s1">rk_is_object = is_object_dtype(rk.dtype)</span>
+
+            <span class="s5"># if either left or right is a categorical</span>
+            <span class="s5"># then the must match exactly in categories &amp; ordered</span>
+            <span class="s2">if </span><span class="s1">lk_is_cat </span><span class="s2">and </span><span class="s1">rk_is_cat:</span>
+                <span class="s2">if </span><span class="s1">lk._categories_match_up_to_permutation(rk):</span>
+                    <span class="s2">continue</span>
+
+            <span class="s2">elif </span><span class="s1">lk_is_cat </span><span class="s2">or </span><span class="s1">rk_is_cat:</span>
+                <span class="s2">pass</span>
+
+            <span class="s2">elif </span><span class="s1">is_dtype_equal(lk.dtype</span><span class="s2">, </span><span class="s1">rk.dtype):</span>
+                <span class="s2">continue</span>
+
+            <span class="s1">msg = (</span>
+                <span class="s3">f&quot;You are trying to merge on </span><span class="s2">{</span><span class="s1">lk.dtype</span><span class="s2">} </span><span class="s3">and &quot;</span>
+                <span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">rk.dtype</span><span class="s2">} </span><span class="s3">columns. If you wish to proceed you should use pd.concat&quot;</span>
+            <span class="s1">)</span>
+
+            <span class="s5"># if we are numeric, then allow differing</span>
+            <span class="s5"># kinds to proceed, eg. int64 and int8, int and float</span>
+            <span class="s5"># further if we are object, but we infer to</span>
+            <span class="s5"># the same, then proceed</span>
+            <span class="s2">if </span><span class="s1">is_numeric_dtype(lk.dtype) </span><span class="s2">and </span><span class="s1">is_numeric_dtype(rk.dtype):</span>
+                <span class="s2">if </span><span class="s1">lk.dtype.kind == rk.dtype.kind:</span>
+                    <span class="s2">continue</span>
+
+                <span class="s5"># check whether ints and floats</span>
+                <span class="s2">elif </span><span class="s1">is_integer_dtype(rk.dtype) </span><span class="s2">and </span><span class="s1">is_float_dtype(lk.dtype):</span>
+                    <span class="s2">if not </span><span class="s1">(lk == lk.astype(rk.dtype))[~np.isnan(lk)].all():</span>
+                        <span class="s1">warnings.warn(</span>
+                            <span class="s3">&quot;You are merging on int and float &quot;</span>
+                            <span class="s3">&quot;columns where the float values &quot;</span>
+                            <span class="s3">&quot;are not equal to their int representation.&quot;</span><span class="s2">,</span>
+                            <span class="s1">UserWarning</span><span class="s2">,</span>
+                        <span class="s1">)</span>
+                    <span class="s2">continue</span>
+
+                <span class="s2">elif </span><span class="s1">is_float_dtype(rk.dtype) </span><span class="s2">and </span><span class="s1">is_integer_dtype(lk.dtype):</span>
+                    <span class="s2">if not </span><span class="s1">(rk == rk.astype(lk.dtype))[~np.isnan(rk)].all():</span>
+                        <span class="s1">warnings.warn(</span>
+                            <span class="s3">&quot;You are merging on int and float &quot;</span>
+                            <span class="s3">&quot;columns where the float values &quot;</span>
+                            <span class="s3">&quot;are not equal to their int representation.&quot;</span><span class="s2">,</span>
+                            <span class="s1">UserWarning</span><span class="s2">,</span>
+                        <span class="s1">)</span>
+                    <span class="s2">continue</span>
+
+                <span class="s5"># let's infer and see if we are ok</span>
+                <span class="s2">elif </span><span class="s1">lib.infer_dtype(lk</span><span class="s2">, </span><span class="s1">skipna=</span><span class="s2">False</span><span class="s1">) == lib.infer_dtype(</span>
+                    <span class="s1">rk</span><span class="s2">, </span><span class="s1">skipna=</span><span class="s2">False</span>
+                <span class="s1">):</span>
+                    <span class="s2">continue</span>
+
+            <span class="s5"># Check if we are trying to merge on obviously</span>
+            <span class="s5"># incompatible dtypes GH 9780, GH 15800</span>
+
+            <span class="s5"># bool values are coerced to object</span>
+            <span class="s2">elif </span><span class="s1">(lk_is_object </span><span class="s2">and </span><span class="s1">is_bool_dtype(rk.dtype)) </span><span class="s2">or </span><span class="s1">(</span>
+                <span class="s1">is_bool_dtype(lk.dtype) </span><span class="s2">and </span><span class="s1">rk_is_object</span>
+            <span class="s1">):</span>
+                <span class="s2">pass</span>
+
+            <span class="s5"># object values are allowed to be merged</span>
+            <span class="s2">elif </span><span class="s1">(lk_is_object </span><span class="s2">and </span><span class="s1">is_numeric_dtype(rk.dtype)) </span><span class="s2">or </span><span class="s1">(</span>
+                <span class="s1">is_numeric_dtype(lk.dtype) </span><span class="s2">and </span><span class="s1">rk_is_object</span>
+            <span class="s1">):</span>
+                <span class="s1">inferred_left = lib.infer_dtype(lk</span><span class="s2">, </span><span class="s1">skipna=</span><span class="s2">False</span><span class="s1">)</span>
+                <span class="s1">inferred_right = lib.infer_dtype(rk</span><span class="s2">, </span><span class="s1">skipna=</span><span class="s2">False</span><span class="s1">)</span>
+                <span class="s1">bool_types = [</span><span class="s3">&quot;integer&quot;</span><span class="s2">, </span><span class="s3">&quot;mixed-integer&quot;</span><span class="s2">, </span><span class="s3">&quot;boolean&quot;</span><span class="s2">, </span><span class="s3">&quot;empty&quot;</span><span class="s1">]</span>
+                <span class="s1">string_types = [</span><span class="s3">&quot;string&quot;</span><span class="s2">, </span><span class="s3">&quot;unicode&quot;</span><span class="s2">, </span><span class="s3">&quot;mixed&quot;</span><span class="s2">, </span><span class="s3">&quot;bytes&quot;</span><span class="s2">, </span><span class="s3">&quot;empty&quot;</span><span class="s1">]</span>
+
+                <span class="s5"># inferred bool</span>
+                <span class="s2">if </span><span class="s1">inferred_left </span><span class="s2">in </span><span class="s1">bool_types </span><span class="s2">and </span><span class="s1">inferred_right </span><span class="s2">in </span><span class="s1">bool_types:</span>
+                    <span class="s2">pass</span>
+
+                <span class="s5"># unless we are merging non-string-like with string-like</span>
+                <span class="s2">elif </span><span class="s1">(</span>
+                    <span class="s1">inferred_left </span><span class="s2">in </span><span class="s1">string_types </span><span class="s2">and </span><span class="s1">inferred_right </span><span class="s2">not in </span><span class="s1">string_types</span>
+                <span class="s1">) </span><span class="s2">or </span><span class="s1">(</span>
+                    <span class="s1">inferred_right </span><span class="s2">in </span><span class="s1">string_types </span><span class="s2">and </span><span class="s1">inferred_left </span><span class="s2">not in </span><span class="s1">string_types</span>
+                <span class="s1">):</span>
+                    <span class="s2">raise </span><span class="s1">ValueError(msg)</span>
+
+            <span class="s5"># datetimelikes must match exactly</span>
+            <span class="s2">elif </span><span class="s1">needs_i8_conversion(lk.dtype) </span><span class="s2">and not </span><span class="s1">needs_i8_conversion(rk.dtype):</span>
+                <span class="s2">raise </span><span class="s1">ValueError(msg)</span>
+            <span class="s2">elif not </span><span class="s1">needs_i8_conversion(lk.dtype) </span><span class="s2">and </span><span class="s1">needs_i8_conversion(rk.dtype):</span>
+                <span class="s2">raise </span><span class="s1">ValueError(msg)</span>
+            <span class="s2">elif </span><span class="s1">is_datetime64tz_dtype(lk.dtype) </span><span class="s2">and not </span><span class="s1">is_datetime64tz_dtype(</span>
+                <span class="s1">rk.dtype</span>
+            <span class="s1">):</span>
+                <span class="s2">raise </span><span class="s1">ValueError(msg)</span>
+            <span class="s2">elif not </span><span class="s1">is_datetime64tz_dtype(lk.dtype) </span><span class="s2">and </span><span class="s1">is_datetime64tz_dtype(</span>
+                <span class="s1">rk.dtype</span>
+            <span class="s1">):</span>
+                <span class="s2">raise </span><span class="s1">ValueError(msg)</span>
+
+            <span class="s2">elif </span><span class="s1">lk_is_object </span><span class="s2">and </span><span class="s1">rk_is_object:</span>
+                <span class="s2">continue</span>
+
+            <span class="s5"># Houston, we have a problem!</span>
+            <span class="s5"># let's coerce to object if the dtypes aren't</span>
+            <span class="s5"># categorical, otherwise coerce to the category</span>
+            <span class="s5"># dtype. If we coerced categories to object,</span>
+            <span class="s5"># then we would lose type information on some</span>
+            <span class="s5"># columns, and end up trying to merge</span>
+            <span class="s5"># incompatible dtypes. See GH 16900.</span>
+            <span class="s2">if </span><span class="s1">name </span><span class="s2">in </span><span class="s1">self.left.columns:</span>
+                <span class="s1">typ = lk.categories.dtype </span><span class="s2">if </span><span class="s1">lk_is_cat </span><span class="s2">else </span><span class="s1">object</span>
+                <span class="s1">self.left = self.left.copy()</span>
+                <span class="s1">self.left[name] = self.left[name].astype(typ)</span>
+            <span class="s2">if </span><span class="s1">name </span><span class="s2">in </span><span class="s1">self.right.columns:</span>
+                <span class="s1">typ = rk.categories.dtype </span><span class="s2">if </span><span class="s1">rk_is_cat </span><span class="s2">else </span><span class="s1">object</span>
+                <span class="s1">self.right = self.right.copy()</span>
+                <span class="s1">self.right[name] = self.right[name].astype(typ)</span>
+
+    <span class="s2">def </span><span class="s1">_create_cross_configuration(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">left: DataFrame</span><span class="s2">, </span><span class="s1">right: DataFrame</span>
+    <span class="s1">) -&gt; tuple[DataFrame</span><span class="s2">, </span><span class="s1">DataFrame</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">str]:</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Creates the configuration to dispatch the cross operation to inner join, 
+        e.g. adding a join column and resetting parameters. Join column is added 
+        to a new object, no inplace modification 
+ 
+        Parameters 
+        ---------- 
+        left : DataFrame 
+        right : DataFrame 
+ 
+        Returns 
+        ------- 
+            a tuple (left, right, how, cross_col) representing the adjusted 
+            DataFrames with cross_col, the merge operation set to inner and the column 
+            to join over. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">cross_col = </span><span class="s3">f&quot;_cross_</span><span class="s2">{</span><span class="s1">hashlib.md5().hexdigest()</span><span class="s2">}</span><span class="s3">&quot;</span>
+        <span class="s1">how = </span><span class="s3">&quot;inner&quot;</span>
+        <span class="s2">return </span><span class="s1">(</span>
+            <span class="s1">left.assign(**{cross_col: </span><span class="s4">1</span><span class="s1">})</span><span class="s2">,</span>
+            <span class="s1">right.assign(**{cross_col: </span><span class="s4">1</span><span class="s1">})</span><span class="s2">,</span>
+            <span class="s1">how</span><span class="s2">,</span>
+            <span class="s1">cross_col</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">_validate_specification(self) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">self.how == </span><span class="s3">&quot;cross&quot;</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">(</span>
+                <span class="s1">self.left_index</span>
+                <span class="s2">or </span><span class="s1">self.right_index</span>
+                <span class="s2">or </span><span class="s1">self.right_on </span><span class="s2">is not None</span>
+                <span class="s2">or </span><span class="s1">self.left_on </span><span class="s2">is not None</span>
+                <span class="s2">or </span><span class="s1">self.on </span><span class="s2">is not None</span>
+            <span class="s1">):</span>
+                <span class="s2">raise </span><span class="s1">MergeError(</span>
+                    <span class="s3">&quot;Can not pass on, right_on, left_on or set right_index=True or &quot;</span>
+                    <span class="s3">&quot;left_index=True&quot;</span>
+                <span class="s1">)</span>
+            <span class="s2">return</span>
+        <span class="s5"># Hm, any way to make this logic less complicated??</span>
+        <span class="s2">elif </span><span class="s1">self.on </span><span class="s2">is None and </span><span class="s1">self.left_on </span><span class="s2">is None and </span><span class="s1">self.right_on </span><span class="s2">is None</span><span class="s1">:</span>
+
+            <span class="s2">if </span><span class="s1">self.left_index </span><span class="s2">and </span><span class="s1">self.right_index:</span>
+                <span class="s1">self.left_on</span><span class="s2">, </span><span class="s1">self.right_on = ()</span><span class="s2">, </span><span class="s1">()</span>
+            <span class="s2">elif </span><span class="s1">self.left_index:</span>
+                <span class="s2">raise </span><span class="s1">MergeError(</span><span class="s3">&quot;Must pass right_on or right_index=True&quot;</span><span class="s1">)</span>
+            <span class="s2">elif </span><span class="s1">self.right_index:</span>
+                <span class="s2">raise </span><span class="s1">MergeError(</span><span class="s3">&quot;Must pass left_on or left_index=True&quot;</span><span class="s1">)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s5"># use the common columns</span>
+                <span class="s1">left_cols = self.left.columns</span>
+                <span class="s1">right_cols = self.right.columns</span>
+                <span class="s1">common_cols = left_cols.intersection(right_cols)</span>
+                <span class="s2">if </span><span class="s1">len(common_cols) == </span><span class="s4">0</span><span class="s1">:</span>
+                    <span class="s2">raise </span><span class="s1">MergeError(</span>
+                        <span class="s3">&quot;No common columns to perform merge on. &quot;</span>
+                        <span class="s3">f&quot;Merge options: left_on=</span><span class="s2">{</span><span class="s1">self.left_on</span><span class="s2">}</span><span class="s3">, &quot;</span>
+                        <span class="s3">f&quot;right_on=</span><span class="s2">{</span><span class="s1">self.right_on</span><span class="s2">}</span><span class="s3">, &quot;</span>
+                        <span class="s3">f&quot;left_index=</span><span class="s2">{</span><span class="s1">self.left_index</span><span class="s2">}</span><span class="s3">, &quot;</span>
+                        <span class="s3">f&quot;right_index=</span><span class="s2">{</span><span class="s1">self.right_index</span><span class="s2">}</span><span class="s3">&quot;</span>
+                    <span class="s1">)</span>
+                <span class="s2">if </span><span class="s1">(</span>
+                    <span class="s2">not </span><span class="s1">left_cols.join(common_cols</span><span class="s2">, </span><span class="s1">how=</span><span class="s3">&quot;inner&quot;</span><span class="s1">).is_unique</span>
+                    <span class="s2">or not </span><span class="s1">right_cols.join(common_cols</span><span class="s2">, </span><span class="s1">how=</span><span class="s3">&quot;inner&quot;</span><span class="s1">).is_unique</span>
+                <span class="s1">):</span>
+                    <span class="s2">raise </span><span class="s1">MergeError(</span><span class="s3">f&quot;Data columns not unique: </span><span class="s2">{</span><span class="s1">repr(common_cols)</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+                <span class="s1">self.left_on = self.right_on = common_cols</span>
+        <span class="s2">elif </span><span class="s1">self.on </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">self.left_on </span><span class="s2">is not None or </span><span class="s1">self.right_on </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">MergeError(</span>
+                    <span class="s3">'Can only pass argument &quot;on&quot; OR &quot;left_on&quot; '</span>
+                    <span class="s3">'and &quot;right_on&quot;, not a combination of both.'</span>
+                <span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">self.left_index </span><span class="s2">or </span><span class="s1">self.right_index:</span>
+                <span class="s2">raise </span><span class="s1">MergeError(</span>
+                    <span class="s3">'Can only pass argument &quot;on&quot; OR &quot;left_index&quot; '</span>
+                    <span class="s3">'and &quot;right_index&quot;, not a combination of both.'</span>
+                <span class="s1">)</span>
+            <span class="s1">self.left_on = self.right_on = self.on</span>
+        <span class="s2">elif </span><span class="s1">self.left_on </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">self.left_index:</span>
+                <span class="s2">raise </span><span class="s1">MergeError(</span>
+                    <span class="s3">'Can only pass argument &quot;left_on&quot; OR &quot;left_index&quot; not both.'</span>
+                <span class="s1">)</span>
+            <span class="s2">if not </span><span class="s1">self.right_index </span><span class="s2">and </span><span class="s1">self.right_on </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">MergeError(</span><span class="s3">'Must pass &quot;right_on&quot; OR &quot;right_index&quot;.'</span><span class="s1">)</span>
+            <span class="s1">n = len(self.left_on)</span>
+            <span class="s2">if </span><span class="s1">self.right_index:</span>
+                <span class="s2">if </span><span class="s1">len(self.left_on) != self.right.index.nlevels:</span>
+                    <span class="s2">raise </span><span class="s1">ValueError(</span>
+                        <span class="s3">&quot;len(left_on) must equal the number &quot;</span>
+                        <span class="s3">'of levels in the index of &quot;right&quot;'</span>
+                    <span class="s1">)</span>
+                <span class="s1">self.right_on = [</span><span class="s2">None</span><span class="s1">] * n</span>
+        <span class="s2">elif </span><span class="s1">self.right_on </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">self.right_index:</span>
+                <span class="s2">raise </span><span class="s1">MergeError(</span>
+                    <span class="s3">'Can only pass argument &quot;right_on&quot; OR &quot;right_index&quot; not both.'</span>
+                <span class="s1">)</span>
+            <span class="s2">if not </span><span class="s1">self.left_index </span><span class="s2">and </span><span class="s1">self.left_on </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">MergeError(</span><span class="s3">'Must pass &quot;left_on&quot; OR &quot;left_index&quot;.'</span><span class="s1">)</span>
+            <span class="s1">n = len(self.right_on)</span>
+            <span class="s2">if </span><span class="s1">self.left_index:</span>
+                <span class="s2">if </span><span class="s1">len(self.right_on) != self.left.index.nlevels:</span>
+                    <span class="s2">raise </span><span class="s1">ValueError(</span>
+                        <span class="s3">&quot;len(right_on) must equal the number &quot;</span>
+                        <span class="s3">'of levels in the index of &quot;left&quot;'</span>
+                    <span class="s1">)</span>
+                <span class="s1">self.left_on = [</span><span class="s2">None</span><span class="s1">] * n</span>
+        <span class="s2">if </span><span class="s1">self.how != </span><span class="s3">&quot;cross&quot; </span><span class="s2">and </span><span class="s1">len(self.right_on) != len(self.left_on):</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;len(right_on) must equal len(left_on)&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">_validate(self</span><span class="s2">, </span><span class="s1">validate: str) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+
+        <span class="s5"># Check uniqueness of each</span>
+        <span class="s2">if </span><span class="s1">self.left_index:</span>
+            <span class="s1">left_unique = self.orig_left.index.is_unique</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">left_unique = MultiIndex.from_arrays(self.left_join_keys).is_unique</span>
+
+        <span class="s2">if </span><span class="s1">self.right_index:</span>
+            <span class="s1">right_unique = self.orig_right.index.is_unique</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">right_unique = MultiIndex.from_arrays(self.right_join_keys).is_unique</span>
+
+        <span class="s5"># Check data integrity</span>
+        <span class="s2">if </span><span class="s1">validate </span><span class="s2">in </span><span class="s1">[</span><span class="s3">&quot;one_to_one&quot;</span><span class="s2">, </span><span class="s3">&quot;1:1&quot;</span><span class="s1">]:</span>
+            <span class="s2">if not </span><span class="s1">left_unique </span><span class="s2">and not </span><span class="s1">right_unique:</span>
+                <span class="s2">raise </span><span class="s1">MergeError(</span>
+                    <span class="s3">&quot;Merge keys are not unique in either left &quot;</span>
+                    <span class="s3">&quot;or right dataset; not a one-to-one merge&quot;</span>
+                <span class="s1">)</span>
+            <span class="s2">elif not </span><span class="s1">left_unique:</span>
+                <span class="s2">raise </span><span class="s1">MergeError(</span>
+                    <span class="s3">&quot;Merge keys are not unique in left dataset; not a one-to-one merge&quot;</span>
+                <span class="s1">)</span>
+            <span class="s2">elif not </span><span class="s1">right_unique:</span>
+                <span class="s2">raise </span><span class="s1">MergeError(</span>
+                    <span class="s3">&quot;Merge keys are not unique in right dataset; not a one-to-one merge&quot;</span>
+                <span class="s1">)</span>
+
+        <span class="s2">elif </span><span class="s1">validate </span><span class="s2">in </span><span class="s1">[</span><span class="s3">&quot;one_to_many&quot;</span><span class="s2">, </span><span class="s3">&quot;1:m&quot;</span><span class="s1">]:</span>
+            <span class="s2">if not </span><span class="s1">left_unique:</span>
+                <span class="s2">raise </span><span class="s1">MergeError(</span>
+                    <span class="s3">&quot;Merge keys are not unique in left dataset; not a one-to-many merge&quot;</span>
+                <span class="s1">)</span>
+
+        <span class="s2">elif </span><span class="s1">validate </span><span class="s2">in </span><span class="s1">[</span><span class="s3">&quot;many_to_one&quot;</span><span class="s2">, </span><span class="s3">&quot;m:1&quot;</span><span class="s1">]:</span>
+            <span class="s2">if not </span><span class="s1">right_unique:</span>
+                <span class="s2">raise </span><span class="s1">MergeError(</span>
+                    <span class="s3">&quot;Merge keys are not unique in right dataset; &quot;</span>
+                    <span class="s3">&quot;not a many-to-one merge&quot;</span>
+                <span class="s1">)</span>
+
+        <span class="s2">elif </span><span class="s1">validate </span><span class="s2">in </span><span class="s1">[</span><span class="s3">&quot;many_to_many&quot;</span><span class="s2">, </span><span class="s3">&quot;m:m&quot;</span><span class="s1">]:</span>
+            <span class="s2">pass</span>
+
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;Not a valid argument for validate&quot;</span><span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">get_join_indexers(</span>
+    <span class="s1">left_keys</span><span class="s2">, </span><span class="s1">right_keys</span><span class="s2">, </span><span class="s1">sort: bool = </span><span class="s2">False, </span><span class="s1">how: str = </span><span class="s3">&quot;inner&quot;</span><span class="s2">, </span><span class="s1">**kwargs</span>
+<span class="s1">) -&gt; tuple[npt.NDArray[np.intp]</span><span class="s2">, </span><span class="s1">npt.NDArray[np.intp]]:</span>
+    <span class="s0">&quot;&quot;&quot; 
+ 
+    Parameters 
+    ---------- 
+    left_keys : ndarray, Index, Series 
+    right_keys : ndarray, Index, Series 
+    sort : bool, default False 
+    how : {'inner', 'outer', 'left', 'right'}, default 'inner' 
+ 
+    Returns 
+    ------- 
+    np.ndarray[np.intp] 
+        Indexer into the left_keys. 
+    np.ndarray[np.intp] 
+        Indexer into the right_keys. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">assert </span><span class="s1">len(left_keys) == len(</span>
+        <span class="s1">right_keys</span>
+    <span class="s1">)</span><span class="s2">, </span><span class="s3">&quot;left_key and right_keys must be the same length&quot;</span>
+
+    <span class="s5"># get left &amp; right join labels and num. of levels at each location</span>
+    <span class="s1">mapped = (</span>
+        <span class="s1">_factorize_keys(left_keys[n]</span><span class="s2">, </span><span class="s1">right_keys[n]</span><span class="s2">, </span><span class="s1">sort=sort</span><span class="s2">, </span><span class="s1">how=how)</span>
+        <span class="s2">for </span><span class="s1">n </span><span class="s2">in </span><span class="s1">range(len(left_keys))</span>
+    <span class="s1">)</span>
+    <span class="s1">zipped = zip(*mapped)</span>
+    <span class="s1">llab</span><span class="s2">, </span><span class="s1">rlab</span><span class="s2">, </span><span class="s1">shape = (list(x) </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">zipped)</span>
+
+    <span class="s5"># get flat i8 keys from label lists</span>
+    <span class="s1">lkey</span><span class="s2">, </span><span class="s1">rkey = _get_join_keys(llab</span><span class="s2">, </span><span class="s1">rlab</span><span class="s2">, </span><span class="s1">shape</span><span class="s2">, </span><span class="s1">sort)</span>
+
+    <span class="s5"># factorize keys to a dense i8 space</span>
+    <span class="s5"># `count` is the num. of unique keys</span>
+    <span class="s5"># set(lkey) | set(rkey) == range(count)</span>
+
+    <span class="s1">lkey</span><span class="s2">, </span><span class="s1">rkey</span><span class="s2">, </span><span class="s1">count = _factorize_keys(lkey</span><span class="s2">, </span><span class="s1">rkey</span><span class="s2">, </span><span class="s1">sort=sort</span><span class="s2">, </span><span class="s1">how=how)</span>
+    <span class="s5"># preserve left frame order if how == 'left' and sort == False</span>
+    <span class="s1">kwargs = copy.copy(kwargs)</span>
+    <span class="s2">if </span><span class="s1">how </span><span class="s2">in </span><span class="s1">(</span><span class="s3">&quot;left&quot;</span><span class="s2">, </span><span class="s3">&quot;right&quot;</span><span class="s1">):</span>
+        <span class="s1">kwargs[</span><span class="s3">&quot;sort&quot;</span><span class="s1">] = sort</span>
+    <span class="s1">join_func = {</span>
+        <span class="s3">&quot;inner&quot;</span><span class="s1">: libjoin.inner_join</span><span class="s2">,</span>
+        <span class="s3">&quot;left&quot;</span><span class="s1">: libjoin.left_outer_join</span><span class="s2">,</span>
+        <span class="s3">&quot;right&quot;</span><span class="s1">: </span><span class="s2">lambda </span><span class="s1">x</span><span class="s2">, </span><span class="s1">y</span><span class="s2">, </span><span class="s1">count</span><span class="s2">, </span><span class="s1">**kwargs: libjoin.left_outer_join(</span>
+            <span class="s1">y</span><span class="s2">, </span><span class="s1">x</span><span class="s2">, </span><span class="s1">count</span><span class="s2">, </span><span class="s1">**kwargs</span>
+        <span class="s1">)[::-</span><span class="s4">1</span><span class="s1">]</span><span class="s2">,</span>
+        <span class="s3">&quot;outer&quot;</span><span class="s1">: libjoin.full_outer_join</span><span class="s2">,</span>
+    <span class="s1">}[how]</span>
+
+    <span class="s5"># error: Cannot call function of unknown type</span>
+    <span class="s2">return </span><span class="s1">join_func(lkey</span><span class="s2">, </span><span class="s1">rkey</span><span class="s2">, </span><span class="s1">count</span><span class="s2">, </span><span class="s1">**kwargs)  </span><span class="s5"># type: ignore[operator]</span>
+
+
+<span class="s2">def </span><span class="s1">restore_dropped_levels_multijoin(</span>
+    <span class="s1">left: MultiIndex</span><span class="s2">,</span>
+    <span class="s1">right: MultiIndex</span><span class="s2">,</span>
+    <span class="s1">dropped_level_names</span><span class="s2">,</span>
+    <span class="s1">join_index: Index</span><span class="s2">,</span>
+    <span class="s1">lindexer: npt.NDArray[np.intp]</span><span class="s2">,</span>
+    <span class="s1">rindexer: npt.NDArray[np.intp]</span><span class="s2">,</span>
+<span class="s1">) -&gt; tuple[list[Index]</span><span class="s2">, </span><span class="s1">npt.NDArray[np.intp]</span><span class="s2">, </span><span class="s1">list[Hashable]]:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    *this is an internal non-public method* 
+ 
+    Returns the levels, labels and names of a multi-index to multi-index join. 
+    Depending on the type of join, this method restores the appropriate 
+    dropped levels of the joined multi-index. 
+    The method relies on lidx, rindexer which hold the index positions of 
+    left and right, where a join was feasible 
+ 
+    Parameters 
+    ---------- 
+    left : MultiIndex 
+        left index 
+    right : MultiIndex 
+        right index 
+    dropped_level_names : str array 
+        list of non-common level names 
+    join_index : Index 
+        the index of the join between the 
+        common levels of left and right 
+    lindexer : np.ndarray[np.intp] 
+        left indexer 
+    rindexer : np.ndarray[np.intp] 
+        right indexer 
+ 
+    Returns 
+    ------- 
+    levels : list of Index 
+        levels of combined multiindexes 
+    labels : np.ndarray[np.intp] 
+        labels of combined multiindexes 
+    names : List[Hashable] 
+        names of combined multiindex levels 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">_convert_to_multiindex(index: Index) -&gt; MultiIndex:</span>
+        <span class="s2">if </span><span class="s1">isinstance(index</span><span class="s2">, </span><span class="s1">MultiIndex):</span>
+            <span class="s2">return </span><span class="s1">index</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">MultiIndex.from_arrays([index._values]</span><span class="s2">, </span><span class="s1">names=[index.name])</span>
+
+    <span class="s5"># For multi-multi joins with one overlapping level,</span>
+    <span class="s5"># the returned index if of type Index</span>
+    <span class="s5"># Assure that join_index is of type MultiIndex</span>
+    <span class="s5"># so that dropped levels can be appended</span>
+    <span class="s1">join_index = _convert_to_multiindex(join_index)</span>
+
+    <span class="s1">join_levels = join_index.levels</span>
+    <span class="s1">join_codes = join_index.codes</span>
+    <span class="s1">join_names = join_index.names</span>
+
+    <span class="s5"># lindexer and rindexer hold the indexes where the join occurred</span>
+    <span class="s5"># for left and right respectively. If left/right is None then</span>
+    <span class="s5"># the join occurred on all indices of left/right</span>
+    <span class="s2">if </span><span class="s1">lindexer </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">lindexer = range(left.size)</span>
+
+    <span class="s2">if </span><span class="s1">rindexer </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">rindexer = range(right.size)</span>
+
+    <span class="s5"># Iterate through the levels that must be restored</span>
+    <span class="s2">for </span><span class="s1">dropped_level_name </span><span class="s2">in </span><span class="s1">dropped_level_names:</span>
+        <span class="s2">if </span><span class="s1">dropped_level_name </span><span class="s2">in </span><span class="s1">left.names:</span>
+            <span class="s1">idx = left</span>
+            <span class="s1">indexer = lindexer</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">idx = right</span>
+            <span class="s1">indexer = rindexer</span>
+
+        <span class="s5"># The index of the level name to be restored</span>
+        <span class="s1">name_idx = idx.names.index(dropped_level_name)</span>
+
+        <span class="s1">restore_levels = idx.levels[name_idx]</span>
+        <span class="s5"># Inject -1 in the codes list where a join was not possible</span>
+        <span class="s5"># IOW indexer[i]=-1</span>
+        <span class="s1">codes = idx.codes[name_idx]</span>
+        <span class="s1">restore_codes = algos.take_nd(codes</span><span class="s2">, </span><span class="s1">indexer</span><span class="s2">, </span><span class="s1">fill_value=-</span><span class="s4">1</span><span class="s1">)</span>
+
+        <span class="s1">join_levels = join_levels + [restore_levels]</span>
+        <span class="s1">join_codes = join_codes + [restore_codes]</span>
+        <span class="s1">join_names = join_names + [dropped_level_name]</span>
+
+    <span class="s2">return </span><span class="s1">join_levels</span><span class="s2">, </span><span class="s1">join_codes</span><span class="s2">, </span><span class="s1">join_names</span>
+
+
+<span class="s2">class </span><span class="s1">_OrderedMerge(_MergeOperation):</span>
+    <span class="s1">_merge_type = </span><span class="s3">&quot;ordered_merge&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">left: DataFrame | Series</span><span class="s2">,</span>
+        <span class="s1">right: DataFrame | Series</span><span class="s2">,</span>
+        <span class="s1">on: IndexLabel | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+        <span class="s1">left_on: IndexLabel | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+        <span class="s1">right_on: IndexLabel | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+        <span class="s1">left_index: bool = </span><span class="s2">False,</span>
+        <span class="s1">right_index: bool = </span><span class="s2">False,</span>
+        <span class="s1">axis: int = </span><span class="s4">1</span><span class="s2">,</span>
+        <span class="s1">suffixes: Suffixes = (</span><span class="s3">&quot;_x&quot;</span><span class="s2">, </span><span class="s3">&quot;_y&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">copy: bool = </span><span class="s2">True,</span>
+        <span class="s1">fill_method: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+        <span class="s1">how: str = </span><span class="s3">&quot;outer&quot;</span><span class="s2">,</span>
+    <span class="s1">):</span>
+
+        <span class="s1">self.fill_method = fill_method</span>
+        <span class="s1">_MergeOperation.__init__(</span>
+            <span class="s1">self</span><span class="s2">,</span>
+            <span class="s1">left</span><span class="s2">,</span>
+            <span class="s1">right</span><span class="s2">,</span>
+            <span class="s1">on=on</span><span class="s2">,</span>
+            <span class="s1">left_on=left_on</span><span class="s2">,</span>
+            <span class="s1">left_index=left_index</span><span class="s2">,</span>
+            <span class="s1">right_index=right_index</span><span class="s2">,</span>
+            <span class="s1">right_on=right_on</span><span class="s2">,</span>
+            <span class="s1">axis=axis</span><span class="s2">,</span>
+            <span class="s1">how=how</span><span class="s2">,</span>
+            <span class="s1">suffixes=suffixes</span><span class="s2">,</span>
+            <span class="s1">sort=</span><span class="s2">True,  </span><span class="s5"># factorize sorts</span>
+        <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">get_result(self) -&gt; DataFrame:</span>
+        <span class="s1">join_index</span><span class="s2">, </span><span class="s1">left_indexer</span><span class="s2">, </span><span class="s1">right_indexer = self._get_join_info()</span>
+
+        <span class="s1">llabels</span><span class="s2">, </span><span class="s1">rlabels = _items_overlap_with_suffix(</span>
+            <span class="s1">self.left._info_axis</span><span class="s2">, </span><span class="s1">self.right._info_axis</span><span class="s2">, </span><span class="s1">self.suffixes</span>
+        <span class="s1">)</span>
+
+        <span class="s1">left_join_indexer: np.ndarray | </span><span class="s2">None</span>
+        <span class="s1">right_join_indexer: np.ndarray | </span><span class="s2">None</span>
+
+        <span class="s2">if </span><span class="s1">self.fill_method == </span><span class="s3">&quot;ffill&quot;</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">left_indexer </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;left_indexer cannot be None&quot;</span><span class="s1">)</span>
+            <span class="s1">left_indexer</span><span class="s2">, </span><span class="s1">right_indexer = cast(np.ndarray</span><span class="s2">, </span><span class="s1">left_indexer)</span><span class="s2">, </span><span class="s1">cast(</span>
+                <span class="s1">np.ndarray</span><span class="s2">, </span><span class="s1">right_indexer</span>
+            <span class="s1">)</span>
+            <span class="s1">left_join_indexer = libjoin.ffill_indexer(left_indexer)</span>
+            <span class="s1">right_join_indexer = libjoin.ffill_indexer(right_indexer)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">left_join_indexer = left_indexer</span>
+            <span class="s1">right_join_indexer = right_indexer</span>
+
+        <span class="s1">lindexers = {</span><span class="s4">1</span><span class="s1">: left_join_indexer} </span><span class="s2">if </span><span class="s1">left_join_indexer </span><span class="s2">is not None else </span><span class="s1">{}</span>
+        <span class="s1">rindexers = {</span><span class="s4">1</span><span class="s1">: right_join_indexer} </span><span class="s2">if </span><span class="s1">right_join_indexer </span><span class="s2">is not None else </span><span class="s1">{}</span>
+
+        <span class="s1">result_data = concatenate_managers(</span>
+            <span class="s1">[(self.left._mgr</span><span class="s2">, </span><span class="s1">lindexers)</span><span class="s2">, </span><span class="s1">(self.right._mgr</span><span class="s2">, </span><span class="s1">rindexers)]</span><span class="s2">,</span>
+            <span class="s1">axes=[llabels.append(rlabels)</span><span class="s2">, </span><span class="s1">join_index]</span><span class="s2">,</span>
+            <span class="s1">concat_axis=</span><span class="s4">0</span><span class="s2">,</span>
+            <span class="s1">copy=self.copy</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+        <span class="s1">typ = self.left._constructor</span>
+        <span class="s1">result = typ(result_data)</span>
+
+        <span class="s1">self._maybe_add_join_keys(result</span><span class="s2">, </span><span class="s1">left_indexer</span><span class="s2">, </span><span class="s1">right_indexer)</span>
+
+        <span class="s2">return </span><span class="s1">result</span>
+
+
+<span class="s2">def </span><span class="s1">_asof_function(direction: str):</span>
+    <span class="s1">name = </span><span class="s3">f&quot;asof_join_</span><span class="s2">{</span><span class="s1">direction</span><span class="s2">}</span><span class="s3">&quot;</span>
+    <span class="s2">return </span><span class="s1">getattr(libjoin</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, None</span><span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">_asof_by_function(direction: str):</span>
+    <span class="s1">name = </span><span class="s3">f&quot;asof_join_</span><span class="s2">{</span><span class="s1">direction</span><span class="s2">}</span><span class="s3">_on_X_by_Y&quot;</span>
+    <span class="s2">return </span><span class="s1">getattr(libjoin</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, None</span><span class="s1">)</span>
+
+
+<span class="s1">_type_casters = {</span>
+    <span class="s3">&quot;int64_t&quot;</span><span class="s1">: ensure_int64</span><span class="s2">,</span>
+    <span class="s3">&quot;double&quot;</span><span class="s1">: ensure_float64</span><span class="s2">,</span>
+    <span class="s3">&quot;object&quot;</span><span class="s1">: ensure_object</span><span class="s2">,</span>
+<span class="s1">}</span>
+
+
+<span class="s2">def </span><span class="s1">_get_cython_type_upcast(dtype: DtypeObj) -&gt; str:</span>
+    <span class="s0">&quot;&quot;&quot;Upcast a dtype to 'int64_t', 'double', or 'object'&quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">is_integer_dtype(dtype):</span>
+        <span class="s2">return </span><span class="s3">&quot;int64_t&quot;</span>
+    <span class="s2">elif </span><span class="s1">is_float_dtype(dtype):</span>
+        <span class="s2">return </span><span class="s3">&quot;double&quot;</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s3">&quot;object&quot;</span>
+
+
+<span class="s2">class </span><span class="s1">_AsOfMerge(_OrderedMerge):</span>
+    <span class="s1">_merge_type = </span><span class="s3">&quot;asof_merge&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">left: DataFrame | Series</span><span class="s2">,</span>
+        <span class="s1">right: DataFrame | Series</span><span class="s2">,</span>
+        <span class="s1">on: IndexLabel | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+        <span class="s1">left_on: IndexLabel | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+        <span class="s1">right_on: IndexLabel | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+        <span class="s1">left_index: bool = </span><span class="s2">False,</span>
+        <span class="s1">right_index: bool = </span><span class="s2">False,</span>
+        <span class="s1">by=</span><span class="s2">None,</span>
+        <span class="s1">left_by=</span><span class="s2">None,</span>
+        <span class="s1">right_by=</span><span class="s2">None,</span>
+        <span class="s1">axis: int = </span><span class="s4">1</span><span class="s2">,</span>
+        <span class="s1">suffixes: Suffixes = (</span><span class="s3">&quot;_x&quot;</span><span class="s2">, </span><span class="s3">&quot;_y&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">copy: bool = </span><span class="s2">True,</span>
+        <span class="s1">fill_method: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+        <span class="s1">how: str = </span><span class="s3">&quot;asof&quot;</span><span class="s2">,</span>
+        <span class="s1">tolerance=</span><span class="s2">None,</span>
+        <span class="s1">allow_exact_matches: bool = </span><span class="s2">True,</span>
+        <span class="s1">direction: str = </span><span class="s3">&quot;backward&quot;</span><span class="s2">,</span>
+    <span class="s1">):</span>
+
+        <span class="s1">self.by = by</span>
+        <span class="s1">self.left_by = left_by</span>
+        <span class="s1">self.right_by = right_by</span>
+        <span class="s1">self.tolerance = tolerance</span>
+        <span class="s1">self.allow_exact_matches = allow_exact_matches</span>
+        <span class="s1">self.direction = direction</span>
+
+        <span class="s1">_OrderedMerge.__init__(</span>
+            <span class="s1">self</span><span class="s2">,</span>
+            <span class="s1">left</span><span class="s2">,</span>
+            <span class="s1">right</span><span class="s2">,</span>
+            <span class="s1">on=on</span><span class="s2">,</span>
+            <span class="s1">left_on=left_on</span><span class="s2">,</span>
+            <span class="s1">right_on=right_on</span><span class="s2">,</span>
+            <span class="s1">left_index=left_index</span><span class="s2">,</span>
+            <span class="s1">right_index=right_index</span><span class="s2">,</span>
+            <span class="s1">axis=axis</span><span class="s2">,</span>
+            <span class="s1">how=how</span><span class="s2">,</span>
+            <span class="s1">suffixes=suffixes</span><span class="s2">,</span>
+            <span class="s1">fill_method=fill_method</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">_validate_specification(self) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">super()._validate_specification()</span>
+
+        <span class="s5"># we only allow on to be a single item for on</span>
+        <span class="s2">if </span><span class="s1">len(self.left_on) != </span><span class="s4">1 </span><span class="s2">and not </span><span class="s1">self.left_index:</span>
+            <span class="s2">raise </span><span class="s1">MergeError(</span><span class="s3">&quot;can only asof on a key for left&quot;</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">len(self.right_on) != </span><span class="s4">1 </span><span class="s2">and not </span><span class="s1">self.right_index:</span>
+            <span class="s2">raise </span><span class="s1">MergeError(</span><span class="s3">&quot;can only asof on a key for right&quot;</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">self.left_index </span><span class="s2">and </span><span class="s1">isinstance(self.left.index</span><span class="s2">, </span><span class="s1">MultiIndex):</span>
+            <span class="s2">raise </span><span class="s1">MergeError(</span><span class="s3">&quot;left can only have one index&quot;</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">self.right_index </span><span class="s2">and </span><span class="s1">isinstance(self.right.index</span><span class="s2">, </span><span class="s1">MultiIndex):</span>
+            <span class="s2">raise </span><span class="s1">MergeError(</span><span class="s3">&quot;right can only have one index&quot;</span><span class="s1">)</span>
+
+        <span class="s5"># set 'by' columns</span>
+        <span class="s2">if </span><span class="s1">self.by </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">self.left_by </span><span class="s2">is not None or </span><span class="s1">self.right_by </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">MergeError(</span><span class="s3">&quot;Can only pass by OR left_by and right_by&quot;</span><span class="s1">)</span>
+            <span class="s1">self.left_by = self.right_by = self.by</span>
+        <span class="s2">if </span><span class="s1">self.left_by </span><span class="s2">is None and </span><span class="s1">self.right_by </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">MergeError(</span><span class="s3">&quot;missing left_by&quot;</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">self.left_by </span><span class="s2">is not None and </span><span class="s1">self.right_by </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">MergeError(</span><span class="s3">&quot;missing right_by&quot;</span><span class="s1">)</span>
+
+        <span class="s5"># GH#29130 Check that merge keys do not have dtype object</span>
+        <span class="s2">if not </span><span class="s1">self.left_index:</span>
+            <span class="s1">left_on = self.left_on[</span><span class="s4">0</span><span class="s1">]</span>
+            <span class="s2">if </span><span class="s1">is_array_like(left_on):</span>
+                <span class="s1">lo_dtype = left_on.dtype</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">lo_dtype = (</span>
+                    <span class="s1">self.left[left_on].dtype</span>
+                    <span class="s2">if </span><span class="s1">left_on </span><span class="s2">in </span><span class="s1">self.left.columns</span>
+                    <span class="s2">else </span><span class="s1">self.left.index.get_level_values(left_on)</span>
+                <span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">lo_dtype = self.left.index.dtype</span>
+
+        <span class="s2">if not </span><span class="s1">self.right_index:</span>
+            <span class="s1">right_on = self.right_on[</span><span class="s4">0</span><span class="s1">]</span>
+            <span class="s2">if </span><span class="s1">is_array_like(right_on):</span>
+                <span class="s1">ro_dtype = right_on.dtype</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">ro_dtype = (</span>
+                    <span class="s1">self.right[right_on].dtype</span>
+                    <span class="s2">if </span><span class="s1">right_on </span><span class="s2">in </span><span class="s1">self.right.columns</span>
+                    <span class="s2">else </span><span class="s1">self.right.index.get_level_values(right_on)</span>
+                <span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">ro_dtype = self.right.index.dtype</span>
+
+        <span class="s2">if </span><span class="s1">is_object_dtype(lo_dtype) </span><span class="s2">or </span><span class="s1">is_object_dtype(ro_dtype):</span>
+            <span class="s2">raise </span><span class="s1">MergeError(</span>
+                <span class="s3">f&quot;Incompatible merge dtype, </span><span class="s2">{</span><span class="s1">repr(ro_dtype)</span><span class="s2">} </span><span class="s3">and &quot;</span>
+                <span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">repr(lo_dtype)</span><span class="s2">}</span><span class="s3">, both sides must have numeric dtype&quot;</span>
+            <span class="s1">)</span>
+
+        <span class="s5"># add 'by' to our key-list so we can have it in the</span>
+        <span class="s5"># output as a key</span>
+        <span class="s2">if </span><span class="s1">self.left_by </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">if not </span><span class="s1">is_list_like(self.left_by):</span>
+                <span class="s1">self.left_by = [self.left_by]</span>
+            <span class="s2">if not </span><span class="s1">is_list_like(self.right_by):</span>
+                <span class="s1">self.right_by = [self.right_by]</span>
+
+            <span class="s2">if </span><span class="s1">len(self.left_by) != len(self.right_by):</span>
+                <span class="s2">raise </span><span class="s1">MergeError(</span><span class="s3">&quot;left_by and right_by must be same length&quot;</span><span class="s1">)</span>
+
+            <span class="s1">self.left_on = self.left_by + list(self.left_on)</span>
+            <span class="s1">self.right_on = self.right_by + list(self.right_on)</span>
+
+        <span class="s5"># check 'direction' is valid</span>
+        <span class="s2">if </span><span class="s1">self.direction </span><span class="s2">not in </span><span class="s1">[</span><span class="s3">&quot;backward&quot;</span><span class="s2">, </span><span class="s3">&quot;forward&quot;</span><span class="s2">, </span><span class="s3">&quot;nearest&quot;</span><span class="s1">]:</span>
+            <span class="s2">raise </span><span class="s1">MergeError(</span><span class="s3">f&quot;direction invalid: </span><span class="s2">{</span><span class="s1">self.direction</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">_get_merge_keys(self):</span>
+
+        <span class="s5"># note this function has side effects</span>
+        <span class="s1">(left_join_keys</span><span class="s2">, </span><span class="s1">right_join_keys</span><span class="s2">, </span><span class="s1">join_names) = super()._get_merge_keys()</span>
+
+        <span class="s5"># validate index types are the same</span>
+        <span class="s2">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">(lk</span><span class="s2">, </span><span class="s1">rk) </span><span class="s2">in </span><span class="s1">enumerate(zip(left_join_keys</span><span class="s2">, </span><span class="s1">right_join_keys)):</span>
+            <span class="s2">if not </span><span class="s1">is_dtype_equal(lk.dtype</span><span class="s2">, </span><span class="s1">rk.dtype):</span>
+                <span class="s2">if </span><span class="s1">is_categorical_dtype(lk.dtype) </span><span class="s2">and </span><span class="s1">is_categorical_dtype(rk.dtype):</span>
+                    <span class="s5"># The generic error message is confusing for categoricals.</span>
+                    <span class="s5">#</span>
+                    <span class="s5"># In this function, the join keys include both the original</span>
+                    <span class="s5"># ones of the merge_asof() call, and also the keys passed</span>
+                    <span class="s5"># to its by= argument. Unordered but equal categories</span>
+                    <span class="s5"># are not supported for the former, but will fail</span>
+                    <span class="s5"># later with a ValueError, so we don't *need* to check</span>
+                    <span class="s5"># for them here.</span>
+                    <span class="s1">msg = (</span>
+                        <span class="s3">f&quot;incompatible merge keys [</span><span class="s2">{</span><span class="s1">i</span><span class="s2">}</span><span class="s3">] </span><span class="s2">{</span><span class="s1">repr(lk.dtype)</span><span class="s2">} </span><span class="s3">and &quot;</span>
+                        <span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">repr(rk.dtype)</span><span class="s2">}</span><span class="s3">, both sides category, but not equal ones&quot;</span>
+                    <span class="s1">)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">msg = (</span>
+                        <span class="s3">f&quot;incompatible merge keys [</span><span class="s2">{</span><span class="s1">i</span><span class="s2">}</span><span class="s3">] </span><span class="s2">{</span><span class="s1">repr(lk.dtype)</span><span class="s2">} </span><span class="s3">and &quot;</span>
+                        <span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">repr(rk.dtype)</span><span class="s2">}</span><span class="s3">, must be the same type&quot;</span>
+                    <span class="s1">)</span>
+                <span class="s2">raise </span><span class="s1">MergeError(msg)</span>
+
+        <span class="s5"># validate tolerance; datetime.timedelta or Timedelta if we have a DTI</span>
+        <span class="s2">if </span><span class="s1">self.tolerance </span><span class="s2">is not None</span><span class="s1">:</span>
+
+            <span class="s2">if </span><span class="s1">self.left_index:</span>
+                <span class="s1">lt = self.left.index</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">lt = left_join_keys[-</span><span class="s4">1</span><span class="s1">]</span>
+
+            <span class="s1">msg = (</span>
+                <span class="s3">f&quot;incompatible tolerance </span><span class="s2">{</span><span class="s1">self.tolerance</span><span class="s2">}</span><span class="s3">, must be compat &quot;</span>
+                <span class="s3">f&quot;with type </span><span class="s2">{</span><span class="s1">repr(lt.dtype)</span><span class="s2">}</span><span class="s3">&quot;</span>
+            <span class="s1">)</span>
+
+            <span class="s2">if </span><span class="s1">needs_i8_conversion(lt):</span>
+                <span class="s2">if not </span><span class="s1">isinstance(self.tolerance</span><span class="s2">, </span><span class="s1">datetime.timedelta):</span>
+                    <span class="s2">raise </span><span class="s1">MergeError(msg)</span>
+                <span class="s2">if </span><span class="s1">self.tolerance &lt; Timedelta(</span><span class="s4">0</span><span class="s1">):</span>
+                    <span class="s2">raise </span><span class="s1">MergeError(</span><span class="s3">&quot;tolerance must be positive&quot;</span><span class="s1">)</span>
+
+            <span class="s2">elif </span><span class="s1">is_integer_dtype(lt):</span>
+                <span class="s2">if not </span><span class="s1">is_integer(self.tolerance):</span>
+                    <span class="s2">raise </span><span class="s1">MergeError(msg)</span>
+                <span class="s2">if </span><span class="s1">self.tolerance &lt; </span><span class="s4">0</span><span class="s1">:</span>
+                    <span class="s2">raise </span><span class="s1">MergeError(</span><span class="s3">&quot;tolerance must be positive&quot;</span><span class="s1">)</span>
+
+            <span class="s2">elif </span><span class="s1">is_float_dtype(lt):</span>
+                <span class="s2">if not </span><span class="s1">is_number(self.tolerance):</span>
+                    <span class="s2">raise </span><span class="s1">MergeError(msg)</span>
+                <span class="s2">if </span><span class="s1">self.tolerance &lt; </span><span class="s4">0</span><span class="s1">:</span>
+                    <span class="s2">raise </span><span class="s1">MergeError(</span><span class="s3">&quot;tolerance must be positive&quot;</span><span class="s1">)</span>
+
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">MergeError(</span><span class="s3">&quot;key must be integer, timestamp or float&quot;</span><span class="s1">)</span>
+
+        <span class="s5"># validate allow_exact_matches</span>
+        <span class="s2">if not </span><span class="s1">is_bool(self.allow_exact_matches):</span>
+            <span class="s1">msg = (</span>
+                <span class="s3">&quot;allow_exact_matches must be boolean, &quot;</span>
+                <span class="s3">f&quot;passed </span><span class="s2">{</span><span class="s1">self.allow_exact_matches</span><span class="s2">}</span><span class="s3">&quot;</span>
+            <span class="s1">)</span>
+            <span class="s2">raise </span><span class="s1">MergeError(msg)</span>
+
+        <span class="s2">return </span><span class="s1">left_join_keys</span><span class="s2">, </span><span class="s1">right_join_keys</span><span class="s2">, </span><span class="s1">join_names</span>
+
+    <span class="s2">def </span><span class="s1">_get_join_indexers(self) -&gt; tuple[npt.NDArray[np.intp]</span><span class="s2">, </span><span class="s1">npt.NDArray[np.intp]]:</span>
+        <span class="s0">&quot;&quot;&quot;return the join indexers&quot;&quot;&quot;</span>
+
+        <span class="s2">def </span><span class="s1">flip(xs) -&gt; np.ndarray:</span>
+            <span class="s0">&quot;&quot;&quot;unlike np.transpose, this returns an array of tuples&quot;&quot;&quot;</span>
+            <span class="s5"># error: Item &quot;ndarray&quot; of &quot;Union[Any, Union[ExtensionArray, ndarray]]&quot; has</span>
+            <span class="s5"># no attribute &quot;_values_for_argsort&quot;</span>
+            <span class="s1">xs = [</span>
+                <span class="s1">x</span>
+                <span class="s2">if not </span><span class="s1">is_extension_array_dtype(x)</span>
+                <span class="s2">else </span><span class="s1">extract_array(x)._values_for_argsort()  </span><span class="s5"># type: ignore[union-attr]</span>
+                <span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">xs</span>
+            <span class="s1">]</span>
+            <span class="s1">labels = list(string.ascii_lowercase[: len(xs)])</span>
+            <span class="s1">dtypes = [x.dtype </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">xs]</span>
+            <span class="s1">labeled_dtypes = list(zip(labels</span><span class="s2">, </span><span class="s1">dtypes))</span>
+            <span class="s2">return </span><span class="s1">np.array(list(zip(*xs))</span><span class="s2">, </span><span class="s1">labeled_dtypes)</span>
+
+        <span class="s5"># values to compare</span>
+        <span class="s1">left_values = (</span>
+            <span class="s1">self.left.index._values </span><span class="s2">if </span><span class="s1">self.left_index </span><span class="s2">else </span><span class="s1">self.left_join_keys[-</span><span class="s4">1</span><span class="s1">]</span>
+        <span class="s1">)</span>
+        <span class="s1">right_values = (</span>
+            <span class="s1">self.right.index._values </span><span class="s2">if </span><span class="s1">self.right_index </span><span class="s2">else </span><span class="s1">self.right_join_keys[-</span><span class="s4">1</span><span class="s1">]</span>
+        <span class="s1">)</span>
+        <span class="s1">tolerance = self.tolerance</span>
+
+        <span class="s5"># we require sortedness and non-null values in the join keys</span>
+        <span class="s2">if not </span><span class="s1">Index(left_values).is_monotonic:</span>
+            <span class="s1">side = </span><span class="s3">&quot;left&quot;</span>
+            <span class="s2">if </span><span class="s1">isna(left_values).any():</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">f&quot;Merge keys contain null values on </span><span class="s2">{</span><span class="s1">side</span><span class="s2">} </span><span class="s3">side&quot;</span><span class="s1">)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">side</span><span class="s2">} </span><span class="s3">keys must be sorted&quot;</span><span class="s1">)</span>
+
+        <span class="s2">if not </span><span class="s1">Index(right_values).is_monotonic:</span>
+            <span class="s1">side = </span><span class="s3">&quot;right&quot;</span>
+            <span class="s2">if </span><span class="s1">isna(right_values).any():</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">f&quot;Merge keys contain null values on </span><span class="s2">{</span><span class="s1">side</span><span class="s2">} </span><span class="s3">side&quot;</span><span class="s1">)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">side</span><span class="s2">} </span><span class="s3">keys must be sorted&quot;</span><span class="s1">)</span>
+
+        <span class="s5"># initial type conversion as needed</span>
+        <span class="s2">if </span><span class="s1">needs_i8_conversion(left_values):</span>
+            <span class="s1">left_values = left_values.view(</span><span class="s3">&quot;i8&quot;</span><span class="s1">)</span>
+            <span class="s1">right_values = right_values.view(</span><span class="s3">&quot;i8&quot;</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">tolerance </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s1">tolerance = Timedelta(tolerance)</span>
+                <span class="s1">tolerance = tolerance.value</span>
+
+        <span class="s5"># a &quot;by&quot; parameter requires special handling</span>
+        <span class="s2">if </span><span class="s1">self.left_by </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s5"># remove 'on' parameter from values if one existed</span>
+            <span class="s2">if </span><span class="s1">self.left_index </span><span class="s2">and </span><span class="s1">self.right_index:</span>
+                <span class="s1">left_by_values = self.left_join_keys</span>
+                <span class="s1">right_by_values = self.right_join_keys</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">left_by_values = self.left_join_keys[</span><span class="s4">0</span><span class="s1">:-</span><span class="s4">1</span><span class="s1">]</span>
+                <span class="s1">right_by_values = self.right_join_keys[</span><span class="s4">0</span><span class="s1">:-</span><span class="s4">1</span><span class="s1">]</span>
+
+            <span class="s5"># get tuple representation of values if more than one</span>
+            <span class="s2">if </span><span class="s1">len(left_by_values) == </span><span class="s4">1</span><span class="s1">:</span>
+                <span class="s1">left_by_values = left_by_values[</span><span class="s4">0</span><span class="s1">]</span>
+                <span class="s1">right_by_values = right_by_values[</span><span class="s4">0</span><span class="s1">]</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">left_by_values = flip(left_by_values)</span>
+                <span class="s1">right_by_values = flip(right_by_values)</span>
+
+            <span class="s5"># upcast 'by' parameter because HashTable is limited</span>
+            <span class="s1">by_type = _get_cython_type_upcast(left_by_values.dtype)</span>
+            <span class="s1">by_type_caster = _type_casters[by_type]</span>
+            <span class="s5"># error: Cannot call function of unknown type</span>
+            <span class="s1">left_by_values = by_type_caster(left_by_values)  </span><span class="s5"># type: ignore[operator]</span>
+            <span class="s5"># error: Cannot call function of unknown type</span>
+            <span class="s1">right_by_values = by_type_caster(right_by_values)  </span><span class="s5"># type: ignore[operator]</span>
+
+            <span class="s5"># choose appropriate function by type</span>
+            <span class="s1">func = _asof_by_function(self.direction)</span>
+            <span class="s2">return </span><span class="s1">func(</span>
+                <span class="s1">left_values</span><span class="s2">,</span>
+                <span class="s1">right_values</span><span class="s2">,</span>
+                <span class="s1">left_by_values</span><span class="s2">,</span>
+                <span class="s1">right_by_values</span><span class="s2">,</span>
+                <span class="s1">self.allow_exact_matches</span><span class="s2">,</span>
+                <span class="s1">tolerance</span><span class="s2">,</span>
+            <span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s5"># choose appropriate function by type</span>
+            <span class="s1">func = _asof_function(self.direction)</span>
+            <span class="s2">return </span><span class="s1">func(left_values</span><span class="s2">, </span><span class="s1">right_values</span><span class="s2">, </span><span class="s1">self.allow_exact_matches</span><span class="s2">, </span><span class="s1">tolerance)</span>
+
+
+<span class="s2">def </span><span class="s1">_get_multiindex_indexer(</span>
+    <span class="s1">join_keys</span><span class="s2">, </span><span class="s1">index: MultiIndex</span><span class="s2">, </span><span class="s1">sort: bool</span>
+<span class="s1">) -&gt; tuple[npt.NDArray[np.intp]</span><span class="s2">, </span><span class="s1">npt.NDArray[np.intp]]:</span>
+
+    <span class="s5"># left &amp; right join labels and num. of levels at each location</span>
+    <span class="s1">mapped = (</span>
+        <span class="s1">_factorize_keys(index.levels[n]</span><span class="s2">, </span><span class="s1">join_keys[n]</span><span class="s2">, </span><span class="s1">sort=sort)</span>
+        <span class="s2">for </span><span class="s1">n </span><span class="s2">in </span><span class="s1">range(index.nlevels)</span>
+    <span class="s1">)</span>
+    <span class="s1">zipped = zip(*mapped)</span>
+    <span class="s1">rcodes</span><span class="s2">, </span><span class="s1">lcodes</span><span class="s2">, </span><span class="s1">shape = (list(x) </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">zipped)</span>
+    <span class="s2">if </span><span class="s1">sort:</span>
+        <span class="s1">rcodes = list(map(np.take</span><span class="s2">, </span><span class="s1">rcodes</span><span class="s2">, </span><span class="s1">index.codes))</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">i8copy = </span><span class="s2">lambda </span><span class="s1">a: a.astype(</span><span class="s3">&quot;i8&quot;</span><span class="s2">, </span><span class="s1">subok=</span><span class="s2">False, </span><span class="s1">copy=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s1">rcodes = list(map(i8copy</span><span class="s2">, </span><span class="s1">index.codes))</span>
+
+    <span class="s5"># fix right labels if there were any nulls</span>
+    <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(len(join_keys)):</span>
+        <span class="s1">mask = index.codes[i] == -</span><span class="s4">1</span>
+        <span class="s2">if </span><span class="s1">mask.any():</span>
+            <span class="s5"># check if there already was any nulls at this location</span>
+            <span class="s5"># if there was, it is factorized to `shape[i] - 1`</span>
+            <span class="s1">a = join_keys[i][lcodes[i] == shape[i] - </span><span class="s4">1</span><span class="s1">]</span>
+            <span class="s2">if </span><span class="s1">a.size == </span><span class="s4">0 </span><span class="s2">or not </span><span class="s1">a[</span><span class="s4">0</span><span class="s1">] != a[</span><span class="s4">0</span><span class="s1">]:</span>
+                <span class="s1">shape[i] += </span><span class="s4">1</span>
+
+            <span class="s1">rcodes[i][mask] = shape[i] - </span><span class="s4">1</span>
+
+    <span class="s5"># get flat i8 join keys</span>
+    <span class="s1">lkey</span><span class="s2">, </span><span class="s1">rkey = _get_join_keys(lcodes</span><span class="s2">, </span><span class="s1">rcodes</span><span class="s2">, </span><span class="s1">shape</span><span class="s2">, </span><span class="s1">sort)</span>
+
+    <span class="s5"># factorize keys to a dense i8 space</span>
+    <span class="s1">lkey</span><span class="s2">, </span><span class="s1">rkey</span><span class="s2">, </span><span class="s1">count = _factorize_keys(lkey</span><span class="s2">, </span><span class="s1">rkey</span><span class="s2">, </span><span class="s1">sort=sort)</span>
+
+    <span class="s2">return </span><span class="s1">libjoin.left_outer_join(lkey</span><span class="s2">, </span><span class="s1">rkey</span><span class="s2">, </span><span class="s1">count</span><span class="s2">, </span><span class="s1">sort=sort)</span>
+
+
+<span class="s2">def </span><span class="s1">_get_single_indexer(</span>
+    <span class="s1">join_key</span><span class="s2">, </span><span class="s1">index: Index</span><span class="s2">, </span><span class="s1">sort: bool = </span><span class="s2">False</span>
+<span class="s1">) -&gt; tuple[npt.NDArray[np.intp]</span><span class="s2">, </span><span class="s1">npt.NDArray[np.intp]]:</span>
+    <span class="s1">left_key</span><span class="s2">, </span><span class="s1">right_key</span><span class="s2">, </span><span class="s1">count = _factorize_keys(join_key</span><span class="s2">, </span><span class="s1">index._values</span><span class="s2">, </span><span class="s1">sort=sort)</span>
+
+    <span class="s2">return </span><span class="s1">libjoin.left_outer_join(left_key</span><span class="s2">, </span><span class="s1">right_key</span><span class="s2">, </span><span class="s1">count</span><span class="s2">, </span><span class="s1">sort=sort)</span>
+
+
+<span class="s2">def </span><span class="s1">_left_join_on_index(</span>
+    <span class="s1">left_ax: Index</span><span class="s2">, </span><span class="s1">right_ax: Index</span><span class="s2">, </span><span class="s1">join_keys</span><span class="s2">, </span><span class="s1">sort: bool = </span><span class="s2">False</span>
+<span class="s1">) -&gt; tuple[Index</span><span class="s2">, </span><span class="s1">npt.NDArray[np.intp] | </span><span class="s2">None, </span><span class="s1">npt.NDArray[np.intp]]:</span>
+    <span class="s2">if </span><span class="s1">len(join_keys) &gt; </span><span class="s4">1</span><span class="s1">:</span>
+        <span class="s2">if not </span><span class="s1">(</span>
+            <span class="s1">isinstance(right_ax</span><span class="s2">, </span><span class="s1">MultiIndex) </span><span class="s2">and </span><span class="s1">len(join_keys) == right_ax.nlevels</span>
+        <span class="s1">):</span>
+            <span class="s2">raise </span><span class="s1">AssertionError(</span>
+                <span class="s3">&quot;If more than one join key is given then &quot;</span>
+                <span class="s3">&quot;'right_ax' must be a MultiIndex and the &quot;</span>
+                <span class="s3">&quot;number of join keys must be the number of levels in right_ax&quot;</span>
+            <span class="s1">)</span>
+
+        <span class="s1">left_indexer</span><span class="s2">, </span><span class="s1">right_indexer = _get_multiindex_indexer(</span>
+            <span class="s1">join_keys</span><span class="s2">, </span><span class="s1">right_ax</span><span class="s2">, </span><span class="s1">sort=sort</span>
+        <span class="s1">)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">jkey = join_keys[</span><span class="s4">0</span><span class="s1">]</span>
+
+        <span class="s1">left_indexer</span><span class="s2">, </span><span class="s1">right_indexer = _get_single_indexer(jkey</span><span class="s2">, </span><span class="s1">right_ax</span><span class="s2">, </span><span class="s1">sort=sort)</span>
+
+    <span class="s2">if </span><span class="s1">sort </span><span class="s2">or </span><span class="s1">len(left_ax) != len(left_indexer):</span>
+        <span class="s5"># if asked to sort or there are 1-to-many matches</span>
+        <span class="s1">join_index = left_ax.take(left_indexer)</span>
+        <span class="s2">return </span><span class="s1">join_index</span><span class="s2">, </span><span class="s1">left_indexer</span><span class="s2">, </span><span class="s1">right_indexer</span>
+
+    <span class="s5"># left frame preserves order &amp; length of its index</span>
+    <span class="s2">return </span><span class="s1">left_ax</span><span class="s2">, None, </span><span class="s1">right_indexer</span>
+
+
+<span class="s2">def </span><span class="s1">_factorize_keys(</span>
+    <span class="s1">lk: ArrayLike</span><span class="s2">, </span><span class="s1">rk: ArrayLike</span><span class="s2">, </span><span class="s1">sort: bool = </span><span class="s2">True, </span><span class="s1">how: str = </span><span class="s3">&quot;inner&quot;</span>
+<span class="s1">) -&gt; tuple[npt.NDArray[np.intp]</span><span class="s2">, </span><span class="s1">npt.NDArray[np.intp]</span><span class="s2">, </span><span class="s1">int]:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Encode left and right keys as enumerated types. 
+ 
+    This is used to get the join indexers to be used when merging DataFrames. 
+ 
+    Parameters 
+    ---------- 
+    lk : array-like 
+        Left key. 
+    rk : array-like 
+        Right key. 
+    sort : bool, defaults to True 
+        If True, the encoding is done such that the unique elements in the 
+        keys are sorted. 
+    how : {‘left’, ‘right’, ‘outer’, ‘inner’}, default ‘inner’ 
+        Type of merge. 
+ 
+    Returns 
+    ------- 
+    np.ndarray[np.intp] 
+        Left (resp. right if called with `key='right'`) labels, as enumerated type. 
+    np.ndarray[np.intp] 
+        Right (resp. left if called with `key='right'`) labels, as enumerated type. 
+    int 
+        Number of unique elements in union of left and right labels. 
+ 
+    See Also 
+    -------- 
+    merge : Merge DataFrame or named Series objects 
+        with a database-style join. 
+    algorithms.factorize : Encode the object as an enumerated type 
+        or categorical variable. 
+ 
+    Examples 
+    -------- 
+    &gt;&gt;&gt; lk = np.array([&quot;a&quot;, &quot;c&quot;, &quot;b&quot;]) 
+    &gt;&gt;&gt; rk = np.array([&quot;a&quot;, &quot;c&quot;]) 
+ 
+    Here, the unique values are `'a', 'b', 'c'`. With the default 
+    `sort=True`, the encoding will be `{0: 'a', 1: 'b', 2: 'c'}`: 
+ 
+    &gt;&gt;&gt; pd.core.reshape.merge._factorize_keys(lk, rk) 
+    (array([0, 2, 1]), array([0, 2]), 3) 
+ 
+    With the `sort=False`, the encoding will correspond to the order 
+    in which the unique elements first appear: `{0: 'a', 1: 'c', 2: 'b'}`: 
+ 
+    &gt;&gt;&gt; pd.core.reshape.merge._factorize_keys(lk, rk, sort=False) 
+    (array([0, 1, 2]), array([0, 1]), 3) 
+    &quot;&quot;&quot;</span>
+    <span class="s5"># Some pre-processing for non-ndarray lk / rk</span>
+    <span class="s1">lk = extract_array(lk</span><span class="s2">, </span><span class="s1">extract_numpy=</span><span class="s2">True, </span><span class="s1">extract_range=</span><span class="s2">True</span><span class="s1">)</span>
+    <span class="s1">rk = extract_array(rk</span><span class="s2">, </span><span class="s1">extract_numpy=</span><span class="s2">True, </span><span class="s1">extract_range=</span><span class="s2">True</span><span class="s1">)</span>
+    <span class="s5"># TODO: if either is a RangeIndex, we can likely factorize more efficiently?</span>
+
+    <span class="s2">if </span><span class="s1">is_datetime64tz_dtype(lk.dtype) </span><span class="s2">and </span><span class="s1">is_datetime64tz_dtype(rk.dtype):</span>
+        <span class="s5"># Extract the ndarray (UTC-localized) values</span>
+        <span class="s5"># Note: we dont need the dtypes to match, as these can still be compared</span>
+        <span class="s1">lk = cast(</span><span class="s3">&quot;DatetimeArray&quot;</span><span class="s2">, </span><span class="s1">lk)._ndarray</span>
+        <span class="s1">rk = cast(</span><span class="s3">&quot;DatetimeArray&quot;</span><span class="s2">, </span><span class="s1">rk)._ndarray</span>
+
+    <span class="s2">elif </span><span class="s1">(</span>
+        <span class="s1">is_categorical_dtype(lk.dtype)</span>
+        <span class="s2">and </span><span class="s1">is_categorical_dtype(rk.dtype)</span>
+        <span class="s2">and </span><span class="s1">is_dtype_equal(lk.dtype</span><span class="s2">, </span><span class="s1">rk.dtype)</span>
+    <span class="s1">):</span>
+        <span class="s2">assert </span><span class="s1">isinstance(lk</span><span class="s2">, </span><span class="s1">Categorical)</span>
+        <span class="s2">assert </span><span class="s1">isinstance(rk</span><span class="s2">, </span><span class="s1">Categorical)</span>
+        <span class="s5"># Cast rk to encoding so we can compare codes with lk</span>
+
+        <span class="s1">rk = lk._encode_with_my_categories(rk)</span>
+
+        <span class="s1">lk = ensure_int64(lk.codes)</span>
+        <span class="s1">rk = ensure_int64(rk.codes)</span>
+
+    <span class="s2">elif </span><span class="s1">isinstance(lk</span><span class="s2">, </span><span class="s1">ExtensionArray) </span><span class="s2">and </span><span class="s1">is_dtype_equal(lk.dtype</span><span class="s2">, </span><span class="s1">rk.dtype):</span>
+        <span class="s5"># error: Incompatible types in assignment (expression has type &quot;ndarray&quot;,</span>
+        <span class="s5"># variable has type &quot;ExtensionArray&quot;)</span>
+        <span class="s1">lk</span><span class="s2">, </span><span class="s1">_ = lk._values_for_factorize()</span>
+
+        <span class="s5"># error: Item &quot;ndarray&quot; of &quot;Union[Any, ndarray]&quot; has no attribute</span>
+        <span class="s5"># &quot;_values_for_factorize&quot;</span>
+        <span class="s1">rk</span><span class="s2">, </span><span class="s1">_ = rk._values_for_factorize()  </span><span class="s5"># type: ignore[union-attr]</span>
+
+    <span class="s1">klass: type[libhashtable.Factorizer] | type[libhashtable.Int64Factorizer]</span>
+    <span class="s2">if </span><span class="s1">is_integer_dtype(lk.dtype) </span><span class="s2">and </span><span class="s1">is_integer_dtype(rk.dtype):</span>
+        <span class="s5"># GH#23917 TODO: needs tests for case where lk is integer-dtype</span>
+        <span class="s5">#  and rk is datetime-dtype</span>
+        <span class="s1">klass = libhashtable.Int64Factorizer</span>
+        <span class="s1">lk = ensure_int64(np.asarray(lk))</span>
+        <span class="s1">rk = ensure_int64(np.asarray(rk))</span>
+
+    <span class="s2">elif </span><span class="s1">needs_i8_conversion(lk.dtype) </span><span class="s2">and </span><span class="s1">is_dtype_equal(lk.dtype</span><span class="s2">, </span><span class="s1">rk.dtype):</span>
+        <span class="s5"># GH#23917 TODO: Needs tests for non-matching dtypes</span>
+        <span class="s1">klass = libhashtable.Int64Factorizer</span>
+        <span class="s1">lk = ensure_int64(np.asarray(lk</span><span class="s2">, </span><span class="s1">dtype=np.int64))</span>
+        <span class="s1">rk = ensure_int64(np.asarray(rk</span><span class="s2">, </span><span class="s1">dtype=np.int64))</span>
+
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">klass = libhashtable.ObjectFactorizer</span>
+        <span class="s1">lk = ensure_object(lk)</span>
+        <span class="s1">rk = ensure_object(rk)</span>
+
+    <span class="s1">rizer = klass(max(len(lk)</span><span class="s2">, </span><span class="s1">len(rk)))</span>
+
+    <span class="s5"># Argument 1 to &quot;factorize&quot; of &quot;ObjectFactorizer&quot; has incompatible type</span>
+    <span class="s5"># &quot;Union[ndarray[Any, dtype[signedinteger[_64Bit]]],</span>
+    <span class="s5"># ndarray[Any, dtype[object_]]]&quot;; expected &quot;ndarray[Any, dtype[object_]]&quot;</span>
+    <span class="s1">llab = rizer.factorize(lk)  </span><span class="s5"># type: ignore[arg-type]</span>
+    <span class="s5"># Argument 1 to &quot;factorize&quot; of &quot;ObjectFactorizer&quot; has incompatible type</span>
+    <span class="s5"># &quot;Union[ndarray[Any, dtype[signedinteger[_64Bit]]],</span>
+    <span class="s5"># ndarray[Any, dtype[object_]]]&quot;; expected &quot;ndarray[Any, dtype[object_]]&quot;</span>
+    <span class="s1">rlab = rizer.factorize(rk)  </span><span class="s5"># type: ignore[arg-type]</span>
+    <span class="s2">assert </span><span class="s1">llab.dtype == np.dtype(np.intp)</span><span class="s2">, </span><span class="s1">llab.dtype</span>
+    <span class="s2">assert </span><span class="s1">rlab.dtype == np.dtype(np.intp)</span><span class="s2">, </span><span class="s1">rlab.dtype</span>
+
+    <span class="s1">count = rizer.get_count()</span>
+
+    <span class="s2">if </span><span class="s1">sort:</span>
+        <span class="s1">uniques = rizer.uniques.to_array()</span>
+        <span class="s1">llab</span><span class="s2">, </span><span class="s1">rlab = _sort_labels(uniques</span><span class="s2">, </span><span class="s1">llab</span><span class="s2">, </span><span class="s1">rlab)</span>
+
+    <span class="s5"># NA group</span>
+    <span class="s1">lmask = llab == -</span><span class="s4">1</span>
+    <span class="s1">lany = lmask.any()</span>
+    <span class="s1">rmask = rlab == -</span><span class="s4">1</span>
+    <span class="s1">rany = rmask.any()</span>
+
+    <span class="s2">if </span><span class="s1">lany </span><span class="s2">or </span><span class="s1">rany:</span>
+        <span class="s2">if </span><span class="s1">lany:</span>
+            <span class="s1">np.putmask(llab</span><span class="s2">, </span><span class="s1">lmask</span><span class="s2">, </span><span class="s1">count)</span>
+        <span class="s2">if </span><span class="s1">rany:</span>
+            <span class="s1">np.putmask(rlab</span><span class="s2">, </span><span class="s1">rmask</span><span class="s2">, </span><span class="s1">count)</span>
+        <span class="s1">count += </span><span class="s4">1</span>
+
+    <span class="s2">if </span><span class="s1">how == </span><span class="s3">&quot;right&quot;</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">rlab</span><span class="s2">, </span><span class="s1">llab</span><span class="s2">, </span><span class="s1">count</span>
+    <span class="s2">return </span><span class="s1">llab</span><span class="s2">, </span><span class="s1">rlab</span><span class="s2">, </span><span class="s1">count</span>
+
+
+<span class="s2">def </span><span class="s1">_sort_labels(</span>
+    <span class="s1">uniques: np.ndarray</span><span class="s2">, </span><span class="s1">left: np.ndarray</span><span class="s2">, </span><span class="s1">right: np.ndarray</span>
+<span class="s1">) -&gt; tuple[npt.NDArray[np.intp]</span><span class="s2">, </span><span class="s1">npt.NDArray[np.intp]]:</span>
+
+    <span class="s1">llength = len(left)</span>
+    <span class="s1">labels = np.concatenate([left</span><span class="s2">, </span><span class="s1">right])</span>
+
+    <span class="s1">_</span><span class="s2">, </span><span class="s1">new_labels = algos.safe_sort(uniques</span><span class="s2">, </span><span class="s1">labels</span><span class="s2">, </span><span class="s1">na_sentinel=-</span><span class="s4">1</span><span class="s1">)</span>
+    <span class="s2">assert </span><span class="s1">new_labels.dtype == np.intp</span>
+    <span class="s1">new_left</span><span class="s2">, </span><span class="s1">new_right = new_labels[:llength]</span><span class="s2">, </span><span class="s1">new_labels[llength:]</span>
+
+    <span class="s2">return </span><span class="s1">new_left</span><span class="s2">, </span><span class="s1">new_right</span>
+
+
+<span class="s2">def </span><span class="s1">_get_join_keys(llab</span><span class="s2">, </span><span class="s1">rlab</span><span class="s2">, </span><span class="s1">shape</span><span class="s2">, </span><span class="s1">sort: bool):</span>
+
+    <span class="s5"># how many levels can be done without overflow</span>
+    <span class="s1">nlev = next(</span>
+        <span class="s1">lev</span>
+        <span class="s2">for </span><span class="s1">lev </span><span class="s2">in </span><span class="s1">range(len(shape)</span><span class="s2">, </span><span class="s4">0</span><span class="s2">, </span><span class="s1">-</span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s2">if not </span><span class="s1">is_int64_overflow_possible(shape[:lev])</span>
+    <span class="s1">)</span>
+
+    <span class="s5"># get keys for the first `nlev` levels</span>
+    <span class="s1">stride = np.prod(shape[</span><span class="s4">1</span><span class="s1">:nlev]</span><span class="s2">, </span><span class="s1">dtype=</span><span class="s3">&quot;i8&quot;</span><span class="s1">)</span>
+    <span class="s1">lkey = stride * llab[</span><span class="s4">0</span><span class="s1">].astype(</span><span class="s3">&quot;i8&quot;</span><span class="s2">, </span><span class="s1">subok=</span><span class="s2">False, </span><span class="s1">copy=</span><span class="s2">False</span><span class="s1">)</span>
+    <span class="s1">rkey = stride * rlab[</span><span class="s4">0</span><span class="s1">].astype(</span><span class="s3">&quot;i8&quot;</span><span class="s2">, </span><span class="s1">subok=</span><span class="s2">False, </span><span class="s1">copy=</span><span class="s2">False</span><span class="s1">)</span>
+
+    <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(</span><span class="s4">1</span><span class="s2">, </span><span class="s1">nlev):</span>
+        <span class="s2">with </span><span class="s1">np.errstate(divide=</span><span class="s3">&quot;ignore&quot;</span><span class="s1">):</span>
+            <span class="s1">stride //= shape[i]</span>
+        <span class="s1">lkey += llab[i] * stride</span>
+        <span class="s1">rkey += rlab[i] * stride</span>
+
+    <span class="s2">if </span><span class="s1">nlev == len(shape):  </span><span class="s5"># all done!</span>
+        <span class="s2">return </span><span class="s1">lkey</span><span class="s2">, </span><span class="s1">rkey</span>
+
+    <span class="s5"># densify current keys to avoid overflow</span>
+    <span class="s1">lkey</span><span class="s2">, </span><span class="s1">rkey</span><span class="s2">, </span><span class="s1">count = _factorize_keys(lkey</span><span class="s2">, </span><span class="s1">rkey</span><span class="s2">, </span><span class="s1">sort=sort)</span>
+
+    <span class="s1">llab = [lkey] + llab[nlev:]</span>
+    <span class="s1">rlab = [rkey] + rlab[nlev:]</span>
+    <span class="s1">shape = [count] + shape[nlev:]</span>
+
+    <span class="s2">return </span><span class="s1">_get_join_keys(llab</span><span class="s2">, </span><span class="s1">rlab</span><span class="s2">, </span><span class="s1">shape</span><span class="s2">, </span><span class="s1">sort)</span>
+
+
+<span class="s2">def </span><span class="s1">_should_fill(lname</span><span class="s2">, </span><span class="s1">rname) -&gt; bool:</span>
+    <span class="s2">if not </span><span class="s1">isinstance(lname</span><span class="s2">, </span><span class="s1">str) </span><span class="s2">or not </span><span class="s1">isinstance(rname</span><span class="s2">, </span><span class="s1">str):</span>
+        <span class="s2">return True</span>
+    <span class="s2">return </span><span class="s1">lname == rname</span>
+
+
+<span class="s2">def </span><span class="s1">_any(x) -&gt; bool:</span>
+    <span class="s2">return </span><span class="s1">x </span><span class="s2">is not None and </span><span class="s1">com.any_not_none(*x)</span>
+
+
+<span class="s2">def </span><span class="s1">_validate_operand(obj: DataFrame | Series) -&gt; DataFrame:</span>
+    <span class="s2">if </span><span class="s1">isinstance(obj</span><span class="s2">, </span><span class="s1">ABCDataFrame):</span>
+        <span class="s2">return </span><span class="s1">obj</span>
+    <span class="s2">elif </span><span class="s1">isinstance(obj</span><span class="s2">, </span><span class="s1">ABCSeries):</span>
+        <span class="s2">if </span><span class="s1">obj.name </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;Cannot merge a Series without a name&quot;</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">obj.to_frame()</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">TypeError(</span>
+            <span class="s3">f&quot;Can only merge Series or DataFrame objects, a </span><span class="s2">{</span><span class="s1">type(obj)</span><span class="s2">} </span><span class="s3">was passed&quot;</span>
+        <span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">_items_overlap_with_suffix(</span>
+    <span class="s1">left: Index</span><span class="s2">, </span><span class="s1">right: Index</span><span class="s2">, </span><span class="s1">suffixes: Suffixes</span>
+<span class="s1">) -&gt; tuple[Index</span><span class="s2">, </span><span class="s1">Index]:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Suffixes type validation. 
+ 
+    If two indices overlap, add suffixes to overlapping entries. 
+ 
+    If corresponding suffix is empty, the entry is simply converted to string. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if not </span><span class="s1">is_list_like(suffixes</span><span class="s2">, </span><span class="s1">allow_sets=</span><span class="s2">False</span><span class="s1">):</span>
+        <span class="s1">warnings.warn(</span>
+            <span class="s3">f&quot;Passing 'suffixes' as a </span><span class="s2">{</span><span class="s1">type(suffixes)</span><span class="s2">}</span><span class="s3">, is not supported and may give &quot;</span>
+            <span class="s3">&quot;unexpected results. Provide 'suffixes' as a tuple instead. In the &quot;</span>
+            <span class="s3">&quot;future a 'TypeError' will be raised.&quot;</span><span class="s2">,</span>
+            <span class="s1">FutureWarning</span><span class="s2">,</span>
+            <span class="s1">stacklevel=find_stack_level()</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+    <span class="s1">to_rename = left.intersection(right)</span>
+    <span class="s2">if </span><span class="s1">len(to_rename) == </span><span class="s4">0</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">left</span><span class="s2">, </span><span class="s1">right</span>
+
+    <span class="s1">lsuffix</span><span class="s2">, </span><span class="s1">rsuffix = suffixes</span>
+
+    <span class="s2">if not </span><span class="s1">lsuffix </span><span class="s2">and not </span><span class="s1">rsuffix:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">f&quot;columns overlap but no suffix specified: </span><span class="s2">{</span><span class="s1">to_rename</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">renamer(x</span><span class="s2">, </span><span class="s1">suffix):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Rename the left and right indices. 
+ 
+        If there is overlap, and suffix is not None, add 
+        suffix, otherwise, leave it as-is. 
+ 
+        Parameters 
+        ---------- 
+        x : original column name 
+        suffix : str or None 
+ 
+        Returns 
+        ------- 
+        x : renamed column name 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">x </span><span class="s2">in </span><span class="s1">to_rename </span><span class="s2">and </span><span class="s1">suffix </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">x</span><span class="s2">}{</span><span class="s1">suffix</span><span class="s2">}</span><span class="s3">&quot;</span>
+        <span class="s2">return </span><span class="s1">x</span>
+
+    <span class="s1">lrenamer = partial(renamer</span><span class="s2">, </span><span class="s1">suffix=lsuffix)</span>
+    <span class="s1">rrenamer = partial(renamer</span><span class="s2">, </span><span class="s1">suffix=rsuffix)</span>
+
+    <span class="s1">llabels = left._transform_index(lrenamer)</span>
+    <span class="s1">rlabels = right._transform_index(rrenamer)</span>
+
+    <span class="s1">dups = []</span>
+    <span class="s2">if not </span><span class="s1">llabels.is_unique:</span>
+        <span class="s5"># Only warn when duplicates are caused because of suffixes, already duplicated</span>
+        <span class="s5"># columns in origin should not warn</span>
+        <span class="s1">dups = llabels[(llabels.duplicated()) &amp; (~left.duplicated())].tolist()</span>
+    <span class="s2">if not </span><span class="s1">rlabels.is_unique:</span>
+        <span class="s1">dups.extend(rlabels[(rlabels.duplicated()) &amp; (~right.duplicated())].tolist())</span>
+    <span class="s2">if </span><span class="s1">dups:</span>
+        <span class="s1">warnings.warn(</span>
+            <span class="s3">f&quot;Passing 'suffixes' which cause duplicate columns </span><span class="s2">{</span><span class="s1">set(dups)</span><span class="s2">} </span><span class="s3">in the &quot;</span>
+            <span class="s3">f&quot;result is deprecated and will raise a MergeError in a future version.&quot;</span><span class="s2">,</span>
+            <span class="s1">FutureWarning</span><span class="s2">,</span>
+            <span class="s1">stacklevel=find_stack_level()</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+    <span class="s2">return </span><span class="s1">llabels</span><span class="s2">, </span><span class="s1">rlabels</span>
+</pre>
+</body>
+</html>

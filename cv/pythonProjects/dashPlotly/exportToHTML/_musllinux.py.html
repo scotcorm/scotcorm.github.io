@@ -1,0 +1,159 @@
+<html>
+<head>
+<title>_musllinux.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6897bb;}
+.s4 { color: #6a8759;}
+.s5 { color: #a5c261;}
+.s6 { color: #808080;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_musllinux.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;PEP 656 support. 
+ 
+This module implements logic to detect if the currently running Python is 
+linked against musl, and what musl version is used. 
+&quot;&quot;&quot;</span>
+
+<span class="s2">import </span><span class="s1">contextlib</span>
+<span class="s2">import </span><span class="s1">functools</span>
+<span class="s2">import </span><span class="s1">operator</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">struct</span>
+<span class="s2">import </span><span class="s1">subprocess</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">IO</span><span class="s2">, </span><span class="s1">Iterator</span><span class="s2">, </span><span class="s1">NamedTuple</span><span class="s2">, </span><span class="s1">Optional</span><span class="s2">, </span><span class="s1">Tuple</span>
+
+
+<span class="s2">def </span><span class="s1">_read_unpacked(f: IO[bytes]</span><span class="s2">, </span><span class="s1">fmt: str) -&gt; Tuple[int</span><span class="s2">, </span><span class="s1">...]:</span>
+    <span class="s2">return </span><span class="s1">struct.unpack(fmt</span><span class="s2">, </span><span class="s1">f.read(struct.calcsize(fmt)))</span>
+
+
+<span class="s2">def </span><span class="s1">_parse_ld_musl_from_elf(f: IO[bytes]) -&gt; Optional[str]:</span>
+    <span class="s0">&quot;&quot;&quot;Detect musl libc location by parsing the Python executable. 
+ 
+    Based on: https://gist.github.com/lyssdod/f51579ae8d93c8657a5564aefc2ffbca 
+    ELF header: https://refspecs.linuxfoundation.org/elf/gabi4+/ch4.eheader.html 
+    &quot;&quot;&quot;</span>
+    <span class="s1">f.seek(</span><span class="s3">0</span><span class="s1">)</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">ident = _read_unpacked(f</span><span class="s2">, </span><span class="s4">&quot;16B&quot;</span><span class="s1">)</span>
+    <span class="s2">except </span><span class="s1">struct.error:</span>
+        <span class="s2">return None</span>
+    <span class="s2">if </span><span class="s1">ident[:</span><span class="s3">4</span><span class="s1">] != tuple(</span><span class="s5">b&quot;</span><span class="s2">\x7f</span><span class="s5">ELF&quot;</span><span class="s1">):  </span><span class="s6"># Invalid magic, not ELF.</span>
+        <span class="s2">return None</span>
+    <span class="s1">f.seek(struct.calcsize(</span><span class="s4">&quot;HHI&quot;</span><span class="s1">)</span><span class="s2">, </span><span class="s3">1</span><span class="s1">)  </span><span class="s6"># Skip file type, machine, and version.</span>
+
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s6"># e_fmt: Format for program header.</span>
+        <span class="s6"># p_fmt: Format for section header.</span>
+        <span class="s6"># p_idx: Indexes to find p_type, p_offset, and p_filesz.</span>
+        <span class="s1">e_fmt</span><span class="s2">, </span><span class="s1">p_fmt</span><span class="s2">, </span><span class="s1">p_idx = {</span>
+            <span class="s3">1</span><span class="s1">: (</span><span class="s4">&quot;IIIIHHH&quot;</span><span class="s2">, </span><span class="s4">&quot;IIIIIIII&quot;</span><span class="s2">, </span><span class="s1">(</span><span class="s3">0</span><span class="s2">, </span><span class="s3">1</span><span class="s2">, </span><span class="s3">4</span><span class="s1">))</span><span class="s2">,  </span><span class="s6"># 32-bit.</span>
+            <span class="s3">2</span><span class="s1">: (</span><span class="s4">&quot;QQQIHHH&quot;</span><span class="s2">, </span><span class="s4">&quot;IIQQQQQQ&quot;</span><span class="s2">, </span><span class="s1">(</span><span class="s3">0</span><span class="s2">, </span><span class="s3">2</span><span class="s2">, </span><span class="s3">5</span><span class="s1">))</span><span class="s2">,  </span><span class="s6"># 64-bit.</span>
+        <span class="s1">}[ident[</span><span class="s3">4</span><span class="s1">]]</span>
+    <span class="s2">except </span><span class="s1">KeyError:</span>
+        <span class="s2">return None</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">p_get = operator.itemgetter(*p_idx)</span>
+
+    <span class="s6"># Find the interpreter section and return its content.</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">_</span><span class="s2">, </span><span class="s1">e_phoff</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">e_phentsize</span><span class="s2">, </span><span class="s1">e_phnum = _read_unpacked(f</span><span class="s2">, </span><span class="s1">e_fmt)</span>
+    <span class="s2">except </span><span class="s1">struct.error:</span>
+        <span class="s2">return None</span>
+    <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(e_phnum + </span><span class="s3">1</span><span class="s1">):</span>
+        <span class="s1">f.seek(e_phoff + e_phentsize * i)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">p_type</span><span class="s2">, </span><span class="s1">p_offset</span><span class="s2">, </span><span class="s1">p_filesz = p_get(_read_unpacked(f</span><span class="s2">, </span><span class="s1">p_fmt))</span>
+        <span class="s2">except </span><span class="s1">struct.error:</span>
+            <span class="s2">return None</span>
+        <span class="s2">if </span><span class="s1">p_type != </span><span class="s3">3</span><span class="s1">:  </span><span class="s6"># Not PT_INTERP.</span>
+            <span class="s2">continue</span>
+        <span class="s1">f.seek(p_offset)</span>
+        <span class="s1">interpreter = os.fsdecode(f.read(p_filesz)).strip(</span><span class="s4">&quot;</span><span class="s2">\0</span><span class="s4">&quot;</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s4">&quot;musl&quot; </span><span class="s2">not in </span><span class="s1">interpreter:</span>
+            <span class="s2">return None</span>
+        <span class="s2">return </span><span class="s1">interpreter</span>
+    <span class="s2">return None</span>
+
+
+<span class="s2">class </span><span class="s1">_MuslVersion(NamedTuple):</span>
+    <span class="s1">major: int</span>
+    <span class="s1">minor: int</span>
+
+
+<span class="s2">def </span><span class="s1">_parse_musl_version(output: str) -&gt; Optional[_MuslVersion]:</span>
+    <span class="s1">lines = [n </span><span class="s2">for </span><span class="s1">n </span><span class="s2">in </span><span class="s1">(n.strip() </span><span class="s2">for </span><span class="s1">n </span><span class="s2">in </span><span class="s1">output.splitlines()) </span><span class="s2">if </span><span class="s1">n]</span>
+    <span class="s2">if </span><span class="s1">len(lines) &lt; </span><span class="s3">2 </span><span class="s2">or </span><span class="s1">lines[</span><span class="s3">0</span><span class="s1">][:</span><span class="s3">4</span><span class="s1">] != </span><span class="s4">&quot;musl&quot;</span><span class="s1">:</span>
+        <span class="s2">return None</span>
+    <span class="s1">m = re.match(</span><span class="s4">r&quot;Version (\d+)\.(\d+)&quot;</span><span class="s2">, </span><span class="s1">lines[</span><span class="s3">1</span><span class="s1">])</span>
+    <span class="s2">if not </span><span class="s1">m:</span>
+        <span class="s2">return None</span>
+    <span class="s2">return </span><span class="s1">_MuslVersion(major=int(m.group(</span><span class="s3">1</span><span class="s1">))</span><span class="s2">, </span><span class="s1">minor=int(m.group(</span><span class="s3">2</span><span class="s1">)))</span>
+
+
+<span class="s1">@functools.lru_cache()</span>
+<span class="s2">def </span><span class="s1">_get_musl_version(executable: str) -&gt; Optional[_MuslVersion]:</span>
+    <span class="s0">&quot;&quot;&quot;Detect currently-running musl runtime version. 
+ 
+    This is done by checking the specified executable's dynamic linking 
+    information, and invoking the loader to parse its output for a version 
+    string. If the loader is musl, the output would be something like:: 
+ 
+        musl libc (x86_64) 
+        Version 1.2.2 
+        Dynamic Program Loader 
+    &quot;&quot;&quot;</span>
+    <span class="s2">with </span><span class="s1">contextlib.ExitStack() </span><span class="s2">as </span><span class="s1">stack:</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">f = stack.enter_context(open(executable</span><span class="s2">, </span><span class="s4">&quot;rb&quot;</span><span class="s1">))</span>
+        <span class="s2">except </span><span class="s1">OSError:</span>
+            <span class="s2">return None</span>
+        <span class="s1">ld = _parse_ld_musl_from_elf(f)</span>
+    <span class="s2">if not </span><span class="s1">ld:</span>
+        <span class="s2">return None</span>
+    <span class="s1">proc = subprocess.run([ld]</span><span class="s2">, </span><span class="s1">stderr=subprocess.PIPE</span><span class="s2">, </span><span class="s1">universal_newlines=</span><span class="s2">True</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">_parse_musl_version(proc.stderr)</span>
+
+
+<span class="s2">def </span><span class="s1">platform_tags(arch: str) -&gt; Iterator[str]:</span>
+    <span class="s0">&quot;&quot;&quot;Generate musllinux tags compatible to the current platform. 
+ 
+    :param arch: Should be the part of platform tag after the ``linux_`` 
+        prefix, e.g. ``x86_64``. The ``linux_`` prefix is assumed as a 
+        prerequisite for the current platform to be musllinux-compatible. 
+ 
+    :returns: An iterator of compatible musllinux tags. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">sys_musl = _get_musl_version(sys.executable)</span>
+    <span class="s2">if </span><span class="s1">sys_musl </span><span class="s2">is None</span><span class="s1">:  </span><span class="s6"># Python not dynamically linked against musl.</span>
+        <span class="s2">return</span>
+    <span class="s2">for </span><span class="s1">minor </span><span class="s2">in </span><span class="s1">range(sys_musl.minor</span><span class="s2">, </span><span class="s1">-</span><span class="s3">1</span><span class="s2">, </span><span class="s1">-</span><span class="s3">1</span><span class="s1">):</span>
+        <span class="s2">yield </span><span class="s4">f&quot;musllinux_</span><span class="s2">{</span><span class="s1">sys_musl.major</span><span class="s2">}</span><span class="s4">_</span><span class="s2">{</span><span class="s1">minor</span><span class="s2">}</span><span class="s4">_</span><span class="s2">{</span><span class="s1">arch</span><span class="s2">}</span><span class="s4">&quot;</span>
+
+
+<span class="s2">if </span><span class="s1">__name__ == </span><span class="s4">&quot;__main__&quot;</span><span class="s1">:  </span><span class="s6"># pragma: no cover</span>
+    <span class="s2">import </span><span class="s1">sysconfig</span>
+
+    <span class="s1">plat = sysconfig.get_platform()</span>
+    <span class="s2">assert </span><span class="s1">plat.startswith(</span><span class="s4">&quot;linux-&quot;</span><span class="s1">)</span><span class="s2">, </span><span class="s4">&quot;not linux&quot;</span>
+
+    <span class="s1">print(</span><span class="s4">&quot;plat:&quot;</span><span class="s2">, </span><span class="s1">plat)</span>
+    <span class="s1">print(</span><span class="s4">&quot;musl:&quot;</span><span class="s2">, </span><span class="s1">_get_musl_version(sys.executable))</span>
+    <span class="s1">print(</span><span class="s4">&quot;tags:&quot;</span><span class="s2">, </span><span class="s1">end=</span><span class="s4">&quot; &quot;</span><span class="s1">)</span>
+    <span class="s2">for </span><span class="s1">t </span><span class="s2">in </span><span class="s1">platform_tags(re.sub(</span><span class="s4">r&quot;[.-]&quot;</span><span class="s2">, </span><span class="s4">&quot;_&quot;</span><span class="s2">, </span><span class="s1">plat.split(</span><span class="s4">&quot;-&quot;</span><span class="s2">, </span><span class="s3">1</span><span class="s1">)[-</span><span class="s3">1</span><span class="s1">])):</span>
+        <span class="s1">print(t</span><span class="s2">, </span><span class="s1">end=</span><span class="s4">&quot;</span><span class="s2">\n      </span><span class="s4">&quot;</span><span class="s1">)</span>
+</pre>
+</body>
+</html>

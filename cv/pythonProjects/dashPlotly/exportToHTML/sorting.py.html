@@ -1,0 +1,729 @@
+<html>
+<head>
+<title>sorting.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #808080;}
+.s4 { color: #6897bb;}
+.s5 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+sorting.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; miscellaneous sorting / groupby utilities &quot;&quot;&quot;</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">from </span><span class="s1">collections </span><span class="s2">import </span><span class="s1">defaultdict</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">TYPE_CHECKING</span><span class="s2">,</span>
+    <span class="s1">Callable</span><span class="s2">,</span>
+    <span class="s1">DefaultDict</span><span class="s2">,</span>
+    <span class="s1">Hashable</span><span class="s2">,</span>
+    <span class="s1">Iterable</span><span class="s2">,</span>
+    <span class="s1">Sequence</span><span class="s2">,</span>
+<span class="s1">)</span>
+
+<span class="s2">import </span><span class="s1">numpy </span><span class="s2">as </span><span class="s1">np</span>
+
+<span class="s2">from </span><span class="s1">pandas._libs </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">algos</span><span class="s2">,</span>
+    <span class="s1">hashtable</span><span class="s2">,</span>
+    <span class="s1">lib</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas._libs.hashtable </span><span class="s2">import </span><span class="s1">unique_label_indices</span>
+<span class="s2">from </span><span class="s1">pandas._typing </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">IndexKeyFunc</span><span class="s2">,</span>
+    <span class="s1">Shape</span><span class="s2">,</span>
+    <span class="s1">npt</span><span class="s2">,</span>
+<span class="s1">)</span>
+
+<span class="s2">from </span><span class="s1">pandas.core.dtypes.common </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">ensure_int64</span><span class="s2">,</span>
+    <span class="s1">ensure_platform_int</span><span class="s2">,</span>
+    <span class="s1">is_extension_array_dtype</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas.core.dtypes.generic </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">ABCMultiIndex</span><span class="s2">,</span>
+    <span class="s1">ABCRangeIndex</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas.core.dtypes.missing </span><span class="s2">import </span><span class="s1">isna</span>
+
+<span class="s2">from </span><span class="s1">pandas.core.construction </span><span class="s2">import </span><span class="s1">extract_array</span>
+
+<span class="s2">if </span><span class="s1">TYPE_CHECKING:</span>
+    <span class="s2">from </span><span class="s1">pandas </span><span class="s2">import </span><span class="s1">MultiIndex</span>
+    <span class="s2">from </span><span class="s1">pandas.core.indexes.base </span><span class="s2">import </span><span class="s1">Index</span>
+
+
+<span class="s2">def </span><span class="s1">get_indexer_indexer(</span>
+    <span class="s1">target: Index</span><span class="s2">,</span>
+    <span class="s1">level: str | int | list[str] | list[int]</span><span class="s2">,</span>
+    <span class="s1">ascending: Sequence[bool | int] | bool | int</span><span class="s2">,</span>
+    <span class="s1">kind: str</span><span class="s2">,</span>
+    <span class="s1">na_position: str</span><span class="s2">,</span>
+    <span class="s1">sort_remaining: bool</span><span class="s2">,</span>
+    <span class="s1">key: IndexKeyFunc</span><span class="s2">,</span>
+<span class="s1">) -&gt; np.ndarray | </span><span class="s2">None</span><span class="s1">:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Helper method that return the indexer according to input parameters for 
+    the sort_index method of DataFrame and Series. 
+ 
+    Parameters 
+    ---------- 
+    target : Index 
+    level : int or level name or list of ints or list of level names 
+    ascending : bool or list of bools, default True 
+    kind : {'quicksort', 'mergesort', 'heapsort', 'stable'}, default 'quicksort' 
+    na_position : {'first', 'last'}, default 'last' 
+    sort_remaining : bool, default True 
+    key : callable, optional 
+ 
+    Returns 
+    ------- 
+    Optional[ndarray] 
+        The indexer for the new index. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">target = ensure_key_mapped(target</span><span class="s2">, </span><span class="s1">key</span><span class="s2">, </span><span class="s1">levels=level)</span>
+    <span class="s1">target = target._sort_levels_monotonic()</span>
+
+    <span class="s2">if </span><span class="s1">level </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s1">_</span><span class="s2">, </span><span class="s1">indexer = target.sortlevel(</span>
+            <span class="s1">level</span><span class="s2">, </span><span class="s1">ascending=ascending</span><span class="s2">, </span><span class="s1">sort_remaining=sort_remaining</span>
+        <span class="s1">)</span>
+    <span class="s2">elif </span><span class="s1">isinstance(target</span><span class="s2">, </span><span class="s1">ABCMultiIndex):</span>
+        <span class="s1">indexer = lexsort_indexer(</span>
+            <span class="s1">target._get_codes_for_sorting()</span><span class="s2">, </span><span class="s1">orders=ascending</span><span class="s2">, </span><span class="s1">na_position=na_position</span>
+        <span class="s1">)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s3"># Check monotonic-ness before sort an index (GH 11080)</span>
+        <span class="s2">if </span><span class="s1">(ascending </span><span class="s2">and </span><span class="s1">target.is_monotonic_increasing) </span><span class="s2">or </span><span class="s1">(</span>
+            <span class="s2">not </span><span class="s1">ascending </span><span class="s2">and </span><span class="s1">target.is_monotonic_decreasing</span>
+        <span class="s1">):</span>
+            <span class="s2">return None</span>
+
+        <span class="s1">indexer = nargsort(</span>
+            <span class="s1">target</span><span class="s2">, </span><span class="s1">kind=kind</span><span class="s2">, </span><span class="s1">ascending=ascending</span><span class="s2">, </span><span class="s1">na_position=na_position</span>
+        <span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">indexer</span>
+
+
+<span class="s2">def </span><span class="s1">get_group_index(</span>
+    <span class="s1">labels</span><span class="s2">, </span><span class="s1">shape: Shape</span><span class="s2">, </span><span class="s1">sort: bool</span><span class="s2">, </span><span class="s1">xnull: bool</span>
+<span class="s1">) -&gt; npt.NDArray[np.int64]:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    For the particular label_list, gets the offsets into the hypothetical list 
+    representing the totally ordered cartesian product of all possible label 
+    combinations, *as long as* this space fits within int64 bounds; 
+    otherwise, though group indices identify unique combinations of 
+    labels, they cannot be deconstructed. 
+    - If `sort`, rank of returned ids preserve lexical ranks of labels. 
+      i.e. returned id's can be used to do lexical sort on labels; 
+    - If `xnull` nulls (-1 labels) are passed through. 
+ 
+    Parameters 
+    ---------- 
+    labels : sequence of arrays 
+        Integers identifying levels at each location 
+    shape : tuple[int, ...] 
+        Number of unique levels at each location 
+    sort : bool 
+        If the ranks of returned ids should match lexical ranks of labels 
+    xnull : bool 
+        If true nulls are excluded. i.e. -1 values in the labels are 
+        passed through. 
+ 
+    Returns 
+    ------- 
+    An array of type int64 where two elements are equal if their corresponding 
+    labels are equal at all location. 
+ 
+    Notes 
+    ----- 
+    The length of `labels` and `shape` must be identical. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">_int64_cut_off(shape) -&gt; int:</span>
+        <span class="s1">acc = </span><span class="s4">1</span>
+        <span class="s2">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">mul </span><span class="s2">in </span><span class="s1">enumerate(shape):</span>
+            <span class="s1">acc *= int(mul)</span>
+            <span class="s2">if not </span><span class="s1">acc &lt; lib.i8max:</span>
+                <span class="s2">return </span><span class="s1">i</span>
+        <span class="s2">return </span><span class="s1">len(shape)</span>
+
+    <span class="s2">def </span><span class="s1">maybe_lift(lab</span><span class="s2">, </span><span class="s1">size) -&gt; tuple[np.ndarray</span><span class="s2">, </span><span class="s1">int]:</span>
+        <span class="s3"># promote nan values (assigned -1 label in lab array)</span>
+        <span class="s3"># so that all output values are non-negative</span>
+        <span class="s2">return </span><span class="s1">(lab + </span><span class="s4">1</span><span class="s2">, </span><span class="s1">size + </span><span class="s4">1</span><span class="s1">) </span><span class="s2">if </span><span class="s1">(lab == -</span><span class="s4">1</span><span class="s1">).any() </span><span class="s2">else </span><span class="s1">(lab</span><span class="s2">, </span><span class="s1">size)</span>
+
+    <span class="s1">labels = [ensure_int64(x) </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">labels]</span>
+    <span class="s1">lshape = list(shape)</span>
+    <span class="s2">if not </span><span class="s1">xnull:</span>
+        <span class="s2">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">(lab</span><span class="s2">, </span><span class="s1">size) </span><span class="s2">in </span><span class="s1">enumerate(zip(labels</span><span class="s2">, </span><span class="s1">shape)):</span>
+            <span class="s1">lab</span><span class="s2">, </span><span class="s1">size = maybe_lift(lab</span><span class="s2">, </span><span class="s1">size)</span>
+            <span class="s1">labels[i] = lab</span>
+            <span class="s1">lshape[i] = size</span>
+
+    <span class="s1">labels = list(labels)</span>
+
+    <span class="s3"># Iteratively process all the labels in chunks sized so less</span>
+    <span class="s3"># than lib.i8max unique int ids will be required for each chunk</span>
+    <span class="s2">while True</span><span class="s1">:</span>
+        <span class="s3"># how many levels can be done without overflow:</span>
+        <span class="s1">nlev = _int64_cut_off(lshape)</span>
+
+        <span class="s3"># compute flat ids for the first `nlev` levels</span>
+        <span class="s1">stride = np.prod(lshape[</span><span class="s4">1</span><span class="s1">:nlev]</span><span class="s2">, </span><span class="s1">dtype=</span><span class="s5">&quot;i8&quot;</span><span class="s1">)</span>
+        <span class="s1">out = stride * labels[</span><span class="s4">0</span><span class="s1">].astype(</span><span class="s5">&quot;i8&quot;</span><span class="s2">, </span><span class="s1">subok=</span><span class="s2">False, </span><span class="s1">copy=</span><span class="s2">False</span><span class="s1">)</span>
+
+        <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(</span><span class="s4">1</span><span class="s2">, </span><span class="s1">nlev):</span>
+            <span class="s2">if </span><span class="s1">lshape[i] == </span><span class="s4">0</span><span class="s1">:</span>
+                <span class="s1">stride = np.int64(</span><span class="s4">0</span><span class="s1">)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">stride //= lshape[i]</span>
+            <span class="s1">out += labels[i] * stride</span>
+
+        <span class="s2">if </span><span class="s1">xnull:  </span><span class="s3"># exclude nulls</span>
+            <span class="s1">mask = labels[</span><span class="s4">0</span><span class="s1">] == -</span><span class="s4">1</span>
+            <span class="s2">for </span><span class="s1">lab </span><span class="s2">in </span><span class="s1">labels[</span><span class="s4">1</span><span class="s1">:nlev]:</span>
+                <span class="s1">mask |= lab == -</span><span class="s4">1</span>
+            <span class="s1">out[mask] = -</span><span class="s4">1</span>
+
+        <span class="s2">if </span><span class="s1">nlev == len(lshape):  </span><span class="s3"># all levels done!</span>
+            <span class="s2">break</span>
+
+        <span class="s3"># compress what has been done so far in order to avoid overflow</span>
+        <span class="s3"># to retain lexical ranks, obs_ids should be sorted</span>
+        <span class="s1">comp_ids</span><span class="s2">, </span><span class="s1">obs_ids = compress_group_index(out</span><span class="s2">, </span><span class="s1">sort=sort)</span>
+
+        <span class="s1">labels = [comp_ids] + labels[nlev:]</span>
+        <span class="s1">lshape = [len(obs_ids)] + lshape[nlev:]</span>
+
+    <span class="s2">return </span><span class="s1">out</span>
+
+
+<span class="s2">def </span><span class="s1">get_compressed_ids(</span>
+    <span class="s1">labels</span><span class="s2">, </span><span class="s1">sizes: Shape</span>
+<span class="s1">) -&gt; tuple[npt.NDArray[np.intp]</span><span class="s2">, </span><span class="s1">npt.NDArray[np.int64]]:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Group_index is offsets into cartesian product of all possible labels. This 
+    space can be huge, so this function compresses it, by computing offsets 
+    (comp_ids) into the list of unique labels (obs_group_ids). 
+ 
+    Parameters 
+    ---------- 
+    labels : list of label arrays 
+    sizes : tuple[int] of size of the levels 
+ 
+    Returns 
+    ------- 
+    np.ndarray[np.intp] 
+        comp_ids 
+    np.ndarray[np.int64] 
+        obs_group_ids 
+    &quot;&quot;&quot;</span>
+    <span class="s1">ids = get_group_index(labels</span><span class="s2">, </span><span class="s1">sizes</span><span class="s2">, </span><span class="s1">sort=</span><span class="s2">True, </span><span class="s1">xnull=</span><span class="s2">False</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">compress_group_index(ids</span><span class="s2">, </span><span class="s1">sort=</span><span class="s2">True</span><span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">is_int64_overflow_possible(shape) -&gt; bool:</span>
+    <span class="s1">the_prod = </span><span class="s4">1</span>
+    <span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">shape:</span>
+        <span class="s1">the_prod *= int(x)</span>
+
+    <span class="s2">return </span><span class="s1">the_prod &gt;= lib.i8max</span>
+
+
+<span class="s2">def </span><span class="s1">decons_group_index(comp_labels</span><span class="s2">, </span><span class="s1">shape):</span>
+    <span class="s3"># reconstruct labels</span>
+    <span class="s2">if </span><span class="s1">is_int64_overflow_possible(shape):</span>
+        <span class="s3"># at some point group indices are factorized,</span>
+        <span class="s3"># and may not be deconstructed here! wrong path!</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s5">&quot;cannot deconstruct factorized group indices!&quot;</span><span class="s1">)</span>
+
+    <span class="s1">label_list = []</span>
+    <span class="s1">factor = </span><span class="s4">1</span>
+    <span class="s1">y = </span><span class="s4">0</span>
+    <span class="s1">x = comp_labels</span>
+    <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">reversed(range(len(shape))):</span>
+        <span class="s1">labels = (x - y) % (factor * shape[i]) // factor</span>
+        <span class="s1">np.putmask(labels</span><span class="s2">, </span><span class="s1">comp_labels &lt; </span><span class="s4">0</span><span class="s2">, </span><span class="s1">-</span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s1">label_list.append(labels)</span>
+        <span class="s1">y = labels * factor</span>
+        <span class="s1">factor *= shape[i]</span>
+    <span class="s2">return </span><span class="s1">label_list[::-</span><span class="s4">1</span><span class="s1">]</span>
+
+
+<span class="s2">def </span><span class="s1">decons_obs_group_ids(</span>
+    <span class="s1">comp_ids: npt.NDArray[np.intp]</span><span class="s2">, </span><span class="s1">obs_ids</span><span class="s2">, </span><span class="s1">shape</span><span class="s2">, </span><span class="s1">labels</span><span class="s2">, </span><span class="s1">xnull: bool</span>
+<span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Reconstruct labels from observed group ids. 
+ 
+    Parameters 
+    ---------- 
+    comp_ids : np.ndarray[np.intp] 
+    xnull : bool 
+        If nulls are excluded; i.e. -1 labels are passed through. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if not </span><span class="s1">xnull:</span>
+        <span class="s1">lift = np.fromiter(((a == -</span><span class="s4">1</span><span class="s1">).any() </span><span class="s2">for </span><span class="s1">a </span><span class="s2">in </span><span class="s1">labels)</span><span class="s2">, </span><span class="s1">dtype=</span><span class="s5">&quot;i8&quot;</span><span class="s1">)</span>
+        <span class="s1">shape = np.asarray(shape</span><span class="s2">, </span><span class="s1">dtype=</span><span class="s5">&quot;i8&quot;</span><span class="s1">) + lift</span>
+
+    <span class="s2">if not </span><span class="s1">is_int64_overflow_possible(shape):</span>
+        <span class="s3"># obs ids are deconstructable! take the fast route!</span>
+        <span class="s1">out = decons_group_index(obs_ids</span><span class="s2">, </span><span class="s1">shape)</span>
+        <span class="s2">return </span><span class="s1">out </span><span class="s2">if </span><span class="s1">xnull </span><span class="s2">or not </span><span class="s1">lift.any() </span><span class="s2">else </span><span class="s1">[x - y </span><span class="s2">for </span><span class="s1">x</span><span class="s2">, </span><span class="s1">y </span><span class="s2">in </span><span class="s1">zip(out</span><span class="s2">, </span><span class="s1">lift)]</span>
+
+    <span class="s1">indexer = unique_label_indices(comp_ids)</span>
+    <span class="s2">return </span><span class="s1">[lab[indexer].astype(np.intp</span><span class="s2">, </span><span class="s1">subok=</span><span class="s2">False, </span><span class="s1">copy=</span><span class="s2">True</span><span class="s1">) </span><span class="s2">for </span><span class="s1">lab </span><span class="s2">in </span><span class="s1">labels]</span>
+
+
+<span class="s2">def </span><span class="s1">indexer_from_factorized(</span>
+    <span class="s1">labels</span><span class="s2">, </span><span class="s1">shape: Shape</span><span class="s2">, </span><span class="s1">compress: bool = </span><span class="s2">True</span>
+<span class="s1">) -&gt; npt.NDArray[np.intp]:</span>
+    <span class="s1">ids = get_group_index(labels</span><span class="s2">, </span><span class="s1">shape</span><span class="s2">, </span><span class="s1">sort=</span><span class="s2">True, </span><span class="s1">xnull=</span><span class="s2">False</span><span class="s1">)</span>
+
+    <span class="s2">if not </span><span class="s1">compress:</span>
+        <span class="s1">ngroups = (ids.size </span><span class="s2">and </span><span class="s1">ids.max()) + </span><span class="s4">1</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">ids</span><span class="s2">, </span><span class="s1">obs = compress_group_index(ids</span><span class="s2">, </span><span class="s1">sort=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s1">ngroups = len(obs)</span>
+
+    <span class="s2">return </span><span class="s1">get_group_index_sorter(ids</span><span class="s2">, </span><span class="s1">ngroups)</span>
+
+
+<span class="s2">def </span><span class="s1">lexsort_indexer(</span>
+    <span class="s1">keys</span><span class="s2">, </span><span class="s1">orders=</span><span class="s2">None, </span><span class="s1">na_position: str = </span><span class="s5">&quot;last&quot;</span><span class="s2">, </span><span class="s1">key: Callable | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None</span>
+<span class="s1">) -&gt; npt.NDArray[np.intp]:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Performs lexical sorting on a set of keys 
+ 
+    Parameters 
+    ---------- 
+    keys : sequence of arrays 
+        Sequence of ndarrays to be sorted by the indexer 
+    orders : bool or list of booleans, optional 
+        Determines the sorting order for each element in keys. If a list, 
+        it must be the same length as keys. This determines whether the 
+        corresponding element in keys should be sorted in ascending 
+        (True) or descending (False) order. if bool, applied to all 
+        elements as above. if None, defaults to True. 
+    na_position : {'first', 'last'}, default 'last' 
+        Determines placement of NA elements in the sorted list (&quot;last&quot; or &quot;first&quot;) 
+    key : Callable, optional 
+        Callable key function applied to every element in keys before sorting 
+ 
+        .. versionadded:: 1.0.0 
+ 
+    Returns 
+    ------- 
+    np.ndarray[np.intp] 
+    &quot;&quot;&quot;</span>
+    <span class="s2">from </span><span class="s1">pandas.core.arrays </span><span class="s2">import </span><span class="s1">Categorical</span>
+
+    <span class="s1">labels = []</span>
+    <span class="s1">shape = []</span>
+    <span class="s2">if </span><span class="s1">isinstance(orders</span><span class="s2">, </span><span class="s1">bool):</span>
+        <span class="s1">orders = [orders] * len(keys)</span>
+    <span class="s2">elif </span><span class="s1">orders </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">orders = [</span><span class="s2">True</span><span class="s1">] * len(keys)</span>
+
+    <span class="s1">keys = [ensure_key_mapped(k</span><span class="s2">, </span><span class="s1">key) </span><span class="s2">for </span><span class="s1">k </span><span class="s2">in </span><span class="s1">keys]</span>
+
+    <span class="s2">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">order </span><span class="s2">in </span><span class="s1">zip(keys</span><span class="s2">, </span><span class="s1">orders):</span>
+        <span class="s1">cat = Categorical(k</span><span class="s2">, </span><span class="s1">ordered=</span><span class="s2">True</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">na_position </span><span class="s2">not in </span><span class="s1">[</span><span class="s5">&quot;last&quot;</span><span class="s2">, </span><span class="s5">&quot;first&quot;</span><span class="s1">]:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s5">f&quot;invalid na_position: </span><span class="s2">{</span><span class="s1">na_position</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s1">)</span>
+
+        <span class="s1">n = len(cat.categories)</span>
+        <span class="s1">codes = cat.codes.copy()</span>
+
+        <span class="s1">mask = cat.codes == -</span><span class="s4">1</span>
+        <span class="s2">if </span><span class="s1">order:  </span><span class="s3"># ascending</span>
+            <span class="s2">if </span><span class="s1">na_position == </span><span class="s5">&quot;last&quot;</span><span class="s1">:</span>
+                <span class="s1">codes = np.where(mask</span><span class="s2">, </span><span class="s1">n</span><span class="s2">, </span><span class="s1">codes)</span>
+            <span class="s2">elif </span><span class="s1">na_position == </span><span class="s5">&quot;first&quot;</span><span class="s1">:</span>
+                <span class="s1">codes += </span><span class="s4">1</span>
+        <span class="s2">else</span><span class="s1">:  </span><span class="s3"># not order means descending</span>
+            <span class="s2">if </span><span class="s1">na_position == </span><span class="s5">&quot;last&quot;</span><span class="s1">:</span>
+                <span class="s1">codes = np.where(mask</span><span class="s2">, </span><span class="s1">n</span><span class="s2">, </span><span class="s1">n - codes - </span><span class="s4">1</span><span class="s1">)</span>
+            <span class="s2">elif </span><span class="s1">na_position == </span><span class="s5">&quot;first&quot;</span><span class="s1">:</span>
+                <span class="s1">codes = np.where(mask</span><span class="s2">, </span><span class="s4">0</span><span class="s2">, </span><span class="s1">n - codes)</span>
+        <span class="s2">if </span><span class="s1">mask.any():</span>
+            <span class="s1">n += </span><span class="s4">1</span>
+
+        <span class="s1">shape.append(n)</span>
+        <span class="s1">labels.append(codes)</span>
+
+    <span class="s2">return </span><span class="s1">indexer_from_factorized(labels</span><span class="s2">, </span><span class="s1">tuple(shape))</span>
+
+
+<span class="s2">def </span><span class="s1">nargsort(</span>
+    <span class="s1">items</span><span class="s2">,</span>
+    <span class="s1">kind: str = </span><span class="s5">&quot;quicksort&quot;</span><span class="s2">,</span>
+    <span class="s1">ascending: bool = </span><span class="s2">True,</span>
+    <span class="s1">na_position: str = </span><span class="s5">&quot;last&quot;</span><span class="s2">,</span>
+    <span class="s1">key: Callable | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">mask: np.ndarray | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+<span class="s1">) -&gt; npt.NDArray[np.intp]:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Intended to be a drop-in replacement for np.argsort which handles NaNs. 
+ 
+    Adds ascending, na_position, and key parameters. 
+ 
+    (GH #6399, #5231, #27237) 
+ 
+    Parameters 
+    ---------- 
+    kind : str, default 'quicksort' 
+    ascending : bool, default True 
+    na_position : {'first', 'last'}, default 'last' 
+    key : Optional[Callable], default None 
+    mask : Optional[np.ndarray], default None 
+        Passed when called by ExtensionArray.argsort. 
+ 
+    Returns 
+    ------- 
+    np.ndarray[np.intp] 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">if </span><span class="s1">key </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s1">items = ensure_key_mapped(items</span><span class="s2">, </span><span class="s1">key)</span>
+        <span class="s2">return </span><span class="s1">nargsort(</span>
+            <span class="s1">items</span><span class="s2">,</span>
+            <span class="s1">kind=kind</span><span class="s2">,</span>
+            <span class="s1">ascending=ascending</span><span class="s2">,</span>
+            <span class="s1">na_position=na_position</span><span class="s2">,</span>
+            <span class="s1">key=</span><span class="s2">None,</span>
+            <span class="s1">mask=mask</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+    <span class="s2">if </span><span class="s1">isinstance(items</span><span class="s2">, </span><span class="s1">ABCRangeIndex):</span>
+        <span class="s2">return </span><span class="s1">items.argsort(ascending=ascending)  </span><span class="s3"># TODO: test coverage with key?</span>
+    <span class="s2">elif not </span><span class="s1">isinstance(items</span><span class="s2">, </span><span class="s1">ABCMultiIndex):</span>
+        <span class="s1">items = extract_array(items)</span>
+    <span class="s2">if </span><span class="s1">mask </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">mask = np.asarray(isna(items))  </span><span class="s3"># TODO: does this exclude MultiIndex too?</span>
+
+    <span class="s2">if </span><span class="s1">is_extension_array_dtype(items):</span>
+        <span class="s2">return </span><span class="s1">items.argsort(ascending=ascending</span><span class="s2">, </span><span class="s1">kind=kind</span><span class="s2">, </span><span class="s1">na_position=na_position)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">items = np.asanyarray(items)</span>
+
+    <span class="s1">idx = np.arange(len(items))</span>
+    <span class="s1">non_nans = items[~mask]</span>
+    <span class="s1">non_nan_idx = idx[~mask]</span>
+
+    <span class="s1">nan_idx = np.nonzero(mask)[</span><span class="s4">0</span><span class="s1">]</span>
+    <span class="s2">if not </span><span class="s1">ascending:</span>
+        <span class="s1">non_nans = non_nans[::-</span><span class="s4">1</span><span class="s1">]</span>
+        <span class="s1">non_nan_idx = non_nan_idx[::-</span><span class="s4">1</span><span class="s1">]</span>
+    <span class="s1">indexer = non_nan_idx[non_nans.argsort(kind=kind)]</span>
+    <span class="s2">if not </span><span class="s1">ascending:</span>
+        <span class="s1">indexer = indexer[::-</span><span class="s4">1</span><span class="s1">]</span>
+    <span class="s3"># Finally, place the NaNs at the end or the beginning according to</span>
+    <span class="s3"># na_position</span>
+    <span class="s2">if </span><span class="s1">na_position == </span><span class="s5">&quot;last&quot;</span><span class="s1">:</span>
+        <span class="s1">indexer = np.concatenate([indexer</span><span class="s2">, </span><span class="s1">nan_idx])</span>
+    <span class="s2">elif </span><span class="s1">na_position == </span><span class="s5">&quot;first&quot;</span><span class="s1">:</span>
+        <span class="s1">indexer = np.concatenate([nan_idx</span><span class="s2">, </span><span class="s1">indexer])</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s5">f&quot;invalid na_position: </span><span class="s2">{</span><span class="s1">na_position</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">ensure_platform_int(indexer)</span>
+
+
+<span class="s2">def </span><span class="s1">nargminmax(values</span><span class="s2">, </span><span class="s1">method: str</span><span class="s2">, </span><span class="s1">axis: int = </span><span class="s4">0</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Implementation of np.argmin/argmax but for ExtensionArray and which 
+    handles missing values. 
+ 
+    Parameters 
+    ---------- 
+    values : ExtensionArray 
+    method : {&quot;argmax&quot;, &quot;argmin&quot;} 
+    axis : int, default 0 
+ 
+    Returns 
+    ------- 
+    int 
+    &quot;&quot;&quot;</span>
+    <span class="s2">assert </span><span class="s1">method </span><span class="s2">in </span><span class="s1">{</span><span class="s5">&quot;argmax&quot;</span><span class="s2">, </span><span class="s5">&quot;argmin&quot;</span><span class="s1">}</span>
+    <span class="s1">func = np.argmax </span><span class="s2">if </span><span class="s1">method == </span><span class="s5">&quot;argmax&quot; </span><span class="s2">else </span><span class="s1">np.argmin</span>
+
+    <span class="s1">mask = np.asarray(isna(values))</span>
+    <span class="s1">values = values._values_for_argsort()</span>
+
+    <span class="s2">if </span><span class="s1">values.ndim &gt; </span><span class="s4">1</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">mask.any():</span>
+            <span class="s2">if </span><span class="s1">axis == </span><span class="s4">1</span><span class="s1">:</span>
+                <span class="s1">zipped = zip(values</span><span class="s2">, </span><span class="s1">mask)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">zipped = zip(values.T</span><span class="s2">, </span><span class="s1">mask.T)</span>
+            <span class="s2">return </span><span class="s1">np.array([_nanargminmax(v</span><span class="s2">, </span><span class="s1">m</span><span class="s2">, </span><span class="s1">func) </span><span class="s2">for </span><span class="s1">v</span><span class="s2">, </span><span class="s1">m </span><span class="s2">in </span><span class="s1">zipped])</span>
+        <span class="s2">return </span><span class="s1">func(values</span><span class="s2">, </span><span class="s1">axis=axis)</span>
+
+    <span class="s2">return </span><span class="s1">_nanargminmax(values</span><span class="s2">, </span><span class="s1">mask</span><span class="s2">, </span><span class="s1">func)</span>
+
+
+<span class="s2">def </span><span class="s1">_nanargminmax(values</span><span class="s2">, </span><span class="s1">mask</span><span class="s2">, </span><span class="s1">func) -&gt; int:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    See nanargminmax.__doc__. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">idx = np.arange(values.shape[</span><span class="s4">0</span><span class="s1">])</span>
+    <span class="s1">non_nans = values[~mask]</span>
+    <span class="s1">non_nan_idx = idx[~mask]</span>
+
+    <span class="s2">return </span><span class="s1">non_nan_idx[func(non_nans)]</span>
+
+
+<span class="s2">def </span><span class="s1">_ensure_key_mapped_multiindex(</span>
+    <span class="s1">index: MultiIndex</span><span class="s2">, </span><span class="s1">key: Callable</span><span class="s2">, </span><span class="s1">level=</span><span class="s2">None</span>
+<span class="s1">) -&gt; MultiIndex:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Returns a new MultiIndex in which key has been applied 
+    to all levels specified in level (or all levels if level 
+    is None). Used for key sorting for MultiIndex. 
+ 
+    Parameters 
+    ---------- 
+    index : MultiIndex 
+        Index to which to apply the key function on the 
+        specified levels. 
+    key : Callable 
+        Function that takes an Index and returns an Index of 
+        the same shape. This key is applied to each level 
+        separately. The name of the level can be used to 
+        distinguish different levels for application. 
+    level : list-like, int or str, default None 
+        Level or list of levels to apply the key function to. 
+        If None, key function is applied to all levels. Other 
+        levels are left unchanged. 
+ 
+    Returns 
+    ------- 
+    labels : MultiIndex 
+        Resulting MultiIndex with modified levels. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">if </span><span class="s1">level </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">isinstance(level</span><span class="s2">, </span><span class="s1">(str</span><span class="s2">, </span><span class="s1">int)):</span>
+            <span class="s1">sort_levels = [level]</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">sort_levels = level</span>
+
+        <span class="s1">sort_levels = [index._get_level_number(lev) </span><span class="s2">for </span><span class="s1">lev </span><span class="s2">in </span><span class="s1">sort_levels]</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">sort_levels = list(range(index.nlevels))  </span><span class="s3"># satisfies mypy</span>
+
+    <span class="s1">mapped = [</span>
+        <span class="s1">ensure_key_mapped(index._get_level_values(level)</span><span class="s2">, </span><span class="s1">key)</span>
+        <span class="s2">if </span><span class="s1">level </span><span class="s2">in </span><span class="s1">sort_levels</span>
+        <span class="s2">else </span><span class="s1">index._get_level_values(level)</span>
+        <span class="s2">for </span><span class="s1">level </span><span class="s2">in </span><span class="s1">range(index.nlevels)</span>
+    <span class="s1">]</span>
+
+    <span class="s2">return </span><span class="s1">type(index).from_arrays(mapped)</span>
+
+
+<span class="s2">def </span><span class="s1">ensure_key_mapped(values</span><span class="s2">, </span><span class="s1">key: Callable | </span><span class="s2">None, </span><span class="s1">levels=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Applies a callable key function to the values function and checks 
+    that the resulting value has the same shape. Can be called on Index 
+    subclasses, Series, DataFrames, or ndarrays. 
+ 
+    Parameters 
+    ---------- 
+    values : Series, DataFrame, Index subclass, or ndarray 
+    key : Optional[Callable], key to be called on the values array 
+    levels : Optional[List], if values is a MultiIndex, list of levels to 
+    apply the key to. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">from </span><span class="s1">pandas.core.indexes.api </span><span class="s2">import </span><span class="s1">Index</span>
+
+    <span class="s2">if not </span><span class="s1">key:</span>
+        <span class="s2">return </span><span class="s1">values</span>
+
+    <span class="s2">if </span><span class="s1">isinstance(values</span><span class="s2">, </span><span class="s1">ABCMultiIndex):</span>
+        <span class="s2">return </span><span class="s1">_ensure_key_mapped_multiindex(values</span><span class="s2">, </span><span class="s1">key</span><span class="s2">, </span><span class="s1">level=levels)</span>
+
+    <span class="s1">result = key(values.copy())</span>
+    <span class="s2">if </span><span class="s1">len(result) != len(values):</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span>
+            <span class="s5">&quot;User-provided `key` function must not change the shape of the array.&quot;</span>
+        <span class="s1">)</span>
+
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">isinstance(</span>
+            <span class="s1">values</span><span class="s2">, </span><span class="s1">Index</span>
+        <span class="s1">):  </span><span class="s3"># convert to a new Index subclass, not necessarily the same</span>
+            <span class="s1">result = Index(result)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">type_of_values = type(values)</span>
+            <span class="s1">result = type_of_values(result)  </span><span class="s3"># try to revert to original type otherwise</span>
+    <span class="s2">except </span><span class="s1">TypeError:</span>
+        <span class="s2">raise </span><span class="s1">TypeError(</span>
+            <span class="s5">f&quot;User-provided `key` function returned an invalid type </span><span class="s2">{</span><span class="s1">type(result)</span><span class="s2">} \ 
+            </span><span class="s5">which could not be converted to </span><span class="s2">{</span><span class="s1">type(values)</span><span class="s2">}</span><span class="s5">.&quot;</span>
+        <span class="s1">)</span>
+
+    <span class="s2">return </span><span class="s1">result</span>
+
+
+<span class="s2">def </span><span class="s1">get_flattened_list(</span>
+    <span class="s1">comp_ids: npt.NDArray[np.intp]</span><span class="s2">,</span>
+    <span class="s1">ngroups: int</span><span class="s2">,</span>
+    <span class="s1">levels: Iterable[Index]</span><span class="s2">,</span>
+    <span class="s1">labels: Iterable[np.ndarray]</span><span class="s2">,</span>
+<span class="s1">) -&gt; list[tuple]:</span>
+    <span class="s0">&quot;&quot;&quot;Map compressed group id -&gt; key tuple.&quot;&quot;&quot;</span>
+    <span class="s1">comp_ids = comp_ids.astype(np.int64</span><span class="s2">, </span><span class="s1">copy=</span><span class="s2">False</span><span class="s1">)</span>
+    <span class="s1">arrays: DefaultDict[int</span><span class="s2">, </span><span class="s1">list[int]] = defaultdict(list)</span>
+    <span class="s2">for </span><span class="s1">labs</span><span class="s2">, </span><span class="s1">level </span><span class="s2">in </span><span class="s1">zip(labels</span><span class="s2">, </span><span class="s1">levels):</span>
+        <span class="s1">table = hashtable.Int64HashTable(ngroups)</span>
+        <span class="s1">table.map(comp_ids</span><span class="s2">, </span><span class="s1">labs.astype(np.int64</span><span class="s2">, </span><span class="s1">copy=</span><span class="s2">False</span><span class="s1">))</span>
+        <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(ngroups):</span>
+            <span class="s1">arrays[i].append(level[table.get_item(i)])</span>
+    <span class="s2">return </span><span class="s1">[tuple(array) </span><span class="s2">for </span><span class="s1">array </span><span class="s2">in </span><span class="s1">arrays.values()]</span>
+
+
+<span class="s2">def </span><span class="s1">get_indexer_dict(</span>
+    <span class="s1">label_list: list[np.ndarray]</span><span class="s2">, </span><span class="s1">keys: list[Index]</span>
+<span class="s1">) -&gt; dict[Hashable</span><span class="s2">, </span><span class="s1">npt.NDArray[np.intp]]:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Returns 
+    ------- 
+    dict: 
+        Labels mapped to indexers. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">shape = [len(x) </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">keys]</span>
+
+    <span class="s1">group_index = get_group_index(label_list</span><span class="s2">, </span><span class="s1">tuple(shape)</span><span class="s2">, </span><span class="s1">sort=</span><span class="s2">True, </span><span class="s1">xnull=</span><span class="s2">True</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">np.all(group_index == -</span><span class="s4">1</span><span class="s1">):</span>
+        <span class="s3"># Short-circuit, lib.indices_fast will return the same</span>
+        <span class="s2">return </span><span class="s1">{}</span>
+    <span class="s1">ngroups = (</span>
+        <span class="s1">((group_index.size </span><span class="s2">and </span><span class="s1">group_index.max()) + </span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">is_int64_overflow_possible(shape)</span>
+        <span class="s2">else </span><span class="s1">np.prod(shape</span><span class="s2">, </span><span class="s1">dtype=</span><span class="s5">&quot;i8&quot;</span><span class="s1">)</span>
+    <span class="s1">)</span>
+
+    <span class="s1">sorter = get_group_index_sorter(group_index</span><span class="s2">, </span><span class="s1">ngroups)</span>
+
+    <span class="s1">sorted_labels = [lab.take(sorter) </span><span class="s2">for </span><span class="s1">lab </span><span class="s2">in </span><span class="s1">label_list]</span>
+    <span class="s1">group_index = group_index.take(sorter)</span>
+
+    <span class="s2">return </span><span class="s1">lib.indices_fast(sorter</span><span class="s2">, </span><span class="s1">group_index</span><span class="s2">, </span><span class="s1">keys</span><span class="s2">, </span><span class="s1">sorted_labels)</span>
+
+
+<span class="s3"># ----------------------------------------------------------------------</span>
+<span class="s3"># sorting levels...cleverly?</span>
+
+
+<span class="s2">def </span><span class="s1">get_group_index_sorter(</span>
+    <span class="s1">group_index: npt.NDArray[np.intp]</span><span class="s2">, </span><span class="s1">ngroups: int | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None</span>
+<span class="s1">) -&gt; npt.NDArray[np.intp]:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    algos.groupsort_indexer implements `counting sort` and it is at least 
+    O(ngroups), where 
+        ngroups = prod(shape) 
+        shape = map(len, keys) 
+    that is, linear in the number of combinations (cartesian product) of unique 
+    values of groupby keys. This can be huge when doing multi-key groupby. 
+    np.argsort(kind='mergesort') is O(count x log(count)) where count is the 
+    length of the data-frame; 
+    Both algorithms are `stable` sort and that is necessary for correctness of 
+    groupby operations. e.g. consider: 
+        df.groupby(key)[col].transform('first') 
+ 
+    Parameters 
+    ---------- 
+    group_index : np.ndarray[np.intp] 
+        signed integer dtype 
+    ngroups : int or None, default None 
+ 
+    Returns 
+    ------- 
+    np.ndarray[np.intp] 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">ngroups </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">ngroups = </span><span class="s4">1 </span><span class="s1">+ group_index.max()</span>
+    <span class="s1">count = len(group_index)</span>
+    <span class="s1">alpha = </span><span class="s4">0.0  </span><span class="s3"># taking complexities literally; there may be</span>
+    <span class="s1">beta = </span><span class="s4">1.0  </span><span class="s3"># some room for fine-tuning these parameters</span>
+    <span class="s1">do_groupsort = count &gt; </span><span class="s4">0 </span><span class="s2">and </span><span class="s1">((alpha + beta * ngroups) &lt; (count * np.log(count)))</span>
+    <span class="s2">if </span><span class="s1">do_groupsort:</span>
+        <span class="s1">sorter</span><span class="s2">, </span><span class="s1">_ = algos.groupsort_indexer(</span>
+            <span class="s1">ensure_platform_int(group_index)</span><span class="s2">,</span>
+            <span class="s1">ngroups</span><span class="s2">,</span>
+        <span class="s1">)</span>
+        <span class="s3"># sorter _should_ already be intp, but mypy is not yet able to verify</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">sorter = group_index.argsort(kind=</span><span class="s5">&quot;mergesort&quot;</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">ensure_platform_int(sorter)</span>
+
+
+<span class="s2">def </span><span class="s1">compress_group_index(</span>
+    <span class="s1">group_index: npt.NDArray[np.int64]</span><span class="s2">, </span><span class="s1">sort: bool = </span><span class="s2">True</span>
+<span class="s1">) -&gt; tuple[npt.NDArray[np.int64]</span><span class="s2">, </span><span class="s1">npt.NDArray[np.int64]]:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Group_index is offsets into cartesian product of all possible labels. This 
+    space can be huge, so this function compresses it, by computing offsets 
+    (comp_ids) into the list of unique labels (obs_group_ids). 
+    &quot;&quot;&quot;</span>
+    <span class="s1">size_hint = len(group_index)</span>
+    <span class="s1">table = hashtable.Int64HashTable(size_hint)</span>
+
+    <span class="s1">group_index = ensure_int64(group_index)</span>
+
+    <span class="s3"># note, group labels come out ascending (ie, 1,2,3 etc)</span>
+    <span class="s1">comp_ids</span><span class="s2">, </span><span class="s1">obs_group_ids = table.get_labels_groupby(group_index)</span>
+
+    <span class="s2">if </span><span class="s1">sort </span><span class="s2">and </span><span class="s1">len(obs_group_ids) &gt; </span><span class="s4">0</span><span class="s1">:</span>
+        <span class="s1">obs_group_ids</span><span class="s2">, </span><span class="s1">comp_ids = _reorder_by_uniques(obs_group_ids</span><span class="s2">, </span><span class="s1">comp_ids)</span>
+
+    <span class="s2">return </span><span class="s1">ensure_int64(comp_ids)</span><span class="s2">, </span><span class="s1">ensure_int64(obs_group_ids)</span>
+
+
+<span class="s2">def </span><span class="s1">_reorder_by_uniques(</span>
+    <span class="s1">uniques: npt.NDArray[np.int64]</span><span class="s2">, </span><span class="s1">labels: npt.NDArray[np.intp]</span>
+<span class="s1">) -&gt; tuple[npt.NDArray[np.int64]</span><span class="s2">, </span><span class="s1">npt.NDArray[np.intp]]:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Parameters 
+    ---------- 
+    uniques : np.ndarray[np.int64] 
+    labels : np.ndarray[np.intp] 
+ 
+    Returns 
+    ------- 
+    np.ndarray[np.int64] 
+    np.ndarray[np.intp] 
+    &quot;&quot;&quot;</span>
+    <span class="s3"># sorter is index where elements ought to go</span>
+    <span class="s1">sorter = uniques.argsort()</span>
+
+    <span class="s3"># reverse_indexer is where elements came from</span>
+    <span class="s1">reverse_indexer = np.empty(len(sorter)</span><span class="s2">, </span><span class="s1">dtype=np.intp)</span>
+    <span class="s1">reverse_indexer.put(sorter</span><span class="s2">, </span><span class="s1">np.arange(len(sorter)))</span>
+
+    <span class="s1">mask = labels &lt; </span><span class="s4">0</span>
+
+    <span class="s3"># move labels to right locations (ie, unsort ascending labels)</span>
+    <span class="s1">labels = reverse_indexer.take(labels)</span>
+    <span class="s1">np.putmask(labels</span><span class="s2">, </span><span class="s1">mask</span><span class="s2">, </span><span class="s1">-</span><span class="s4">1</span><span class="s1">)</span>
+
+    <span class="s3"># sort observed ids</span>
+    <span class="s1">uniques = uniques.take(sorter)</span>
+
+    <span class="s2">return </span><span class="s1">uniques</span><span class="s2">, </span><span class="s1">labels</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,453 @@
+<html>
+<head>
+<title>vectorized.pyx</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+vectorized.pyx</font>
+</center></td></tr></table>
+<pre><span class="s0">import cython</span>
+
+<span class="s0">from cpython.datetime cimport (</span>
+    <span class="s0">date,</span>
+    <span class="s0">datetime,</span>
+    <span class="s0">time,</span>
+    <span class="s0">tzinfo,</span>
+<span class="s0">)</span>
+
+<span class="s0">import numpy as np</span>
+
+<span class="s0">from numpy cimport (</span>
+    <span class="s0">int64_t,</span>
+    <span class="s0">intp_t,</span>
+    <span class="s0">ndarray,</span>
+<span class="s0">)</span>
+
+<span class="s0">from .conversion cimport normalize_i8_stamp</span>
+
+<span class="s0">from .dtypes import Resolution</span>
+
+<span class="s0">from .nattype cimport (</span>
+    <span class="s0">NPY_NAT,</span>
+    <span class="s0">c_NaT as NaT,</span>
+<span class="s0">)</span>
+<span class="s0">from .np_datetime cimport (</span>
+    <span class="s0">dt64_to_dtstruct,</span>
+    <span class="s0">npy_datetimestruct,</span>
+<span class="s0">)</span>
+<span class="s0">from .offsets cimport to_offset</span>
+<span class="s0">from .period cimport get_period_ordinal</span>
+<span class="s0">from .timestamps cimport create_timestamp_from_ts</span>
+<span class="s0">from .timezones cimport (</span>
+    <span class="s0">get_dst_info,</span>
+    <span class="s0">is_tzlocal,</span>
+    <span class="s0">is_utc,</span>
+<span class="s0">)</span>
+<span class="s0">from .tzconversion cimport tz_convert_utc_to_tzlocal</span>
+
+<span class="s0"># -------------------------------------------------------------------------</span>
+
+<span class="s0">cdef inline object create_datetime_from_ts(</span>
+    <span class="s0">int64_t value,</span>
+    <span class="s0">npy_datetimestruct dts,</span>
+    <span class="s0">tzinfo tz,</span>
+    <span class="s0">object freq,</span>
+    <span class="s0">bint fold,</span>
+<span class="s0">):</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Convenience routine to construct a datetime.datetime from its parts.</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">return datetime(</span>
+        <span class="s0">dts.year, dts.month, dts.day, dts.hour, dts.min, dts.sec, dts.us,</span>
+        <span class="s0">tz, fold=fold,</span>
+    <span class="s0">)</span>
+
+
+<span class="s0">cdef inline object create_date_from_ts(</span>
+    <span class="s0">int64_t value,</span>
+    <span class="s0">npy_datetimestruct dts,</span>
+    <span class="s0">tzinfo tz,</span>
+    <span class="s0">object freq,</span>
+    <span class="s0">bint fold</span>
+<span class="s0">):</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Convenience routine to construct a datetime.date from its parts.</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0"># GH#25057 add fold argument to match other func_create signatures</span>
+    <span class="s0">return date(dts.year, dts.month, dts.day)</span>
+
+
+<span class="s0">cdef inline object create_time_from_ts(</span>
+    <span class="s0">int64_t value,</span>
+    <span class="s0">npy_datetimestruct dts,</span>
+    <span class="s0">tzinfo tz,</span>
+    <span class="s0">object freq,</span>
+    <span class="s0">bint fold</span>
+<span class="s0">):</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Convenience routine to construct a datetime.time from its parts.</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">return time(dts.hour, dts.min, dts.sec, dts.us, tz, fold=fold)</span>
+
+
+<span class="s0">@cython.wraparound(False)</span>
+<span class="s0">@cython.boundscheck(False)</span>
+<span class="s0">def ints_to_pydatetime(</span>
+    <span class="s0">const int64_t[:] arr,</span>
+    <span class="s0">tzinfo tz=None,</span>
+    <span class="s0">object freq=None,</span>
+    <span class="s0">bint fold=False,</span>
+    <span class="s0">str box=&quot;datetime&quot;</span>
+<span class="s0">) -&gt; np.ndarray:</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Convert an i8 repr to an ndarray of datetimes, date, time or Timestamp.</span>
+
+    <span class="s0">Parameters</span>
+    <span class="s0">----------</span>
+    <span class="s0">arr : array of i8</span>
+    <span class="s0">tz : str, optional</span>
+         <span class="s0">convert to this timezone</span>
+    <span class="s0">freq : str/Offset, optional</span>
+         <span class="s0">freq to convert</span>
+    <span class="s0">fold : bint, default is 0</span>
+        <span class="s0">Due to daylight saving time, one wall clock time can occur twice</span>
+        <span class="s0">when shifting from summer to winter time; fold describes whether the</span>
+        <span class="s0">datetime-like corresponds  to the first (0) or the second time (1)</span>
+        <span class="s0">the wall clock hits the ambiguous time</span>
+
+        <span class="s0">.. versionadded:: 1.1.0</span>
+    <span class="s0">box : {'datetime', 'timestamp', 'date', 'time'}, default 'datetime'</span>
+        <span class="s0">* If datetime, convert to datetime.datetime</span>
+        <span class="s0">* If date, convert to datetime.date</span>
+        <span class="s0">* If time, convert to datetime.time</span>
+        <span class="s0">* If Timestamp, convert to pandas.Timestamp</span>
+
+    <span class="s0">Returns</span>
+    <span class="s0">-------</span>
+    <span class="s0">ndarray[object] of type specified by box</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">Py_ssize_t i, n = len(arr)</span>
+        <span class="s0">ndarray[int64_t] trans</span>
+        <span class="s0">int64_t[:] deltas</span>
+        <span class="s0">intp_t[:] pos</span>
+        <span class="s0">npy_datetimestruct dts</span>
+        <span class="s0">object dt, new_tz</span>
+        <span class="s0">str typ</span>
+        <span class="s0">int64_t value, local_value, delta = NPY_NAT  # dummy for delta</span>
+        <span class="s0">ndarray[object] result = np.empty(n, dtype=object)</span>
+        <span class="s0">object (*func_create)(int64_t, npy_datetimestruct, tzinfo, object, bint)</span>
+        <span class="s0">bint use_utc = False, use_tzlocal = False, use_fixed = False</span>
+        <span class="s0">bint use_pytz = False</span>
+
+    <span class="s0">if box == &quot;date&quot;:</span>
+        <span class="s0">assert (tz is None), &quot;tz should be None when converting to date&quot;</span>
+
+        <span class="s0">func_create = create_date_from_ts</span>
+    <span class="s0">elif box == &quot;timestamp&quot;:</span>
+        <span class="s0">func_create = create_timestamp_from_ts</span>
+
+        <span class="s0">if isinstance(freq, str):</span>
+            <span class="s0">freq = to_offset(freq)</span>
+    <span class="s0">elif box == &quot;time&quot;:</span>
+        <span class="s0">func_create = create_time_from_ts</span>
+    <span class="s0">elif box == &quot;datetime&quot;:</span>
+        <span class="s0">func_create = create_datetime_from_ts</span>
+    <span class="s0">else:</span>
+        <span class="s0">raise ValueError(</span>
+            <span class="s0">&quot;box must be one of 'datetime', 'date', 'time' or 'timestamp'&quot;</span>
+        <span class="s0">)</span>
+
+    <span class="s0">if is_utc(tz) or tz is None:</span>
+        <span class="s0">use_utc = True</span>
+    <span class="s0">elif is_tzlocal(tz):</span>
+        <span class="s0">use_tzlocal = True</span>
+    <span class="s0">else:</span>
+        <span class="s0">trans, deltas, typ = get_dst_info(tz)</span>
+        <span class="s0">if typ not in [&quot;pytz&quot;, &quot;dateutil&quot;]:</span>
+            <span class="s0"># static/fixed; in this case we know that len(delta) == 1</span>
+            <span class="s0">use_fixed = True</span>
+            <span class="s0">delta = deltas[0]</span>
+        <span class="s0">else:</span>
+            <span class="s0">pos = trans.searchsorted(arr, side=&quot;right&quot;) - 1</span>
+            <span class="s0">use_pytz = typ == &quot;pytz&quot;</span>
+
+    <span class="s0">for i in range(n):</span>
+        <span class="s0">new_tz = tz</span>
+        <span class="s0">value = arr[i]</span>
+
+        <span class="s0">if value == NPY_NAT:</span>
+            <span class="s0">result[i] = &lt;object&gt;NaT</span>
+        <span class="s0">else:</span>
+            <span class="s0">if use_utc:</span>
+                <span class="s0">local_value = value</span>
+            <span class="s0">elif use_tzlocal:</span>
+                <span class="s0">local_value = tz_convert_utc_to_tzlocal(value, tz)</span>
+            <span class="s0">elif use_fixed:</span>
+                <span class="s0">local_value = value + delta</span>
+            <span class="s0">elif not use_pytz:</span>
+                <span class="s0"># i.e. dateutil</span>
+                <span class="s0"># no zone-name change for dateutil tzs - dst etc</span>
+                <span class="s0"># represented in single object.</span>
+                <span class="s0">local_value = value + deltas[pos[i]]</span>
+            <span class="s0">else:</span>
+                <span class="s0"># pytz</span>
+                <span class="s0"># find right representation of dst etc in pytz timezone</span>
+                <span class="s0">new_tz = tz._tzinfos[tz._transition_info[pos[i]]]</span>
+                <span class="s0">local_value = value + deltas[pos[i]]</span>
+
+            <span class="s0">dt64_to_dtstruct(local_value, &amp;dts)</span>
+            <span class="s0">result[i] = func_create(value, dts, new_tz, freq, fold)</span>
+
+    <span class="s0">return result</span>
+
+
+<span class="s0"># -------------------------------------------------------------------------</span>
+
+<span class="s0">cdef:</span>
+    <span class="s0">int RESO_NS = 0</span>
+    <span class="s0">int RESO_US = 1</span>
+    <span class="s0">int RESO_MS = 2</span>
+    <span class="s0">int RESO_SEC = 3</span>
+    <span class="s0">int RESO_MIN = 4</span>
+    <span class="s0">int RESO_HR = 5</span>
+    <span class="s0">int RESO_DAY = 6</span>
+    <span class="s0">int RESO_MTH = 7</span>
+    <span class="s0">int RESO_QTR = 8</span>
+    <span class="s0">int RESO_YR = 9</span>
+
+
+<span class="s0">cdef inline int _reso_stamp(npy_datetimestruct *dts):</span>
+    <span class="s0">if dts.us != 0:</span>
+        <span class="s0">if dts.us % 1000 == 0:</span>
+            <span class="s0">return RESO_MS</span>
+        <span class="s0">return RESO_US</span>
+    <span class="s0">elif dts.sec != 0:</span>
+        <span class="s0">return RESO_SEC</span>
+    <span class="s0">elif dts.min != 0:</span>
+        <span class="s0">return RESO_MIN</span>
+    <span class="s0">elif dts.hour != 0:</span>
+        <span class="s0">return RESO_HR</span>
+    <span class="s0">return RESO_DAY</span>
+
+
+<span class="s0">def get_resolution(const int64_t[:] stamps, tzinfo tz=None) -&gt; Resolution:</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">Py_ssize_t i, n = len(stamps)</span>
+        <span class="s0">npy_datetimestruct dts</span>
+        <span class="s0">int reso = RESO_DAY, curr_reso</span>
+        <span class="s0">ndarray[int64_t] trans</span>
+        <span class="s0">int64_t[:] deltas</span>
+        <span class="s0">intp_t[:] pos</span>
+        <span class="s0">int64_t local_val, delta = NPY_NAT</span>
+        <span class="s0">bint use_utc = False, use_tzlocal = False, use_fixed = False</span>
+
+    <span class="s0">if is_utc(tz) or tz is None:</span>
+        <span class="s0">use_utc = True</span>
+    <span class="s0">elif is_tzlocal(tz):</span>
+        <span class="s0">use_tzlocal = True</span>
+    <span class="s0">else:</span>
+        <span class="s0">trans, deltas, typ = get_dst_info(tz)</span>
+        <span class="s0">if typ not in [&quot;pytz&quot;, &quot;dateutil&quot;]:</span>
+            <span class="s0"># static/fixed; in this case we know that len(delta) == 1</span>
+            <span class="s0">use_fixed = True</span>
+            <span class="s0">delta = deltas[0]</span>
+        <span class="s0">else:</span>
+            <span class="s0">pos = trans.searchsorted(stamps, side=&quot;right&quot;) - 1</span>
+
+    <span class="s0">for i in range(n):</span>
+        <span class="s0">if stamps[i] == NPY_NAT:</span>
+            <span class="s0">continue</span>
+
+        <span class="s0">if use_utc:</span>
+            <span class="s0">local_val = stamps[i]</span>
+        <span class="s0">elif use_tzlocal:</span>
+            <span class="s0">local_val = tz_convert_utc_to_tzlocal(stamps[i], tz)</span>
+        <span class="s0">elif use_fixed:</span>
+            <span class="s0">local_val = stamps[i] + delta</span>
+        <span class="s0">else:</span>
+            <span class="s0">local_val = stamps[i] + deltas[pos[i]]</span>
+
+        <span class="s0">dt64_to_dtstruct(local_val, &amp;dts)</span>
+        <span class="s0">curr_reso = _reso_stamp(&amp;dts)</span>
+        <span class="s0">if curr_reso &lt; reso:</span>
+            <span class="s0">reso = curr_reso</span>
+
+    <span class="s0">return Resolution(reso)</span>
+
+
+<span class="s0"># -------------------------------------------------------------------------</span>
+
+<span class="s0">@cython.wraparound(False)</span>
+<span class="s0">@cython.boundscheck(False)</span>
+<span class="s0">cpdef ndarray[int64_t] normalize_i8_timestamps(const int64_t[:] stamps, tzinfo tz):</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Normalize each of the (nanosecond) timezone aware timestamps in the given</span>
+    <span class="s0">array by rounding down to the beginning of the day (i.e. midnight).</span>
+    <span class="s0">This is midnight for timezone, `tz`.</span>
+
+    <span class="s0">Parameters</span>
+    <span class="s0">----------</span>
+    <span class="s0">stamps : int64 ndarray</span>
+    <span class="s0">tz : tzinfo or None</span>
+
+    <span class="s0">Returns</span>
+    <span class="s0">-------</span>
+    <span class="s0">result : int64 ndarray of converted of normalized nanosecond timestamps</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">Py_ssize_t i, n = len(stamps)</span>
+        <span class="s0">int64_t[:] result = np.empty(n, dtype=np.int64)</span>
+        <span class="s0">ndarray[int64_t] trans</span>
+        <span class="s0">int64_t[:] deltas</span>
+        <span class="s0">str typ</span>
+        <span class="s0">Py_ssize_t[:] pos</span>
+        <span class="s0">int64_t local_val, delta = NPY_NAT</span>
+        <span class="s0">bint use_utc = False, use_tzlocal = False, use_fixed = False</span>
+
+    <span class="s0">if is_utc(tz) or tz is None:</span>
+        <span class="s0">use_utc = True</span>
+    <span class="s0">elif is_tzlocal(tz):</span>
+        <span class="s0">use_tzlocal = True</span>
+    <span class="s0">else:</span>
+        <span class="s0">trans, deltas, typ = get_dst_info(tz)</span>
+        <span class="s0">if typ not in [&quot;pytz&quot;, &quot;dateutil&quot;]:</span>
+            <span class="s0"># static/fixed; in this case we know that len(delta) == 1</span>
+            <span class="s0">use_fixed = True</span>
+            <span class="s0">delta = deltas[0]</span>
+        <span class="s0">else:</span>
+            <span class="s0">pos = trans.searchsorted(stamps, side=&quot;right&quot;) - 1</span>
+
+    <span class="s0">for i in range(n):</span>
+        <span class="s0"># TODO: reinstate nogil for use_utc case?</span>
+        <span class="s0">if stamps[i] == NPY_NAT:</span>
+            <span class="s0">result[i] = NPY_NAT</span>
+            <span class="s0">continue</span>
+
+        <span class="s0">if use_utc:</span>
+            <span class="s0">local_val = stamps[i]</span>
+        <span class="s0">elif use_tzlocal:</span>
+            <span class="s0">local_val = tz_convert_utc_to_tzlocal(stamps[i], tz)</span>
+        <span class="s0">elif use_fixed:</span>
+            <span class="s0">local_val = stamps[i] + delta</span>
+        <span class="s0">else:</span>
+            <span class="s0">local_val = stamps[i] + deltas[pos[i]]</span>
+
+        <span class="s0">result[i] = normalize_i8_stamp(local_val)</span>
+
+    <span class="s0">return result.base  # `.base` to access underlying ndarray</span>
+
+
+<span class="s0">@cython.wraparound(False)</span>
+<span class="s0">@cython.boundscheck(False)</span>
+<span class="s0">def is_date_array_normalized(const int64_t[:] stamps, tzinfo tz=None) -&gt; bool:</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Check if all of the given (nanosecond) timestamps are normalized to</span>
+    <span class="s0">midnight, i.e. hour == minute == second == 0.  If the optional timezone</span>
+    <span class="s0">`tz` is not None, then this is midnight for this timezone.</span>
+
+    <span class="s0">Parameters</span>
+    <span class="s0">----------</span>
+    <span class="s0">stamps : int64 ndarray</span>
+    <span class="s0">tz : tzinfo or None</span>
+
+    <span class="s0">Returns</span>
+    <span class="s0">-------</span>
+    <span class="s0">is_normalized : bool True if all stamps are normalized</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">Py_ssize_t i, n = len(stamps)</span>
+        <span class="s0">ndarray[int64_t] trans</span>
+        <span class="s0">int64_t[:] deltas</span>
+        <span class="s0">intp_t[:] pos</span>
+        <span class="s0">int64_t local_val, delta = NPY_NAT</span>
+        <span class="s0">str typ</span>
+        <span class="s0">int64_t day_nanos = 24 * 3600 * 1_000_000_000</span>
+        <span class="s0">bint use_utc = False, use_tzlocal = False, use_fixed = False</span>
+
+    <span class="s0">if is_utc(tz) or tz is None:</span>
+        <span class="s0">use_utc = True</span>
+    <span class="s0">elif is_tzlocal(tz):</span>
+        <span class="s0">use_tzlocal = True</span>
+    <span class="s0">else:</span>
+        <span class="s0">trans, deltas, typ = get_dst_info(tz)</span>
+        <span class="s0">if typ not in [&quot;pytz&quot;, &quot;dateutil&quot;]:</span>
+            <span class="s0"># static/fixed; in this case we know that len(delta) == 1</span>
+            <span class="s0">use_fixed = True</span>
+            <span class="s0">delta = deltas[0]</span>
+        <span class="s0">else:</span>
+            <span class="s0">pos = trans.searchsorted(stamps, side=&quot;right&quot;) - 1</span>
+
+    <span class="s0">for i in range(n):</span>
+        <span class="s0">if use_utc:</span>
+            <span class="s0">local_val = stamps[i]</span>
+        <span class="s0">elif use_tzlocal:</span>
+            <span class="s0">local_val = tz_convert_utc_to_tzlocal(stamps[i], tz)</span>
+        <span class="s0">elif use_fixed:</span>
+            <span class="s0">local_val = stamps[i] + delta</span>
+        <span class="s0">else:</span>
+            <span class="s0">local_val = stamps[i] + deltas[pos[i]]</span>
+
+        <span class="s0">if local_val % day_nanos != 0:</span>
+            <span class="s0">return False</span>
+
+    <span class="s0">return True</span>
+
+
+<span class="s0"># -------------------------------------------------------------------------</span>
+
+
+<span class="s0">@cython.wraparound(False)</span>
+<span class="s0">@cython.boundscheck(False)</span>
+<span class="s0">def dt64arr_to_periodarr(const int64_t[:] stamps, int freq, tzinfo tz):</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">Py_ssize_t n = len(stamps)</span>
+        <span class="s0">int64_t[:] result = np.empty(n, dtype=np.int64)</span>
+        <span class="s0">ndarray[int64_t] trans</span>
+        <span class="s0">int64_t[:] deltas</span>
+        <span class="s0">Py_ssize_t[:] pos</span>
+        <span class="s0">npy_datetimestruct dts</span>
+        <span class="s0">int64_t local_val, delta = NPY_NAT</span>
+        <span class="s0">bint use_utc = False, use_tzlocal = False, use_fixed = False</span>
+
+    <span class="s0">if is_utc(tz) or tz is None:</span>
+        <span class="s0">use_utc = True</span>
+    <span class="s0">elif is_tzlocal(tz):</span>
+        <span class="s0">use_tzlocal = True</span>
+    <span class="s0">else:</span>
+        <span class="s0">trans, deltas, typ = get_dst_info(tz)</span>
+        <span class="s0">if typ not in [&quot;pytz&quot;, &quot;dateutil&quot;]:</span>
+            <span class="s0"># static/fixed; in this case we know that len(delta) == 1</span>
+            <span class="s0">use_fixed = True</span>
+            <span class="s0">delta = deltas[0]</span>
+        <span class="s0">else:</span>
+            <span class="s0">pos = trans.searchsorted(stamps, side=&quot;right&quot;) - 1</span>
+
+    <span class="s0">for i in range(n):</span>
+        <span class="s0"># TODO: reinstate nogil for use_utc case?</span>
+        <span class="s0">if stamps[i] == NPY_NAT:</span>
+            <span class="s0">result[i] = NPY_NAT</span>
+            <span class="s0">continue</span>
+
+        <span class="s0">if use_utc:</span>
+            <span class="s0">local_val = stamps[i]</span>
+        <span class="s0">elif use_tzlocal:</span>
+            <span class="s0">local_val = tz_convert_utc_to_tzlocal(stamps[i], tz)</span>
+        <span class="s0">elif use_fixed:</span>
+            <span class="s0">local_val = stamps[i] + delta</span>
+        <span class="s0">else:</span>
+            <span class="s0">local_val = stamps[i] + deltas[pos[i]]</span>
+
+        <span class="s0">dt64_to_dtstruct(local_val, &amp;dts)</span>
+        <span class="s0">result[i] = get_period_ordinal(&amp;dts, freq)</span>
+
+    <span class="s0">return result.base  # .base to get underlying ndarray</span>
+</pre>
+</body>
+</html>

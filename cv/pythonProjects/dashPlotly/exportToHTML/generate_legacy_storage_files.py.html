@@ -1,0 +1,367 @@
+<html>
+<head>
+<title>generate_legacy_storage_files.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #808080;}
+.s4 { color: #6897bb;}
+.s5 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+generate_legacy_storage_files.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+self-contained to write legacy storage pickle files 
+ 
+To use this script. Create an environment where you want 
+generate pickles, say its for 0.20.3, with your pandas clone 
+in ~/pandas 
+ 
+. activate pandas_0.20.3 
+cd ~/pandas/pandas 
+ 
+$ python -m tests.io.generate_legacy_storage_files \ 
+    tests/io/data/legacy_pickle/0.20.3/ pickle 
+ 
+This script generates a storage file for the current arch, system, 
+and python version 
+  pandas version: 0.20.3 
+  output dir    : pandas/pandas/tests/io/data/legacy_pickle/0.20.3/ 
+  storage format: pickle 
+created pickle file: 0.20.3_x86_64_darwin_3.5.2.pickle 
+ 
+The idea here is you are using the *current* version of the 
+generate_legacy_storage_files with an *older* version of pandas to 
+generate a pickle file. We will then check this file into a current 
+branch, and test using test_pickle.py. This will load the *older* 
+pickles and test versus the current data that is generated 
+(with main). These are then compared. 
+ 
+If we have cases where we changed the signature (e.g. we renamed 
+offset -&gt; freq in Timestamp). Then we have to conditionally execute 
+in the generate_legacy_storage_files.py to make it 
+run under the older AND the newer version. 
+ 
+&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">datetime </span><span class="s2">import </span><span class="s1">timedelta</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">pickle</span>
+<span class="s2">import </span><span class="s1">platform </span><span class="s2">as </span><span class="s1">pl</span>
+<span class="s2">import </span><span class="s1">sys</span>
+
+<span class="s2">import </span><span class="s1">numpy </span><span class="s2">as </span><span class="s1">np</span>
+
+<span class="s2">import </span><span class="s1">pandas</span>
+<span class="s2">from </span><span class="s1">pandas </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">Categorical</span><span class="s2">,</span>
+    <span class="s1">DataFrame</span><span class="s2">,</span>
+    <span class="s1">Index</span><span class="s2">,</span>
+    <span class="s1">MultiIndex</span><span class="s2">,</span>
+    <span class="s1">NaT</span><span class="s2">,</span>
+    <span class="s1">Period</span><span class="s2">,</span>
+    <span class="s1">RangeIndex</span><span class="s2">,</span>
+    <span class="s1">Series</span><span class="s2">,</span>
+    <span class="s1">Timestamp</span><span class="s2">,</span>
+    <span class="s1">bdate_range</span><span class="s2">,</span>
+    <span class="s1">date_range</span><span class="s2">,</span>
+    <span class="s1">interval_range</span><span class="s2">,</span>
+    <span class="s1">period_range</span><span class="s2">,</span>
+    <span class="s1">timedelta_range</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas.arrays </span><span class="s2">import </span><span class="s1">SparseArray</span>
+
+<span class="s2">from </span><span class="s1">pandas.tseries.offsets </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">FY5253</span><span class="s2">,</span>
+    <span class="s1">BusinessDay</span><span class="s2">,</span>
+    <span class="s1">BusinessHour</span><span class="s2">,</span>
+    <span class="s1">CustomBusinessDay</span><span class="s2">,</span>
+    <span class="s1">DateOffset</span><span class="s2">,</span>
+    <span class="s1">Day</span><span class="s2">,</span>
+    <span class="s1">Easter</span><span class="s2">,</span>
+    <span class="s1">Hour</span><span class="s2">,</span>
+    <span class="s1">LastWeekOfMonth</span><span class="s2">,</span>
+    <span class="s1">Minute</span><span class="s2">,</span>
+    <span class="s1">MonthBegin</span><span class="s2">,</span>
+    <span class="s1">MonthEnd</span><span class="s2">,</span>
+    <span class="s1">QuarterBegin</span><span class="s2">,</span>
+    <span class="s1">QuarterEnd</span><span class="s2">,</span>
+    <span class="s1">SemiMonthBegin</span><span class="s2">,</span>
+    <span class="s1">SemiMonthEnd</span><span class="s2">,</span>
+    <span class="s1">Week</span><span class="s2">,</span>
+    <span class="s1">WeekOfMonth</span><span class="s2">,</span>
+    <span class="s1">YearBegin</span><span class="s2">,</span>
+    <span class="s1">YearEnd</span><span class="s2">,</span>
+<span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">_create_sp_series():</span>
+    <span class="s1">nan = np.nan</span>
+
+    <span class="s3"># nan-based</span>
+    <span class="s1">arr = np.arange(</span><span class="s4">15</span><span class="s2">, </span><span class="s1">dtype=np.float64)</span>
+    <span class="s1">arr[</span><span class="s4">7</span><span class="s1">:</span><span class="s4">12</span><span class="s1">] = nan</span>
+    <span class="s1">arr[-</span><span class="s4">1</span><span class="s1">:] = nan</span>
+
+    <span class="s1">bseries = Series(SparseArray(arr</span><span class="s2">, </span><span class="s1">kind=</span><span class="s5">&quot;block&quot;</span><span class="s1">))</span>
+    <span class="s1">bseries.name = </span><span class="s5">&quot;bseries&quot;</span>
+    <span class="s2">return </span><span class="s1">bseries</span>
+
+
+<span class="s2">def </span><span class="s1">_create_sp_tsseries():</span>
+    <span class="s1">nan = np.nan</span>
+
+    <span class="s3"># nan-based</span>
+    <span class="s1">arr = np.arange(</span><span class="s4">15</span><span class="s2">, </span><span class="s1">dtype=np.float64)</span>
+    <span class="s1">arr[</span><span class="s4">7</span><span class="s1">:</span><span class="s4">12</span><span class="s1">] = nan</span>
+    <span class="s1">arr[-</span><span class="s4">1</span><span class="s1">:] = nan</span>
+
+    <span class="s1">date_index = bdate_range(</span><span class="s5">&quot;1/1/2011&quot;</span><span class="s2">, </span><span class="s1">periods=len(arr))</span>
+    <span class="s1">bseries = Series(SparseArray(arr</span><span class="s2">, </span><span class="s1">kind=</span><span class="s5">&quot;block&quot;</span><span class="s1">)</span><span class="s2">, </span><span class="s1">index=date_index)</span>
+    <span class="s1">bseries.name = </span><span class="s5">&quot;btsseries&quot;</span>
+    <span class="s2">return </span><span class="s1">bseries</span>
+
+
+<span class="s2">def </span><span class="s1">_create_sp_frame():</span>
+    <span class="s1">nan = np.nan</span>
+
+    <span class="s1">data = {</span>
+        <span class="s5">&quot;A&quot;</span><span class="s1">: [nan</span><span class="s2">, </span><span class="s1">nan</span><span class="s2">, </span><span class="s1">nan</span><span class="s2">, </span><span class="s4">0</span><span class="s2">, </span><span class="s4">1</span><span class="s2">, </span><span class="s4">2</span><span class="s2">, </span><span class="s4">3</span><span class="s2">, </span><span class="s4">4</span><span class="s2">, </span><span class="s4">5</span><span class="s2">, </span><span class="s4">6</span><span class="s1">]</span><span class="s2">,</span>
+        <span class="s5">&quot;B&quot;</span><span class="s1">: [</span><span class="s4">0</span><span class="s2">, </span><span class="s4">1</span><span class="s2">, </span><span class="s4">2</span><span class="s2">, </span><span class="s1">nan</span><span class="s2">, </span><span class="s1">nan</span><span class="s2">, </span><span class="s1">nan</span><span class="s2">, </span><span class="s4">3</span><span class="s2">, </span><span class="s4">4</span><span class="s2">, </span><span class="s4">5</span><span class="s2">, </span><span class="s4">6</span><span class="s1">]</span><span class="s2">,</span>
+        <span class="s5">&quot;C&quot;</span><span class="s1">: np.arange(</span><span class="s4">10</span><span class="s1">).astype(np.int64)</span><span class="s2">,</span>
+        <span class="s5">&quot;D&quot;</span><span class="s1">: [</span><span class="s4">0</span><span class="s2">, </span><span class="s4">1</span><span class="s2">, </span><span class="s4">2</span><span class="s2">, </span><span class="s4">3</span><span class="s2">, </span><span class="s4">4</span><span class="s2">, </span><span class="s4">5</span><span class="s2">, </span><span class="s1">nan</span><span class="s2">, </span><span class="s1">nan</span><span class="s2">, </span><span class="s1">nan</span><span class="s2">, </span><span class="s1">nan]</span><span class="s2">,</span>
+    <span class="s1">}</span>
+
+    <span class="s1">dates = bdate_range(</span><span class="s5">&quot;1/1/2011&quot;</span><span class="s2">, </span><span class="s1">periods=</span><span class="s4">10</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">DataFrame(data</span><span class="s2">, </span><span class="s1">index=dates).apply(SparseArray)</span>
+
+
+<span class="s2">def </span><span class="s1">create_data():</span>
+    <span class="s0">&quot;&quot;&quot;create the pickle data&quot;&quot;&quot;</span>
+    <span class="s1">data = {</span>
+        <span class="s5">&quot;A&quot;</span><span class="s1">: [</span><span class="s4">0.0</span><span class="s2">, </span><span class="s4">1.0</span><span class="s2">, </span><span class="s4">2.0</span><span class="s2">, </span><span class="s4">3.0</span><span class="s2">, </span><span class="s1">np.nan]</span><span class="s2">,</span>
+        <span class="s5">&quot;B&quot;</span><span class="s1">: [</span><span class="s4">0</span><span class="s2">, </span><span class="s4">1</span><span class="s2">, </span><span class="s4">0</span><span class="s2">, </span><span class="s4">1</span><span class="s2">, </span><span class="s4">0</span><span class="s1">]</span><span class="s2">,</span>
+        <span class="s5">&quot;C&quot;</span><span class="s1">: [</span><span class="s5">&quot;foo1&quot;</span><span class="s2">, </span><span class="s5">&quot;foo2&quot;</span><span class="s2">, </span><span class="s5">&quot;foo3&quot;</span><span class="s2">, </span><span class="s5">&quot;foo4&quot;</span><span class="s2">, </span><span class="s5">&quot;foo5&quot;</span><span class="s1">]</span><span class="s2">,</span>
+        <span class="s5">&quot;D&quot;</span><span class="s1">: date_range(</span><span class="s5">&quot;1/1/2009&quot;</span><span class="s2">, </span><span class="s1">periods=</span><span class="s4">5</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;E&quot;</span><span class="s1">: [</span><span class="s4">0.0</span><span class="s2">, </span><span class="s4">1</span><span class="s2">, </span><span class="s1">Timestamp(</span><span class="s5">&quot;20100101&quot;</span><span class="s1">)</span><span class="s2">, </span><span class="s5">&quot;foo&quot;</span><span class="s2">, </span><span class="s4">2.0</span><span class="s1">]</span><span class="s2">,</span>
+    <span class="s1">}</span>
+
+    <span class="s1">scalars = {</span><span class="s5">&quot;timestamp&quot;</span><span class="s1">: Timestamp(</span><span class="s5">&quot;20130101&quot;</span><span class="s1">)</span><span class="s2">, </span><span class="s5">&quot;period&quot;</span><span class="s1">: Period(</span><span class="s5">&quot;2012&quot;</span><span class="s2">, </span><span class="s5">&quot;M&quot;</span><span class="s1">)}</span>
+
+    <span class="s1">index = {</span>
+        <span class="s5">&quot;int&quot;</span><span class="s1">: Index(np.arange(</span><span class="s4">10</span><span class="s1">))</span><span class="s2">,</span>
+        <span class="s5">&quot;date&quot;</span><span class="s1">: date_range(</span><span class="s5">&quot;20130101&quot;</span><span class="s2">, </span><span class="s1">periods=</span><span class="s4">10</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;period&quot;</span><span class="s1">: period_range(</span><span class="s5">&quot;2013-01-01&quot;</span><span class="s2">, </span><span class="s1">freq=</span><span class="s5">&quot;M&quot;</span><span class="s2">, </span><span class="s1">periods=</span><span class="s4">10</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;float&quot;</span><span class="s1">: Index(np.arange(</span><span class="s4">10</span><span class="s2">, </span><span class="s1">dtype=np.float64))</span><span class="s2">,</span>
+        <span class="s5">&quot;uint&quot;</span><span class="s1">: Index(np.arange(</span><span class="s4">10</span><span class="s2">, </span><span class="s1">dtype=np.uint64))</span><span class="s2">,</span>
+        <span class="s5">&quot;timedelta&quot;</span><span class="s1">: timedelta_range(</span><span class="s5">&quot;00:00:00&quot;</span><span class="s2">, </span><span class="s1">freq=</span><span class="s5">&quot;30T&quot;</span><span class="s2">, </span><span class="s1">periods=</span><span class="s4">10</span><span class="s1">)</span><span class="s2">,</span>
+    <span class="s1">}</span>
+
+    <span class="s1">index[</span><span class="s5">&quot;range&quot;</span><span class="s1">] = RangeIndex(</span><span class="s4">10</span><span class="s1">)</span>
+
+    <span class="s1">index[</span><span class="s5">&quot;interval&quot;</span><span class="s1">] = interval_range(</span><span class="s4">0</span><span class="s2">, </span><span class="s1">periods=</span><span class="s4">10</span><span class="s1">)</span>
+
+    <span class="s1">mi = {</span>
+        <span class="s5">&quot;reg2&quot;</span><span class="s1">: MultiIndex.from_tuples(</span>
+            <span class="s1">tuple(</span>
+                <span class="s1">zip(</span>
+                    <span class="s1">*[</span>
+                        <span class="s1">[</span><span class="s5">&quot;bar&quot;</span><span class="s2">, </span><span class="s5">&quot;bar&quot;</span><span class="s2">, </span><span class="s5">&quot;baz&quot;</span><span class="s2">, </span><span class="s5">&quot;baz&quot;</span><span class="s2">, </span><span class="s5">&quot;foo&quot;</span><span class="s2">, </span><span class="s5">&quot;foo&quot;</span><span class="s2">, </span><span class="s5">&quot;qux&quot;</span><span class="s2">, </span><span class="s5">&quot;qux&quot;</span><span class="s1">]</span><span class="s2">,</span>
+                        <span class="s1">[</span><span class="s5">&quot;one&quot;</span><span class="s2">, </span><span class="s5">&quot;two&quot;</span><span class="s2">, </span><span class="s5">&quot;one&quot;</span><span class="s2">, </span><span class="s5">&quot;two&quot;</span><span class="s2">, </span><span class="s5">&quot;one&quot;</span><span class="s2">, </span><span class="s5">&quot;two&quot;</span><span class="s2">, </span><span class="s5">&quot;one&quot;</span><span class="s2">, </span><span class="s5">&quot;two&quot;</span><span class="s1">]</span><span class="s2">,</span>
+                    <span class="s1">]</span>
+                <span class="s1">)</span>
+            <span class="s1">)</span><span class="s2">,</span>
+            <span class="s1">names=[</span><span class="s5">&quot;first&quot;</span><span class="s2">, </span><span class="s5">&quot;second&quot;</span><span class="s1">]</span><span class="s2">,</span>
+        <span class="s1">)</span>
+    <span class="s1">}</span>
+
+    <span class="s1">series = {</span>
+        <span class="s5">&quot;float&quot;</span><span class="s1">: Series(data[</span><span class="s5">&quot;A&quot;</span><span class="s1">])</span><span class="s2">,</span>
+        <span class="s5">&quot;int&quot;</span><span class="s1">: Series(data[</span><span class="s5">&quot;B&quot;</span><span class="s1">])</span><span class="s2">,</span>
+        <span class="s5">&quot;mixed&quot;</span><span class="s1">: Series(data[</span><span class="s5">&quot;E&quot;</span><span class="s1">])</span><span class="s2">,</span>
+        <span class="s5">&quot;ts&quot;</span><span class="s1">: Series(</span>
+            <span class="s1">np.arange(</span><span class="s4">10</span><span class="s1">).astype(np.int64)</span><span class="s2">, </span><span class="s1">index=date_range(</span><span class="s5">&quot;20130101&quot;</span><span class="s2">, </span><span class="s1">periods=</span><span class="s4">10</span><span class="s1">)</span>
+        <span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;mi&quot;</span><span class="s1">: Series(</span>
+            <span class="s1">np.arange(</span><span class="s4">5</span><span class="s1">).astype(np.float64)</span><span class="s2">,</span>
+            <span class="s1">index=MultiIndex.from_tuples(</span>
+                <span class="s1">tuple(zip(*[[</span><span class="s4">1</span><span class="s2">, </span><span class="s4">1</span><span class="s2">, </span><span class="s4">2</span><span class="s2">, </span><span class="s4">2</span><span class="s2">, </span><span class="s4">2</span><span class="s1">]</span><span class="s2">, </span><span class="s1">[</span><span class="s4">3</span><span class="s2">, </span><span class="s4">4</span><span class="s2">, </span><span class="s4">3</span><span class="s2">, </span><span class="s4">4</span><span class="s2">, </span><span class="s4">5</span><span class="s1">]]))</span><span class="s2">, </span><span class="s1">names=[</span><span class="s5">&quot;one&quot;</span><span class="s2">, </span><span class="s5">&quot;two&quot;</span><span class="s1">]</span>
+            <span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;dup&quot;</span><span class="s1">: Series(np.arange(</span><span class="s4">5</span><span class="s1">).astype(np.float64)</span><span class="s2">, </span><span class="s1">index=[</span><span class="s5">&quot;A&quot;</span><span class="s2">, </span><span class="s5">&quot;B&quot;</span><span class="s2">, </span><span class="s5">&quot;C&quot;</span><span class="s2">, </span><span class="s5">&quot;D&quot;</span><span class="s2">, </span><span class="s5">&quot;A&quot;</span><span class="s1">])</span><span class="s2">,</span>
+        <span class="s5">&quot;cat&quot;</span><span class="s1">: Series(Categorical([</span><span class="s5">&quot;foo&quot;</span><span class="s2">, </span><span class="s5">&quot;bar&quot;</span><span class="s2">, </span><span class="s5">&quot;baz&quot;</span><span class="s1">]))</span><span class="s2">,</span>
+        <span class="s5">&quot;dt&quot;</span><span class="s1">: Series(date_range(</span><span class="s5">&quot;20130101&quot;</span><span class="s2">, </span><span class="s1">periods=</span><span class="s4">5</span><span class="s1">))</span><span class="s2">,</span>
+        <span class="s5">&quot;dt_tz&quot;</span><span class="s1">: Series(date_range(</span><span class="s5">&quot;20130101&quot;</span><span class="s2">, </span><span class="s1">periods=</span><span class="s4">5</span><span class="s2">, </span><span class="s1">tz=</span><span class="s5">&quot;US/Eastern&quot;</span><span class="s1">))</span><span class="s2">,</span>
+        <span class="s5">&quot;period&quot;</span><span class="s1">: Series([Period(</span><span class="s5">&quot;2000Q1&quot;</span><span class="s1">)] * </span><span class="s4">5</span><span class="s1">)</span><span class="s2">,</span>
+    <span class="s1">}</span>
+
+    <span class="s1">mixed_dup_df = DataFrame(data)</span>
+    <span class="s1">mixed_dup_df.columns = list(</span><span class="s5">&quot;ABCDA&quot;</span><span class="s1">)</span>
+    <span class="s1">frame = {</span>
+        <span class="s5">&quot;float&quot;</span><span class="s1">: DataFrame({</span><span class="s5">&quot;A&quot;</span><span class="s1">: series[</span><span class="s5">&quot;float&quot;</span><span class="s1">]</span><span class="s2">, </span><span class="s5">&quot;B&quot;</span><span class="s1">: series[</span><span class="s5">&quot;float&quot;</span><span class="s1">] + </span><span class="s4">1</span><span class="s1">})</span><span class="s2">,</span>
+        <span class="s5">&quot;int&quot;</span><span class="s1">: DataFrame({</span><span class="s5">&quot;A&quot;</span><span class="s1">: series[</span><span class="s5">&quot;int&quot;</span><span class="s1">]</span><span class="s2">, </span><span class="s5">&quot;B&quot;</span><span class="s1">: series[</span><span class="s5">&quot;int&quot;</span><span class="s1">] + </span><span class="s4">1</span><span class="s1">})</span><span class="s2">,</span>
+        <span class="s5">&quot;mixed&quot;</span><span class="s1">: DataFrame({k: data[k] </span><span class="s2">for </span><span class="s1">k </span><span class="s2">in </span><span class="s1">[</span><span class="s5">&quot;A&quot;</span><span class="s2">, </span><span class="s5">&quot;B&quot;</span><span class="s2">, </span><span class="s5">&quot;C&quot;</span><span class="s2">, </span><span class="s5">&quot;D&quot;</span><span class="s1">]})</span><span class="s2">,</span>
+        <span class="s5">&quot;mi&quot;</span><span class="s1">: DataFrame(</span>
+            <span class="s1">{</span><span class="s5">&quot;A&quot;</span><span class="s1">: np.arange(</span><span class="s4">5</span><span class="s1">).astype(np.float64)</span><span class="s2">, </span><span class="s5">&quot;B&quot;</span><span class="s1">: np.arange(</span><span class="s4">5</span><span class="s1">).astype(np.int64)}</span><span class="s2">,</span>
+            <span class="s1">index=MultiIndex.from_tuples(</span>
+                <span class="s1">tuple(</span>
+                    <span class="s1">zip(</span>
+                        <span class="s1">*[</span>
+                            <span class="s1">[</span><span class="s5">&quot;bar&quot;</span><span class="s2">, </span><span class="s5">&quot;bar&quot;</span><span class="s2">, </span><span class="s5">&quot;baz&quot;</span><span class="s2">, </span><span class="s5">&quot;baz&quot;</span><span class="s2">, </span><span class="s5">&quot;baz&quot;</span><span class="s1">]</span><span class="s2">,</span>
+                            <span class="s1">[</span><span class="s5">&quot;one&quot;</span><span class="s2">, </span><span class="s5">&quot;two&quot;</span><span class="s2">, </span><span class="s5">&quot;one&quot;</span><span class="s2">, </span><span class="s5">&quot;two&quot;</span><span class="s2">, </span><span class="s5">&quot;three&quot;</span><span class="s1">]</span><span class="s2">,</span>
+                        <span class="s1">]</span>
+                    <span class="s1">)</span>
+                <span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">names=[</span><span class="s5">&quot;first&quot;</span><span class="s2">, </span><span class="s5">&quot;second&quot;</span><span class="s1">]</span><span class="s2">,</span>
+            <span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;dup&quot;</span><span class="s1">: DataFrame(</span>
+            <span class="s1">np.arange(</span><span class="s4">15</span><span class="s1">).reshape(</span><span class="s4">5</span><span class="s2">, </span><span class="s4">3</span><span class="s1">).astype(np.float64)</span><span class="s2">, </span><span class="s1">columns=[</span><span class="s5">&quot;A&quot;</span><span class="s2">, </span><span class="s5">&quot;B&quot;</span><span class="s2">, </span><span class="s5">&quot;A&quot;</span><span class="s1">]</span>
+        <span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;cat_onecol&quot;</span><span class="s1">: DataFrame({</span><span class="s5">&quot;A&quot;</span><span class="s1">: Categorical([</span><span class="s5">&quot;foo&quot;</span><span class="s2">, </span><span class="s5">&quot;bar&quot;</span><span class="s1">])})</span><span class="s2">,</span>
+        <span class="s5">&quot;cat_and_float&quot;</span><span class="s1">: DataFrame(</span>
+            <span class="s1">{</span>
+                <span class="s5">&quot;A&quot;</span><span class="s1">: Categorical([</span><span class="s5">&quot;foo&quot;</span><span class="s2">, </span><span class="s5">&quot;bar&quot;</span><span class="s2">, </span><span class="s5">&quot;baz&quot;</span><span class="s1">])</span><span class="s2">,</span>
+                <span class="s5">&quot;B&quot;</span><span class="s1">: np.arange(</span><span class="s4">3</span><span class="s1">).astype(np.int64)</span><span class="s2">,</span>
+            <span class="s1">}</span>
+        <span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;mixed_dup&quot;</span><span class="s1">: mixed_dup_df</span><span class="s2">,</span>
+        <span class="s5">&quot;dt_mixed_tzs&quot;</span><span class="s1">: DataFrame(</span>
+            <span class="s1">{</span>
+                <span class="s5">&quot;A&quot;</span><span class="s1">: Timestamp(</span><span class="s5">&quot;20130102&quot;</span><span class="s2">, </span><span class="s1">tz=</span><span class="s5">&quot;US/Eastern&quot;</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s5">&quot;B&quot;</span><span class="s1">: Timestamp(</span><span class="s5">&quot;20130603&quot;</span><span class="s2">, </span><span class="s1">tz=</span><span class="s5">&quot;CET&quot;</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s1">}</span><span class="s2">,</span>
+            <span class="s1">index=range(</span><span class="s4">5</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;dt_mixed2_tzs&quot;</span><span class="s1">: DataFrame(</span>
+            <span class="s1">{</span>
+                <span class="s5">&quot;A&quot;</span><span class="s1">: Timestamp(</span><span class="s5">&quot;20130102&quot;</span><span class="s2">, </span><span class="s1">tz=</span><span class="s5">&quot;US/Eastern&quot;</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s5">&quot;B&quot;</span><span class="s1">: Timestamp(</span><span class="s5">&quot;20130603&quot;</span><span class="s2">, </span><span class="s1">tz=</span><span class="s5">&quot;CET&quot;</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s5">&quot;C&quot;</span><span class="s1">: Timestamp(</span><span class="s5">&quot;20130603&quot;</span><span class="s2">, </span><span class="s1">tz=</span><span class="s5">&quot;UTC&quot;</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s1">}</span><span class="s2">,</span>
+            <span class="s1">index=range(</span><span class="s4">5</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">)</span><span class="s2">,</span>
+    <span class="s1">}</span>
+
+    <span class="s1">cat = {</span>
+        <span class="s5">&quot;int8&quot;</span><span class="s1">: Categorical(list(</span><span class="s5">&quot;abcdefg&quot;</span><span class="s1">))</span><span class="s2">,</span>
+        <span class="s5">&quot;int16&quot;</span><span class="s1">: Categorical(np.arange(</span><span class="s4">1000</span><span class="s1">))</span><span class="s2">,</span>
+        <span class="s5">&quot;int32&quot;</span><span class="s1">: Categorical(np.arange(</span><span class="s4">10000</span><span class="s1">))</span><span class="s2">,</span>
+    <span class="s1">}</span>
+
+    <span class="s1">timestamp = {</span>
+        <span class="s5">&quot;normal&quot;</span><span class="s1">: Timestamp(</span><span class="s5">&quot;2011-01-01&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;nat&quot;</span><span class="s1">: NaT</span><span class="s2">,</span>
+        <span class="s5">&quot;tz&quot;</span><span class="s1">: Timestamp(</span><span class="s5">&quot;2011-01-01&quot;</span><span class="s2">, </span><span class="s1">tz=</span><span class="s5">&quot;US/Eastern&quot;</span><span class="s1">)</span><span class="s2">,</span>
+    <span class="s1">}</span>
+
+    <span class="s1">timestamp[</span><span class="s5">&quot;freq&quot;</span><span class="s1">] = Timestamp(</span><span class="s5">&quot;2011-01-01&quot;</span><span class="s2">, </span><span class="s1">freq=</span><span class="s5">&quot;D&quot;</span><span class="s1">)</span>
+    <span class="s1">timestamp[</span><span class="s5">&quot;both&quot;</span><span class="s1">] = Timestamp(</span><span class="s5">&quot;2011-01-01&quot;</span><span class="s2">, </span><span class="s1">tz=</span><span class="s5">&quot;Asia/Tokyo&quot;</span><span class="s2">, </span><span class="s1">freq=</span><span class="s5">&quot;M&quot;</span><span class="s1">)</span>
+
+    <span class="s1">off = {</span>
+        <span class="s5">&quot;DateOffset&quot;</span><span class="s1">: DateOffset(years=</span><span class="s4">1</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;DateOffset_h_ns&quot;</span><span class="s1">: DateOffset(hour=</span><span class="s4">6</span><span class="s2">, </span><span class="s1">nanoseconds=</span><span class="s4">5824</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;BusinessDay&quot;</span><span class="s1">: BusinessDay(offset=timedelta(seconds=</span><span class="s4">9</span><span class="s1">))</span><span class="s2">,</span>
+        <span class="s5">&quot;BusinessHour&quot;</span><span class="s1">: BusinessHour(normalize=</span><span class="s2">True, </span><span class="s1">n=</span><span class="s4">6</span><span class="s2">, </span><span class="s1">end=</span><span class="s5">&quot;15:14&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;CustomBusinessDay&quot;</span><span class="s1">: CustomBusinessDay(weekmask=</span><span class="s5">&quot;Mon Fri&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;SemiMonthBegin&quot;</span><span class="s1">: SemiMonthBegin(day_of_month=</span><span class="s4">9</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;SemiMonthEnd&quot;</span><span class="s1">: SemiMonthEnd(day_of_month=</span><span class="s4">24</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;MonthBegin&quot;</span><span class="s1">: MonthBegin(</span><span class="s4">1</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;MonthEnd&quot;</span><span class="s1">: MonthEnd(</span><span class="s4">1</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;QuarterBegin&quot;</span><span class="s1">: QuarterBegin(</span><span class="s4">1</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;QuarterEnd&quot;</span><span class="s1">: QuarterEnd(</span><span class="s4">1</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;Day&quot;</span><span class="s1">: Day(</span><span class="s4">1</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;YearBegin&quot;</span><span class="s1">: YearBegin(</span><span class="s4">1</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;YearEnd&quot;</span><span class="s1">: YearEnd(</span><span class="s4">1</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;Week&quot;</span><span class="s1">: Week(</span><span class="s4">1</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;Week_Tues&quot;</span><span class="s1">: Week(</span><span class="s4">2</span><span class="s2">, </span><span class="s1">normalize=</span><span class="s2">False, </span><span class="s1">weekday=</span><span class="s4">1</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;WeekOfMonth&quot;</span><span class="s1">: WeekOfMonth(week=</span><span class="s4">3</span><span class="s2">, </span><span class="s1">weekday=</span><span class="s4">4</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;LastWeekOfMonth&quot;</span><span class="s1">: LastWeekOfMonth(n=</span><span class="s4">1</span><span class="s2">, </span><span class="s1">weekday=</span><span class="s4">3</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;FY5253&quot;</span><span class="s1">: FY5253(n=</span><span class="s4">2</span><span class="s2">, </span><span class="s1">weekday=</span><span class="s4">6</span><span class="s2">, </span><span class="s1">startingMonth=</span><span class="s4">7</span><span class="s2">, </span><span class="s1">variation=</span><span class="s5">&quot;last&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;Easter&quot;</span><span class="s1">: Easter()</span><span class="s2">,</span>
+        <span class="s5">&quot;Hour&quot;</span><span class="s1">: Hour(</span><span class="s4">1</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s5">&quot;Minute&quot;</span><span class="s1">: Minute(</span><span class="s4">1</span><span class="s1">)</span><span class="s2">,</span>
+    <span class="s1">}</span>
+
+    <span class="s2">return </span><span class="s1">{</span>
+        <span class="s5">&quot;series&quot;</span><span class="s1">: series</span><span class="s2">,</span>
+        <span class="s5">&quot;frame&quot;</span><span class="s1">: frame</span><span class="s2">,</span>
+        <span class="s5">&quot;index&quot;</span><span class="s1">: index</span><span class="s2">,</span>
+        <span class="s5">&quot;scalars&quot;</span><span class="s1">: scalars</span><span class="s2">,</span>
+        <span class="s5">&quot;mi&quot;</span><span class="s1">: mi</span><span class="s2">,</span>
+        <span class="s5">&quot;sp_series&quot;</span><span class="s1">: {</span><span class="s5">&quot;float&quot;</span><span class="s1">: _create_sp_series()</span><span class="s2">, </span><span class="s5">&quot;ts&quot;</span><span class="s1">: _create_sp_tsseries()}</span><span class="s2">,</span>
+        <span class="s5">&quot;sp_frame&quot;</span><span class="s1">: {</span><span class="s5">&quot;float&quot;</span><span class="s1">: _create_sp_frame()}</span><span class="s2">,</span>
+        <span class="s5">&quot;cat&quot;</span><span class="s1">: cat</span><span class="s2">,</span>
+        <span class="s5">&quot;timestamp&quot;</span><span class="s1">: timestamp</span><span class="s2">,</span>
+        <span class="s5">&quot;offsets&quot;</span><span class="s1">: off</span><span class="s2">,</span>
+    <span class="s1">}</span>
+
+
+<span class="s2">def </span><span class="s1">create_pickle_data():</span>
+    <span class="s1">data = create_data()</span>
+
+    <span class="s2">return </span><span class="s1">data</span>
+
+
+<span class="s2">def </span><span class="s1">platform_name():</span>
+    <span class="s2">return </span><span class="s5">&quot;_&quot;</span><span class="s1">.join(</span>
+        <span class="s1">[</span>
+            <span class="s1">str(pandas.__version__)</span><span class="s2">,</span>
+            <span class="s1">str(pl.machine())</span><span class="s2">,</span>
+            <span class="s1">str(pl.system().lower())</span><span class="s2">,</span>
+            <span class="s1">str(pl.python_version())</span><span class="s2">,</span>
+        <span class="s1">]</span>
+    <span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">write_legacy_pickles(output_dir):</span>
+
+    <span class="s1">version = pandas.__version__</span>
+
+    <span class="s1">print(</span>
+        <span class="s5">&quot;This script generates a storage file for the current arch, system, &quot;</span>
+        <span class="s5">&quot;and python version&quot;</span>
+    <span class="s1">)</span>
+    <span class="s1">print(</span><span class="s5">f&quot;  pandas version: </span><span class="s2">{</span><span class="s1">version</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s1">)</span>
+    <span class="s1">print(</span><span class="s5">f&quot;  output dir    : </span><span class="s2">{</span><span class="s1">output_dir</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s1">)</span>
+    <span class="s1">print(</span><span class="s5">&quot;  storage format: pickle&quot;</span><span class="s1">)</span>
+
+    <span class="s1">pth = </span><span class="s5">f&quot;</span><span class="s2">{</span><span class="s1">platform_name()</span><span class="s2">}</span><span class="s5">.pickle&quot;</span>
+
+    <span class="s2">with </span><span class="s1">open(os.path.join(output_dir</span><span class="s2">, </span><span class="s1">pth)</span><span class="s2">, </span><span class="s5">&quot;wb&quot;</span><span class="s1">) </span><span class="s2">as </span><span class="s1">fh:</span>
+        <span class="s1">pickle.dump(create_pickle_data()</span><span class="s2">, </span><span class="s1">fh</span><span class="s2">, </span><span class="s1">pickle.DEFAULT_PROTOCOL)</span>
+
+    <span class="s1">print(</span><span class="s5">f&quot;created pickle file: </span><span class="s2">{</span><span class="s1">pth</span><span class="s2">}</span><span class="s5">&quot;</span><span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">write_legacy_file():</span>
+    <span class="s3"># force our cwd to be the first searched</span>
+    <span class="s1">sys.path.insert(</span><span class="s4">0</span><span class="s2">, </span><span class="s5">&quot;.&quot;</span><span class="s1">)</span>
+
+    <span class="s2">if not </span><span class="s1">(</span><span class="s4">3 </span><span class="s1">&lt;= len(sys.argv) &lt;= </span><span class="s4">4</span><span class="s1">):</span>
+        <span class="s1">exit(</span>
+            <span class="s5">&quot;Specify output directory and storage type: generate_legacy_&quot;</span>
+            <span class="s5">&quot;storage_files.py &lt;output_dir&gt; &lt;storage_type&gt; &quot;</span>
+        <span class="s1">)</span>
+
+    <span class="s1">output_dir = str(sys.argv[</span><span class="s4">1</span><span class="s1">])</span>
+    <span class="s1">storage_type = str(sys.argv[</span><span class="s4">2</span><span class="s1">])</span>
+
+    <span class="s2">if </span><span class="s1">storage_type == </span><span class="s5">&quot;pickle&quot;</span><span class="s1">:</span>
+        <span class="s1">write_legacy_pickles(output_dir=output_dir)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">exit(</span><span class="s5">&quot;storage_type must be one of {'pickle'}&quot;</span><span class="s1">)</span>
+
+
+<span class="s2">if </span><span class="s1">__name__ == </span><span class="s5">&quot;__main__&quot;</span><span class="s1">:</span>
+    <span class="s1">write_legacy_file()</span>
+</pre>
+</body>
+</html>

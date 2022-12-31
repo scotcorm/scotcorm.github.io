@@ -1,0 +1,2063 @@
+<html>
+<head>
+<title>style_render.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6a8759;}
+.s3 { color: #808080;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+style_render.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">from </span><span class="s1">collections </span><span class="s0">import </span><span class="s1">defaultdict</span>
+<span class="s0">from </span><span class="s1">functools </span><span class="s0">import </span><span class="s1">partial</span>
+<span class="s0">import </span><span class="s1">re</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">Any</span><span class="s0">,</span>
+    <span class="s1">Callable</span><span class="s0">,</span>
+    <span class="s1">DefaultDict</span><span class="s0">,</span>
+    <span class="s1">Dict</span><span class="s0">,</span>
+    <span class="s1">List</span><span class="s0">,</span>
+    <span class="s1">Optional</span><span class="s0">,</span>
+    <span class="s1">Sequence</span><span class="s0">,</span>
+    <span class="s1">Tuple</span><span class="s0">,</span>
+    <span class="s1">TypedDict</span><span class="s0">,</span>
+    <span class="s1">Union</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">uuid </span><span class="s0">import </span><span class="s1">uuid4</span>
+
+<span class="s0">import </span><span class="s1">numpy </span><span class="s0">as </span><span class="s1">np</span>
+
+<span class="s0">from </span><span class="s1">pandas._config </span><span class="s0">import </span><span class="s1">get_option</span>
+
+<span class="s0">from </span><span class="s1">pandas._libs </span><span class="s0">import </span><span class="s1">lib</span>
+<span class="s0">from </span><span class="s1">pandas._typing </span><span class="s0">import </span><span class="s1">Level</span>
+<span class="s0">from </span><span class="s1">pandas.compat._optional </span><span class="s0">import </span><span class="s1">import_optional_dependency</span>
+
+<span class="s0">from </span><span class="s1">pandas.core.dtypes.generic </span><span class="s0">import </span><span class="s1">ABCSeries</span>
+
+<span class="s0">from </span><span class="s1">pandas </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">DataFrame</span><span class="s0">,</span>
+    <span class="s1">Index</span><span class="s0">,</span>
+    <span class="s1">IndexSlice</span><span class="s0">,</span>
+    <span class="s1">MultiIndex</span><span class="s0">,</span>
+    <span class="s1">Series</span><span class="s0">,</span>
+    <span class="s1">isna</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.api.types </span><span class="s0">import </span><span class="s1">is_list_like</span>
+<span class="s0">import </span><span class="s1">pandas.core.common </span><span class="s0">as </span><span class="s1">com</span>
+
+<span class="s1">jinja2 = import_optional_dependency(</span><span class="s2">&quot;jinja2&quot;</span><span class="s0">, </span><span class="s1">extra=</span><span class="s2">&quot;DataFrame.style requires jinja2.&quot;</span><span class="s1">)</span>
+<span class="s0">from </span><span class="s1">markupsafe </span><span class="s0">import </span><span class="s1">escape </span><span class="s0">as </span><span class="s1">escape_html  </span><span class="s3"># markupsafe is jinja2 dependency</span>
+
+<span class="s1">BaseFormatter = Union[str</span><span class="s0">, </span><span class="s1">Callable]</span>
+<span class="s1">ExtFormatter = Union[BaseFormatter</span><span class="s0">, </span><span class="s1">Dict[Any</span><span class="s0">, </span><span class="s1">Optional[BaseFormatter]]]</span>
+<span class="s1">CSSPair = Tuple[str</span><span class="s0">, </span><span class="s1">Union[str</span><span class="s0">, </span><span class="s1">int</span><span class="s0">, </span><span class="s1">float]]</span>
+<span class="s1">CSSList = List[CSSPair]</span>
+<span class="s1">CSSProperties = Union[str</span><span class="s0">, </span><span class="s1">CSSList]</span>
+
+
+<span class="s0">class </span><span class="s1">CSSDict(TypedDict):</span>
+    <span class="s1">selector: str</span>
+    <span class="s1">props: CSSProperties</span>
+
+
+<span class="s1">CSSStyles = List[CSSDict]</span>
+<span class="s1">Subset = Union[slice</span><span class="s0">, </span><span class="s1">Sequence</span><span class="s0">, </span><span class="s1">Index]</span>
+
+
+<span class="s0">def </span><span class="s1">_gl01_adjust(obj: Any) -&gt; Any:</span>
+    <span class="s4">&quot;&quot;&quot;Adjust docstrings for Numpydoc GLO1.&quot;&quot;&quot;</span>
+    <span class="s1">obj.__doc__ = </span><span class="s2">&quot;</span><span class="s0">\n</span><span class="s2">&quot; </span><span class="s1">+ obj.__doc__</span>
+    <span class="s0">return </span><span class="s1">obj</span>
+
+
+<span class="s0">class </span><span class="s1">StylerRenderer:</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Base class to process rendering a Styler with a specified jinja2 template. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">loader = _gl01_adjust(jinja2.PackageLoader(</span><span class="s2">&quot;pandas&quot;</span><span class="s0">, </span><span class="s2">&quot;io/formats/templates&quot;</span><span class="s1">))</span>
+    <span class="s1">env = _gl01_adjust(jinja2.Environment(loader=loader</span><span class="s0">, </span><span class="s1">trim_blocks=</span><span class="s0">True</span><span class="s1">))</span>
+    <span class="s1">template_html = _gl01_adjust(env.get_template(</span><span class="s2">&quot;html.tpl&quot;</span><span class="s1">))</span>
+    <span class="s1">template_html_table = _gl01_adjust(env.get_template(</span><span class="s2">&quot;html_table.tpl&quot;</span><span class="s1">))</span>
+    <span class="s1">template_html_style = _gl01_adjust(env.get_template(</span><span class="s2">&quot;html_style.tpl&quot;</span><span class="s1">))</span>
+    <span class="s1">template_latex = _gl01_adjust(env.get_template(</span><span class="s2">&quot;latex.tpl&quot;</span><span class="s1">))</span>
+
+    <span class="s0">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">data: DataFrame | Series</span><span class="s0">,</span>
+        <span class="s1">uuid: str | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">uuid_len: int = </span><span class="s5">5</span><span class="s0">,</span>
+        <span class="s1">table_styles: CSSStyles | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">table_attributes: str | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">caption: str | tuple | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">cell_ids: bool = </span><span class="s0">True,</span>
+        <span class="s1">precision: int | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+    <span class="s1">):</span>
+
+        <span class="s3"># validate ordered args</span>
+        <span class="s0">if </span><span class="s1">isinstance(data</span><span class="s0">, </span><span class="s1">Series):</span>
+            <span class="s1">data = data.to_frame()</span>
+        <span class="s0">if not </span><span class="s1">isinstance(data</span><span class="s0">, </span><span class="s1">DataFrame):</span>
+            <span class="s0">raise </span><span class="s1">TypeError(</span><span class="s2">&quot;``data`` must be a Series or DataFrame&quot;</span><span class="s1">)</span>
+        <span class="s1">self.data: DataFrame = data</span>
+        <span class="s1">self.index: Index = data.index</span>
+        <span class="s1">self.columns: Index = data.columns</span>
+        <span class="s0">if not </span><span class="s1">isinstance(uuid_len</span><span class="s0">, </span><span class="s1">int) </span><span class="s0">or not </span><span class="s1">uuid_len &gt;= </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">TypeError(</span><span class="s2">&quot;``uuid_len`` must be an integer in range [0, 32].&quot;</span><span class="s1">)</span>
+        <span class="s1">self.uuid = uuid </span><span class="s0">or </span><span class="s1">uuid4().hex[: min(</span><span class="s5">32</span><span class="s0">, </span><span class="s1">uuid_len)]</span>
+        <span class="s1">self.uuid_len = len(self.uuid)</span>
+        <span class="s1">self.table_styles = table_styles</span>
+        <span class="s1">self.table_attributes = table_attributes</span>
+        <span class="s1">self.caption = caption</span>
+        <span class="s1">self.cell_ids = cell_ids</span>
+        <span class="s1">self.css = {</span>
+            <span class="s2">&quot;row_heading&quot;</span><span class="s1">: </span><span class="s2">&quot;row_heading&quot;</span><span class="s0">,</span>
+            <span class="s2">&quot;col_heading&quot;</span><span class="s1">: </span><span class="s2">&quot;col_heading&quot;</span><span class="s0">,</span>
+            <span class="s2">&quot;index_name&quot;</span><span class="s1">: </span><span class="s2">&quot;index_name&quot;</span><span class="s0">,</span>
+            <span class="s2">&quot;col&quot;</span><span class="s1">: </span><span class="s2">&quot;col&quot;</span><span class="s0">,</span>
+            <span class="s2">&quot;row&quot;</span><span class="s1">: </span><span class="s2">&quot;row&quot;</span><span class="s0">,</span>
+            <span class="s2">&quot;col_trim&quot;</span><span class="s1">: </span><span class="s2">&quot;col_trim&quot;</span><span class="s0">,</span>
+            <span class="s2">&quot;row_trim&quot;</span><span class="s1">: </span><span class="s2">&quot;row_trim&quot;</span><span class="s0">,</span>
+            <span class="s2">&quot;level&quot;</span><span class="s1">: </span><span class="s2">&quot;level&quot;</span><span class="s0">,</span>
+            <span class="s2">&quot;data&quot;</span><span class="s1">: </span><span class="s2">&quot;data&quot;</span><span class="s0">,</span>
+            <span class="s2">&quot;blank&quot;</span><span class="s1">: </span><span class="s2">&quot;blank&quot;</span><span class="s0">,</span>
+        <span class="s1">}</span>
+
+        <span class="s3"># add rendering variables</span>
+        <span class="s1">self.hide_index_names: bool = </span><span class="s0">False</span>
+        <span class="s1">self.hide_column_names: bool = </span><span class="s0">False</span>
+        <span class="s1">self.hide_index_: list = [</span><span class="s0">False</span><span class="s1">] * self.index.nlevels</span>
+        <span class="s1">self.hide_columns_: list = [</span><span class="s0">False</span><span class="s1">] * self.columns.nlevels</span>
+        <span class="s1">self.hidden_rows: Sequence[int] = []  </span><span class="s3"># sequence for specific hidden rows/cols</span>
+        <span class="s1">self.hidden_columns: Sequence[int] = []</span>
+        <span class="s1">self.ctx: DefaultDict[tuple[int</span><span class="s0">, </span><span class="s1">int]</span><span class="s0">, </span><span class="s1">CSSList] = defaultdict(list)</span>
+        <span class="s1">self.ctx_index: DefaultDict[tuple[int</span><span class="s0">, </span><span class="s1">int]</span><span class="s0">, </span><span class="s1">CSSList] = defaultdict(list)</span>
+        <span class="s1">self.ctx_columns: DefaultDict[tuple[int</span><span class="s0">, </span><span class="s1">int]</span><span class="s0">, </span><span class="s1">CSSList] = defaultdict(list)</span>
+        <span class="s1">self.cell_context: DefaultDict[tuple[int</span><span class="s0">, </span><span class="s1">int]</span><span class="s0">, </span><span class="s1">str] = defaultdict(str)</span>
+        <span class="s1">self._todo: list[tuple[Callable</span><span class="s0">, </span><span class="s1">tuple</span><span class="s0">, </span><span class="s1">dict]] = []</span>
+        <span class="s1">self.tooltips: Tooltips | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None</span>
+        <span class="s1">precision = (</span>
+            <span class="s1">get_option(</span><span class="s2">&quot;styler.format.precision&quot;</span><span class="s1">) </span><span class="s0">if </span><span class="s1">precision </span><span class="s0">is None else </span><span class="s1">precision</span>
+        <span class="s1">)</span>
+        <span class="s1">self._display_funcs: DefaultDict[  </span><span class="s3"># maps (row, col) -&gt; format func</span>
+            <span class="s1">tuple[int</span><span class="s0">, </span><span class="s1">int]</span><span class="s0">, </span><span class="s1">Callable[[Any]</span><span class="s0">, </span><span class="s1">str]</span>
+        <span class="s1">] = defaultdict(</span><span class="s0">lambda</span><span class="s1">: partial(_default_formatter</span><span class="s0">, </span><span class="s1">precision=precision))</span>
+        <span class="s1">self._display_funcs_index: DefaultDict[  </span><span class="s3"># maps (row, level) -&gt; format func</span>
+            <span class="s1">tuple[int</span><span class="s0">, </span><span class="s1">int]</span><span class="s0">, </span><span class="s1">Callable[[Any]</span><span class="s0">, </span><span class="s1">str]</span>
+        <span class="s1">] = defaultdict(</span><span class="s0">lambda</span><span class="s1">: partial(_default_formatter</span><span class="s0">, </span><span class="s1">precision=precision))</span>
+        <span class="s1">self._display_funcs_columns: DefaultDict[  </span><span class="s3"># maps (level, col) -&gt; format func</span>
+            <span class="s1">tuple[int</span><span class="s0">, </span><span class="s1">int]</span><span class="s0">, </span><span class="s1">Callable[[Any]</span><span class="s0">, </span><span class="s1">str]</span>
+        <span class="s1">] = defaultdict(</span><span class="s0">lambda</span><span class="s1">: partial(_default_formatter</span><span class="s0">, </span><span class="s1">precision=precision))</span>
+
+    <span class="s0">def </span><span class="s1">_render_html(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">sparse_index: bool</span><span class="s0">,</span>
+        <span class="s1">sparse_columns: bool</span><span class="s0">,</span>
+        <span class="s1">max_rows: int | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">max_cols: int | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">**kwargs</span><span class="s0">,</span>
+    <span class="s1">) -&gt; str:</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Renders the ``Styler`` including all applied styles to HTML. 
+        Generates a dict with necessary kwargs passed to jinja2 template. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self._compute()</span>
+        <span class="s3"># TODO: namespace all the pandas keys</span>
+        <span class="s1">d = self._translate(sparse_index</span><span class="s0">, </span><span class="s1">sparse_columns</span><span class="s0">, </span><span class="s1">max_rows</span><span class="s0">, </span><span class="s1">max_cols)</span>
+        <span class="s1">d.update(kwargs)</span>
+        <span class="s0">return </span><span class="s1">self.template_html.render(</span>
+            <span class="s1">**d</span><span class="s0">,</span>
+            <span class="s1">html_table_tpl=self.template_html_table</span><span class="s0">,</span>
+            <span class="s1">html_style_tpl=self.template_html_style</span><span class="s0">,</span>
+        <span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">_render_latex(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">sparse_index: bool</span><span class="s0">, </span><span class="s1">sparse_columns: bool</span><span class="s0">, </span><span class="s1">clines: str | </span><span class="s0">None, </span><span class="s1">**kwargs</span>
+    <span class="s1">) -&gt; str:</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Render a Styler in latex format 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self._compute()</span>
+
+        <span class="s1">d = self._translate(sparse_index</span><span class="s0">, </span><span class="s1">sparse_columns</span><span class="s0">, </span><span class="s1">blank=</span><span class="s2">&quot;&quot;</span><span class="s1">)</span>
+        <span class="s1">self._translate_latex(d</span><span class="s0">, </span><span class="s1">clines=clines)</span>
+
+        <span class="s1">self.template_latex.globals[</span><span class="s2">&quot;parse_wrap&quot;</span><span class="s1">] = _parse_latex_table_wrapping</span>
+        <span class="s1">self.template_latex.globals[</span><span class="s2">&quot;parse_table&quot;</span><span class="s1">] = _parse_latex_table_styles</span>
+        <span class="s1">self.template_latex.globals[</span><span class="s2">&quot;parse_cell&quot;</span><span class="s1">] = _parse_latex_cell_styles</span>
+        <span class="s1">self.template_latex.globals[</span><span class="s2">&quot;parse_header&quot;</span><span class="s1">] = _parse_latex_header_span</span>
+
+        <span class="s1">d.update(kwargs)</span>
+        <span class="s0">return </span><span class="s1">self.template_latex.render(**d)</span>
+
+    <span class="s0">def </span><span class="s1">_compute(self):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Execute the style functions built up in `self._todo`. 
+ 
+        Relies on the conventions that all style functions go through 
+        .apply or .applymap. The append styles to apply as tuples of 
+ 
+        (application method, *args, **kwargs) 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.ctx.clear()</span>
+        <span class="s1">self.ctx_index.clear()</span>
+        <span class="s1">self.ctx_columns.clear()</span>
+        <span class="s1">r = self</span>
+        <span class="s0">for </span><span class="s1">func</span><span class="s0">, </span><span class="s1">args</span><span class="s0">, </span><span class="s1">kwargs </span><span class="s0">in </span><span class="s1">self._todo:</span>
+            <span class="s1">r = func(self)(*args</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+        <span class="s0">return </span><span class="s1">r</span>
+
+    <span class="s0">def </span><span class="s1">_translate(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">sparse_index: bool</span><span class="s0">,</span>
+        <span class="s1">sparse_cols: bool</span><span class="s0">,</span>
+        <span class="s1">max_rows: int | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">max_cols: int | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">blank: str = </span><span class="s2">&quot;&amp;nbsp;&quot;</span><span class="s0">,</span>
+    <span class="s1">):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Process Styler data and settings into a dict for template rendering. 
+ 
+        Convert data and settings from ``Styler`` attributes such as ``self.data``, 
+        ``self.tooltips`` including applying any methods in ``self._todo``. 
+ 
+        Parameters 
+        ---------- 
+        sparse_index : bool 
+            Whether to sparsify the index or print all hierarchical index elements. 
+            Upstream defaults are typically to `pandas.options.styler.sparse.index`. 
+        sparse_cols : bool 
+            Whether to sparsify the columns or print all hierarchical column elements. 
+            Upstream defaults are typically to `pandas.options.styler.sparse.columns`. 
+        blank : str 
+            Entry to top-left blank cells. 
+        max_rows, max_cols : int, optional 
+            Specific max rows and cols. max_elements always take precedence in render. 
+ 
+        Returns 
+        ------- 
+        d : dict 
+            The following structure: {uuid, table_styles, caption, head, body, 
+            cellstyle, table_attributes} 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.css[</span><span class="s2">&quot;blank_value&quot;</span><span class="s1">] = blank</span>
+
+        <span class="s3"># construct render dict</span>
+        <span class="s1">d = {</span>
+            <span class="s2">&quot;uuid&quot;</span><span class="s1">: self.uuid</span><span class="s0">,</span>
+            <span class="s2">&quot;table_styles&quot;</span><span class="s1">: format_table_styles(self.table_styles </span><span class="s0">or </span><span class="s1">[])</span><span class="s0">,</span>
+            <span class="s2">&quot;caption&quot;</span><span class="s1">: self.caption</span><span class="s0">,</span>
+        <span class="s1">}</span>
+
+        <span class="s1">max_elements = get_option(</span><span class="s2">&quot;styler.render.max_elements&quot;</span><span class="s1">)</span>
+        <span class="s1">max_rows = max_rows </span><span class="s0">if </span><span class="s1">max_rows </span><span class="s0">else </span><span class="s1">get_option(</span><span class="s2">&quot;styler.render.max_rows&quot;</span><span class="s1">)</span>
+        <span class="s1">max_cols = max_cols </span><span class="s0">if </span><span class="s1">max_cols </span><span class="s0">else </span><span class="s1">get_option(</span><span class="s2">&quot;styler.render.max_columns&quot;</span><span class="s1">)</span>
+        <span class="s1">max_rows</span><span class="s0">, </span><span class="s1">max_cols = _get_trimming_maximums(</span>
+            <span class="s1">len(self.data.index)</span><span class="s0">,</span>
+            <span class="s1">len(self.data.columns)</span><span class="s0">,</span>
+            <span class="s1">max_elements</span><span class="s0">,</span>
+            <span class="s1">max_rows</span><span class="s0">,</span>
+            <span class="s1">max_cols</span><span class="s0">,</span>
+        <span class="s1">)</span>
+
+        <span class="s1">self.cellstyle_map_columns: DefaultDict[</span>
+            <span class="s1">tuple[CSSPair</span><span class="s0">, </span><span class="s1">...]</span><span class="s0">, </span><span class="s1">list[str]</span>
+        <span class="s1">] = defaultdict(list)</span>
+        <span class="s1">head = self._translate_header(sparse_cols</span><span class="s0">, </span><span class="s1">max_cols)</span>
+        <span class="s1">d.update({</span><span class="s2">&quot;head&quot;</span><span class="s1">: head})</span>
+
+        <span class="s3"># for sparsifying a MultiIndex and for use with latex clines</span>
+        <span class="s1">idx_lengths = _get_level_lengths(</span>
+            <span class="s1">self.index</span><span class="s0">, </span><span class="s1">sparse_index</span><span class="s0">, </span><span class="s1">max_rows</span><span class="s0">, </span><span class="s1">self.hidden_rows</span>
+        <span class="s1">)</span>
+        <span class="s1">d.update({</span><span class="s2">&quot;index_lengths&quot;</span><span class="s1">: idx_lengths})</span>
+
+        <span class="s1">self.cellstyle_map: DefaultDict[tuple[CSSPair</span><span class="s0">, </span><span class="s1">...]</span><span class="s0">, </span><span class="s1">list[str]] = defaultdict(</span>
+            <span class="s1">list</span>
+        <span class="s1">)</span>
+        <span class="s1">self.cellstyle_map_index: DefaultDict[</span>
+            <span class="s1">tuple[CSSPair</span><span class="s0">, </span><span class="s1">...]</span><span class="s0">, </span><span class="s1">list[str]</span>
+        <span class="s1">] = defaultdict(list)</span>
+        <span class="s1">body = self._translate_body(idx_lengths</span><span class="s0">, </span><span class="s1">max_rows</span><span class="s0">, </span><span class="s1">max_cols)</span>
+        <span class="s1">d.update({</span><span class="s2">&quot;body&quot;</span><span class="s1">: body})</span>
+
+        <span class="s1">ctx_maps = {</span>
+            <span class="s2">&quot;cellstyle&quot;</span><span class="s1">: </span><span class="s2">&quot;cellstyle_map&quot;</span><span class="s0">,</span>
+            <span class="s2">&quot;cellstyle_index&quot;</span><span class="s1">: </span><span class="s2">&quot;cellstyle_map_index&quot;</span><span class="s0">,</span>
+            <span class="s2">&quot;cellstyle_columns&quot;</span><span class="s1">: </span><span class="s2">&quot;cellstyle_map_columns&quot;</span><span class="s0">,</span>
+        <span class="s1">}  </span><span class="s3"># add the cell_ids styles map to the render dictionary in right format</span>
+        <span class="s0">for </span><span class="s1">k</span><span class="s0">, </span><span class="s1">attr </span><span class="s0">in </span><span class="s1">ctx_maps.items():</span>
+            <span class="s1">map = [</span>
+                <span class="s1">{</span><span class="s2">&quot;props&quot;</span><span class="s1">: list(props)</span><span class="s0">, </span><span class="s2">&quot;selectors&quot;</span><span class="s1">: selectors}</span>
+                <span class="s0">for </span><span class="s1">props</span><span class="s0">, </span><span class="s1">selectors </span><span class="s0">in </span><span class="s1">getattr(self</span><span class="s0">, </span><span class="s1">attr).items()</span>
+            <span class="s1">]</span>
+            <span class="s1">d.update({k: map})</span>
+
+        <span class="s1">table_attr = self.table_attributes</span>
+        <span class="s0">if not </span><span class="s1">get_option(</span><span class="s2">&quot;styler.html.mathjax&quot;</span><span class="s1">):</span>
+            <span class="s1">table_attr = table_attr </span><span class="s0">or </span><span class="s2">&quot;&quot;</span>
+            <span class="s0">if </span><span class="s2">'class=&quot;' </span><span class="s0">in </span><span class="s1">table_attr:</span>
+                <span class="s1">table_attr = table_attr.replace(</span><span class="s2">'class=&quot;'</span><span class="s0">, </span><span class="s2">'class=&quot;tex2jax_ignore '</span><span class="s1">)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">table_attr += </span><span class="s2">' class=&quot;tex2jax_ignore&quot;'</span>
+        <span class="s1">d.update({</span><span class="s2">&quot;table_attributes&quot;</span><span class="s1">: table_attr})</span>
+
+        <span class="s0">if </span><span class="s1">self.tooltips:</span>
+            <span class="s1">d = self.tooltips._translate(self</span><span class="s0">, </span><span class="s1">d)</span>
+
+        <span class="s0">return </span><span class="s1">d</span>
+
+    <span class="s0">def </span><span class="s1">_translate_header(self</span><span class="s0">, </span><span class="s1">sparsify_cols: bool</span><span class="s0">, </span><span class="s1">max_cols: int):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Build each &lt;tr&gt; within table &lt;head&gt; as a list 
+ 
+        Using the structure: 
+             +----------------------------+---------------+---------------------------+ 
+             |  index_blanks ...          | column_name_0 |  column_headers (level_0) | 
+          1) |       ..                   |       ..      |             ..            | 
+             |  index_blanks ...          | column_name_n |  column_headers (level_n) | 
+             +----------------------------+---------------+---------------------------+ 
+          2) |  index_names (level_0 to level_n) ...      | column_blanks ...         | 
+             +----------------------------+---------------+---------------------------+ 
+ 
+        Parameters 
+        ---------- 
+        sparsify_cols : bool 
+            Whether column_headers section will add colspan attributes (&gt;1) to elements. 
+        max_cols : int 
+            Maximum number of columns to render. If exceeded will contain `...` filler. 
+ 
+        Returns 
+        ------- 
+        head : list 
+            The associated HTML elements needed for template rendering. 
+        &quot;&quot;&quot;</span>
+        <span class="s3"># for sparsifying a MultiIndex</span>
+        <span class="s1">col_lengths = _get_level_lengths(</span>
+            <span class="s1">self.columns</span><span class="s0">, </span><span class="s1">sparsify_cols</span><span class="s0">, </span><span class="s1">max_cols</span><span class="s0">, </span><span class="s1">self.hidden_columns</span>
+        <span class="s1">)</span>
+
+        <span class="s1">clabels = self.data.columns.tolist()</span>
+        <span class="s0">if </span><span class="s1">self.data.columns.nlevels == </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s1">clabels = [[x] </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">clabels]</span>
+        <span class="s1">clabels = list(zip(*clabels))</span>
+
+        <span class="s1">head = []</span>
+        <span class="s3"># 1) column headers</span>
+        <span class="s0">for </span><span class="s1">r</span><span class="s0">, </span><span class="s1">hide </span><span class="s0">in </span><span class="s1">enumerate(self.hide_columns_):</span>
+            <span class="s0">if </span><span class="s1">hide </span><span class="s0">or not </span><span class="s1">clabels:</span>
+                <span class="s0">continue</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">header_row = self._generate_col_header_row(</span>
+                    <span class="s1">(r</span><span class="s0">, </span><span class="s1">clabels)</span><span class="s0">, </span><span class="s1">max_cols</span><span class="s0">, </span><span class="s1">col_lengths</span>
+                <span class="s1">)</span>
+                <span class="s1">head.append(header_row)</span>
+
+        <span class="s3"># 2) index names</span>
+        <span class="s0">if </span><span class="s1">(</span>
+            <span class="s1">self.data.index.names</span>
+            <span class="s0">and </span><span class="s1">com.any_not_none(*self.data.index.names)</span>
+            <span class="s0">and not </span><span class="s1">all(self.hide_index_)</span>
+            <span class="s0">and not </span><span class="s1">self.hide_index_names</span>
+        <span class="s1">):</span>
+            <span class="s1">index_names_row = self._generate_index_names_row(</span>
+                <span class="s1">clabels</span><span class="s0">, </span><span class="s1">max_cols</span><span class="s0">, </span><span class="s1">col_lengths</span>
+            <span class="s1">)</span>
+            <span class="s1">head.append(index_names_row)</span>
+
+        <span class="s0">return </span><span class="s1">head</span>
+
+    <span class="s0">def </span><span class="s1">_generate_col_header_row(self</span><span class="s0">, </span><span class="s1">iter: tuple</span><span class="s0">, </span><span class="s1">max_cols: int</span><span class="s0">, </span><span class="s1">col_lengths: dict):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Generate the row containing column headers: 
+ 
+         +----------------------------+---------------+---------------------------+ 
+         |  index_blanks ...          | column_name_i |  column_headers (level_i) | 
+         +----------------------------+---------------+---------------------------+ 
+ 
+        Parameters 
+        ---------- 
+        iter : tuple 
+            Looping variables from outer scope 
+        max_cols : int 
+            Permissible number of columns 
+        col_lenths : 
+            c 
+ 
+        Returns 
+        ------- 
+        list of elements 
+        &quot;&quot;&quot;</span>
+
+        <span class="s1">r</span><span class="s0">, </span><span class="s1">clabels = iter</span>
+
+        <span class="s3"># number of index blanks is governed by number of hidden index levels</span>
+        <span class="s1">index_blanks = [</span>
+            <span class="s1">_element(</span><span class="s2">&quot;th&quot;</span><span class="s0">, </span><span class="s1">self.css[</span><span class="s2">&quot;blank&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">self.css[</span><span class="s2">&quot;blank_value&quot;</span><span class="s1">]</span><span class="s0">, True</span><span class="s1">)</span>
+        <span class="s1">] * (self.index.nlevels - sum(self.hide_index_) - </span><span class="s5">1</span><span class="s1">)</span>
+
+        <span class="s1">name = self.data.columns.names[r]</span>
+        <span class="s1">column_name = [</span>
+            <span class="s1">_element(</span>
+                <span class="s2">&quot;th&quot;</span><span class="s0">,</span>
+                <span class="s1">(</span>
+                    <span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'blank'</span><span class="s1">]</span><span class="s0">} {</span><span class="s1">self.css[</span><span class="s2">'level'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">r</span><span class="s0">}</span><span class="s2">&quot;</span>
+                    <span class="s0">if </span><span class="s1">name </span><span class="s0">is None</span>
+                    <span class="s0">else </span><span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'index_name'</span><span class="s1">]</span><span class="s0">} {</span><span class="s1">self.css[</span><span class="s2">'level'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">r</span><span class="s0">}</span><span class="s2">&quot;</span>
+                <span class="s1">)</span><span class="s0">,</span>
+                <span class="s1">name</span>
+                <span class="s0">if </span><span class="s1">(name </span><span class="s0">is not None and not </span><span class="s1">self.hide_column_names)</span>
+                <span class="s0">else </span><span class="s1">self.css[</span><span class="s2">&quot;blank_value&quot;</span><span class="s1">]</span><span class="s0">,</span>
+                <span class="s0">not </span><span class="s1">all(self.hide_index_)</span><span class="s0">,</span>
+            <span class="s1">)</span>
+        <span class="s1">]</span>
+
+        <span class="s1">column_headers</span><span class="s0">, </span><span class="s1">visible_col_count = []</span><span class="s0">, </span><span class="s5">0</span>
+        <span class="s0">for </span><span class="s1">c</span><span class="s0">, </span><span class="s1">value </span><span class="s0">in </span><span class="s1">enumerate(clabels[r]):</span>
+            <span class="s1">header_element_visible = _is_visible(c</span><span class="s0">, </span><span class="s1">r</span><span class="s0">, </span><span class="s1">col_lengths)</span>
+            <span class="s0">if </span><span class="s1">header_element_visible:</span>
+                <span class="s1">visible_col_count += col_lengths.get((r</span><span class="s0">, </span><span class="s1">c)</span><span class="s0">, </span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s0">if </span><span class="s1">visible_col_count &gt; max_cols:</span>
+                <span class="s3"># add an extra column with `...` value to indicate trimming</span>
+                <span class="s1">column_headers.append(</span>
+                    <span class="s1">_element(</span>
+                        <span class="s2">&quot;th&quot;</span><span class="s0">,</span>
+                        <span class="s1">(</span>
+                            <span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'col_heading'</span><span class="s1">]</span><span class="s0">} {</span><span class="s1">self.css[</span><span class="s2">'level'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">r</span><span class="s0">} </span><span class="s2">&quot;</span>
+                            <span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'col_trim'</span><span class="s1">]</span><span class="s0">}</span><span class="s2">&quot;</span>
+                        <span class="s1">)</span><span class="s0">,</span>
+                        <span class="s2">&quot;...&quot;</span><span class="s0">,</span>
+                        <span class="s0">True,</span>
+                        <span class="s1">attributes=</span><span class="s2">&quot;&quot;</span><span class="s0">,</span>
+                    <span class="s1">)</span>
+                <span class="s1">)</span>
+                <span class="s0">break</span>
+
+            <span class="s1">header_element = _element(</span>
+                <span class="s2">&quot;th&quot;</span><span class="s0">,</span>
+                <span class="s1">(</span>
+                    <span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'col_heading'</span><span class="s1">]</span><span class="s0">} {</span><span class="s1">self.css[</span><span class="s2">'level'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">r</span><span class="s0">} </span><span class="s2">&quot;</span>
+                    <span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'col'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">c</span><span class="s0">}</span><span class="s2">&quot;</span>
+                <span class="s1">)</span><span class="s0">,</span>
+                <span class="s1">value</span><span class="s0">,</span>
+                <span class="s1">header_element_visible</span><span class="s0">,</span>
+                <span class="s1">display_value=self._display_funcs_columns[(r</span><span class="s0">, </span><span class="s1">c)](value)</span><span class="s0">,</span>
+                <span class="s1">attributes=(</span>
+                    <span class="s2">f'colspan=&quot;</span><span class="s0">{</span><span class="s1">col_lengths.get((r</span><span class="s0">, </span><span class="s1">c)</span><span class="s0">, </span><span class="s5">0</span><span class="s1">)</span><span class="s0">}</span><span class="s2">&quot;'</span>
+                    <span class="s0">if </span><span class="s1">col_lengths.get((r</span><span class="s0">, </span><span class="s1">c)</span><span class="s0">, </span><span class="s5">0</span><span class="s1">) &gt; </span><span class="s5">1</span>
+                    <span class="s0">else </span><span class="s2">&quot;&quot;</span>
+                <span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">)</span>
+
+            <span class="s0">if </span><span class="s1">self.cell_ids:</span>
+                <span class="s1">header_element[</span><span class="s2">&quot;id&quot;</span><span class="s1">] = </span><span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'level'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">r</span><span class="s0">}</span><span class="s2">_</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'col'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">c</span><span class="s0">}</span><span class="s2">&quot;</span>
+            <span class="s0">if </span><span class="s1">(</span>
+                <span class="s1">header_element_visible</span>
+                <span class="s0">and </span><span class="s1">(r</span><span class="s0">, </span><span class="s1">c) </span><span class="s0">in </span><span class="s1">self.ctx_columns</span>
+                <span class="s0">and </span><span class="s1">self.ctx_columns[r</span><span class="s0">, </span><span class="s1">c]</span>
+            <span class="s1">):</span>
+                <span class="s1">header_element[</span><span class="s2">&quot;id&quot;</span><span class="s1">] = </span><span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'level'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">r</span><span class="s0">}</span><span class="s2">_</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'col'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">c</span><span class="s0">}</span><span class="s2">&quot;</span>
+                <span class="s1">self.cellstyle_map_columns[tuple(self.ctx_columns[r</span><span class="s0">, </span><span class="s1">c])].append(</span>
+                    <span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'level'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">r</span><span class="s0">}</span><span class="s2">_</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'col'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">c</span><span class="s0">}</span><span class="s2">&quot;</span>
+                <span class="s1">)</span>
+
+            <span class="s1">column_headers.append(header_element)</span>
+
+        <span class="s0">return </span><span class="s1">index_blanks + column_name + column_headers</span>
+
+    <span class="s0">def </span><span class="s1">_generate_index_names_row(self</span><span class="s0">, </span><span class="s1">iter: tuple</span><span class="s0">, </span><span class="s1">max_cols: int</span><span class="s0">, </span><span class="s1">col_lengths: dict):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Generate the row containing index names 
+ 
+         +----------------------------+---------------+---------------------------+ 
+         |  index_names (level_0 to level_n) ...      | column_blanks ...         | 
+         +----------------------------+---------------+---------------------------+ 
+ 
+        Parameters 
+        ---------- 
+        iter : tuple 
+            Looping variables from outer scope 
+        max_cols : int 
+            Permissible number of columns 
+ 
+        Returns 
+        ------- 
+        list of elements 
+        &quot;&quot;&quot;</span>
+
+        <span class="s1">clabels = iter</span>
+
+        <span class="s1">index_names = [</span>
+            <span class="s1">_element(</span>
+                <span class="s2">&quot;th&quot;</span><span class="s0">,</span>
+                <span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'index_name'</span><span class="s1">]</span><span class="s0">} {</span><span class="s1">self.css[</span><span class="s2">'level'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">c</span><span class="s0">}</span><span class="s2">&quot;</span><span class="s0">,</span>
+                <span class="s1">self.css[</span><span class="s2">&quot;blank_value&quot;</span><span class="s1">] </span><span class="s0">if </span><span class="s1">name </span><span class="s0">is None else </span><span class="s1">name</span><span class="s0">,</span>
+                <span class="s0">not </span><span class="s1">self.hide_index_[c]</span><span class="s0">,</span>
+            <span class="s1">)</span>
+            <span class="s0">for </span><span class="s1">c</span><span class="s0">, </span><span class="s1">name </span><span class="s0">in </span><span class="s1">enumerate(self.data.index.names)</span>
+        <span class="s1">]</span>
+
+        <span class="s1">column_blanks</span><span class="s0">, </span><span class="s1">visible_col_count = []</span><span class="s0">, </span><span class="s5">0</span>
+        <span class="s0">if </span><span class="s1">clabels:</span>
+            <span class="s1">last_level = self.columns.nlevels - </span><span class="s5">1  </span><span class="s3"># use last level since never sparsed</span>
+            <span class="s0">for </span><span class="s1">c</span><span class="s0">, </span><span class="s1">value </span><span class="s0">in </span><span class="s1">enumerate(clabels[last_level]):</span>
+                <span class="s1">header_element_visible = _is_visible(c</span><span class="s0">, </span><span class="s1">last_level</span><span class="s0">, </span><span class="s1">col_lengths)</span>
+                <span class="s0">if </span><span class="s1">header_element_visible:</span>
+                    <span class="s1">visible_col_count += </span><span class="s5">1</span>
+                <span class="s0">if </span><span class="s1">visible_col_count &gt; max_cols:</span>
+                    <span class="s1">column_blanks.append(</span>
+                        <span class="s1">_element(</span>
+                            <span class="s2">&quot;th&quot;</span><span class="s0">,</span>
+                            <span class="s1">(</span>
+                                <span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'blank'</span><span class="s1">]</span><span class="s0">} {</span><span class="s1">self.css[</span><span class="s2">'col'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">c</span><span class="s0">} </span><span class="s2">&quot;</span>
+                                <span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'col_trim'</span><span class="s1">]</span><span class="s0">}</span><span class="s2">&quot;</span>
+                            <span class="s1">)</span><span class="s0">,</span>
+                            <span class="s1">self.css[</span><span class="s2">&quot;blank_value&quot;</span><span class="s1">]</span><span class="s0">,</span>
+                            <span class="s0">True,</span>
+                            <span class="s1">attributes=</span><span class="s2">&quot;&quot;</span><span class="s0">,</span>
+                        <span class="s1">)</span>
+                    <span class="s1">)</span>
+                    <span class="s0">break</span>
+
+                <span class="s1">column_blanks.append(</span>
+                    <span class="s1">_element(</span>
+                        <span class="s2">&quot;th&quot;</span><span class="s0">,</span>
+                        <span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'blank'</span><span class="s1">]</span><span class="s0">} {</span><span class="s1">self.css[</span><span class="s2">'col'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">c</span><span class="s0">}</span><span class="s2">&quot;</span><span class="s0">,</span>
+                        <span class="s1">self.css[</span><span class="s2">&quot;blank_value&quot;</span><span class="s1">]</span><span class="s0">,</span>
+                        <span class="s1">c </span><span class="s0">not in </span><span class="s1">self.hidden_columns</span><span class="s0">,</span>
+                    <span class="s1">)</span>
+                <span class="s1">)</span>
+
+        <span class="s0">return </span><span class="s1">index_names + column_blanks</span>
+
+    <span class="s0">def </span><span class="s1">_translate_body(self</span><span class="s0">, </span><span class="s1">idx_lengths: dict</span><span class="s0">, </span><span class="s1">max_rows: int</span><span class="s0">, </span><span class="s1">max_cols: int):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Build each &lt;tr&gt; within table &lt;body&gt; as a list 
+ 
+        Use the following structure: 
+          +--------------------------------------------+---------------------------+ 
+          |  index_header_0    ...    index_header_n   |  data_by_column   ...     | 
+          +--------------------------------------------+---------------------------+ 
+ 
+        Also add elements to the cellstyle_map for more efficient grouped elements in 
+        &lt;style&gt;&lt;/style&gt; block 
+ 
+        Parameters 
+        ---------- 
+        sparsify_index : bool 
+            Whether index_headers section will add rowspan attributes (&gt;1) to elements. 
+ 
+        Returns 
+        ------- 
+        body : list 
+            The associated HTML elements needed for template rendering. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">rlabels = self.data.index.tolist()</span>
+        <span class="s0">if not </span><span class="s1">isinstance(self.data.index</span><span class="s0">, </span><span class="s1">MultiIndex):</span>
+            <span class="s1">rlabels = [[x] </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">rlabels]</span>
+
+        <span class="s1">body</span><span class="s0">, </span><span class="s1">row_count = []</span><span class="s0">, </span><span class="s5">0</span>
+        <span class="s0">for </span><span class="s1">r</span><span class="s0">, </span><span class="s1">row_tup </span><span class="s0">in </span><span class="s1">[</span>
+            <span class="s1">z </span><span class="s0">for </span><span class="s1">z </span><span class="s0">in </span><span class="s1">enumerate(self.data.itertuples()) </span><span class="s0">if </span><span class="s1">z[</span><span class="s5">0</span><span class="s1">] </span><span class="s0">not in </span><span class="s1">self.hidden_rows</span>
+        <span class="s1">]:</span>
+            <span class="s1">row_count += </span><span class="s5">1</span>
+            <span class="s0">if </span><span class="s1">row_count &gt; max_rows:  </span><span class="s3"># used only to add a '...' trimmed row:</span>
+                <span class="s1">trimmed_row = self._generate_trimmed_row(max_cols)</span>
+                <span class="s1">body.append(trimmed_row)</span>
+                <span class="s0">break</span>
+            <span class="s1">body_row = self._generate_body_row(</span>
+                <span class="s1">(r</span><span class="s0">, </span><span class="s1">row_tup</span><span class="s0">, </span><span class="s1">rlabels)</span><span class="s0">, </span><span class="s1">max_cols</span><span class="s0">, </span><span class="s1">idx_lengths</span>
+            <span class="s1">)</span>
+            <span class="s1">body.append(body_row)</span>
+        <span class="s0">return </span><span class="s1">body</span>
+
+    <span class="s0">def </span><span class="s1">_generate_trimmed_row(self</span><span class="s0">, </span><span class="s1">max_cols: int) -&gt; list:</span>
+        <span class="s4">&quot;&quot;&quot; 
+        When a render has too many rows we generate a trimming row containing &quot;...&quot; 
+ 
+        Parameters 
+        ---------- 
+        max_cols : int 
+            Number of permissible columns 
+ 
+        Returns 
+        ------- 
+        list of elements 
+        &quot;&quot;&quot;</span>
+        <span class="s1">index_headers = [</span>
+            <span class="s1">_element(</span>
+                <span class="s2">&quot;th&quot;</span><span class="s0">,</span>
+                <span class="s1">(</span>
+                    <span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'row_heading'</span><span class="s1">]</span><span class="s0">} {</span><span class="s1">self.css[</span><span class="s2">'level'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">c</span><span class="s0">} </span><span class="s2">&quot;</span>
+                    <span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'row_trim'</span><span class="s1">]</span><span class="s0">}</span><span class="s2">&quot;</span>
+                <span class="s1">)</span><span class="s0">,</span>
+                <span class="s2">&quot;...&quot;</span><span class="s0">,</span>
+                <span class="s0">not </span><span class="s1">self.hide_index_[c]</span><span class="s0">,</span>
+                <span class="s1">attributes=</span><span class="s2">&quot;&quot;</span><span class="s0">,</span>
+            <span class="s1">)</span>
+            <span class="s0">for </span><span class="s1">c </span><span class="s0">in </span><span class="s1">range(self.data.index.nlevels)</span>
+        <span class="s1">]</span>
+
+        <span class="s1">data</span><span class="s0">, </span><span class="s1">visible_col_count = []</span><span class="s0">, </span><span class="s5">0</span>
+        <span class="s0">for </span><span class="s1">c</span><span class="s0">, </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">enumerate(self.columns):</span>
+            <span class="s1">data_element_visible = c </span><span class="s0">not in </span><span class="s1">self.hidden_columns</span>
+            <span class="s0">if </span><span class="s1">data_element_visible:</span>
+                <span class="s1">visible_col_count += </span><span class="s5">1</span>
+            <span class="s0">if </span><span class="s1">visible_col_count &gt; max_cols:</span>
+                <span class="s1">data.append(</span>
+                    <span class="s1">_element(</span>
+                        <span class="s2">&quot;td&quot;</span><span class="s0">,</span>
+                        <span class="s1">(</span>
+                            <span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'data'</span><span class="s1">]</span><span class="s0">} {</span><span class="s1">self.css[</span><span class="s2">'row_trim'</span><span class="s1">]</span><span class="s0">} </span><span class="s2">&quot;</span>
+                            <span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'col_trim'</span><span class="s1">]</span><span class="s0">}</span><span class="s2">&quot;</span>
+                        <span class="s1">)</span><span class="s0">,</span>
+                        <span class="s2">&quot;...&quot;</span><span class="s0">,</span>
+                        <span class="s0">True,</span>
+                        <span class="s1">attributes=</span><span class="s2">&quot;&quot;</span><span class="s0">,</span>
+                    <span class="s1">)</span>
+                <span class="s1">)</span>
+                <span class="s0">break</span>
+
+            <span class="s1">data.append(</span>
+                <span class="s1">_element(</span>
+                    <span class="s2">&quot;td&quot;</span><span class="s0">,</span>
+                    <span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'data'</span><span class="s1">]</span><span class="s0">} {</span><span class="s1">self.css[</span><span class="s2">'col'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">c</span><span class="s0">} {</span><span class="s1">self.css[</span><span class="s2">'row_trim'</span><span class="s1">]</span><span class="s0">}</span><span class="s2">&quot;</span><span class="s0">,</span>
+                    <span class="s2">&quot;...&quot;</span><span class="s0">,</span>
+                    <span class="s1">data_element_visible</span><span class="s0">,</span>
+                    <span class="s1">attributes=</span><span class="s2">&quot;&quot;</span><span class="s0">,</span>
+                <span class="s1">)</span>
+            <span class="s1">)</span>
+
+        <span class="s0">return </span><span class="s1">index_headers + data</span>
+
+    <span class="s0">def </span><span class="s1">_generate_body_row(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">iter: tuple</span><span class="s0">,</span>
+        <span class="s1">max_cols: int</span><span class="s0">,</span>
+        <span class="s1">idx_lengths: dict</span><span class="s0">,</span>
+    <span class="s1">):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Generate a regular row for the body section of appropriate format. 
+ 
+          +--------------------------------------------+---------------------------+ 
+          |  index_header_0    ...    index_header_n   |  data_by_column   ...     | 
+          +--------------------------------------------+---------------------------+ 
+ 
+        Parameters 
+        ---------- 
+        iter : tuple 
+            Iterable from outer scope: row number, row data tuple, row index labels. 
+        max_cols : int 
+            Number of permissible columns. 
+        idx_lengths : dict 
+            A map of the sparsification structure of the index 
+ 
+        Returns 
+        ------- 
+            list of elements 
+        &quot;&quot;&quot;</span>
+        <span class="s1">r</span><span class="s0">, </span><span class="s1">row_tup</span><span class="s0">, </span><span class="s1">rlabels = iter</span>
+
+        <span class="s1">index_headers = []</span>
+        <span class="s0">for </span><span class="s1">c</span><span class="s0">, </span><span class="s1">value </span><span class="s0">in </span><span class="s1">enumerate(rlabels[r]):</span>
+            <span class="s1">header_element_visible = (</span>
+                <span class="s1">_is_visible(r</span><span class="s0">, </span><span class="s1">c</span><span class="s0">, </span><span class="s1">idx_lengths) </span><span class="s0">and not </span><span class="s1">self.hide_index_[c]</span>
+            <span class="s1">)</span>
+            <span class="s1">header_element = _element(</span>
+                <span class="s2">&quot;th&quot;</span><span class="s0">,</span>
+                <span class="s1">(</span>
+                    <span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'row_heading'</span><span class="s1">]</span><span class="s0">} {</span><span class="s1">self.css[</span><span class="s2">'level'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">c</span><span class="s0">} </span><span class="s2">&quot;</span>
+                    <span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'row'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">r</span><span class="s0">}</span><span class="s2">&quot;</span>
+                <span class="s1">)</span><span class="s0">,</span>
+                <span class="s1">value</span><span class="s0">,</span>
+                <span class="s1">header_element_visible</span><span class="s0">,</span>
+                <span class="s1">display_value=self._display_funcs_index[(r</span><span class="s0">, </span><span class="s1">c)](value)</span><span class="s0">,</span>
+                <span class="s1">attributes=(</span>
+                    <span class="s2">f'rowspan=&quot;</span><span class="s0">{</span><span class="s1">idx_lengths.get((c</span><span class="s0">, </span><span class="s1">r)</span><span class="s0">, </span><span class="s5">0</span><span class="s1">)</span><span class="s0">}</span><span class="s2">&quot;'</span>
+                    <span class="s0">if </span><span class="s1">idx_lengths.get((c</span><span class="s0">, </span><span class="s1">r)</span><span class="s0">, </span><span class="s5">0</span><span class="s1">) &gt; </span><span class="s5">1</span>
+                    <span class="s0">else </span><span class="s2">&quot;&quot;</span>
+                <span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">)</span>
+
+            <span class="s0">if </span><span class="s1">self.cell_ids:</span>
+                <span class="s1">header_element[</span>
+                    <span class="s2">&quot;id&quot;</span>
+                <span class="s1">] = </span><span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'level'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">c</span><span class="s0">}</span><span class="s2">_</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'row'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">r</span><span class="s0">}</span><span class="s2">&quot;  </span><span class="s3"># id is given</span>
+            <span class="s0">if </span><span class="s1">(</span>
+                <span class="s1">header_element_visible</span>
+                <span class="s0">and </span><span class="s1">(r</span><span class="s0">, </span><span class="s1">c) </span><span class="s0">in </span><span class="s1">self.ctx_index</span>
+                <span class="s0">and </span><span class="s1">self.ctx_index[r</span><span class="s0">, </span><span class="s1">c]</span>
+            <span class="s1">):</span>
+                <span class="s3"># always add id if a style is specified</span>
+                <span class="s1">header_element[</span><span class="s2">&quot;id&quot;</span><span class="s1">] = </span><span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'level'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">c</span><span class="s0">}</span><span class="s2">_</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'row'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">r</span><span class="s0">}</span><span class="s2">&quot;</span>
+                <span class="s1">self.cellstyle_map_index[tuple(self.ctx_index[r</span><span class="s0">, </span><span class="s1">c])].append(</span>
+                    <span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'level'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">c</span><span class="s0">}</span><span class="s2">_</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'row'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">r</span><span class="s0">}</span><span class="s2">&quot;</span>
+                <span class="s1">)</span>
+
+            <span class="s1">index_headers.append(header_element)</span>
+
+        <span class="s1">data</span><span class="s0">, </span><span class="s1">visible_col_count = []</span><span class="s0">, </span><span class="s5">0</span>
+        <span class="s0">for </span><span class="s1">c</span><span class="s0">, </span><span class="s1">value </span><span class="s0">in </span><span class="s1">enumerate(row_tup[</span><span class="s5">1</span><span class="s1">:]):</span>
+            <span class="s1">data_element_visible = (</span>
+                <span class="s1">c </span><span class="s0">not in </span><span class="s1">self.hidden_columns </span><span class="s0">and </span><span class="s1">r </span><span class="s0">not in </span><span class="s1">self.hidden_rows</span>
+            <span class="s1">)</span>
+            <span class="s0">if </span><span class="s1">data_element_visible:</span>
+                <span class="s1">visible_col_count += </span><span class="s5">1</span>
+            <span class="s0">if </span><span class="s1">visible_col_count &gt; max_cols:</span>
+                <span class="s1">data.append(</span>
+                    <span class="s1">_element(</span>
+                        <span class="s2">&quot;td&quot;</span><span class="s0">,</span>
+                        <span class="s1">(</span>
+                            <span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'data'</span><span class="s1">]</span><span class="s0">} {</span><span class="s1">self.css[</span><span class="s2">'row'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">r</span><span class="s0">} </span><span class="s2">&quot;</span>
+                            <span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'col_trim'</span><span class="s1">]</span><span class="s0">}</span><span class="s2">&quot;</span>
+                        <span class="s1">)</span><span class="s0">,</span>
+                        <span class="s2">&quot;...&quot;</span><span class="s0">,</span>
+                        <span class="s0">True,</span>
+                        <span class="s1">attributes=</span><span class="s2">&quot;&quot;</span><span class="s0">,</span>
+                    <span class="s1">)</span>
+                <span class="s1">)</span>
+                <span class="s0">break</span>
+
+            <span class="s3"># add custom classes from cell context</span>
+            <span class="s1">cls = </span><span class="s2">&quot;&quot;</span>
+            <span class="s0">if </span><span class="s1">(r</span><span class="s0">, </span><span class="s1">c) </span><span class="s0">in </span><span class="s1">self.cell_context:</span>
+                <span class="s1">cls = </span><span class="s2">&quot; &quot; </span><span class="s1">+ self.cell_context[r</span><span class="s0">, </span><span class="s1">c]</span>
+
+            <span class="s1">data_element = _element(</span>
+                <span class="s2">&quot;td&quot;</span><span class="s0">,</span>
+                <span class="s1">(</span>
+                    <span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'data'</span><span class="s1">]</span><span class="s0">} {</span><span class="s1">self.css[</span><span class="s2">'row'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">r</span><span class="s0">} </span><span class="s2">&quot;</span>
+                    <span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'col'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">c</span><span class="s0">}{</span><span class="s1">cls</span><span class="s0">}</span><span class="s2">&quot;</span>
+                <span class="s1">)</span><span class="s0">,</span>
+                <span class="s1">value</span><span class="s0">,</span>
+                <span class="s1">data_element_visible</span><span class="s0">,</span>
+                <span class="s1">attributes=</span><span class="s2">&quot;&quot;</span><span class="s0">,</span>
+                <span class="s1">display_value=self._display_funcs[(r</span><span class="s0">, </span><span class="s1">c)](value)</span><span class="s0">,</span>
+            <span class="s1">)</span>
+
+            <span class="s0">if </span><span class="s1">self.cell_ids:</span>
+                <span class="s1">data_element[</span><span class="s2">&quot;id&quot;</span><span class="s1">] = </span><span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'row'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">r</span><span class="s0">}</span><span class="s2">_</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'col'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">c</span><span class="s0">}</span><span class="s2">&quot;</span>
+            <span class="s0">if </span><span class="s1">data_element_visible </span><span class="s0">and </span><span class="s1">(r</span><span class="s0">, </span><span class="s1">c) </span><span class="s0">in </span><span class="s1">self.ctx </span><span class="s0">and </span><span class="s1">self.ctx[r</span><span class="s0">, </span><span class="s1">c]:</span>
+                <span class="s3"># always add id if needed due to specified style</span>
+                <span class="s1">data_element[</span><span class="s2">&quot;id&quot;</span><span class="s1">] = </span><span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'row'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">r</span><span class="s0">}</span><span class="s2">_</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'col'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">c</span><span class="s0">}</span><span class="s2">&quot;</span>
+                <span class="s1">self.cellstyle_map[tuple(self.ctx[r</span><span class="s0">, </span><span class="s1">c])].append(</span>
+                    <span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'row'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">r</span><span class="s0">}</span><span class="s2">_</span><span class="s0">{</span><span class="s1">self.css[</span><span class="s2">'col'</span><span class="s1">]</span><span class="s0">}{</span><span class="s1">c</span><span class="s0">}</span><span class="s2">&quot;</span>
+                <span class="s1">)</span>
+
+            <span class="s1">data.append(data_element)</span>
+
+        <span class="s0">return </span><span class="s1">index_headers + data</span>
+
+    <span class="s0">def </span><span class="s1">_translate_latex(self</span><span class="s0">, </span><span class="s1">d: dict</span><span class="s0">, </span><span class="s1">clines: str | </span><span class="s0">None</span><span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s4">r&quot;&quot;&quot; 
+        Post-process the default render dict for the LaTeX template format. 
+ 
+        Processing items included are: 
+          - Remove hidden columns from the non-headers part of the body. 
+          - Place cellstyles directly in td cells rather than use cellstyle_map. 
+          - Remove hidden indexes or reinsert missing th elements if part of multiindex 
+            or multirow sparsification (so that \multirow and \multicol work correctly). 
+        &quot;&quot;&quot;</span>
+        <span class="s1">index_levels = self.index.nlevels</span>
+        <span class="s1">visible_index_level_n = index_levels - sum(self.hide_index_)</span>
+        <span class="s1">d[</span><span class="s2">&quot;head&quot;</span><span class="s1">] = [</span>
+            <span class="s1">[</span>
+                <span class="s1">{**col</span><span class="s0">, </span><span class="s2">&quot;cellstyle&quot;</span><span class="s1">: self.ctx_columns[r</span><span class="s0">, </span><span class="s1">c - visible_index_level_n]}</span>
+                <span class="s0">for </span><span class="s1">c</span><span class="s0">, </span><span class="s1">col </span><span class="s0">in </span><span class="s1">enumerate(row)</span>
+                <span class="s0">if </span><span class="s1">col[</span><span class="s2">&quot;is_visible&quot;</span><span class="s1">]</span>
+            <span class="s1">]</span>
+            <span class="s0">for </span><span class="s1">r</span><span class="s0">, </span><span class="s1">row </span><span class="s0">in </span><span class="s1">enumerate(d[</span><span class="s2">&quot;head&quot;</span><span class="s1">])</span>
+        <span class="s1">]</span>
+        <span class="s1">body = []</span>
+        <span class="s0">for </span><span class="s1">r</span><span class="s0">, </span><span class="s1">row </span><span class="s0">in </span><span class="s1">zip(</span>
+            <span class="s1">[r </span><span class="s0">for </span><span class="s1">r </span><span class="s0">in </span><span class="s1">range(len(self.data.index)) </span><span class="s0">if </span><span class="s1">r </span><span class="s0">not in </span><span class="s1">self.hidden_rows]</span><span class="s0">,</span>
+            <span class="s1">d[</span><span class="s2">&quot;body&quot;</span><span class="s1">]</span><span class="s0">,</span>
+        <span class="s1">):</span>
+            <span class="s3"># note: cannot enumerate d[&quot;body&quot;] because rows were dropped if hidden</span>
+            <span class="s3"># during _translate_body so must zip to acquire the true r-index associated</span>
+            <span class="s3"># with the ctx obj which contains the cell styles.</span>
+            <span class="s0">if </span><span class="s1">all(self.hide_index_):</span>
+                <span class="s1">row_body_headers = []</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">row_body_headers = [</span>
+                    <span class="s1">{</span>
+                        <span class="s1">**col</span><span class="s0">,</span>
+                        <span class="s2">&quot;display_value&quot;</span><span class="s1">: col[</span><span class="s2">&quot;display_value&quot;</span><span class="s1">]</span>
+                        <span class="s0">if </span><span class="s1">col[</span><span class="s2">&quot;is_visible&quot;</span><span class="s1">]</span>
+                        <span class="s0">else </span><span class="s2">&quot;&quot;</span><span class="s0">,</span>
+                        <span class="s2">&quot;cellstyle&quot;</span><span class="s1">: self.ctx_index[r</span><span class="s0">, </span><span class="s1">c]</span><span class="s0">,</span>
+                    <span class="s1">}</span>
+                    <span class="s0">for </span><span class="s1">c</span><span class="s0">, </span><span class="s1">col </span><span class="s0">in </span><span class="s1">enumerate(row[:index_levels])</span>
+                    <span class="s0">if </span><span class="s1">(col[</span><span class="s2">&quot;type&quot;</span><span class="s1">] == </span><span class="s2">&quot;th&quot; </span><span class="s0">and not </span><span class="s1">self.hide_index_[c])</span>
+                <span class="s1">]</span>
+
+            <span class="s1">row_body_cells = [</span>
+                <span class="s1">{**col</span><span class="s0">, </span><span class="s2">&quot;cellstyle&quot;</span><span class="s1">: self.ctx[r</span><span class="s0">, </span><span class="s1">c]}</span>
+                <span class="s0">for </span><span class="s1">c</span><span class="s0">, </span><span class="s1">col </span><span class="s0">in </span><span class="s1">enumerate(row[index_levels:])</span>
+                <span class="s0">if </span><span class="s1">(col[</span><span class="s2">&quot;is_visible&quot;</span><span class="s1">] </span><span class="s0">and </span><span class="s1">col[</span><span class="s2">&quot;type&quot;</span><span class="s1">] == </span><span class="s2">&quot;td&quot;</span><span class="s1">)</span>
+            <span class="s1">]</span>
+
+            <span class="s1">body.append(row_body_headers + row_body_cells)</span>
+        <span class="s1">d[</span><span class="s2">&quot;body&quot;</span><span class="s1">] = body</span>
+
+        <span class="s3"># clines are determined from info on index_lengths and hidden_rows and input</span>
+        <span class="s3"># to a dict defining which row clines should be added in the template.</span>
+        <span class="s0">if </span><span class="s1">clines </span><span class="s0">not in </span><span class="s1">[</span>
+            <span class="s0">None,</span>
+            <span class="s2">&quot;all;data&quot;</span><span class="s0">,</span>
+            <span class="s2">&quot;all;index&quot;</span><span class="s0">,</span>
+            <span class="s2">&quot;skip-last;data&quot;</span><span class="s0">,</span>
+            <span class="s2">&quot;skip-last;index&quot;</span><span class="s0">,</span>
+        <span class="s1">]:</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span>
+                <span class="s2">f&quot;`clines` value of </span><span class="s0">{</span><span class="s1">clines</span><span class="s0">} </span><span class="s2">is invalid. Should either be None or one &quot;</span>
+                <span class="s2">f&quot;of 'all;data', 'all;index', 'skip-last;data', 'skip-last;index'.&quot;</span>
+            <span class="s1">)</span>
+        <span class="s0">elif </span><span class="s1">clines </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">data_len = len(row_body_cells) </span><span class="s0">if </span><span class="s2">&quot;data&quot; </span><span class="s0">in </span><span class="s1">clines </span><span class="s0">else </span><span class="s5">0</span>
+
+            <span class="s1">d[</span><span class="s2">&quot;clines&quot;</span><span class="s1">] = defaultdict(list)</span>
+            <span class="s1">visible_row_indexes: list[int] = [</span>
+                <span class="s1">r </span><span class="s0">for </span><span class="s1">r </span><span class="s0">in </span><span class="s1">range(len(self.data.index)) </span><span class="s0">if </span><span class="s1">r </span><span class="s0">not in </span><span class="s1">self.hidden_rows</span>
+            <span class="s1">]</span>
+            <span class="s1">visible_index_levels: list[int] = [</span>
+                <span class="s1">i </span><span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">range(index_levels) </span><span class="s0">if not </span><span class="s1">self.hide_index_[i]</span>
+            <span class="s1">]</span>
+            <span class="s0">for </span><span class="s1">rn</span><span class="s0">, </span><span class="s1">r </span><span class="s0">in </span><span class="s1">enumerate(visible_row_indexes):</span>
+                <span class="s0">for </span><span class="s1">lvln</span><span class="s0">, </span><span class="s1">lvl </span><span class="s0">in </span><span class="s1">enumerate(visible_index_levels):</span>
+                    <span class="s0">if </span><span class="s1">lvl == index_levels - </span><span class="s5">1 </span><span class="s0">and </span><span class="s2">&quot;skip-last&quot; </span><span class="s0">in </span><span class="s1">clines:</span>
+                        <span class="s0">continue</span>
+                    <span class="s1">idx_len = d[</span><span class="s2">&quot;index_lengths&quot;</span><span class="s1">].get((lvl</span><span class="s0">, </span><span class="s1">r)</span><span class="s0">, None</span><span class="s1">)</span>
+                    <span class="s0">if </span><span class="s1">idx_len </span><span class="s0">is not None</span><span class="s1">:  </span><span class="s3"># i.e. not a sparsified entry</span>
+                        <span class="s1">d[</span><span class="s2">&quot;clines&quot;</span><span class="s1">][rn + idx_len].append(</span>
+                            <span class="s2">f&quot;</span><span class="s0">\\</span><span class="s2">cline</span><span class="s0">{{{</span><span class="s1">lvln+</span><span class="s5">1</span><span class="s0">}</span><span class="s2">-</span><span class="s0">{</span><span class="s1">len(visible_index_levels)+data_len</span><span class="s0">}}}</span><span class="s2">&quot;</span>
+                        <span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">format(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">formatter: ExtFormatter | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">subset: Subset | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">na_rep: str | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">precision: int | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">decimal: str = </span><span class="s2">&quot;.&quot;</span><span class="s0">,</span>
+        <span class="s1">thousands: str | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">escape: str | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">hyperlinks: str | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+    <span class="s1">) -&gt; StylerRenderer:</span>
+        <span class="s4">r&quot;&quot;&quot; 
+        Format the text display value of cells. 
+ 
+        Parameters 
+        ---------- 
+        formatter : str, callable, dict or None 
+            Object to define how values are displayed. See notes. 
+        subset : label, array-like, IndexSlice, optional 
+            A valid 2d input to `DataFrame.loc[&lt;subset&gt;]`, or, in the case of a 1d input 
+            or single key, to `DataFrame.loc[:, &lt;subset&gt;]` where the columns are 
+            prioritised, to limit ``data`` to *before* applying the function. 
+        na_rep : str, optional 
+            Representation for missing values. 
+            If ``na_rep`` is None, no special formatting is applied. 
+ 
+            .. versionadded:: 1.0.0 
+ 
+        precision : int, optional 
+            Floating point precision to use for display purposes, if not determined by 
+            the specified ``formatter``. 
+ 
+            .. versionadded:: 1.3.0 
+ 
+        decimal : str, default &quot;.&quot; 
+            Character used as decimal separator for floats, complex and integers. 
+ 
+            .. versionadded:: 1.3.0 
+ 
+        thousands : str, optional, default None 
+            Character used as thousands separator for floats, complex and integers. 
+ 
+            .. versionadded:: 1.3.0 
+ 
+        escape : str, optional 
+            Use 'html' to replace the characters ``&amp;``, ``&lt;``, ``&gt;``, ``'``, and ``&quot;`` 
+            in cell display string with HTML-safe sequences. 
+            Use 'latex' to replace the characters ``&amp;``, ``%``, ``$``, ``#``, ``_``, 
+            ``{``, ``}``, ``~``, ``^``, and ``\`` in the cell display string with 
+            LaTeX-safe sequences. 
+            Escaping is done before ``formatter``. 
+ 
+            .. versionadded:: 1.3.0 
+ 
+        hyperlinks : {&quot;html&quot;, &quot;latex&quot;}, optional 
+            Convert string patterns containing https://, http://, ftp:// or www. to 
+            HTML &lt;a&gt; tags as clickable URL hyperlinks if &quot;html&quot;, or LaTeX \href 
+            commands if &quot;latex&quot;. 
+ 
+            .. versionadded:: 1.4.0 
+ 
+        Returns 
+        ------- 
+        self : Styler 
+ 
+        Notes 
+        ----- 
+        This method assigns a formatting function, ``formatter``, to each cell in the 
+        DataFrame. If ``formatter`` is ``None``, then the default formatter is used. 
+        If a callable then that function should take a data value as input and return 
+        a displayable representation, such as a string. If ``formatter`` is 
+        given as a string this is assumed to be a valid Python format specification 
+        and is wrapped to a callable as ``string.format(x)``. If a ``dict`` is given, 
+        keys should correspond to column names, and values should be string or 
+        callable, as above. 
+ 
+        The default formatter currently expresses floats and complex numbers with the 
+        pandas display precision unless using the ``precision`` argument here. The 
+        default formatter does not adjust the representation of missing values unless 
+        the ``na_rep`` argument is used. 
+ 
+        The ``subset`` argument defines which region to apply the formatting function 
+        to. If the ``formatter`` argument is given in dict form but does not include 
+        all columns within the subset then these columns will have the default formatter 
+        applied. Any columns in the formatter dict excluded from the subset will 
+        be ignored. 
+ 
+        When using a ``formatter`` string the dtypes must be compatible, otherwise a 
+        `ValueError` will be raised. 
+ 
+        When instantiating a Styler, default formatting can be applied be setting the 
+        ``pandas.options``: 
+ 
+          - ``styler.format.formatter``: default None. 
+          - ``styler.format.na_rep``: default None. 
+          - ``styler.format.precision``: default 6. 
+          - ``styler.format.decimal``: default &quot;.&quot;. 
+          - ``styler.format.thousands``: default None. 
+          - ``styler.format.escape``: default None. 
+ 
+        Examples 
+        -------- 
+        Using ``na_rep`` and ``precision`` with the default ``formatter`` 
+ 
+        &gt;&gt;&gt; df = pd.DataFrame([[np.nan, 1.0, 'A'], [2.0, np.nan, 3.0]]) 
+        &gt;&gt;&gt; df.style.format(na_rep='MISS', precision=3)  # doctest: +SKIP 
+                0       1       2 
+        0    MISS   1.000       A 
+        1   2.000    MISS   3.000 
+ 
+        Using a ``formatter`` specification on consistent column dtypes 
+ 
+        &gt;&gt;&gt; df.style.format('{:.2f}', na_rep='MISS', subset=[0,1])  # doctest: +SKIP 
+                0      1          2 
+        0    MISS   1.00          A 
+        1    2.00   MISS   3.000000 
+ 
+        Using the default ``formatter`` for unspecified columns 
+ 
+        &gt;&gt;&gt; df.style.format({0: '{:.2f}', 1: '£ {:.1f}'}, na_rep='MISS', precision=1) 
+        ...  # doctest: +SKIP 
+                 0      1     2 
+        0    MISS   £ 1.0     A 
+        1    2.00    MISS   3.0 
+ 
+        Multiple ``na_rep`` or ``precision`` specifications under the default 
+        ``formatter``. 
+ 
+        &gt;&gt;&gt; df.style.format(na_rep='MISS', precision=1, subset=[0]) 
+        ...     .format(na_rep='PASS', precision=2, subset=[1, 2])  # doctest: +SKIP 
+                0      1      2 
+        0    MISS   1.00      A 
+        1     2.0   PASS   3.00 
+ 
+        Using a callable ``formatter`` function. 
+ 
+        &gt;&gt;&gt; func = lambda s: 'STRING' if isinstance(s, str) else 'FLOAT' 
+        &gt;&gt;&gt; df.style.format({0: '{:.1f}', 2: func}, precision=4, na_rep='MISS') 
+        ...  # doctest: +SKIP 
+                0        1        2 
+        0    MISS   1.0000   STRING 
+        1     2.0     MISS    FLOAT 
+ 
+        Using a ``formatter`` with HTML ``escape`` and ``na_rep``. 
+ 
+        &gt;&gt;&gt; df = pd.DataFrame([['&lt;div&gt;&lt;/div&gt;', '&quot;A&amp;B&quot;', None]]) 
+        &gt;&gt;&gt; s = df.style.format( 
+        ...     '&lt;a href=&quot;a.com/{0}&quot;&gt;{0}&lt;/a&gt;', escape=&quot;html&quot;, na_rep=&quot;NA&quot; 
+        ...     ) 
+        &gt;&gt;&gt; s.to_html()  # doctest: +SKIP 
+        ... 
+        &lt;td .. &gt;&lt;a href=&quot;a.com/&amp;lt;div&amp;gt;&amp;lt;/div&amp;gt;&quot;&gt;&amp;lt;div&amp;gt;&amp;lt;/div&amp;gt;&lt;/a&gt;&lt;/td&gt; 
+        &lt;td .. &gt;&lt;a href=&quot;a.com/&amp;#34;A&amp;amp;B&amp;#34;&quot;&gt;&amp;#34;A&amp;amp;B&amp;#34;&lt;/a&gt;&lt;/td&gt; 
+        &lt;td .. &gt;NA&lt;/td&gt; 
+        ... 
+ 
+        Using a ``formatter`` with LaTeX ``escape``. 
+ 
+        &gt;&gt;&gt; df = pd.DataFrame([[&quot;123&quot;], [&quot;~ ^&quot;], [&quot;$%#&quot;]]) 
+        &gt;&gt;&gt; df.style.format(&quot;\\textbf{{{}}}&quot;, escape=&quot;latex&quot;).to_latex() 
+        ...  # doctest: +SKIP 
+        \begin{tabular}{ll} 
+        {} &amp; {0} \\ 
+        0 &amp; \textbf{123} \\ 
+        1 &amp; \textbf{\textasciitilde \space \textasciicircum } \\ 
+        2 &amp; \textbf{\$\%\#} \\ 
+        \end{tabular} 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">all(</span>
+            <span class="s1">(</span>
+                <span class="s1">formatter </span><span class="s0">is None,</span>
+                <span class="s1">subset </span><span class="s0">is None,</span>
+                <span class="s1">precision </span><span class="s0">is None,</span>
+                <span class="s1">decimal == </span><span class="s2">&quot;.&quot;</span><span class="s0">,</span>
+                <span class="s1">thousands </span><span class="s0">is None,</span>
+                <span class="s1">na_rep </span><span class="s0">is None,</span>
+                <span class="s1">escape </span><span class="s0">is None,</span>
+                <span class="s1">hyperlinks </span><span class="s0">is None,</span>
+            <span class="s1">)</span>
+        <span class="s1">):</span>
+            <span class="s1">self._display_funcs.clear()</span>
+            <span class="s0">return </span><span class="s1">self  </span><span class="s3"># clear the formatter / revert to default and avoid looping</span>
+
+        <span class="s1">subset = slice(</span><span class="s0">None</span><span class="s1">) </span><span class="s0">if </span><span class="s1">subset </span><span class="s0">is None else </span><span class="s1">subset</span>
+        <span class="s1">subset = non_reducing_slice(subset)</span>
+        <span class="s1">data = self.data.loc[subset]</span>
+
+        <span class="s0">if not </span><span class="s1">isinstance(formatter</span><span class="s0">, </span><span class="s1">dict):</span>
+            <span class="s1">formatter = {col: formatter </span><span class="s0">for </span><span class="s1">col </span><span class="s0">in </span><span class="s1">data.columns}</span>
+
+        <span class="s1">cis = self.columns.get_indexer_for(data.columns)</span>
+        <span class="s1">ris = self.index.get_indexer_for(data.index)</span>
+        <span class="s0">for </span><span class="s1">ci </span><span class="s0">in </span><span class="s1">cis:</span>
+            <span class="s1">format_func = _maybe_wrap_formatter(</span>
+                <span class="s1">formatter.get(self.columns[ci])</span><span class="s0">,</span>
+                <span class="s1">na_rep=na_rep</span><span class="s0">,</span>
+                <span class="s1">precision=precision</span><span class="s0">,</span>
+                <span class="s1">decimal=decimal</span><span class="s0">,</span>
+                <span class="s1">thousands=thousands</span><span class="s0">,</span>
+                <span class="s1">escape=escape</span><span class="s0">,</span>
+                <span class="s1">hyperlinks=hyperlinks</span><span class="s0">,</span>
+            <span class="s1">)</span>
+            <span class="s0">for </span><span class="s1">ri </span><span class="s0">in </span><span class="s1">ris:</span>
+                <span class="s1">self._display_funcs[(ri</span><span class="s0">, </span><span class="s1">ci)] = format_func</span>
+
+        <span class="s0">return </span><span class="s1">self</span>
+
+    <span class="s0">def </span><span class="s1">format_index(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">formatter: ExtFormatter | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">axis: int | str = </span><span class="s5">0</span><span class="s0">,</span>
+        <span class="s1">level: Level | list[Level] | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">na_rep: str | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">precision: int | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">decimal: str = </span><span class="s2">&quot;.&quot;</span><span class="s0">,</span>
+        <span class="s1">thousands: str | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">escape: str | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">hyperlinks: str | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+    <span class="s1">) -&gt; StylerRenderer:</span>
+        <span class="s4">r&quot;&quot;&quot; 
+        Format the text display value of index labels or column headers. 
+ 
+        .. versionadded:: 1.4.0 
+ 
+        Parameters 
+        ---------- 
+        formatter : str, callable, dict or None 
+            Object to define how values are displayed. See notes. 
+        axis : {0, &quot;index&quot;, 1, &quot;columns&quot;} 
+            Whether to apply the formatter to the index or column headers. 
+        level : int, str, list 
+            The level(s) over which to apply the generic formatter. 
+        na_rep : str, optional 
+            Representation for missing values. 
+            If ``na_rep`` is None, no special formatting is applied. 
+        precision : int, optional 
+            Floating point precision to use for display purposes, if not determined by 
+            the specified ``formatter``. 
+        decimal : str, default &quot;.&quot; 
+            Character used as decimal separator for floats, complex and integers. 
+        thousands : str, optional, default None 
+            Character used as thousands separator for floats, complex and integers. 
+        escape : str, optional 
+            Use 'html' to replace the characters ``&amp;``, ``&lt;``, ``&gt;``, ``'``, and ``&quot;`` 
+            in cell display string with HTML-safe sequences. 
+            Use 'latex' to replace the characters ``&amp;``, ``%``, ``$``, ``#``, ``_``, 
+            ``{``, ``}``, ``~``, ``^``, and ``\`` in the cell display string with 
+            LaTeX-safe sequences. 
+            Escaping is done before ``formatter``. 
+        hyperlinks : {&quot;html&quot;, &quot;latex&quot;}, optional 
+            Convert string patterns containing https://, http://, ftp:// or www. to 
+            HTML &lt;a&gt; tags as clickable URL hyperlinks if &quot;html&quot;, or LaTeX \href 
+            commands if &quot;latex&quot;. 
+ 
+        Returns 
+        ------- 
+        self : Styler 
+ 
+        Notes 
+        ----- 
+        This method assigns a formatting function, ``formatter``, to each level label 
+        in the DataFrame's index or column headers. If ``formatter`` is ``None``, 
+        then the default formatter is used. 
+        If a callable then that function should take a label value as input and return 
+        a displayable representation, such as a string. If ``formatter`` is 
+        given as a string this is assumed to be a valid Python format specification 
+        and is wrapped to a callable as ``string.format(x)``. If a ``dict`` is given, 
+        keys should correspond to MultiIndex level numbers or names, and values should 
+        be string or callable, as above. 
+ 
+        The default formatter currently expresses floats and complex numbers with the 
+        pandas display precision unless using the ``precision`` argument here. The 
+        default formatter does not adjust the representation of missing values unless 
+        the ``na_rep`` argument is used. 
+ 
+        The ``level`` argument defines which levels of a MultiIndex to apply the 
+        method to. If the ``formatter`` argument is given in dict form but does 
+        not include all levels within the level argument then these unspecified levels 
+        will have the default formatter applied. Any levels in the formatter dict 
+        specifically excluded from the level argument will be ignored. 
+ 
+        When using a ``formatter`` string the dtypes must be compatible, otherwise a 
+        `ValueError` will be raised. 
+ 
+        Examples 
+        -------- 
+        Using ``na_rep`` and ``precision`` with the default ``formatter`` 
+ 
+        &gt;&gt;&gt; df = pd.DataFrame([[1, 2, 3]], columns=[2.0, np.nan, 4.0]) 
+        &gt;&gt;&gt; df.style.format_index(axis=1, na_rep='MISS', precision=3)  # doctest: +SKIP 
+            2.000    MISS   4.000 
+        0       1       2       3 
+ 
+        Using a ``formatter`` specification on consistent dtypes in a level 
+ 
+        &gt;&gt;&gt; df.style.format_index('{:.2f}', axis=1, na_rep='MISS')  # doctest: +SKIP 
+             2.00   MISS    4.00 
+        0       1      2       3 
+ 
+        Using the default ``formatter`` for unspecified levels 
+ 
+        &gt;&gt;&gt; df = pd.DataFrame([[1, 2, 3]], 
+        ...     columns=pd.MultiIndex.from_arrays([[&quot;a&quot;, &quot;a&quot;, &quot;b&quot;],[2, np.nan, 4]])) 
+        &gt;&gt;&gt; df.style.format_index({0: lambda v: upper(v)}, axis=1, precision=1) 
+        ...  # doctest: +SKIP 
+                       A       B 
+              2.0    nan     4.0 
+        0       1      2       3 
+ 
+        Using a callable ``formatter`` function. 
+ 
+        &gt;&gt;&gt; func = lambda s: 'STRING' if isinstance(s, str) else 'FLOAT' 
+        &gt;&gt;&gt; df.style.format_index(func, axis=1, na_rep='MISS') 
+        ...  # doctest: +SKIP 
+                  STRING  STRING 
+            FLOAT   MISS   FLOAT 
+        0       1      2       3 
+ 
+        Using a ``formatter`` with HTML ``escape`` and ``na_rep``. 
+ 
+        &gt;&gt;&gt; df = pd.DataFrame([[1, 2, 3]], columns=['&quot;A&quot;', 'A&amp;B', None]) 
+        &gt;&gt;&gt; s = df.style.format_index('$ {0}', axis=1, escape=&quot;html&quot;, na_rep=&quot;NA&quot;) 
+        ...  # doctest: +SKIP 
+        &lt;th .. &gt;$ &amp;#34;A&amp;#34;&lt;/th&gt; 
+        &lt;th .. &gt;$ A&amp;amp;B&lt;/th&gt; 
+        &lt;th .. &gt;NA&lt;/td&gt; 
+        ... 
+ 
+        Using a ``formatter`` with LaTeX ``escape``. 
+ 
+        &gt;&gt;&gt; df = pd.DataFrame([[1, 2, 3]], columns=[&quot;123&quot;, &quot;~&quot;, &quot;$%#&quot;]) 
+        &gt;&gt;&gt; df.style.format_index(&quot;\\textbf{{{}}}&quot;, escape=&quot;latex&quot;, axis=1).to_latex() 
+        ...  # doctest: +SKIP 
+        \begin{tabular}{lrrr} 
+        {} &amp; {\textbf{123}} &amp; {\textbf{\textasciitilde }} &amp; {\textbf{\$\%\#}} \\ 
+        0 &amp; 1 &amp; 2 &amp; 3 \\ 
+        \end{tabular} 
+        &quot;&quot;&quot;</span>
+        <span class="s1">axis = self.data._get_axis_number(axis)</span>
+        <span class="s0">if </span><span class="s1">axis == </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s1">display_funcs_</span><span class="s0">, </span><span class="s1">obj = self._display_funcs_index</span><span class="s0">, </span><span class="s1">self.index</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">display_funcs_</span><span class="s0">, </span><span class="s1">obj = self._display_funcs_columns</span><span class="s0">, </span><span class="s1">self.columns</span>
+        <span class="s1">levels_ = refactor_levels(level</span><span class="s0">, </span><span class="s1">obj)</span>
+
+        <span class="s0">if </span><span class="s1">all(</span>
+            <span class="s1">(</span>
+                <span class="s1">formatter </span><span class="s0">is None,</span>
+                <span class="s1">level </span><span class="s0">is None,</span>
+                <span class="s1">precision </span><span class="s0">is None,</span>
+                <span class="s1">decimal == </span><span class="s2">&quot;.&quot;</span><span class="s0">,</span>
+                <span class="s1">thousands </span><span class="s0">is None,</span>
+                <span class="s1">na_rep </span><span class="s0">is None,</span>
+                <span class="s1">escape </span><span class="s0">is None,</span>
+                <span class="s1">hyperlinks </span><span class="s0">is None,</span>
+            <span class="s1">)</span>
+        <span class="s1">):</span>
+            <span class="s1">display_funcs_.clear()</span>
+            <span class="s0">return </span><span class="s1">self  </span><span class="s3"># clear the formatter / revert to default and avoid looping</span>
+
+        <span class="s0">if not </span><span class="s1">isinstance(formatter</span><span class="s0">, </span><span class="s1">dict):</span>
+            <span class="s1">formatter = {level: formatter </span><span class="s0">for </span><span class="s1">level </span><span class="s0">in </span><span class="s1">levels_}</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">formatter = {</span>
+                <span class="s1">obj._get_level_number(level): formatter_</span>
+                <span class="s0">for </span><span class="s1">level</span><span class="s0">, </span><span class="s1">formatter_ </span><span class="s0">in </span><span class="s1">formatter.items()</span>
+            <span class="s1">}</span>
+
+        <span class="s0">for </span><span class="s1">lvl </span><span class="s0">in </span><span class="s1">levels_:</span>
+            <span class="s1">format_func = _maybe_wrap_formatter(</span>
+                <span class="s1">formatter.get(lvl)</span><span class="s0">,</span>
+                <span class="s1">na_rep=na_rep</span><span class="s0">,</span>
+                <span class="s1">precision=precision</span><span class="s0">,</span>
+                <span class="s1">decimal=decimal</span><span class="s0">,</span>
+                <span class="s1">thousands=thousands</span><span class="s0">,</span>
+                <span class="s1">escape=escape</span><span class="s0">,</span>
+                <span class="s1">hyperlinks=hyperlinks</span><span class="s0">,</span>
+            <span class="s1">)</span>
+
+            <span class="s0">for </span><span class="s1">idx </span><span class="s0">in </span><span class="s1">[(i</span><span class="s0">, </span><span class="s1">lvl) </span><span class="s0">if </span><span class="s1">axis == </span><span class="s5">0 </span><span class="s0">else </span><span class="s1">(lvl</span><span class="s0">, </span><span class="s1">i) </span><span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">range(len(obj))]:</span>
+                <span class="s1">display_funcs_[idx] = format_func</span>
+
+        <span class="s0">return </span><span class="s1">self</span>
+
+
+<span class="s0">def </span><span class="s1">_element(</span>
+    <span class="s1">html_element: str</span><span class="s0">,</span>
+    <span class="s1">html_class: str</span><span class="s0">,</span>
+    <span class="s1">value: Any</span><span class="s0">,</span>
+    <span class="s1">is_visible: bool</span><span class="s0">,</span>
+    <span class="s1">**kwargs</span><span class="s0">,</span>
+<span class="s1">) -&gt; dict:</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Template to return container with information for a &lt;td&gt;&lt;/td&gt; or &lt;th&gt;&lt;/th&gt; element. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s2">&quot;display_value&quot; </span><span class="s0">not in </span><span class="s1">kwargs:</span>
+        <span class="s1">kwargs[</span><span class="s2">&quot;display_value&quot;</span><span class="s1">] = value</span>
+    <span class="s0">return </span><span class="s1">{</span>
+        <span class="s2">&quot;type&quot;</span><span class="s1">: html_element</span><span class="s0">,</span>
+        <span class="s2">&quot;value&quot;</span><span class="s1">: value</span><span class="s0">,</span>
+        <span class="s2">&quot;class&quot;</span><span class="s1">: html_class</span><span class="s0">,</span>
+        <span class="s2">&quot;is_visible&quot;</span><span class="s1">: is_visible</span><span class="s0">,</span>
+        <span class="s1">**kwargs</span><span class="s0">,</span>
+    <span class="s1">}</span>
+
+
+<span class="s0">def </span><span class="s1">_get_trimming_maximums(</span>
+    <span class="s1">rn</span><span class="s0">,</span>
+    <span class="s1">cn</span><span class="s0">,</span>
+    <span class="s1">max_elements</span><span class="s0">,</span>
+    <span class="s1">max_rows=</span><span class="s0">None,</span>
+    <span class="s1">max_cols=</span><span class="s0">None,</span>
+    <span class="s1">scaling_factor=</span><span class="s5">0.8</span><span class="s0">,</span>
+<span class="s1">) -&gt; tuple[int</span><span class="s0">, </span><span class="s1">int]:</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Recursively reduce the number of rows and columns to satisfy max elements. 
+ 
+    Parameters 
+    ---------- 
+    rn, cn : int 
+        The number of input rows / columns 
+    max_elements : int 
+        The number of allowable elements 
+    max_rows, max_cols : int, optional 
+        Directly specify an initial maximum rows or columns before compression. 
+    scaling_factor : float 
+        Factor at which to reduce the number of rows / columns to fit. 
+ 
+    Returns 
+    ------- 
+    rn, cn : tuple 
+        New rn and cn values that satisfy the max_elements constraint 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">scale_down(rn</span><span class="s0">, </span><span class="s1">cn):</span>
+        <span class="s0">if </span><span class="s1">cn &gt;= rn:</span>
+            <span class="s0">return </span><span class="s1">rn</span><span class="s0">, </span><span class="s1">int(cn * scaling_factor)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">int(rn * scaling_factor)</span><span class="s0">, </span><span class="s1">cn</span>
+
+    <span class="s0">if </span><span class="s1">max_rows:</span>
+        <span class="s1">rn = max_rows </span><span class="s0">if </span><span class="s1">rn &gt; max_rows </span><span class="s0">else </span><span class="s1">rn</span>
+    <span class="s0">if </span><span class="s1">max_cols:</span>
+        <span class="s1">cn = max_cols </span><span class="s0">if </span><span class="s1">cn &gt; max_cols </span><span class="s0">else </span><span class="s1">cn</span>
+
+    <span class="s0">while </span><span class="s1">rn * cn &gt; max_elements:</span>
+        <span class="s1">rn</span><span class="s0">, </span><span class="s1">cn = scale_down(rn</span><span class="s0">, </span><span class="s1">cn)</span>
+
+    <span class="s0">return </span><span class="s1">rn</span><span class="s0">, </span><span class="s1">cn</span>
+
+
+<span class="s0">def </span><span class="s1">_get_level_lengths(</span>
+    <span class="s1">index: Index</span><span class="s0">,</span>
+    <span class="s1">sparsify: bool</span><span class="s0">,</span>
+    <span class="s1">max_index: int</span><span class="s0">,</span>
+    <span class="s1">hidden_elements: Sequence[int] | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+<span class="s1">):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Given an index, find the level length for each element. 
+ 
+    Parameters 
+    ---------- 
+    index : Index 
+        Index or columns to determine lengths of each element 
+    sparsify : bool 
+        Whether to hide or show each distinct element in a MultiIndex 
+    max_index : int 
+        The maximum number of elements to analyse along the index due to trimming 
+    hidden_elements : sequence of int 
+        Index positions of elements hidden from display in the index affecting 
+        length 
+ 
+    Returns 
+    ------- 
+    Dict : 
+        Result is a dictionary of (level, initial_position): span 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">isinstance(index</span><span class="s0">, </span><span class="s1">MultiIndex):</span>
+        <span class="s1">levels = index.format(sparsify=lib.no_default</span><span class="s0">, </span><span class="s1">adjoin=</span><span class="s0">False</span><span class="s1">)</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">levels = index.format()</span>
+
+    <span class="s0">if </span><span class="s1">hidden_elements </span><span class="s0">is None</span><span class="s1">:</span>
+        <span class="s1">hidden_elements = []</span>
+
+    <span class="s1">lengths = {}</span>
+    <span class="s0">if not </span><span class="s1">isinstance(index</span><span class="s0">, </span><span class="s1">MultiIndex):</span>
+        <span class="s0">for </span><span class="s1">i</span><span class="s0">, </span><span class="s1">value </span><span class="s0">in </span><span class="s1">enumerate(levels):</span>
+            <span class="s0">if </span><span class="s1">i </span><span class="s0">not in </span><span class="s1">hidden_elements:</span>
+                <span class="s1">lengths[(</span><span class="s5">0</span><span class="s0">, </span><span class="s1">i)] = </span><span class="s5">1</span>
+        <span class="s0">return </span><span class="s1">lengths</span>
+
+    <span class="s0">for </span><span class="s1">i</span><span class="s0">, </span><span class="s1">lvl </span><span class="s0">in </span><span class="s1">enumerate(levels):</span>
+        <span class="s1">visible_row_count = </span><span class="s5">0  </span><span class="s3"># used to break loop due to display trimming</span>
+        <span class="s0">for </span><span class="s1">j</span><span class="s0">, </span><span class="s1">row </span><span class="s0">in </span><span class="s1">enumerate(lvl):</span>
+            <span class="s0">if </span><span class="s1">visible_row_count &gt; max_index:</span>
+                <span class="s0">break</span>
+            <span class="s0">if not </span><span class="s1">sparsify:</span>
+                <span class="s3"># then lengths will always equal 1 since no aggregation.</span>
+                <span class="s0">if </span><span class="s1">j </span><span class="s0">not in </span><span class="s1">hidden_elements:</span>
+                    <span class="s1">lengths[(i</span><span class="s0">, </span><span class="s1">j)] = </span><span class="s5">1</span>
+                    <span class="s1">visible_row_count += </span><span class="s5">1</span>
+            <span class="s0">elif </span><span class="s1">(row </span><span class="s0">is not </span><span class="s1">lib.no_default) </span><span class="s0">and </span><span class="s1">(j </span><span class="s0">not in </span><span class="s1">hidden_elements):</span>
+                <span class="s3"># this element has not been sparsified so must be the start of section</span>
+                <span class="s1">last_label = j</span>
+                <span class="s1">lengths[(i</span><span class="s0">, </span><span class="s1">last_label)] = </span><span class="s5">1</span>
+                <span class="s1">visible_row_count += </span><span class="s5">1</span>
+            <span class="s0">elif </span><span class="s1">row </span><span class="s0">is not </span><span class="s1">lib.no_default:</span>
+                <span class="s3"># even if the above is hidden, keep track of it in case length &gt; 1 and</span>
+                <span class="s3"># later elements are visible</span>
+                <span class="s1">last_label = j</span>
+                <span class="s1">lengths[(i</span><span class="s0">, </span><span class="s1">last_label)] = </span><span class="s5">0</span>
+            <span class="s0">elif </span><span class="s1">j </span><span class="s0">not in </span><span class="s1">hidden_elements:</span>
+                <span class="s3"># then element must be part of sparsified section and is visible</span>
+                <span class="s1">visible_row_count += </span><span class="s5">1</span>
+                <span class="s0">if </span><span class="s1">visible_row_count &gt; max_index:</span>
+                    <span class="s0">break  </span><span class="s3"># do not add a length since the render trim limit reached</span>
+                <span class="s0">if </span><span class="s1">lengths[(i</span><span class="s0">, </span><span class="s1">last_label)] == </span><span class="s5">0</span><span class="s1">:</span>
+                    <span class="s3"># if previous iteration was first-of-section but hidden then offset</span>
+                    <span class="s1">last_label = j</span>
+                    <span class="s1">lengths[(i</span><span class="s0">, </span><span class="s1">last_label)] = </span><span class="s5">1</span>
+                <span class="s0">else</span><span class="s1">:</span>
+                    <span class="s3"># else add to previous iteration</span>
+                    <span class="s1">lengths[(i</span><span class="s0">, </span><span class="s1">last_label)] += </span><span class="s5">1</span>
+
+    <span class="s1">non_zero_lengths = {</span>
+        <span class="s1">element: length </span><span class="s0">for </span><span class="s1">element</span><span class="s0">, </span><span class="s1">length </span><span class="s0">in </span><span class="s1">lengths.items() </span><span class="s0">if </span><span class="s1">length &gt;= </span><span class="s5">1</span>
+    <span class="s1">}</span>
+
+    <span class="s0">return </span><span class="s1">non_zero_lengths</span>
+
+
+<span class="s0">def </span><span class="s1">_is_visible(idx_row</span><span class="s0">, </span><span class="s1">idx_col</span><span class="s0">, </span><span class="s1">lengths) -&gt; bool:</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Index -&gt; {(idx_row, idx_col): bool}). 
+    &quot;&quot;&quot;</span>
+    <span class="s0">return </span><span class="s1">(idx_col</span><span class="s0">, </span><span class="s1">idx_row) </span><span class="s0">in </span><span class="s1">lengths</span>
+
+
+<span class="s0">def </span><span class="s1">format_table_styles(styles: CSSStyles) -&gt; CSSStyles:</span>
+    <span class="s4">&quot;&quot;&quot; 
+    looks for multiple CSS selectors and separates them: 
+    [{'selector': 'td, th', 'props': 'a:v;'}] 
+        ---&gt; [{'selector': 'td', 'props': 'a:v;'}, 
+              {'selector': 'th', 'props': 'a:v;'}] 
+    &quot;&quot;&quot;</span>
+    <span class="s0">return </span><span class="s1">[</span>
+        <span class="s1">{</span><span class="s2">&quot;selector&quot;</span><span class="s1">: selector</span><span class="s0">, </span><span class="s2">&quot;props&quot;</span><span class="s1">: css_dict[</span><span class="s2">&quot;props&quot;</span><span class="s1">]}</span>
+        <span class="s0">for </span><span class="s1">css_dict </span><span class="s0">in </span><span class="s1">styles</span>
+        <span class="s0">for </span><span class="s1">selector </span><span class="s0">in </span><span class="s1">css_dict[</span><span class="s2">&quot;selector&quot;</span><span class="s1">].split(</span><span class="s2">&quot;,&quot;</span><span class="s1">)</span>
+    <span class="s1">]</span>
+
+
+<span class="s0">def </span><span class="s1">_default_formatter(x: Any</span><span class="s0">, </span><span class="s1">precision: int</span><span class="s0">, </span><span class="s1">thousands: bool = </span><span class="s0">False</span><span class="s1">) -&gt; Any:</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Format the display of a value 
+ 
+    Parameters 
+    ---------- 
+    x : Any 
+        Input variable to be formatted 
+    precision : Int 
+        Floating point precision used if ``x`` is float or complex. 
+    thousands : bool, default False 
+        Whether to group digits with thousands separated with &quot;,&quot;. 
+ 
+    Returns 
+    ------- 
+    value : Any 
+        Matches input type, or string if input is float or complex or int with sep. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">isinstance(x</span><span class="s0">, </span><span class="s1">(float</span><span class="s0">, </span><span class="s1">complex)):</span>
+        <span class="s0">return </span><span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">x</span><span class="s0">:</span><span class="s2">,.</span><span class="s0">{</span><span class="s1">precision</span><span class="s0">}</span><span class="s2">f</span><span class="s0">}</span><span class="s2">&quot; </span><span class="s0">if </span><span class="s1">thousands </span><span class="s0">else </span><span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">x</span><span class="s0">:</span><span class="s2">.</span><span class="s0">{</span><span class="s1">precision</span><span class="s0">}</span><span class="s2">f</span><span class="s0">}</span><span class="s2">&quot;</span>
+    <span class="s0">elif </span><span class="s1">isinstance(x</span><span class="s0">, </span><span class="s1">int):</span>
+        <span class="s0">return </span><span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">x</span><span class="s0">:</span><span class="s2">,.0f</span><span class="s0">}</span><span class="s2">&quot; </span><span class="s0">if </span><span class="s1">thousands </span><span class="s0">else </span><span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">x</span><span class="s0">:</span><span class="s2">.0f</span><span class="s0">}</span><span class="s2">&quot;</span>
+    <span class="s0">return </span><span class="s1">x</span>
+
+
+<span class="s0">def </span><span class="s1">_wrap_decimal_thousands(</span>
+    <span class="s1">formatter: Callable</span><span class="s0">, </span><span class="s1">decimal: str</span><span class="s0">, </span><span class="s1">thousands: str | </span><span class="s0">None</span>
+<span class="s1">) -&gt; Callable:</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Takes a string formatting function and wraps logic to deal with thousands and 
+    decimal parameters, in the case that they are non-standard and that the input 
+    is a (float, complex, int). 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">wrapper(x):</span>
+        <span class="s0">if </span><span class="s1">isinstance(x</span><span class="s0">, </span><span class="s1">(float</span><span class="s0">, </span><span class="s1">complex</span><span class="s0">, </span><span class="s1">int)):</span>
+            <span class="s0">if </span><span class="s1">decimal != </span><span class="s2">&quot;.&quot; </span><span class="s0">and </span><span class="s1">thousands </span><span class="s0">is not None and </span><span class="s1">thousands != </span><span class="s2">&quot;,&quot;</span><span class="s1">:</span>
+                <span class="s0">return </span><span class="s1">(</span>
+                    <span class="s1">formatter(x)</span>
+                    <span class="s1">.replace(</span><span class="s2">&quot;,&quot;</span><span class="s0">, </span><span class="s2">&quot;§_§-&quot;</span><span class="s1">)  </span><span class="s3"># rare string to avoid &quot;,&quot; &lt;-&gt; &quot;.&quot; clash.</span>
+                    <span class="s1">.replace(</span><span class="s2">&quot;.&quot;</span><span class="s0">, </span><span class="s1">decimal)</span>
+                    <span class="s1">.replace(</span><span class="s2">&quot;§_§-&quot;</span><span class="s0">, </span><span class="s1">thousands)</span>
+                <span class="s1">)</span>
+            <span class="s0">elif </span><span class="s1">decimal != </span><span class="s2">&quot;.&quot; </span><span class="s0">and </span><span class="s1">(thousands </span><span class="s0">is None or </span><span class="s1">thousands == </span><span class="s2">&quot;,&quot;</span><span class="s1">):</span>
+                <span class="s0">return </span><span class="s1">formatter(x).replace(</span><span class="s2">&quot;.&quot;</span><span class="s0">, </span><span class="s1">decimal)</span>
+            <span class="s0">elif </span><span class="s1">decimal == </span><span class="s2">&quot;.&quot; </span><span class="s0">and </span><span class="s1">thousands </span><span class="s0">is not None and </span><span class="s1">thousands != </span><span class="s2">&quot;,&quot;</span><span class="s1">:</span>
+                <span class="s0">return </span><span class="s1">formatter(x).replace(</span><span class="s2">&quot;,&quot;</span><span class="s0">, </span><span class="s1">thousands)</span>
+        <span class="s0">return </span><span class="s1">formatter(x)</span>
+
+    <span class="s0">return </span><span class="s1">wrapper</span>
+
+
+<span class="s0">def </span><span class="s1">_str_escape(x</span><span class="s0">, </span><span class="s1">escape):</span>
+    <span class="s4">&quot;&quot;&quot;if escaping: only use on str, else return input&quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">isinstance(x</span><span class="s0">, </span><span class="s1">str):</span>
+        <span class="s0">if </span><span class="s1">escape == </span><span class="s2">&quot;html&quot;</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">escape_html(x)</span>
+        <span class="s0">elif </span><span class="s1">escape == </span><span class="s2">&quot;latex&quot;</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">_escape_latex(x)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span>
+                <span class="s2">f&quot;`escape` only permitted in </span><span class="s0">{{</span><span class="s2">'html', 'latex'</span><span class="s0">}}</span><span class="s2">, got </span><span class="s0">{</span><span class="s1">escape</span><span class="s0">}</span><span class="s2">&quot;</span>
+            <span class="s1">)</span>
+    <span class="s0">return </span><span class="s1">x</span>
+
+
+<span class="s0">def </span><span class="s1">_render_href(x</span><span class="s0">, </span><span class="s1">format):</span>
+    <span class="s4">&quot;&quot;&quot;uses regex to detect a common URL pattern and converts to href tag in format.&quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">isinstance(x</span><span class="s0">, </span><span class="s1">str):</span>
+        <span class="s0">if </span><span class="s1">format == </span><span class="s2">&quot;html&quot;</span><span class="s1">:</span>
+            <span class="s1">href = </span><span class="s2">'&lt;a href=&quot;{0}&quot; target=&quot;_blank&quot;&gt;{0}&lt;/a&gt;'</span>
+        <span class="s0">elif </span><span class="s1">format == </span><span class="s2">&quot;latex&quot;</span><span class="s1">:</span>
+            <span class="s1">href = </span><span class="s2">r&quot;\href{{{0}}}{{{0}}}&quot;</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s2">&quot;``hyperlinks`` format can only be 'html' or 'latex'&quot;</span><span class="s1">)</span>
+        <span class="s1">pat = </span><span class="s2">r&quot;(https?:\/\/|ftp:\/\/|www.)[\w/\-?=%.]+\.[\w/\-&amp;?=%.]+&quot;</span>
+        <span class="s0">return </span><span class="s1">re.sub(pat</span><span class="s0">, lambda </span><span class="s1">m: href.format(m.group(</span><span class="s5">0</span><span class="s1">))</span><span class="s0">, </span><span class="s1">x)</span>
+    <span class="s0">return </span><span class="s1">x</span>
+
+
+<span class="s0">def </span><span class="s1">_maybe_wrap_formatter(</span>
+    <span class="s1">formatter: BaseFormatter | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+    <span class="s1">na_rep: str | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+    <span class="s1">precision: int | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+    <span class="s1">decimal: str = </span><span class="s2">&quot;.&quot;</span><span class="s0">,</span>
+    <span class="s1">thousands: str | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+    <span class="s1">escape: str | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+    <span class="s1">hyperlinks: str | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+<span class="s1">) -&gt; Callable:</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Allows formatters to be expressed as str, callable or None, where None returns 
+    a default formatting function. wraps with na_rep, and precision where they are 
+    available. 
+    &quot;&quot;&quot;</span>
+    <span class="s3"># Get initial func from input string, input callable, or from default factory</span>
+    <span class="s0">if </span><span class="s1">isinstance(formatter</span><span class="s0">, </span><span class="s1">str):</span>
+        <span class="s1">func_0 = </span><span class="s0">lambda </span><span class="s1">x: formatter.format(x)</span>
+    <span class="s0">elif </span><span class="s1">callable(formatter):</span>
+        <span class="s1">func_0 = formatter</span>
+    <span class="s0">elif </span><span class="s1">formatter </span><span class="s0">is None</span><span class="s1">:</span>
+        <span class="s1">precision = (</span>
+            <span class="s1">get_option(</span><span class="s2">&quot;styler.format.precision&quot;</span><span class="s1">) </span><span class="s0">if </span><span class="s1">precision </span><span class="s0">is None else </span><span class="s1">precision</span>
+        <span class="s1">)</span>
+        <span class="s1">func_0 = partial(</span>
+            <span class="s1">_default_formatter</span><span class="s0">, </span><span class="s1">precision=precision</span><span class="s0">, </span><span class="s1">thousands=(thousands </span><span class="s0">is not None</span><span class="s1">)</span>
+        <span class="s1">)</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s0">raise </span><span class="s1">TypeError(</span><span class="s2">f&quot;'formatter' expected str or callable, got </span><span class="s0">{</span><span class="s1">type(formatter)</span><span class="s0">}</span><span class="s2">&quot;</span><span class="s1">)</span>
+
+    <span class="s3"># Replace chars if escaping</span>
+    <span class="s0">if </span><span class="s1">escape </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s1">func_1 = </span><span class="s0">lambda </span><span class="s1">x: func_0(_str_escape(x</span><span class="s0">, </span><span class="s1">escape=escape))</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">func_1 = func_0</span>
+
+    <span class="s3"># Replace decimals and thousands if non-standard inputs detected</span>
+    <span class="s0">if </span><span class="s1">decimal != </span><span class="s2">&quot;.&quot; </span><span class="s0">or </span><span class="s1">(thousands </span><span class="s0">is not None and </span><span class="s1">thousands != </span><span class="s2">&quot;,&quot;</span><span class="s1">):</span>
+        <span class="s1">func_2 = _wrap_decimal_thousands(func_1</span><span class="s0">, </span><span class="s1">decimal=decimal</span><span class="s0">, </span><span class="s1">thousands=thousands)</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">func_2 = func_1</span>
+
+    <span class="s3"># Render links</span>
+    <span class="s0">if </span><span class="s1">hyperlinks </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s1">func_3 = </span><span class="s0">lambda </span><span class="s1">x: func_2(_render_href(x</span><span class="s0">, </span><span class="s1">format=hyperlinks))</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">func_3 = func_2</span>
+
+    <span class="s3"># Replace missing values if na_rep</span>
+    <span class="s0">if </span><span class="s1">na_rep </span><span class="s0">is None</span><span class="s1">:</span>
+        <span class="s0">return </span><span class="s1">func_3</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s0">return lambda </span><span class="s1">x: na_rep </span><span class="s0">if </span><span class="s1">isna(x) </span><span class="s0">else </span><span class="s1">func_3(x)</span>
+
+
+<span class="s0">def </span><span class="s1">non_reducing_slice(slice_: Subset):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Ensure that a slice doesn't reduce to a Series or Scalar. 
+ 
+    Any user-passed `subset` should have this called on it 
+    to make sure we're always working with DataFrames. 
+    &quot;&quot;&quot;</span>
+    <span class="s3"># default to column slice, like DataFrame</span>
+    <span class="s3"># ['A', 'B'] -&gt; IndexSlices[:, ['A', 'B']]</span>
+    <span class="s1">kinds = (ABCSeries</span><span class="s0">, </span><span class="s1">np.ndarray</span><span class="s0">, </span><span class="s1">Index</span><span class="s0">, </span><span class="s1">list</span><span class="s0">, </span><span class="s1">str)</span>
+    <span class="s0">if </span><span class="s1">isinstance(slice_</span><span class="s0">, </span><span class="s1">kinds):</span>
+        <span class="s1">slice_ = IndexSlice[:</span><span class="s0">, </span><span class="s1">slice_]</span>
+
+    <span class="s0">def </span><span class="s1">pred(part) -&gt; bool:</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Returns 
+        ------- 
+        bool 
+            True if slice does *not* reduce, 
+            False if `part` is a tuple. 
+        &quot;&quot;&quot;</span>
+        <span class="s3"># true when slice does *not* reduce, False when part is a tuple,</span>
+        <span class="s3"># i.e. MultiIndex slice</span>
+        <span class="s0">if </span><span class="s1">isinstance(part</span><span class="s0">, </span><span class="s1">tuple):</span>
+            <span class="s3"># GH#39421 check for sub-slice:</span>
+            <span class="s0">return </span><span class="s1">any((isinstance(s</span><span class="s0">, </span><span class="s1">slice) </span><span class="s0">or </span><span class="s1">is_list_like(s)) </span><span class="s0">for </span><span class="s1">s </span><span class="s0">in </span><span class="s1">part)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">isinstance(part</span><span class="s0">, </span><span class="s1">slice) </span><span class="s0">or </span><span class="s1">is_list_like(part)</span>
+
+    <span class="s0">if not </span><span class="s1">is_list_like(slice_):</span>
+        <span class="s0">if not </span><span class="s1">isinstance(slice_</span><span class="s0">, </span><span class="s1">slice):</span>
+            <span class="s3"># a 1-d slice, like df.loc[1]</span>
+            <span class="s1">slice_ = [[slice_]]</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s3"># slice(a, b, c)</span>
+            <span class="s1">slice_ = [slice_]  </span><span class="s3"># to tuplize later</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s3"># error: Item &quot;slice&quot; of &quot;Union[slice, Sequence[Any]]&quot; has no attribute</span>
+        <span class="s3"># &quot;__iter__&quot; (not iterable) -&gt; is specifically list_like in conditional</span>
+        <span class="s1">slice_ = [p </span><span class="s0">if </span><span class="s1">pred(p) </span><span class="s0">else </span><span class="s1">[p] </span><span class="s0">for </span><span class="s1">p </span><span class="s0">in </span><span class="s1">slice_]  </span><span class="s3"># type: ignore[union-attr]</span>
+    <span class="s0">return </span><span class="s1">tuple(slice_)</span>
+
+
+<span class="s0">def </span><span class="s1">maybe_convert_css_to_tuples(style: CSSProperties) -&gt; CSSList:</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Convert css-string to sequence of tuples format if needed. 
+    'color:red; border:1px solid black;' -&gt; [('color', 'red'), 
+                                             ('border','1px solid red')] 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">isinstance(style</span><span class="s0">, </span><span class="s1">str):</span>
+        <span class="s1">s = style.split(</span><span class="s2">&quot;;&quot;</span><span class="s1">)</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">[</span>
+                <span class="s1">(x.split(</span><span class="s2">&quot;:&quot;</span><span class="s1">)[</span><span class="s5">0</span><span class="s1">].strip()</span><span class="s0">, </span><span class="s1">x.split(</span><span class="s2">&quot;:&quot;</span><span class="s1">)[</span><span class="s5">1</span><span class="s1">].strip())</span>
+                <span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">s</span>
+                <span class="s0">if </span><span class="s1">x.strip() != </span><span class="s2">&quot;&quot;</span>
+            <span class="s1">]</span>
+        <span class="s0">except </span><span class="s1">IndexError:</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span>
+                <span class="s2">&quot;Styles supplied as string must follow CSS rule formats, &quot;</span>
+                <span class="s2">f&quot;for example 'attr: val;'. '</span><span class="s0">{</span><span class="s1">style</span><span class="s0">}</span><span class="s2">' was given.&quot;</span>
+            <span class="s1">)</span>
+    <span class="s0">return </span><span class="s1">style</span>
+
+
+<span class="s0">def </span><span class="s1">refactor_levels(</span>
+    <span class="s1">level: Level | list[Level] | </span><span class="s0">None,</span>
+    <span class="s1">obj: Index</span><span class="s0">,</span>
+<span class="s1">) -&gt; list[int]:</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Returns a consistent levels arg for use in ``hide_index`` or ``hide_columns``. 
+ 
+    Parameters 
+    ---------- 
+    level : int, str, list 
+        Original ``level`` arg supplied to above methods. 
+    obj: 
+        Either ``self.index`` or ``self.columns`` 
+ 
+    Returns 
+    ------- 
+    list : refactored arg with a list of levels to hide 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">level </span><span class="s0">is None</span><span class="s1">:</span>
+        <span class="s1">levels_: list[int] = list(range(obj.nlevels))</span>
+    <span class="s0">elif </span><span class="s1">isinstance(level</span><span class="s0">, </span><span class="s1">int):</span>
+        <span class="s1">levels_ = [level]</span>
+    <span class="s0">elif </span><span class="s1">isinstance(level</span><span class="s0">, </span><span class="s1">str):</span>
+        <span class="s1">levels_ = [obj._get_level_number(level)]</span>
+    <span class="s0">elif </span><span class="s1">isinstance(level</span><span class="s0">, </span><span class="s1">list):</span>
+        <span class="s1">levels_ = [</span>
+            <span class="s1">obj._get_level_number(lev) </span><span class="s0">if not </span><span class="s1">isinstance(lev</span><span class="s0">, </span><span class="s1">int) </span><span class="s0">else </span><span class="s1">lev</span>
+            <span class="s0">for </span><span class="s1">lev </span><span class="s0">in </span><span class="s1">level</span>
+        <span class="s1">]</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s2">&quot;`level` must be of type `int`, `str` or list of such&quot;</span><span class="s1">)</span>
+    <span class="s0">return </span><span class="s1">levels_</span>
+
+
+<span class="s0">class </span><span class="s1">Tooltips:</span>
+    <span class="s4">&quot;&quot;&quot; 
+    An extension to ``Styler`` that allows for and manipulates tooltips on hover 
+    of ``&lt;td&gt;`` cells in the HTML result. 
+ 
+    Parameters 
+    ---------- 
+    css_name: str, default &quot;pd-t&quot; 
+        Name of the CSS class that controls visualisation of tooltips. 
+    css_props: list-like, default; see Notes 
+        List of (attr, value) tuples defining properties of the CSS class. 
+    tooltips: DataFrame, default empty 
+        DataFrame of strings aligned with underlying Styler data for tooltip 
+        display. 
+ 
+    Notes 
+    ----- 
+    The default properties for the tooltip CSS class are: 
+ 
+        - visibility: hidden 
+        - position: absolute 
+        - z-index: 1 
+        - background-color: black 
+        - color: white 
+        - transform: translate(-20px, -20px) 
+ 
+    Hidden visibility is a key prerequisite to the hover functionality, and should 
+    always be included in any manual properties specification. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">css_props: CSSProperties = [</span>
+            <span class="s1">(</span><span class="s2">&quot;visibility&quot;</span><span class="s0">, </span><span class="s2">&quot;hidden&quot;</span><span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">(</span><span class="s2">&quot;position&quot;</span><span class="s0">, </span><span class="s2">&quot;absolute&quot;</span><span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">(</span><span class="s2">&quot;z-index&quot;</span><span class="s0">, </span><span class="s5">1</span><span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">(</span><span class="s2">&quot;background-color&quot;</span><span class="s0">, </span><span class="s2">&quot;black&quot;</span><span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">(</span><span class="s2">&quot;color&quot;</span><span class="s0">, </span><span class="s2">&quot;white&quot;</span><span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">(</span><span class="s2">&quot;transform&quot;</span><span class="s0">, </span><span class="s2">&quot;translate(-20px, -20px)&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">]</span><span class="s0">,</span>
+        <span class="s1">css_name: str = </span><span class="s2">&quot;pd-t&quot;</span><span class="s0">,</span>
+        <span class="s1">tooltips: DataFrame = DataFrame()</span><span class="s0">,</span>
+    <span class="s1">):</span>
+        <span class="s1">self.class_name = css_name</span>
+        <span class="s1">self.class_properties = css_props</span>
+        <span class="s1">self.tt_data = tooltips</span>
+        <span class="s1">self.table_styles: CSSStyles = []</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">_class_styles(self):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Combine the ``_Tooltips`` CSS class name and CSS properties to the format 
+        required to extend the underlying ``Styler`` `table_styles` to allow 
+        tooltips to render in HTML. 
+ 
+        Returns 
+        ------- 
+        styles : List 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">[</span>
+            <span class="s1">{</span>
+                <span class="s2">&quot;selector&quot;</span><span class="s1">: </span><span class="s2">f&quot;.</span><span class="s0">{</span><span class="s1">self.class_name</span><span class="s0">}</span><span class="s2">&quot;</span><span class="s0">,</span>
+                <span class="s2">&quot;props&quot;</span><span class="s1">: maybe_convert_css_to_tuples(self.class_properties)</span><span class="s0">,</span>
+            <span class="s1">}</span>
+        <span class="s1">]</span>
+
+    <span class="s0">def </span><span class="s1">_pseudo_css(self</span><span class="s0">, </span><span class="s1">uuid: str</span><span class="s0">, </span><span class="s1">name: str</span><span class="s0">, </span><span class="s1">row: int</span><span class="s0">, </span><span class="s1">col: int</span><span class="s0">, </span><span class="s1">text: str):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        For every table data-cell that has a valid tooltip (not None, NaN or 
+        empty string) must create two pseudo CSS entries for the specific 
+        &lt;td&gt; element id which are added to overall table styles: 
+        an on hover visibility change and a content change 
+        dependent upon the user's chosen display string. 
+ 
+        For example: 
+            [{&quot;selector&quot;: &quot;T__row1_col1:hover .pd-t&quot;, 
+             &quot;props&quot;: [(&quot;visibility&quot;, &quot;visible&quot;)]}, 
+            {&quot;selector&quot;: &quot;T__row1_col1 .pd-t::after&quot;, 
+             &quot;props&quot;: [(&quot;content&quot;, &quot;Some Valid Text String&quot;)]}] 
+ 
+        Parameters 
+        ---------- 
+        uuid: str 
+            The uuid of the Styler instance 
+        name: str 
+            The css-name of the class used for styling tooltips 
+        row : int 
+            The row index of the specified tooltip string data 
+        col : int 
+            The col index of the specified tooltip string data 
+        text : str 
+            The textual content of the tooltip to be displayed in HTML. 
+ 
+        Returns 
+        ------- 
+        pseudo_css : List 
+        &quot;&quot;&quot;</span>
+        <span class="s1">selector_id = </span><span class="s2">&quot;#T_&quot; </span><span class="s1">+ uuid + </span><span class="s2">&quot;_row&quot; </span><span class="s1">+ str(row) + </span><span class="s2">&quot;_col&quot; </span><span class="s1">+ str(col)</span>
+        <span class="s0">return </span><span class="s1">[</span>
+            <span class="s1">{</span>
+                <span class="s2">&quot;selector&quot;</span><span class="s1">: selector_id + </span><span class="s2">f&quot;:hover .</span><span class="s0">{</span><span class="s1">name</span><span class="s0">}</span><span class="s2">&quot;</span><span class="s0">,</span>
+                <span class="s2">&quot;props&quot;</span><span class="s1">: [(</span><span class="s2">&quot;visibility&quot;</span><span class="s0">, </span><span class="s2">&quot;visible&quot;</span><span class="s1">)]</span><span class="s0">,</span>
+            <span class="s1">}</span><span class="s0">,</span>
+            <span class="s1">{</span>
+                <span class="s2">&quot;selector&quot;</span><span class="s1">: selector_id + </span><span class="s2">f&quot; .</span><span class="s0">{</span><span class="s1">name</span><span class="s0">}</span><span class="s2">::after&quot;</span><span class="s0">,</span>
+                <span class="s2">&quot;props&quot;</span><span class="s1">: [(</span><span class="s2">&quot;content&quot;</span><span class="s0">, </span><span class="s2">f'&quot;</span><span class="s0">{</span><span class="s1">text</span><span class="s0">}</span><span class="s2">&quot;'</span><span class="s1">)]</span><span class="s0">,</span>
+            <span class="s1">}</span><span class="s0">,</span>
+        <span class="s1">]</span>
+
+    <span class="s0">def </span><span class="s1">_translate(self</span><span class="s0">, </span><span class="s1">styler: StylerRenderer</span><span class="s0">, </span><span class="s1">d: dict):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Mutate the render dictionary to allow for tooltips: 
+ 
+        - Add ``&lt;span&gt;`` HTML element to each data cells ``display_value``. Ignores 
+          headers. 
+        - Add table level CSS styles to control pseudo classes. 
+ 
+        Parameters 
+        ---------- 
+        styler_data : DataFrame 
+            Underlying ``Styler`` DataFrame used for reindexing. 
+        uuid : str 
+            The underlying ``Styler`` uuid for CSS id. 
+        d : dict 
+            The dictionary prior to final render 
+ 
+        Returns 
+        ------- 
+        render_dict : Dict 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.tt_data = self.tt_data.reindex_like(styler.data)</span>
+        <span class="s0">if </span><span class="s1">self.tt_data.empty:</span>
+            <span class="s0">return </span><span class="s1">d</span>
+
+        <span class="s1">name = self.class_name</span>
+        <span class="s1">mask = (self.tt_data.isna()) | (self.tt_data.eq(</span><span class="s2">&quot;&quot;</span><span class="s1">))  </span><span class="s3"># empty string = no ttip</span>
+        <span class="s1">self.table_styles = [</span>
+            <span class="s1">style</span>
+            <span class="s0">for </span><span class="s1">sublist </span><span class="s0">in </span><span class="s1">[</span>
+                <span class="s1">self._pseudo_css(styler.uuid</span><span class="s0">, </span><span class="s1">name</span><span class="s0">, </span><span class="s1">i</span><span class="s0">, </span><span class="s1">j</span><span class="s0">, </span><span class="s1">str(self.tt_data.iloc[i</span><span class="s0">, </span><span class="s1">j]))</span>
+                <span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">range(len(self.tt_data.index))</span>
+                <span class="s0">for </span><span class="s1">j </span><span class="s0">in </span><span class="s1">range(len(self.tt_data.columns))</span>
+                <span class="s0">if not </span><span class="s1">(</span>
+                    <span class="s1">mask.iloc[i</span><span class="s0">, </span><span class="s1">j]</span>
+                    <span class="s0">or </span><span class="s1">i </span><span class="s0">in </span><span class="s1">styler.hidden_rows</span>
+                    <span class="s0">or </span><span class="s1">j </span><span class="s0">in </span><span class="s1">styler.hidden_columns</span>
+                <span class="s1">)</span>
+            <span class="s1">]</span>
+            <span class="s0">for </span><span class="s1">style </span><span class="s0">in </span><span class="s1">sublist</span>
+        <span class="s1">]</span>
+
+        <span class="s0">if </span><span class="s1">self.table_styles:</span>
+            <span class="s3"># add span class to every cell only if at least 1 non-empty tooltip</span>
+            <span class="s0">for </span><span class="s1">row </span><span class="s0">in </span><span class="s1">d[</span><span class="s2">&quot;body&quot;</span><span class="s1">]:</span>
+                <span class="s0">for </span><span class="s1">item </span><span class="s0">in </span><span class="s1">row:</span>
+                    <span class="s0">if </span><span class="s1">item[</span><span class="s2">&quot;type&quot;</span><span class="s1">] == </span><span class="s2">&quot;td&quot;</span><span class="s1">:</span>
+                        <span class="s1">item[</span><span class="s2">&quot;display_value&quot;</span><span class="s1">] = (</span>
+                            <span class="s1">str(item[</span><span class="s2">&quot;display_value&quot;</span><span class="s1">])</span>
+                            <span class="s1">+ </span><span class="s2">f'&lt;span class=&quot;</span><span class="s0">{</span><span class="s1">self.class_name</span><span class="s0">}</span><span class="s2">&quot;&gt;&lt;/span&gt;'</span>
+                        <span class="s1">)</span>
+            <span class="s1">d[</span><span class="s2">&quot;table_styles&quot;</span><span class="s1">].extend(self._class_styles)</span>
+            <span class="s1">d[</span><span class="s2">&quot;table_styles&quot;</span><span class="s1">].extend(self.table_styles)</span>
+
+        <span class="s0">return </span><span class="s1">d</span>
+
+
+<span class="s0">def </span><span class="s1">_parse_latex_table_wrapping(table_styles: CSSStyles</span><span class="s0">, </span><span class="s1">caption: str | </span><span class="s0">None</span><span class="s1">) -&gt; bool:</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Indicate whether LaTeX {tabular} should be wrapped with a {table} environment. 
+ 
+    Parses the `table_styles` and detects any selectors which must be included outside 
+    of {tabular}, i.e. indicating that wrapping must occur, and therefore return True, 
+    or if a caption exists and requires similar. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">IGNORED_WRAPPERS = [</span><span class="s2">&quot;toprule&quot;</span><span class="s0">, </span><span class="s2">&quot;midrule&quot;</span><span class="s0">, </span><span class="s2">&quot;bottomrule&quot;</span><span class="s0">, </span><span class="s2">&quot;column_format&quot;</span><span class="s1">]</span>
+    <span class="s3"># ignored selectors are included with {tabular} so do not need wrapping</span>
+    <span class="s0">return </span><span class="s1">(</span>
+        <span class="s1">table_styles </span><span class="s0">is not None</span>
+        <span class="s0">and </span><span class="s1">any(d[</span><span class="s2">&quot;selector&quot;</span><span class="s1">] </span><span class="s0">not in </span><span class="s1">IGNORED_WRAPPERS </span><span class="s0">for </span><span class="s1">d </span><span class="s0">in </span><span class="s1">table_styles)</span>
+    <span class="s1">) </span><span class="s0">or </span><span class="s1">caption </span><span class="s0">is not None</span>
+
+
+<span class="s0">def </span><span class="s1">_parse_latex_table_styles(table_styles: CSSStyles</span><span class="s0">, </span><span class="s1">selector: str) -&gt; str | </span><span class="s0">None</span><span class="s1">:</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Return the first 'props' 'value' from ``tables_styles`` identified by ``selector``. 
+ 
+    Examples 
+    -------- 
+    &gt;&gt;&gt; table_styles = [{'selector': 'foo', 'props': [('attr','value')]}, 
+    ...                 {'selector': 'bar', 'props': [('attr', 'overwritten')]}, 
+    ...                 {'selector': 'bar', 'props': [('a1', 'baz'), ('a2', 'ignore')]}] 
+    &gt;&gt;&gt; _parse_latex_table_styles(table_styles, selector='bar') 
+    'baz' 
+ 
+    Notes 
+    ----- 
+    The replacement of &quot;§&quot; with &quot;:&quot; is to avoid the CSS problem where &quot;:&quot; has structural 
+    significance and cannot be used in LaTeX labels, but is often required by them. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">for </span><span class="s1">style </span><span class="s0">in </span><span class="s1">table_styles[::-</span><span class="s5">1</span><span class="s1">]:  </span><span class="s3"># in reverse for most recently applied style</span>
+        <span class="s0">if </span><span class="s1">style[</span><span class="s2">&quot;selector&quot;</span><span class="s1">] == selector:</span>
+            <span class="s0">return </span><span class="s1">str(style[</span><span class="s2">&quot;props&quot;</span><span class="s1">][</span><span class="s5">0</span><span class="s1">][</span><span class="s5">1</span><span class="s1">]).replace(</span><span class="s2">&quot;§&quot;</span><span class="s0">, </span><span class="s2">&quot;:&quot;</span><span class="s1">)</span>
+    <span class="s0">return None</span>
+
+
+<span class="s0">def </span><span class="s1">_parse_latex_cell_styles(</span>
+    <span class="s1">latex_styles: CSSList</span><span class="s0">, </span><span class="s1">display_value: str</span><span class="s0">, </span><span class="s1">convert_css: bool = </span><span class="s0">False</span>
+<span class="s1">) -&gt; str:</span>
+    <span class="s4">r&quot;&quot;&quot; 
+    Mutate the ``display_value`` string including LaTeX commands from ``latex_styles``. 
+ 
+    This method builds a recursive latex chain of commands based on the 
+    CSSList input, nested around ``display_value``. 
+ 
+    If a CSS style is given as ('&lt;command&gt;', '&lt;options&gt;') this is translated to 
+    '\&lt;command&gt;&lt;options&gt;{display_value}', and this value is treated as the 
+    display value for the next iteration. 
+ 
+    The most recent style forms the inner component, for example for styles: 
+    `[('c1', 'o1'), ('c2', 'o2')]` this returns: `\c1o1{\c2o2{display_value}}` 
+ 
+    Sometimes latex commands have to be wrapped with curly braces in different ways: 
+    We create some parsing flags to identify the different behaviours: 
+ 
+     - `--rwrap`        : `\&lt;command&gt;&lt;options&gt;{&lt;display_value&gt;}` 
+     - `--wrap`         : `{\&lt;command&gt;&lt;options&gt; &lt;display_value&gt;}` 
+     - `--nowrap`       : `\&lt;command&gt;&lt;options&gt; &lt;display_value&gt;` 
+     - `--lwrap`        : `{\&lt;command&gt;&lt;options&gt;} &lt;display_value&gt;` 
+     - `--dwrap`        : `{\&lt;command&gt;&lt;options&gt;}{&lt;display_value&gt;}` 
+ 
+    For example for styles: 
+    `[('c1', 'o1--wrap'), ('c2', 'o2')]` this returns: `{\c1o1 \c2o2{display_value}} 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">convert_css:</span>
+        <span class="s1">latex_styles = _parse_latex_css_conversion(latex_styles)</span>
+    <span class="s0">for </span><span class="s1">(command</span><span class="s0">, </span><span class="s1">options) </span><span class="s0">in </span><span class="s1">latex_styles[::-</span><span class="s5">1</span><span class="s1">]:  </span><span class="s3"># in reverse for most recent style</span>
+        <span class="s1">formatter = {</span>
+            <span class="s2">&quot;--wrap&quot;</span><span class="s1">: </span><span class="s2">f&quot;</span><span class="s0">{{\\{</span><span class="s1">command</span><span class="s0">}</span><span class="s2">--to_parse </span><span class="s0">{</span><span class="s1">display_value</span><span class="s0">}}}</span><span class="s2">&quot;</span><span class="s0">,</span>
+            <span class="s2">&quot;--nowrap&quot;</span><span class="s1">: </span><span class="s2">f&quot;</span><span class="s0">\\{</span><span class="s1">command</span><span class="s0">}</span><span class="s2">--to_parse </span><span class="s0">{</span><span class="s1">display_value</span><span class="s0">}</span><span class="s2">&quot;</span><span class="s0">,</span>
+            <span class="s2">&quot;--lwrap&quot;</span><span class="s1">: </span><span class="s2">f&quot;</span><span class="s0">{{\\{</span><span class="s1">command</span><span class="s0">}</span><span class="s2">--to_parse</span><span class="s0">}} {</span><span class="s1">display_value</span><span class="s0">}</span><span class="s2">&quot;</span><span class="s0">,</span>
+            <span class="s2">&quot;--rwrap&quot;</span><span class="s1">: </span><span class="s2">f&quot;</span><span class="s0">\\{</span><span class="s1">command</span><span class="s0">}</span><span class="s2">--to_parse</span><span class="s0">{{{</span><span class="s1">display_value</span><span class="s0">}}}</span><span class="s2">&quot;</span><span class="s0">,</span>
+            <span class="s2">&quot;--dwrap&quot;</span><span class="s1">: </span><span class="s2">f&quot;</span><span class="s0">{{\\{</span><span class="s1">command</span><span class="s0">}</span><span class="s2">--to_parse</span><span class="s0">}}{{{</span><span class="s1">display_value</span><span class="s0">}}}</span><span class="s2">&quot;</span><span class="s0">,</span>
+        <span class="s1">}</span>
+        <span class="s1">display_value = </span><span class="s2">f&quot;</span><span class="s0">\\{</span><span class="s1">command</span><span class="s0">}{</span><span class="s1">options</span><span class="s0">} {</span><span class="s1">display_value</span><span class="s0">}</span><span class="s2">&quot;</span>
+        <span class="s0">for </span><span class="s1">arg </span><span class="s0">in </span><span class="s1">[</span><span class="s2">&quot;--nowrap&quot;</span><span class="s0">, </span><span class="s2">&quot;--wrap&quot;</span><span class="s0">, </span><span class="s2">&quot;--lwrap&quot;</span><span class="s0">, </span><span class="s2">&quot;--rwrap&quot;</span><span class="s0">, </span><span class="s2">&quot;--dwrap&quot;</span><span class="s1">]:</span>
+            <span class="s0">if </span><span class="s1">arg </span><span class="s0">in </span><span class="s1">str(options):</span>
+                <span class="s1">display_value = formatter[arg].replace(</span>
+                    <span class="s2">&quot;--to_parse&quot;</span><span class="s0">, </span><span class="s1">_parse_latex_options_strip(value=options</span><span class="s0">, </span><span class="s1">arg=arg)</span>
+                <span class="s1">)</span>
+                <span class="s0">break  </span><span class="s3"># only ever one purposeful entry</span>
+    <span class="s0">return </span><span class="s1">display_value</span>
+
+
+<span class="s0">def </span><span class="s1">_parse_latex_header_span(</span>
+    <span class="s1">cell: dict[str</span><span class="s0">, </span><span class="s1">Any]</span><span class="s0">,</span>
+    <span class="s1">multirow_align: str</span><span class="s0">,</span>
+    <span class="s1">multicol_align: str</span><span class="s0">,</span>
+    <span class="s1">wrap: bool = </span><span class="s0">False,</span>
+    <span class="s1">convert_css: bool = </span><span class="s0">False,</span>
+<span class="s1">) -&gt; str:</span>
+    <span class="s4">r&quot;&quot;&quot; 
+    Refactor the cell `display_value` if a 'colspan' or 'rowspan' attribute is present. 
+ 
+    'rowspan' and 'colspan' do not occur simultaneouly. If they are detected then 
+    the `display_value` is altered to a LaTeX `multirow` or `multicol` command 
+    respectively, with the appropriate cell-span. 
+ 
+    ``wrap`` is used to enclose the `display_value` in braces which is needed for 
+    column headers using an siunitx package. 
+ 
+    Requires the package {multirow}, whereas multicol support is usually built in 
+    to the {tabular} environment. 
+ 
+    Examples 
+    -------- 
+    &gt;&gt;&gt; cell = {'cellstyle': '', 'display_value':'text', 'attributes': 'colspan=&quot;3&quot;'} 
+    &gt;&gt;&gt; _parse_latex_header_span(cell, 't', 'c') 
+    '\\multicolumn{3}{c}{text}' 
+    &quot;&quot;&quot;</span>
+    <span class="s1">display_val = _parse_latex_cell_styles(</span>
+        <span class="s1">cell[</span><span class="s2">&quot;cellstyle&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">cell[</span><span class="s2">&quot;display_value&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">convert_css</span>
+    <span class="s1">)</span>
+    <span class="s0">if </span><span class="s2">&quot;attributes&quot; </span><span class="s0">in </span><span class="s1">cell:</span>
+        <span class="s1">attrs = cell[</span><span class="s2">&quot;attributes&quot;</span><span class="s1">]</span>
+        <span class="s0">if </span><span class="s2">'colspan=&quot;' </span><span class="s0">in </span><span class="s1">attrs:</span>
+            <span class="s1">colspan = attrs[attrs.find(</span><span class="s2">'colspan=&quot;'</span><span class="s1">) + </span><span class="s5">9 </span><span class="s1">:]  </span><span class="s3"># len('colspan=&quot;') = 9</span>
+            <span class="s1">colspan = int(colspan[: colspan.find(</span><span class="s2">'&quot;'</span><span class="s1">)])</span>
+            <span class="s0">if </span><span class="s2">&quot;naive-l&quot; </span><span class="s1">== multicol_align:</span>
+                <span class="s1">out = </span><span class="s2">f&quot;</span><span class="s0">{{{</span><span class="s1">display_val</span><span class="s0">}}}</span><span class="s2">&quot; </span><span class="s0">if </span><span class="s1">wrap </span><span class="s0">else </span><span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">display_val</span><span class="s0">}</span><span class="s2">&quot;</span>
+                <span class="s1">blanks = </span><span class="s2">&quot; &amp; {}&quot; </span><span class="s0">if </span><span class="s1">wrap </span><span class="s0">else </span><span class="s2">&quot; &amp;&quot;</span>
+                <span class="s0">return </span><span class="s1">out + blanks * (colspan - </span><span class="s5">1</span><span class="s1">)</span>
+            <span class="s0">elif </span><span class="s2">&quot;naive-r&quot; </span><span class="s1">== multicol_align:</span>
+                <span class="s1">out = </span><span class="s2">f&quot;</span><span class="s0">{{{</span><span class="s1">display_val</span><span class="s0">}}}</span><span class="s2">&quot; </span><span class="s0">if </span><span class="s1">wrap </span><span class="s0">else </span><span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">display_val</span><span class="s0">}</span><span class="s2">&quot;</span>
+                <span class="s1">blanks = </span><span class="s2">&quot;{} &amp; &quot; </span><span class="s0">if </span><span class="s1">wrap </span><span class="s0">else </span><span class="s2">&quot;&amp; &quot;</span>
+                <span class="s0">return </span><span class="s1">blanks * (colspan - </span><span class="s5">1</span><span class="s1">) + out</span>
+            <span class="s0">return </span><span class="s2">f&quot;</span><span class="s0">\\</span><span class="s2">multicolumn</span><span class="s0">{{{</span><span class="s1">colspan</span><span class="s0">}}}{{{</span><span class="s1">multicol_align</span><span class="s0">}}}{{{</span><span class="s1">display_val</span><span class="s0">}}}</span><span class="s2">&quot;</span>
+        <span class="s0">elif </span><span class="s2">'rowspan=&quot;' </span><span class="s0">in </span><span class="s1">attrs:</span>
+            <span class="s0">if </span><span class="s1">multirow_align == </span><span class="s2">&quot;naive&quot;</span><span class="s1">:</span>
+                <span class="s0">return </span><span class="s1">display_val</span>
+            <span class="s1">rowspan = attrs[attrs.find(</span><span class="s2">'rowspan=&quot;'</span><span class="s1">) + </span><span class="s5">9 </span><span class="s1">:]</span>
+            <span class="s1">rowspan = int(rowspan[: rowspan.find(</span><span class="s2">'&quot;'</span><span class="s1">)])</span>
+            <span class="s0">return </span><span class="s2">f&quot;</span><span class="s0">\\</span><span class="s2">multirow[</span><span class="s0">{</span><span class="s1">multirow_align</span><span class="s0">}</span><span class="s2">]</span><span class="s0">{{{</span><span class="s1">rowspan</span><span class="s0">}}}{{</span><span class="s2">*</span><span class="s0">}}{{{</span><span class="s1">display_val</span><span class="s0">}}}</span><span class="s2">&quot;</span>
+    <span class="s0">if </span><span class="s1">wrap:</span>
+        <span class="s0">return </span><span class="s2">f&quot;</span><span class="s0">{{{</span><span class="s1">display_val</span><span class="s0">}}}</span><span class="s2">&quot;</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s0">return </span><span class="s1">display_val</span>
+
+
+<span class="s0">def </span><span class="s1">_parse_latex_options_strip(value: str | int | float</span><span class="s0">, </span><span class="s1">arg: str) -&gt; str:</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Strip a css_value which may have latex wrapping arguments, css comment identifiers, 
+    and whitespaces, to a valid string for latex options parsing. 
+ 
+    For example: 'red /* --wrap */  ' --&gt; 'red' 
+    &quot;&quot;&quot;</span>
+    <span class="s0">return </span><span class="s1">str(value).replace(arg</span><span class="s0">, </span><span class="s2">&quot;&quot;</span><span class="s1">).replace(</span><span class="s2">&quot;/*&quot;</span><span class="s0">, </span><span class="s2">&quot;&quot;</span><span class="s1">).replace(</span><span class="s2">&quot;*/&quot;</span><span class="s0">, </span><span class="s2">&quot;&quot;</span><span class="s1">).strip()</span>
+
+
+<span class="s0">def </span><span class="s1">_parse_latex_css_conversion(styles: CSSList) -&gt; CSSList:</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Convert CSS (attribute,value) pairs to equivalent LaTeX (command,options) pairs. 
+ 
+    Ignore conversion if tagged with `--latex` option, skipped if no conversion found. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">font_weight(value</span><span class="s0">, </span><span class="s1">arg):</span>
+        <span class="s0">if </span><span class="s1">value == </span><span class="s2">&quot;bold&quot; </span><span class="s0">or </span><span class="s1">value == </span><span class="s2">&quot;bolder&quot;</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s2">&quot;bfseries&quot;</span><span class="s0">, </span><span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">arg</span><span class="s0">}</span><span class="s2">&quot;</span>
+        <span class="s0">return None</span>
+
+    <span class="s0">def </span><span class="s1">font_style(value</span><span class="s0">, </span><span class="s1">arg):</span>
+        <span class="s0">if </span><span class="s1">value == </span><span class="s2">&quot;italic&quot;</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s2">&quot;itshape&quot;</span><span class="s0">, </span><span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">arg</span><span class="s0">}</span><span class="s2">&quot;</span>
+        <span class="s0">elif </span><span class="s1">value == </span><span class="s2">&quot;oblique&quot;</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s2">&quot;slshape&quot;</span><span class="s0">, </span><span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">arg</span><span class="s0">}</span><span class="s2">&quot;</span>
+        <span class="s0">return None</span>
+
+    <span class="s0">def </span><span class="s1">color(value</span><span class="s0">, </span><span class="s1">user_arg</span><span class="s0">, </span><span class="s1">command</span><span class="s0">, </span><span class="s1">comm_arg):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        CSS colors have 5 formats to process: 
+ 
+         - 6 digit hex code: &quot;#ff23ee&quot;     --&gt; [HTML]{FF23EE} 
+         - 3 digit hex code: &quot;#f0e&quot;        --&gt; [HTML]{FF00EE} 
+         - rgba: rgba(128, 255, 0, 0.5)    --&gt; [rgb]{0.502, 1.000, 0.000} 
+         - rgb: rgb(128, 255, 0,)          --&gt; [rbg]{0.502, 1.000, 0.000} 
+         - string: red                     --&gt; {red} 
+ 
+        Additionally rgb or rgba can be expressed in % which is also parsed. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">arg = user_arg </span><span class="s0">if </span><span class="s1">user_arg != </span><span class="s2">&quot;&quot; </span><span class="s0">else </span><span class="s1">comm_arg</span>
+
+        <span class="s0">if </span><span class="s1">value[</span><span class="s5">0</span><span class="s1">] == </span><span class="s2">&quot;#&quot; </span><span class="s0">and </span><span class="s1">len(value) == </span><span class="s5">7</span><span class="s1">:  </span><span class="s3"># color is hex code</span>
+            <span class="s0">return </span><span class="s1">command</span><span class="s0">, </span><span class="s2">f&quot;[HTML]</span><span class="s0">{{{</span><span class="s1">value[</span><span class="s5">1</span><span class="s1">:].upper()</span><span class="s0">}}}{</span><span class="s1">arg</span><span class="s0">}</span><span class="s2">&quot;</span>
+        <span class="s0">if </span><span class="s1">value[</span><span class="s5">0</span><span class="s1">] == </span><span class="s2">&quot;#&quot; </span><span class="s0">and </span><span class="s1">len(value) == </span><span class="s5">4</span><span class="s1">:  </span><span class="s3"># color is short hex code</span>
+            <span class="s1">val = </span><span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">value[</span><span class="s5">1</span><span class="s1">].upper()*</span><span class="s5">2</span><span class="s0">}{</span><span class="s1">value[</span><span class="s5">2</span><span class="s1">].upper()*</span><span class="s5">2</span><span class="s0">}{</span><span class="s1">value[</span><span class="s5">3</span><span class="s1">].upper()*</span><span class="s5">2</span><span class="s0">}</span><span class="s2">&quot;</span>
+            <span class="s0">return </span><span class="s1">command</span><span class="s0">, </span><span class="s2">f&quot;[HTML]</span><span class="s0">{{{</span><span class="s1">val</span><span class="s0">}}}{</span><span class="s1">arg</span><span class="s0">}</span><span class="s2">&quot;</span>
+        <span class="s0">elif </span><span class="s1">value[:</span><span class="s5">3</span><span class="s1">] == </span><span class="s2">&quot;rgb&quot;</span><span class="s1">:  </span><span class="s3"># color is rgb or rgba</span>
+            <span class="s1">r = re.findall(</span><span class="s2">&quot;(?&lt;=</span><span class="s0">\\</span><span class="s2">()[0-9</span><span class="s0">\\</span><span class="s2">s%]+(?=,)&quot;</span><span class="s0">, </span><span class="s1">value)[</span><span class="s5">0</span><span class="s1">].strip()</span>
+            <span class="s1">r = float(r[:-</span><span class="s5">1</span><span class="s1">]) / </span><span class="s5">100 </span><span class="s0">if </span><span class="s2">&quot;%&quot; </span><span class="s0">in </span><span class="s1">r </span><span class="s0">else </span><span class="s1">int(r) / </span><span class="s5">255</span>
+            <span class="s1">g = re.findall(</span><span class="s2">&quot;(?&lt;=,)[0-9</span><span class="s0">\\</span><span class="s2">s%]+(?=,)&quot;</span><span class="s0">, </span><span class="s1">value)[</span><span class="s5">0</span><span class="s1">].strip()</span>
+            <span class="s1">g = float(g[:-</span><span class="s5">1</span><span class="s1">]) / </span><span class="s5">100 </span><span class="s0">if </span><span class="s2">&quot;%&quot; </span><span class="s0">in </span><span class="s1">g </span><span class="s0">else </span><span class="s1">int(g) / </span><span class="s5">255</span>
+            <span class="s0">if </span><span class="s1">value[</span><span class="s5">3</span><span class="s1">] == </span><span class="s2">&quot;a&quot;</span><span class="s1">:  </span><span class="s3"># color is rgba</span>
+                <span class="s1">b = re.findall(</span><span class="s2">&quot;(?&lt;=,)[0-9</span><span class="s0">\\</span><span class="s2">s%]+(?=,)&quot;</span><span class="s0">, </span><span class="s1">value)[</span><span class="s5">1</span><span class="s1">].strip()</span>
+            <span class="s0">else</span><span class="s1">:  </span><span class="s3"># color is rgb</span>
+                <span class="s1">b = re.findall(</span><span class="s2">&quot;(?&lt;=,)[0-9</span><span class="s0">\\</span><span class="s2">s%]+(?=</span><span class="s0">\\</span><span class="s2">))&quot;</span><span class="s0">, </span><span class="s1">value)[</span><span class="s5">0</span><span class="s1">].strip()</span>
+            <span class="s1">b = float(b[:-</span><span class="s5">1</span><span class="s1">]) / </span><span class="s5">100 </span><span class="s0">if </span><span class="s2">&quot;%&quot; </span><span class="s0">in </span><span class="s1">b </span><span class="s0">else </span><span class="s1">int(b) / </span><span class="s5">255</span>
+            <span class="s0">return </span><span class="s1">command</span><span class="s0">, </span><span class="s2">f&quot;[rgb]</span><span class="s0">{{{</span><span class="s1">r</span><span class="s0">:</span><span class="s2">.3f</span><span class="s0">}</span><span class="s2">, </span><span class="s0">{</span><span class="s1">g</span><span class="s0">:</span><span class="s2">.3f</span><span class="s0">}</span><span class="s2">, </span><span class="s0">{</span><span class="s1">b</span><span class="s0">:</span><span class="s2">.3f</span><span class="s0">}}}{</span><span class="s1">arg</span><span class="s0">}</span><span class="s2">&quot;</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">command</span><span class="s0">, </span><span class="s2">f&quot;</span><span class="s0">{{{</span><span class="s1">value</span><span class="s0">}}}{</span><span class="s1">arg</span><span class="s0">}</span><span class="s2">&quot;  </span><span class="s3"># color is likely string-named</span>
+
+    <span class="s1">CONVERTED_ATTRIBUTES: dict[str</span><span class="s0">, </span><span class="s1">Callable] = {</span>
+        <span class="s2">&quot;font-weight&quot;</span><span class="s1">: font_weight</span><span class="s0">,</span>
+        <span class="s2">&quot;background-color&quot;</span><span class="s1">: partial(color</span><span class="s0">, </span><span class="s1">command=</span><span class="s2">&quot;cellcolor&quot;</span><span class="s0">, </span><span class="s1">comm_arg=</span><span class="s2">&quot;--lwrap&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s2">&quot;color&quot;</span><span class="s1">: partial(color</span><span class="s0">, </span><span class="s1">command=</span><span class="s2">&quot;color&quot;</span><span class="s0">, </span><span class="s1">comm_arg=</span><span class="s2">&quot;&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s2">&quot;font-style&quot;</span><span class="s1">: font_style</span><span class="s0">,</span>
+    <span class="s1">}</span>
+
+    <span class="s1">latex_styles: CSSList = []</span>
+    <span class="s0">for </span><span class="s1">(attribute</span><span class="s0">, </span><span class="s1">value) </span><span class="s0">in </span><span class="s1">styles:</span>
+        <span class="s0">if </span><span class="s1">isinstance(value</span><span class="s0">, </span><span class="s1">str) </span><span class="s0">and </span><span class="s2">&quot;--latex&quot; </span><span class="s0">in </span><span class="s1">value:</span>
+            <span class="s3"># return the style without conversion but drop '--latex'</span>
+            <span class="s1">latex_styles.append((attribute</span><span class="s0">, </span><span class="s1">value.replace(</span><span class="s2">&quot;--latex&quot;</span><span class="s0">, </span><span class="s2">&quot;&quot;</span><span class="s1">)))</span>
+        <span class="s0">if </span><span class="s1">attribute </span><span class="s0">in </span><span class="s1">CONVERTED_ATTRIBUTES.keys():</span>
+            <span class="s1">arg = </span><span class="s2">&quot;&quot;</span>
+            <span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">[</span><span class="s2">&quot;--wrap&quot;</span><span class="s0">, </span><span class="s2">&quot;--nowrap&quot;</span><span class="s0">, </span><span class="s2">&quot;--lwrap&quot;</span><span class="s0">, </span><span class="s2">&quot;--dwrap&quot;</span><span class="s0">, </span><span class="s2">&quot;--rwrap&quot;</span><span class="s1">]:</span>
+                <span class="s0">if </span><span class="s1">x </span><span class="s0">in </span><span class="s1">str(value):</span>
+                    <span class="s1">arg</span><span class="s0">, </span><span class="s1">value = x</span><span class="s0">, </span><span class="s1">_parse_latex_options_strip(value</span><span class="s0">, </span><span class="s1">x)</span>
+                    <span class="s0">break</span>
+            <span class="s1">latex_style = CONVERTED_ATTRIBUTES[attribute](value</span><span class="s0">, </span><span class="s1">arg)</span>
+            <span class="s0">if </span><span class="s1">latex_style </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s1">latex_styles.extend([latex_style])</span>
+    <span class="s0">return </span><span class="s1">latex_styles</span>
+
+
+<span class="s0">def </span><span class="s1">_escape_latex(s):</span>
+    <span class="s4">r&quot;&quot;&quot; 
+    Replace the characters ``&amp;``, ``%``, ``$``, ``#``, ``_``, ``{``, ``}``, 
+    ``~``, ``^``, and ``\`` in the string with LaTeX-safe sequences. 
+ 
+    Use this if you need to display text that might contain such characters in LaTeX. 
+ 
+    Parameters 
+    ---------- 
+    s : str 
+        Input to be escaped 
+ 
+    Return 
+    ------ 
+    str : 
+        Escaped string 
+    &quot;&quot;&quot;</span>
+    <span class="s0">return </span><span class="s1">(</span>
+        <span class="s1">s.replace(</span><span class="s2">&quot;</span><span class="s0">\\</span><span class="s2">&quot;</span><span class="s0">, </span><span class="s2">&quot;ab2§=§8yz&quot;</span><span class="s1">)  </span><span class="s3"># rare string for final conversion: avoid \\ clash</span>
+        <span class="s1">.replace(</span><span class="s2">&quot;ab2§=§8yz &quot;</span><span class="s0">, </span><span class="s2">&quot;ab2§=§8yz</span><span class="s0">\\</span><span class="s2">space &quot;</span><span class="s1">)  </span><span class="s3"># since \backslash gobbles spaces</span>
+        <span class="s1">.replace(</span><span class="s2">&quot;&amp;&quot;</span><span class="s0">, </span><span class="s2">&quot;</span><span class="s0">\\</span><span class="s2">&amp;&quot;</span><span class="s1">)</span>
+        <span class="s1">.replace(</span><span class="s2">&quot;%&quot;</span><span class="s0">, </span><span class="s2">&quot;</span><span class="s0">\\</span><span class="s2">%&quot;</span><span class="s1">)</span>
+        <span class="s1">.replace(</span><span class="s2">&quot;$&quot;</span><span class="s0">, </span><span class="s2">&quot;</span><span class="s0">\\</span><span class="s2">$&quot;</span><span class="s1">)</span>
+        <span class="s1">.replace(</span><span class="s2">&quot;#&quot;</span><span class="s0">, </span><span class="s2">&quot;</span><span class="s0">\\</span><span class="s2">#&quot;</span><span class="s1">)</span>
+        <span class="s1">.replace(</span><span class="s2">&quot;_&quot;</span><span class="s0">, </span><span class="s2">&quot;</span><span class="s0">\\</span><span class="s2">_&quot;</span><span class="s1">)</span>
+        <span class="s1">.replace(</span><span class="s2">&quot;{&quot;</span><span class="s0">, </span><span class="s2">&quot;</span><span class="s0">\\</span><span class="s2">{&quot;</span><span class="s1">)</span>
+        <span class="s1">.replace(</span><span class="s2">&quot;}&quot;</span><span class="s0">, </span><span class="s2">&quot;</span><span class="s0">\\</span><span class="s2">}&quot;</span><span class="s1">)</span>
+        <span class="s1">.replace(</span><span class="s2">&quot;~ &quot;</span><span class="s0">, </span><span class="s2">&quot;~</span><span class="s0">\\</span><span class="s2">space &quot;</span><span class="s1">)  </span><span class="s3"># since \textasciitilde gobbles spaces</span>
+        <span class="s1">.replace(</span><span class="s2">&quot;~&quot;</span><span class="s0">, </span><span class="s2">&quot;</span><span class="s0">\\</span><span class="s2">textasciitilde &quot;</span><span class="s1">)</span>
+        <span class="s1">.replace(</span><span class="s2">&quot;^ &quot;</span><span class="s0">, </span><span class="s2">&quot;^</span><span class="s0">\\</span><span class="s2">space &quot;</span><span class="s1">)  </span><span class="s3"># since \textasciicircum gobbles spaces</span>
+        <span class="s1">.replace(</span><span class="s2">&quot;^&quot;</span><span class="s0">, </span><span class="s2">&quot;</span><span class="s0">\\</span><span class="s2">textasciicircum &quot;</span><span class="s1">)</span>
+        <span class="s1">.replace(</span><span class="s2">&quot;ab2§=§8yz&quot;</span><span class="s0">, </span><span class="s2">&quot;</span><span class="s0">\\</span><span class="s2">textbackslash &quot;</span><span class="s1">)</span>
+    <span class="s1">)</span>
+</pre>
+</body>
+</html>

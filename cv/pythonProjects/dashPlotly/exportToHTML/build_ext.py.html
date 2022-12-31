@@ -1,0 +1,778 @@
+<html>
+<head>
+<title>build_ext.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #808080;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+.s6 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+build_ext.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;distutils.command.build_ext 
+ 
+Implements the Distutils 'build_ext' command, for building extension 
+modules (currently limited to C extensions, should accommodate C++ 
+extensions ASAP).&quot;&quot;&quot;</span>
+
+<span class="s2">import </span><span class="s1">contextlib</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">from </span><span class="s1">distutils.core </span><span class="s2">import </span><span class="s1">Command</span>
+<span class="s2">from </span><span class="s1">distutils.errors </span><span class="s2">import </span><span class="s1">*</span>
+<span class="s2">from </span><span class="s1">distutils.sysconfig </span><span class="s2">import </span><span class="s1">customize_compiler</span><span class="s2">, </span><span class="s1">get_python_version</span>
+<span class="s2">from </span><span class="s1">distutils.sysconfig </span><span class="s2">import </span><span class="s1">get_config_h_filename</span>
+<span class="s2">from </span><span class="s1">distutils.dep_util </span><span class="s2">import </span><span class="s1">newer_group</span>
+<span class="s2">from </span><span class="s1">distutils.extension </span><span class="s2">import </span><span class="s1">Extension</span>
+<span class="s2">from </span><span class="s1">distutils.util </span><span class="s2">import </span><span class="s1">get_platform</span>
+<span class="s2">from </span><span class="s1">distutils </span><span class="s2">import </span><span class="s1">log</span>
+<span class="s2">from </span><span class="s1">. </span><span class="s2">import </span><span class="s1">py37compat</span>
+
+<span class="s2">from </span><span class="s1">site </span><span class="s2">import </span><span class="s1">USER_BASE</span>
+
+<span class="s3"># An extension name is just a dot-separated list of Python NAMEs (ie.</span>
+<span class="s3"># the same as a fully-qualified module name).</span>
+<span class="s1">extension_name_re = re.compile \</span>
+    <span class="s1">(</span><span class="s4">r'^[a-zA-Z_][a-zA-Z_0-9]*(\.[a-zA-Z_][a-zA-Z_0-9]*)*$'</span><span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">show_compilers ():</span>
+    <span class="s2">from </span><span class="s1">distutils.ccompiler </span><span class="s2">import </span><span class="s1">show_compilers</span>
+    <span class="s1">show_compilers()</span>
+
+
+<span class="s2">class </span><span class="s1">build_ext(Command):</span>
+
+    <span class="s1">description = </span><span class="s4">&quot;build C/C++ extensions (compile/link to build directory)&quot;</span>
+
+    <span class="s3"># XXX thoughts on how to deal with complex command-line options like</span>
+    <span class="s3"># these, i.e. how to make it so fancy_getopt can suck them off the</span>
+    <span class="s3"># command line and make it look like setup.py defined the appropriate</span>
+    <span class="s3"># lists of tuples of what-have-you.</span>
+    <span class="s3">#   - each command needs a callback to process its command-line options</span>
+    <span class="s3">#   - Command.__init__() needs access to its share of the whole</span>
+    <span class="s3">#     command line (must ultimately come from</span>
+    <span class="s3">#     Distribution.parse_command_line())</span>
+    <span class="s3">#   - it then calls the current command class' option-parsing</span>
+    <span class="s3">#     callback to deal with weird options like -D, which have to</span>
+    <span class="s3">#     parse the option text and churn out some custom data</span>
+    <span class="s3">#     structure</span>
+    <span class="s3">#   - that data structure (in this case, a list of 2-tuples)</span>
+    <span class="s3">#     will then be present in the command object by the time</span>
+    <span class="s3">#     we get to finalize_options() (i.e. the constructor</span>
+    <span class="s3">#     takes care of both command-line and client options</span>
+    <span class="s3">#     in between initialize_options() and finalize_options())</span>
+
+    <span class="s1">sep_by = </span><span class="s4">&quot; (separated by '%s')&quot; </span><span class="s1">% os.pathsep</span>
+    <span class="s1">user_options = [</span>
+        <span class="s1">(</span><span class="s4">'build-lib='</span><span class="s2">, </span><span class="s4">'b'</span><span class="s2">,</span>
+         <span class="s4">&quot;directory for compiled extension modules&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s4">'build-temp='</span><span class="s2">, </span><span class="s4">'t'</span><span class="s2">,</span>
+         <span class="s4">&quot;directory for temporary files (build by-products)&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s4">'plat-name='</span><span class="s2">, </span><span class="s4">'p'</span><span class="s2">,</span>
+         <span class="s4">&quot;platform name to cross-compile for, if supported &quot;</span>
+         <span class="s4">&quot;(default: %s)&quot; </span><span class="s1">% get_platform())</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s4">'inplace'</span><span class="s2">, </span><span class="s4">'i'</span><span class="s2">,</span>
+         <span class="s4">&quot;ignore build-lib and put compiled extensions into the source &quot; </span><span class="s1">+</span>
+         <span class="s4">&quot;directory alongside your pure Python modules&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s4">'include-dirs='</span><span class="s2">, </span><span class="s4">'I'</span><span class="s2">,</span>
+         <span class="s4">&quot;list of directories to search for header files&quot; </span><span class="s1">+ sep_by)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s4">'define='</span><span class="s2">, </span><span class="s4">'D'</span><span class="s2">,</span>
+         <span class="s4">&quot;C preprocessor macros to define&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s4">'undef='</span><span class="s2">, </span><span class="s4">'U'</span><span class="s2">,</span>
+         <span class="s4">&quot;C preprocessor macros to undefine&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s4">'libraries='</span><span class="s2">, </span><span class="s4">'l'</span><span class="s2">,</span>
+         <span class="s4">&quot;external C libraries to link with&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s4">'library-dirs='</span><span class="s2">, </span><span class="s4">'L'</span><span class="s2">,</span>
+         <span class="s4">&quot;directories to search for external C libraries&quot; </span><span class="s1">+ sep_by)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s4">'rpath='</span><span class="s2">, </span><span class="s4">'R'</span><span class="s2">,</span>
+         <span class="s4">&quot;directories to search for shared C libraries at runtime&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s4">'link-objects='</span><span class="s2">, </span><span class="s4">'O'</span><span class="s2">,</span>
+         <span class="s4">&quot;extra explicit link objects to include in the link&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s4">'debug'</span><span class="s2">, </span><span class="s4">'g'</span><span class="s2">,</span>
+         <span class="s4">&quot;compile/link with debugging information&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s4">'force'</span><span class="s2">, </span><span class="s4">'f'</span><span class="s2">,</span>
+         <span class="s4">&quot;forcibly build everything (ignore file timestamps)&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s4">'compiler='</span><span class="s2">, </span><span class="s4">'c'</span><span class="s2">,</span>
+         <span class="s4">&quot;specify the compiler type&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s4">'parallel='</span><span class="s2">, </span><span class="s4">'j'</span><span class="s2">,</span>
+         <span class="s4">&quot;number of parallel build jobs&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s4">'swig-cpp'</span><span class="s2">, None,</span>
+         <span class="s4">&quot;make SWIG create C++ files (default is C)&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s4">'swig-opts='</span><span class="s2">, None,</span>
+         <span class="s4">&quot;list of SWIG command line options&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s4">'swig='</span><span class="s2">, None,</span>
+         <span class="s4">&quot;path to the SWIG executable&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s4">'user'</span><span class="s2">, None,</span>
+         <span class="s4">&quot;add user include, library and rpath&quot;</span><span class="s1">)</span>
+        <span class="s1">]</span>
+
+    <span class="s1">boolean_options = [</span><span class="s4">'inplace'</span><span class="s2">, </span><span class="s4">'debug'</span><span class="s2">, </span><span class="s4">'force'</span><span class="s2">, </span><span class="s4">'swig-cpp'</span><span class="s2">, </span><span class="s4">'user'</span><span class="s1">]</span>
+
+    <span class="s1">help_options = [</span>
+        <span class="s1">(</span><span class="s4">'help-compiler'</span><span class="s2">, None,</span>
+         <span class="s4">&quot;list available compilers&quot;</span><span class="s2">, </span><span class="s1">show_compilers)</span><span class="s2">,</span>
+        <span class="s1">]</span>
+
+    <span class="s2">def </span><span class="s1">initialize_options(self):</span>
+        <span class="s1">self.extensions = </span><span class="s2">None</span>
+        <span class="s1">self.build_lib = </span><span class="s2">None</span>
+        <span class="s1">self.plat_name = </span><span class="s2">None</span>
+        <span class="s1">self.build_temp = </span><span class="s2">None</span>
+        <span class="s1">self.inplace = </span><span class="s5">0</span>
+        <span class="s1">self.package = </span><span class="s2">None</span>
+
+        <span class="s1">self.include_dirs = </span><span class="s2">None</span>
+        <span class="s1">self.define = </span><span class="s2">None</span>
+        <span class="s1">self.undef = </span><span class="s2">None</span>
+        <span class="s1">self.libraries = </span><span class="s2">None</span>
+        <span class="s1">self.library_dirs = </span><span class="s2">None</span>
+        <span class="s1">self.rpath = </span><span class="s2">None</span>
+        <span class="s1">self.link_objects = </span><span class="s2">None</span>
+        <span class="s1">self.debug = </span><span class="s2">None</span>
+        <span class="s1">self.force = </span><span class="s2">None</span>
+        <span class="s1">self.compiler = </span><span class="s2">None</span>
+        <span class="s1">self.swig = </span><span class="s2">None</span>
+        <span class="s1">self.swig_cpp = </span><span class="s2">None</span>
+        <span class="s1">self.swig_opts = </span><span class="s2">None</span>
+        <span class="s1">self.user = </span><span class="s2">None</span>
+        <span class="s1">self.parallel = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">finalize_options(self):</span>
+        <span class="s2">from </span><span class="s1">distutils </span><span class="s2">import </span><span class="s1">sysconfig</span>
+
+        <span class="s1">self.set_undefined_options(</span><span class="s4">'build'</span><span class="s2">,</span>
+                                   <span class="s1">(</span><span class="s4">'build_lib'</span><span class="s2">, </span><span class="s4">'build_lib'</span><span class="s1">)</span><span class="s2">,</span>
+                                   <span class="s1">(</span><span class="s4">'build_temp'</span><span class="s2">, </span><span class="s4">'build_temp'</span><span class="s1">)</span><span class="s2">,</span>
+                                   <span class="s1">(</span><span class="s4">'compiler'</span><span class="s2">, </span><span class="s4">'compiler'</span><span class="s1">)</span><span class="s2">,</span>
+                                   <span class="s1">(</span><span class="s4">'debug'</span><span class="s2">, </span><span class="s4">'debug'</span><span class="s1">)</span><span class="s2">,</span>
+                                   <span class="s1">(</span><span class="s4">'force'</span><span class="s2">, </span><span class="s4">'force'</span><span class="s1">)</span><span class="s2">,</span>
+                                   <span class="s1">(</span><span class="s4">'parallel'</span><span class="s2">, </span><span class="s4">'parallel'</span><span class="s1">)</span><span class="s2">,</span>
+                                   <span class="s1">(</span><span class="s4">'plat_name'</span><span class="s2">, </span><span class="s4">'plat_name'</span><span class="s1">)</span><span class="s2">,</span>
+                                   <span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">self.package </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">self.package = self.distribution.ext_package</span>
+
+        <span class="s1">self.extensions = self.distribution.ext_modules</span>
+
+        <span class="s3"># Make sure Python's include directories (for Python.h, pyconfig.h,</span>
+        <span class="s3"># etc.) are in the include search path.</span>
+        <span class="s1">py_include = sysconfig.get_python_inc()</span>
+        <span class="s1">plat_py_include = sysconfig.get_python_inc(plat_specific=</span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">self.include_dirs </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">self.include_dirs = self.distribution.include_dirs </span><span class="s2">or </span><span class="s1">[]</span>
+        <span class="s2">if </span><span class="s1">isinstance(self.include_dirs</span><span class="s2">, </span><span class="s1">str):</span>
+            <span class="s1">self.include_dirs = self.include_dirs.split(os.pathsep)</span>
+
+        <span class="s3"># If in a virtualenv, add its include directory</span>
+        <span class="s3"># Issue 16116</span>
+        <span class="s2">if </span><span class="s1">sys.exec_prefix != sys.base_exec_prefix:</span>
+            <span class="s1">self.include_dirs.append(os.path.join(sys.exec_prefix</span><span class="s2">, </span><span class="s4">'include'</span><span class="s1">))</span>
+
+        <span class="s3"># Put the Python &quot;system&quot; include dir at the end, so that</span>
+        <span class="s3"># any local include dirs take precedence.</span>
+        <span class="s1">self.include_dirs.extend(py_include.split(os.path.pathsep))</span>
+        <span class="s2">if </span><span class="s1">plat_py_include != py_include:</span>
+            <span class="s1">self.include_dirs.extend(</span>
+                <span class="s1">plat_py_include.split(os.path.pathsep))</span>
+
+        <span class="s1">self.ensure_string_list(</span><span class="s4">'libraries'</span><span class="s1">)</span>
+        <span class="s1">self.ensure_string_list(</span><span class="s4">'link_objects'</span><span class="s1">)</span>
+
+        <span class="s3"># Life is easier if we're not forever checking for None, so</span>
+        <span class="s3"># simplify these options to empty lists if unset</span>
+        <span class="s2">if </span><span class="s1">self.libraries </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">self.libraries = []</span>
+        <span class="s2">if </span><span class="s1">self.library_dirs </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">self.library_dirs = []</span>
+        <span class="s2">elif </span><span class="s1">isinstance(self.library_dirs</span><span class="s2">, </span><span class="s1">str):</span>
+            <span class="s1">self.library_dirs = self.library_dirs.split(os.pathsep)</span>
+
+        <span class="s2">if </span><span class="s1">self.rpath </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">self.rpath = []</span>
+        <span class="s2">elif </span><span class="s1">isinstance(self.rpath</span><span class="s2">, </span><span class="s1">str):</span>
+            <span class="s1">self.rpath = self.rpath.split(os.pathsep)</span>
+
+        <span class="s3"># for extensions under windows use different directories</span>
+        <span class="s3"># for Release and Debug builds.</span>
+        <span class="s3"># also Python's library directory must be appended to library_dirs</span>
+        <span class="s2">if </span><span class="s1">os.name == </span><span class="s4">'nt'</span><span class="s1">:</span>
+            <span class="s3"># the 'libs' directory is for binary installs - we assume that</span>
+            <span class="s3"># must be the *native* platform.  But we don't really support</span>
+            <span class="s3"># cross-compiling via a binary install anyway, so we let it go.</span>
+            <span class="s1">self.library_dirs.append(os.path.join(sys.exec_prefix</span><span class="s2">, </span><span class="s4">'libs'</span><span class="s1">))</span>
+            <span class="s2">if </span><span class="s1">sys.base_exec_prefix != sys.prefix:  </span><span class="s3"># Issue 16116</span>
+                <span class="s1">self.library_dirs.append(os.path.join(sys.base_exec_prefix</span><span class="s2">, </span><span class="s4">'libs'</span><span class="s1">))</span>
+            <span class="s2">if </span><span class="s1">self.debug:</span>
+                <span class="s1">self.build_temp = os.path.join(self.build_temp</span><span class="s2">, </span><span class="s4">&quot;Debug&quot;</span><span class="s1">)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">self.build_temp = os.path.join(self.build_temp</span><span class="s2">, </span><span class="s4">&quot;Release&quot;</span><span class="s1">)</span>
+
+            <span class="s3"># Append the source distribution include and library directories,</span>
+            <span class="s3"># this allows distutils on windows to work in the source tree</span>
+            <span class="s1">self.include_dirs.append(os.path.dirname(get_config_h_filename()))</span>
+            <span class="s1">_sys_home = getattr(sys</span><span class="s2">, </span><span class="s4">'_home'</span><span class="s2">, None</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">_sys_home:</span>
+                <span class="s1">self.library_dirs.append(_sys_home)</span>
+
+            <span class="s3"># Use the .lib files for the correct architecture</span>
+            <span class="s2">if </span><span class="s1">self.plat_name == </span><span class="s4">'win32'</span><span class="s1">:</span>
+                <span class="s1">suffix = </span><span class="s4">'win32'</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s3"># win-amd64</span>
+                <span class="s1">suffix = self.plat_name[</span><span class="s5">4</span><span class="s1">:]</span>
+            <span class="s1">new_lib = os.path.join(sys.exec_prefix</span><span class="s2">, </span><span class="s4">'PCbuild'</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">suffix:</span>
+                <span class="s1">new_lib = os.path.join(new_lib</span><span class="s2">, </span><span class="s1">suffix)</span>
+            <span class="s1">self.library_dirs.append(new_lib)</span>
+
+        <span class="s3"># For extensions under Cygwin, Python's library directory must be</span>
+        <span class="s3"># appended to library_dirs</span>
+        <span class="s2">if </span><span class="s1">sys.platform[:</span><span class="s5">6</span><span class="s1">] == </span><span class="s4">'cygwin'</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">sys.executable.startswith(os.path.join(sys.exec_prefix</span><span class="s2">, </span><span class="s4">&quot;bin&quot;</span><span class="s1">)):</span>
+                <span class="s3"># building third party extensions</span>
+                <span class="s1">self.library_dirs.append(os.path.join(sys.prefix</span><span class="s2">, </span><span class="s4">&quot;lib&quot;</span><span class="s2">,</span>
+                                                      <span class="s4">&quot;python&quot; </span><span class="s1">+ get_python_version()</span><span class="s2">,</span>
+                                                      <span class="s4">&quot;config&quot;</span><span class="s1">))</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s3"># building python standard extensions</span>
+                <span class="s1">self.library_dirs.append(</span><span class="s4">'.'</span><span class="s1">)</span>
+
+        <span class="s3"># For building extensions with a shared Python library,</span>
+        <span class="s3"># Python's library directory must be appended to library_dirs</span>
+        <span class="s3"># See Issues: #1600860, #4366</span>
+        <span class="s2">if </span><span class="s1">(sysconfig.get_config_var(</span><span class="s4">'Py_ENABLE_SHARED'</span><span class="s1">)):</span>
+            <span class="s2">if not </span><span class="s1">sysconfig.python_build:</span>
+                <span class="s3"># building third party extensions</span>
+                <span class="s1">self.library_dirs.append(sysconfig.get_config_var(</span><span class="s4">'LIBDIR'</span><span class="s1">))</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s3"># building python standard extensions</span>
+                <span class="s1">self.library_dirs.append(</span><span class="s4">'.'</span><span class="s1">)</span>
+
+        <span class="s3"># The argument parsing will result in self.define being a string, but</span>
+        <span class="s3"># it has to be a list of 2-tuples.  All the preprocessor symbols</span>
+        <span class="s3"># specified by the 'define' option will be set to '1'.  Multiple</span>
+        <span class="s3"># symbols can be separated with commas.</span>
+
+        <span class="s2">if </span><span class="s1">self.define:</span>
+            <span class="s1">defines = self.define.split(</span><span class="s4">','</span><span class="s1">)</span>
+            <span class="s1">self.define = [(symbol</span><span class="s2">, </span><span class="s4">'1'</span><span class="s1">) </span><span class="s2">for </span><span class="s1">symbol </span><span class="s2">in </span><span class="s1">defines]</span>
+
+        <span class="s3"># The option for macros to undefine is also a string from the</span>
+        <span class="s3"># option parsing, but has to be a list.  Multiple symbols can also</span>
+        <span class="s3"># be separated with commas here.</span>
+        <span class="s2">if </span><span class="s1">self.undef:</span>
+            <span class="s1">self.undef = self.undef.split(</span><span class="s4">','</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">self.swig_opts </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">self.swig_opts = []</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.swig_opts = self.swig_opts.split(</span><span class="s4">' '</span><span class="s1">)</span>
+
+        <span class="s3"># Finally add the user include and library directories if requested</span>
+        <span class="s2">if </span><span class="s1">self.user:</span>
+            <span class="s1">user_include = os.path.join(USER_BASE</span><span class="s2">, </span><span class="s4">&quot;include&quot;</span><span class="s1">)</span>
+            <span class="s1">user_lib = os.path.join(USER_BASE</span><span class="s2">, </span><span class="s4">&quot;lib&quot;</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">os.path.isdir(user_include):</span>
+                <span class="s1">self.include_dirs.append(user_include)</span>
+            <span class="s2">if </span><span class="s1">os.path.isdir(user_lib):</span>
+                <span class="s1">self.library_dirs.append(user_lib)</span>
+                <span class="s1">self.rpath.append(user_lib)</span>
+
+        <span class="s2">if </span><span class="s1">isinstance(self.parallel</span><span class="s2">, </span><span class="s1">str):</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">self.parallel = int(self.parallel)</span>
+            <span class="s2">except </span><span class="s1">ValueError:</span>
+                <span class="s2">raise </span><span class="s1">DistutilsOptionError(</span><span class="s4">&quot;parallel should be an integer&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">run(self):</span>
+        <span class="s2">from </span><span class="s1">distutils.ccompiler </span><span class="s2">import </span><span class="s1">new_compiler</span>
+
+        <span class="s3"># 'self.extensions', as supplied by setup.py, is a list of</span>
+        <span class="s3"># Extension instances.  See the documentation for Extension (in</span>
+        <span class="s3"># distutils.extension) for details.</span>
+        <span class="s3">#</span>
+        <span class="s3"># For backwards compatibility with Distutils 0.8.2 and earlier, we</span>
+        <span class="s3"># also allow the 'extensions' list to be a list of tuples:</span>
+        <span class="s3">#    (ext_name, build_info)</span>
+        <span class="s3"># where build_info is a dictionary containing everything that</span>
+        <span class="s3"># Extension instances do except the name, with a few things being</span>
+        <span class="s3"># differently named.  We convert these 2-tuples to Extension</span>
+        <span class="s3"># instances as needed.</span>
+
+        <span class="s2">if not </span><span class="s1">self.extensions:</span>
+            <span class="s2">return</span>
+
+        <span class="s3"># If we were asked to build any C/C++ libraries, make sure that the</span>
+        <span class="s3"># directory where we put them is in the library search path for</span>
+        <span class="s3"># linking extensions.</span>
+        <span class="s2">if </span><span class="s1">self.distribution.has_c_libraries():</span>
+            <span class="s1">build_clib = self.get_finalized_command(</span><span class="s4">'build_clib'</span><span class="s1">)</span>
+            <span class="s1">self.libraries.extend(build_clib.get_library_names() </span><span class="s2">or </span><span class="s1">[])</span>
+            <span class="s1">self.library_dirs.append(build_clib.build_clib)</span>
+
+        <span class="s3"># Setup the CCompiler object that we'll use to do all the</span>
+        <span class="s3"># compiling and linking</span>
+        <span class="s1">self.compiler = new_compiler(compiler=self.compiler</span><span class="s2">,</span>
+                                     <span class="s1">verbose=self.verbose</span><span class="s2">,</span>
+                                     <span class="s1">dry_run=self.dry_run</span><span class="s2">,</span>
+                                     <span class="s1">force=self.force)</span>
+        <span class="s1">customize_compiler(self.compiler)</span>
+        <span class="s3"># If we are cross-compiling, init the compiler now (if we are not</span>
+        <span class="s3"># cross-compiling, init would not hurt, but people may rely on</span>
+        <span class="s3"># late initialization of compiler even if they shouldn't...)</span>
+        <span class="s2">if </span><span class="s1">os.name == </span><span class="s4">'nt' </span><span class="s2">and </span><span class="s1">self.plat_name != get_platform():</span>
+            <span class="s1">self.compiler.initialize(self.plat_name)</span>
+
+        <span class="s3"># And make sure that any compile/link-related options (which might</span>
+        <span class="s3"># come from the command-line or from the setup script) are set in</span>
+        <span class="s3"># that CCompiler object -- that way, they automatically apply to</span>
+        <span class="s3"># all compiling and linking done here.</span>
+        <span class="s2">if </span><span class="s1">self.include_dirs </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self.compiler.set_include_dirs(self.include_dirs)</span>
+        <span class="s2">if </span><span class="s1">self.define </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s3"># 'define' option is a list of (name,value) tuples</span>
+            <span class="s2">for </span><span class="s1">(name</span><span class="s2">, </span><span class="s1">value) </span><span class="s2">in </span><span class="s1">self.define:</span>
+                <span class="s1">self.compiler.define_macro(name</span><span class="s2">, </span><span class="s1">value)</span>
+        <span class="s2">if </span><span class="s1">self.undef </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">for </span><span class="s1">macro </span><span class="s2">in </span><span class="s1">self.undef:</span>
+                <span class="s1">self.compiler.undefine_macro(macro)</span>
+        <span class="s2">if </span><span class="s1">self.libraries </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self.compiler.set_libraries(self.libraries)</span>
+        <span class="s2">if </span><span class="s1">self.library_dirs </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self.compiler.set_library_dirs(self.library_dirs)</span>
+        <span class="s2">if </span><span class="s1">self.rpath </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self.compiler.set_runtime_library_dirs(self.rpath)</span>
+        <span class="s2">if </span><span class="s1">self.link_objects </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self.compiler.set_link_objects(self.link_objects)</span>
+
+        <span class="s3"># Now actually compile and link everything.</span>
+        <span class="s1">self.build_extensions()</span>
+
+    <span class="s2">def </span><span class="s1">check_extensions_list(self</span><span class="s2">, </span><span class="s1">extensions):</span>
+        <span class="s0">&quot;&quot;&quot;Ensure that the list of extensions (presumably provided as a 
+        command option 'extensions') is valid, i.e. it is a list of 
+        Extension objects.  We also support the old-style list of 2-tuples, 
+        where the tuples are (ext_name, build_info), which are converted to 
+        Extension instances here. 
+ 
+        Raise DistutilsSetupError if the structure is invalid anywhere; 
+        just returns otherwise. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if not </span><span class="s1">isinstance(extensions</span><span class="s2">, </span><span class="s1">list):</span>
+            <span class="s2">raise </span><span class="s1">DistutilsSetupError(</span>
+                  <span class="s4">&quot;'ext_modules' option must be a list of Extension instances&quot;</span><span class="s1">)</span>
+
+        <span class="s2">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">ext </span><span class="s2">in </span><span class="s1">enumerate(extensions):</span>
+            <span class="s2">if </span><span class="s1">isinstance(ext</span><span class="s2">, </span><span class="s1">Extension):</span>
+                <span class="s2">continue                </span><span class="s3"># OK! (assume type-checking done</span>
+                                        <span class="s3"># by Extension constructor)</span>
+
+            <span class="s2">if not </span><span class="s1">isinstance(ext</span><span class="s2">, </span><span class="s1">tuple) </span><span class="s2">or </span><span class="s1">len(ext) != </span><span class="s5">2</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">DistutilsSetupError(</span>
+                       <span class="s4">&quot;each element of 'ext_modules' option must be an &quot;</span>
+                       <span class="s4">&quot;Extension instance or 2-tuple&quot;</span><span class="s1">)</span>
+
+            <span class="s1">ext_name</span><span class="s2">, </span><span class="s1">build_info = ext</span>
+
+            <span class="s1">log.warn(</span><span class="s4">&quot;old-style (ext_name, build_info) tuple found in &quot;</span>
+                     <span class="s4">&quot;ext_modules for extension '%s' &quot;</span>
+                     <span class="s4">&quot;-- please convert to Extension instance&quot;</span><span class="s2">, </span><span class="s1">ext_name)</span>
+
+            <span class="s2">if not </span><span class="s1">(isinstance(ext_name</span><span class="s2">, </span><span class="s1">str) </span><span class="s2">and</span>
+                    <span class="s1">extension_name_re.match(ext_name)):</span>
+                <span class="s2">raise </span><span class="s1">DistutilsSetupError(</span>
+                       <span class="s4">&quot;first element of each tuple in 'ext_modules' &quot;</span>
+                       <span class="s4">&quot;must be the extension name (a string)&quot;</span><span class="s1">)</span>
+
+            <span class="s2">if not </span><span class="s1">isinstance(build_info</span><span class="s2">, </span><span class="s1">dict):</span>
+                <span class="s2">raise </span><span class="s1">DistutilsSetupError(</span>
+                       <span class="s4">&quot;second element of each tuple in 'ext_modules' &quot;</span>
+                       <span class="s4">&quot;must be a dictionary (build info)&quot;</span><span class="s1">)</span>
+
+            <span class="s3"># OK, the (ext_name, build_info) dict is type-safe: convert it</span>
+            <span class="s3"># to an Extension instance.</span>
+            <span class="s1">ext = Extension(ext_name</span><span class="s2">, </span><span class="s1">build_info[</span><span class="s4">'sources'</span><span class="s1">])</span>
+
+            <span class="s3"># Easy stuff: one-to-one mapping from dict elements to</span>
+            <span class="s3"># instance attributes.</span>
+            <span class="s2">for </span><span class="s1">key </span><span class="s2">in </span><span class="s1">(</span><span class="s4">'include_dirs'</span><span class="s2">, </span><span class="s4">'library_dirs'</span><span class="s2">, </span><span class="s4">'libraries'</span><span class="s2">,</span>
+                        <span class="s4">'extra_objects'</span><span class="s2">, </span><span class="s4">'extra_compile_args'</span><span class="s2">,</span>
+                        <span class="s4">'extra_link_args'</span><span class="s1">):</span>
+                <span class="s1">val = build_info.get(key)</span>
+                <span class="s2">if </span><span class="s1">val </span><span class="s2">is not None</span><span class="s1">:</span>
+                    <span class="s1">setattr(ext</span><span class="s2">, </span><span class="s1">key</span><span class="s2">, </span><span class="s1">val)</span>
+
+            <span class="s3"># Medium-easy stuff: same syntax/semantics, different names.</span>
+            <span class="s1">ext.runtime_library_dirs = build_info.get(</span><span class="s4">'rpath'</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s4">'def_file' </span><span class="s2">in </span><span class="s1">build_info:</span>
+                <span class="s1">log.warn(</span><span class="s4">&quot;'def_file' element of build info dict &quot;</span>
+                         <span class="s4">&quot;no longer supported&quot;</span><span class="s1">)</span>
+
+            <span class="s3"># Non-trivial stuff: 'macros' split into 'define_macros'</span>
+            <span class="s3"># and 'undef_macros'.</span>
+            <span class="s1">macros = build_info.get(</span><span class="s4">'macros'</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">macros:</span>
+                <span class="s1">ext.define_macros = []</span>
+                <span class="s1">ext.undef_macros = []</span>
+                <span class="s2">for </span><span class="s1">macro </span><span class="s2">in </span><span class="s1">macros:</span>
+                    <span class="s2">if not </span><span class="s1">(isinstance(macro</span><span class="s2">, </span><span class="s1">tuple) </span><span class="s2">and </span><span class="s1">len(macro) </span><span class="s2">in </span><span class="s1">(</span><span class="s5">1</span><span class="s2">, </span><span class="s5">2</span><span class="s1">)):</span>
+                        <span class="s2">raise </span><span class="s1">DistutilsSetupError(</span>
+                              <span class="s4">&quot;'macros' element of build info dict &quot;</span>
+                              <span class="s4">&quot;must be 1- or 2-tuple&quot;</span><span class="s1">)</span>
+                    <span class="s2">if </span><span class="s1">len(macro) == </span><span class="s5">1</span><span class="s1">:</span>
+                        <span class="s1">ext.undef_macros.append(macro[</span><span class="s5">0</span><span class="s1">])</span>
+                    <span class="s2">elif </span><span class="s1">len(macro) == </span><span class="s5">2</span><span class="s1">:</span>
+                        <span class="s1">ext.define_macros.append(macro)</span>
+
+            <span class="s1">extensions[i] = ext</span>
+
+    <span class="s2">def </span><span class="s1">get_source_files(self):</span>
+        <span class="s1">self.check_extensions_list(self.extensions)</span>
+        <span class="s1">filenames = []</span>
+
+        <span class="s3"># Wouldn't it be neat if we knew the names of header files too...</span>
+        <span class="s2">for </span><span class="s1">ext </span><span class="s2">in </span><span class="s1">self.extensions:</span>
+            <span class="s1">filenames.extend(ext.sources)</span>
+        <span class="s2">return </span><span class="s1">filenames</span>
+
+    <span class="s2">def </span><span class="s1">get_outputs(self):</span>
+        <span class="s3"># Sanity check the 'extensions' list -- can't assume this is being</span>
+        <span class="s3"># done in the same run as a 'build_extensions()' call (in fact, we</span>
+        <span class="s3"># can probably assume that it *isn't*!).</span>
+        <span class="s1">self.check_extensions_list(self.extensions)</span>
+
+        <span class="s3"># And build the list of output (built) filenames.  Note that this</span>
+        <span class="s3"># ignores the 'inplace' flag, and assumes everything goes in the</span>
+        <span class="s3"># &quot;build&quot; tree.</span>
+        <span class="s1">outputs = []</span>
+        <span class="s2">for </span><span class="s1">ext </span><span class="s2">in </span><span class="s1">self.extensions:</span>
+            <span class="s1">outputs.append(self.get_ext_fullpath(ext.name))</span>
+        <span class="s2">return </span><span class="s1">outputs</span>
+
+    <span class="s2">def </span><span class="s1">build_extensions(self):</span>
+        <span class="s3"># First, sanity-check the 'extensions' list</span>
+        <span class="s1">self.check_extensions_list(self.extensions)</span>
+        <span class="s2">if </span><span class="s1">self.parallel:</span>
+            <span class="s1">self._build_extensions_parallel()</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self._build_extensions_serial()</span>
+
+    <span class="s2">def </span><span class="s1">_build_extensions_parallel(self):</span>
+        <span class="s1">workers = self.parallel</span>
+        <span class="s2">if </span><span class="s1">self.parallel </span><span class="s2">is True</span><span class="s1">:</span>
+            <span class="s1">workers = os.cpu_count()  </span><span class="s3"># may return None</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">from </span><span class="s1">concurrent.futures </span><span class="s2">import </span><span class="s1">ThreadPoolExecutor</span>
+        <span class="s2">except </span><span class="s1">ImportError:</span>
+            <span class="s1">workers = </span><span class="s2">None</span>
+
+        <span class="s2">if </span><span class="s1">workers </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">self._build_extensions_serial()</span>
+            <span class="s2">return</span>
+
+        <span class="s2">with </span><span class="s1">ThreadPoolExecutor(max_workers=workers) </span><span class="s2">as </span><span class="s1">executor:</span>
+            <span class="s1">futures = [executor.submit(self.build_extension</span><span class="s2">, </span><span class="s1">ext)</span>
+                       <span class="s2">for </span><span class="s1">ext </span><span class="s2">in </span><span class="s1">self.extensions]</span>
+            <span class="s2">for </span><span class="s1">ext</span><span class="s2">, </span><span class="s1">fut </span><span class="s2">in </span><span class="s1">zip(self.extensions</span><span class="s2">, </span><span class="s1">futures):</span>
+                <span class="s2">with </span><span class="s1">self._filter_build_errors(ext):</span>
+                    <span class="s1">fut.result()</span>
+
+    <span class="s2">def </span><span class="s1">_build_extensions_serial(self):</span>
+        <span class="s2">for </span><span class="s1">ext </span><span class="s2">in </span><span class="s1">self.extensions:</span>
+            <span class="s2">with </span><span class="s1">self._filter_build_errors(ext):</span>
+                <span class="s1">self.build_extension(ext)</span>
+
+    <span class="s1">@contextlib.contextmanager</span>
+    <span class="s2">def </span><span class="s1">_filter_build_errors(self</span><span class="s2">, </span><span class="s1">ext):</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">yield</span>
+        <span class="s2">except </span><span class="s1">(CCompilerError</span><span class="s2">, </span><span class="s1">DistutilsError</span><span class="s2">, </span><span class="s1">CompileError) </span><span class="s2">as </span><span class="s1">e:</span>
+            <span class="s2">if not </span><span class="s1">ext.optional:</span>
+                <span class="s2">raise</span>
+            <span class="s1">self.warn(</span><span class="s4">'building extension &quot;%s&quot; failed: %s' </span><span class="s1">%</span>
+                      <span class="s1">(ext.name</span><span class="s2">, </span><span class="s1">e))</span>
+
+    <span class="s2">def </span><span class="s1">build_extension(self</span><span class="s2">, </span><span class="s1">ext):</span>
+        <span class="s1">sources = ext.sources</span>
+        <span class="s2">if </span><span class="s1">sources </span><span class="s2">is None or not </span><span class="s1">isinstance(sources</span><span class="s2">, </span><span class="s1">(list</span><span class="s2">, </span><span class="s1">tuple)):</span>
+            <span class="s2">raise </span><span class="s1">DistutilsSetupError(</span>
+                  <span class="s4">&quot;in 'ext_modules' option (extension '%s'), &quot;</span>
+                  <span class="s4">&quot;'sources' must be present and must be &quot;</span>
+                  <span class="s4">&quot;a list of source filenames&quot; </span><span class="s1">% ext.name)</span>
+        <span class="s3"># sort to make the resulting .so file build reproducible</span>
+        <span class="s1">sources = sorted(sources)</span>
+
+        <span class="s1">ext_path = self.get_ext_fullpath(ext.name)</span>
+        <span class="s1">depends = sources + ext.depends</span>
+        <span class="s2">if not </span><span class="s1">(self.force </span><span class="s2">or </span><span class="s1">newer_group(depends</span><span class="s2">, </span><span class="s1">ext_path</span><span class="s2">, </span><span class="s4">'newer'</span><span class="s1">)):</span>
+            <span class="s1">log.debug(</span><span class="s4">&quot;skipping '%s' extension (up-to-date)&quot;</span><span class="s2">, </span><span class="s1">ext.name)</span>
+            <span class="s2">return</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">log.info(</span><span class="s4">&quot;building '%s' extension&quot;</span><span class="s2">, </span><span class="s1">ext.name)</span>
+
+        <span class="s3"># First, scan the sources for SWIG definition files (.i), run</span>
+        <span class="s3"># SWIG on 'em to create .c files, and modify the sources list</span>
+        <span class="s3"># accordingly.</span>
+        <span class="s1">sources = self.swig_sources(sources</span><span class="s2">, </span><span class="s1">ext)</span>
+
+        <span class="s3"># Next, compile the source code to object files.</span>
+
+        <span class="s3"># XXX not honouring 'define_macros' or 'undef_macros' -- the</span>
+        <span class="s3"># CCompiler API needs to change to accommodate this, and I</span>
+        <span class="s3"># want to do one thing at a time!</span>
+
+        <span class="s3"># Two possible sources for extra compiler arguments:</span>
+        <span class="s3">#   - 'extra_compile_args' in Extension object</span>
+        <span class="s3">#   - CFLAGS environment variable (not particularly</span>
+        <span class="s3">#     elegant, but people seem to expect it and I</span>
+        <span class="s3">#     guess it's useful)</span>
+        <span class="s3"># The environment variable should take precedence, and</span>
+        <span class="s3"># any sensible compiler will give precedence to later</span>
+        <span class="s3"># command line args.  Hence we combine them in order:</span>
+        <span class="s1">extra_args = ext.extra_compile_args </span><span class="s2">or </span><span class="s1">[]</span>
+
+        <span class="s1">macros = ext.define_macros[:]</span>
+        <span class="s2">for </span><span class="s1">undef </span><span class="s2">in </span><span class="s1">ext.undef_macros:</span>
+            <span class="s1">macros.append((undef</span><span class="s2">,</span><span class="s1">))</span>
+
+        <span class="s1">objects = self.compiler.compile(sources</span><span class="s2">,</span>
+                                         <span class="s1">output_dir=self.build_temp</span><span class="s2">,</span>
+                                         <span class="s1">macros=macros</span><span class="s2">,</span>
+                                         <span class="s1">include_dirs=ext.include_dirs</span><span class="s2">,</span>
+                                         <span class="s1">debug=self.debug</span><span class="s2">,</span>
+                                         <span class="s1">extra_postargs=extra_args</span><span class="s2">,</span>
+                                         <span class="s1">depends=ext.depends)</span>
+
+        <span class="s3"># XXX outdated variable, kept here in case third-part code</span>
+        <span class="s3"># needs it.</span>
+        <span class="s1">self._built_objects = objects[:]</span>
+
+        <span class="s3"># Now link the object files together into a &quot;shared object&quot; --</span>
+        <span class="s3"># of course, first we have to figure out all the other things</span>
+        <span class="s3"># that go into the mix.</span>
+        <span class="s2">if </span><span class="s1">ext.extra_objects:</span>
+            <span class="s1">objects.extend(ext.extra_objects)</span>
+        <span class="s1">extra_args = ext.extra_link_args </span><span class="s2">or </span><span class="s1">[]</span>
+
+        <span class="s3"># Detect target language, if not provided</span>
+        <span class="s1">language = ext.language </span><span class="s2">or </span><span class="s1">self.compiler.detect_language(sources)</span>
+
+        <span class="s1">self.compiler.link_shared_object(</span>
+            <span class="s1">objects</span><span class="s2">, </span><span class="s1">ext_path</span><span class="s2">,</span>
+            <span class="s1">libraries=self.get_libraries(ext)</span><span class="s2">,</span>
+            <span class="s1">library_dirs=ext.library_dirs</span><span class="s2">,</span>
+            <span class="s1">runtime_library_dirs=ext.runtime_library_dirs</span><span class="s2">,</span>
+            <span class="s1">extra_postargs=extra_args</span><span class="s2">,</span>
+            <span class="s1">export_symbols=self.get_export_symbols(ext)</span><span class="s2">,</span>
+            <span class="s1">debug=self.debug</span><span class="s2">,</span>
+            <span class="s1">build_temp=self.build_temp</span><span class="s2">,</span>
+            <span class="s1">target_lang=language)</span>
+
+    <span class="s2">def </span><span class="s1">swig_sources(self</span><span class="s2">, </span><span class="s1">sources</span><span class="s2">, </span><span class="s1">extension):</span>
+        <span class="s0">&quot;&quot;&quot;Walk the list of source files in 'sources', looking for SWIG 
+        interface (.i) files.  Run SWIG on all that are found, and 
+        return a modified 'sources' list with SWIG source files replaced 
+        by the generated C (or C++) files. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">new_sources = []</span>
+        <span class="s1">swig_sources = []</span>
+        <span class="s1">swig_targets = {}</span>
+
+        <span class="s3"># XXX this drops generated C/C++ files into the source tree, which</span>
+        <span class="s3"># is fine for developers who want to distribute the generated</span>
+        <span class="s3"># source -- but there should be an option to put SWIG output in</span>
+        <span class="s3"># the temp dir.</span>
+
+        <span class="s2">if </span><span class="s1">self.swig_cpp:</span>
+            <span class="s1">log.warn(</span><span class="s4">&quot;--swig-cpp is deprecated - use --swig-opts=-c++&quot;</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">self.swig_cpp </span><span class="s2">or </span><span class="s1">(</span><span class="s4">'-c++' </span><span class="s2">in </span><span class="s1">self.swig_opts) </span><span class="s2">or </span><span class="s1">\</span>
+           <span class="s1">(</span><span class="s4">'-c++' </span><span class="s2">in </span><span class="s1">extension.swig_opts):</span>
+            <span class="s1">target_ext = </span><span class="s4">'.cpp'</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">target_ext = </span><span class="s4">'.c'</span>
+
+        <span class="s2">for </span><span class="s1">source </span><span class="s2">in </span><span class="s1">sources:</span>
+            <span class="s1">(base</span><span class="s2">, </span><span class="s1">ext) = os.path.splitext(source)</span>
+            <span class="s2">if </span><span class="s1">ext == </span><span class="s4">&quot;.i&quot;</span><span class="s1">:             </span><span class="s3"># SWIG interface file</span>
+                <span class="s1">new_sources.append(base + </span><span class="s4">'_wrap' </span><span class="s1">+ target_ext)</span>
+                <span class="s1">swig_sources.append(source)</span>
+                <span class="s1">swig_targets[source] = new_sources[-</span><span class="s5">1</span><span class="s1">]</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">new_sources.append(source)</span>
+
+        <span class="s2">if not </span><span class="s1">swig_sources:</span>
+            <span class="s2">return </span><span class="s1">new_sources</span>
+
+        <span class="s1">swig = self.swig </span><span class="s2">or </span><span class="s1">self.find_swig()</span>
+        <span class="s1">swig_cmd = [swig</span><span class="s2">, </span><span class="s4">&quot;-python&quot;</span><span class="s1">]</span>
+        <span class="s1">swig_cmd.extend(self.swig_opts)</span>
+        <span class="s2">if </span><span class="s1">self.swig_cpp:</span>
+            <span class="s1">swig_cmd.append(</span><span class="s4">&quot;-c++&quot;</span><span class="s1">)</span>
+
+        <span class="s3"># Do not override commandline arguments</span>
+        <span class="s2">if not </span><span class="s1">self.swig_opts:</span>
+            <span class="s2">for </span><span class="s1">o </span><span class="s2">in </span><span class="s1">extension.swig_opts:</span>
+                <span class="s1">swig_cmd.append(o)</span>
+
+        <span class="s2">for </span><span class="s1">source </span><span class="s2">in </span><span class="s1">swig_sources:</span>
+            <span class="s1">target = swig_targets[source]</span>
+            <span class="s1">log.info(</span><span class="s4">&quot;swigging %s to %s&quot;</span><span class="s2">, </span><span class="s1">source</span><span class="s2">, </span><span class="s1">target)</span>
+            <span class="s1">self.spawn(swig_cmd + [</span><span class="s4">&quot;-o&quot;</span><span class="s2">, </span><span class="s1">target</span><span class="s2">, </span><span class="s1">source])</span>
+
+        <span class="s2">return </span><span class="s1">new_sources</span>
+
+    <span class="s2">def </span><span class="s1">find_swig(self):</span>
+        <span class="s0">&quot;&quot;&quot;Return the name of the SWIG executable.  On Unix, this is 
+        just &quot;swig&quot; -- it should be in the PATH.  Tries a bit harder on 
+        Windows. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">os.name == </span><span class="s4">&quot;posix&quot;</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s4">&quot;swig&quot;</span>
+        <span class="s2">elif </span><span class="s1">os.name == </span><span class="s4">&quot;nt&quot;</span><span class="s1">:</span>
+            <span class="s3"># Look for SWIG in its standard installation directory on</span>
+            <span class="s3"># Windows (or so I presume!).  If we find it there, great;</span>
+            <span class="s3"># if not, act like Unix and assume it's in the PATH.</span>
+            <span class="s2">for </span><span class="s1">vers </span><span class="s2">in </span><span class="s1">(</span><span class="s4">&quot;1.3&quot;</span><span class="s2">, </span><span class="s4">&quot;1.2&quot;</span><span class="s2">, </span><span class="s4">&quot;1.1&quot;</span><span class="s1">):</span>
+                <span class="s1">fn = os.path.join(</span><span class="s4">&quot;c:</span><span class="s2">\\</span><span class="s4">swig%s&quot; </span><span class="s1">% vers</span><span class="s2">, </span><span class="s4">&quot;swig.exe&quot;</span><span class="s1">)</span>
+                <span class="s2">if </span><span class="s1">os.path.isfile(fn):</span>
+                    <span class="s2">return </span><span class="s1">fn</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s4">&quot;swig.exe&quot;</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">DistutilsPlatformError(</span>
+                  <span class="s4">&quot;I don't know how to find (much less run) SWIG &quot;</span>
+                  <span class="s4">&quot;on platform '%s'&quot; </span><span class="s1">% os.name)</span>
+
+    <span class="s3"># -- Name generators -----------------------------------------------</span>
+    <span class="s3"># (extension names, filenames, whatever)</span>
+    <span class="s2">def </span><span class="s1">get_ext_fullpath(self</span><span class="s2">, </span><span class="s1">ext_name):</span>
+        <span class="s0">&quot;&quot;&quot;Returns the path of the filename for a given extension. 
+ 
+        The file is located in `build_lib` or directly in the package 
+        (inplace option). 
+        &quot;&quot;&quot;</span>
+        <span class="s1">fullname = self.get_ext_fullname(ext_name)</span>
+        <span class="s1">modpath = fullname.split(</span><span class="s4">'.'</span><span class="s1">)</span>
+        <span class="s1">filename = self.get_ext_filename(modpath[-</span><span class="s5">1</span><span class="s1">])</span>
+
+        <span class="s2">if not </span><span class="s1">self.inplace:</span>
+            <span class="s3"># no further work needed</span>
+            <span class="s3"># returning :</span>
+            <span class="s3">#   build_dir/package/path/filename</span>
+            <span class="s1">filename = os.path.join(*modpath[:-</span><span class="s5">1</span><span class="s1">]+[filename])</span>
+            <span class="s2">return </span><span class="s1">os.path.join(self.build_lib</span><span class="s2">, </span><span class="s1">filename)</span>
+
+        <span class="s3"># the inplace option requires to find the package directory</span>
+        <span class="s3"># using the build_py command for that</span>
+        <span class="s1">package = </span><span class="s4">'.'</span><span class="s1">.join(modpath[</span><span class="s5">0</span><span class="s1">:-</span><span class="s5">1</span><span class="s1">])</span>
+        <span class="s1">build_py = self.get_finalized_command(</span><span class="s4">'build_py'</span><span class="s1">)</span>
+        <span class="s1">package_dir = os.path.abspath(build_py.get_package_dir(package))</span>
+
+        <span class="s3"># returning</span>
+        <span class="s3">#   package_dir/filename</span>
+        <span class="s2">return </span><span class="s1">os.path.join(package_dir</span><span class="s2">, </span><span class="s1">filename)</span>
+
+    <span class="s2">def </span><span class="s1">get_ext_fullname(self</span><span class="s2">, </span><span class="s1">ext_name):</span>
+        <span class="s0">&quot;&quot;&quot;Returns the fullname of a given extension name. 
+ 
+        Adds the `package.` prefix&quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self.package </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">ext_name</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">self.package + </span><span class="s4">'.' </span><span class="s1">+ ext_name</span>
+
+    <span class="s2">def </span><span class="s1">get_ext_filename(self</span><span class="s2">, </span><span class="s1">ext_name):</span>
+        <span class="s0">r&quot;&quot;&quot;Convert the name of an extension (eg. &quot;foo.bar&quot;) into the name 
+        of the file from which it will be loaded (eg. &quot;foo/bar.so&quot;, or 
+        &quot;foo\bar.pyd&quot;). 
+        &quot;&quot;&quot;</span>
+        <span class="s2">from </span><span class="s1">distutils.sysconfig </span><span class="s2">import </span><span class="s1">get_config_var</span>
+        <span class="s1">ext_path = ext_name.split(</span><span class="s4">'.'</span><span class="s1">)</span>
+        <span class="s1">ext_suffix = get_config_var(</span><span class="s4">'EXT_SUFFIX'</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">os.path.join(*ext_path) + ext_suffix</span>
+
+    <span class="s2">def </span><span class="s1">get_export_symbols(self</span><span class="s2">, </span><span class="s1">ext):</span>
+        <span class="s0">&quot;&quot;&quot;Return the list of symbols that a shared extension has to 
+        export.  This either uses 'ext.export_symbols' or, if it's not 
+        provided, &quot;PyInit_&quot; + module_name.  Only relevant on Windows, where 
+        the .pyd file (DLL) must export the module &quot;PyInit_&quot; function. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">suffix = </span><span class="s4">'_' </span><span class="s1">+ ext.name.split(</span><span class="s4">'.'</span><span class="s1">)[-</span><span class="s5">1</span><span class="s1">]</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s3"># Unicode module name support as defined in PEP-489</span>
+            <span class="s3"># https://www.python.org/dev/peps/pep-0489/#export-hook-name</span>
+            <span class="s1">suffix.encode(</span><span class="s4">'ascii'</span><span class="s1">)</span>
+        <span class="s2">except </span><span class="s1">UnicodeEncodeError:</span>
+            <span class="s1">suffix = </span><span class="s4">'U' </span><span class="s1">+ suffix.encode(</span><span class="s4">'punycode'</span><span class="s1">).replace(</span><span class="s6">b'-'</span><span class="s2">, </span><span class="s6">b'_'</span><span class="s1">).decode(</span><span class="s4">'ascii'</span><span class="s1">)</span>
+
+        <span class="s1">initfunc_name = </span><span class="s4">&quot;PyInit&quot; </span><span class="s1">+ suffix</span>
+        <span class="s2">if </span><span class="s1">initfunc_name </span><span class="s2">not in </span><span class="s1">ext.export_symbols:</span>
+            <span class="s1">ext.export_symbols.append(initfunc_name)</span>
+        <span class="s2">return </span><span class="s1">ext.export_symbols</span>
+
+    <span class="s2">def </span><span class="s1">get_libraries(self</span><span class="s2">, </span><span class="s1">ext):</span>
+        <span class="s0">&quot;&quot;&quot;Return the list of libraries to link against when building a 
+        shared extension.  On most platforms, this is just 'ext.libraries'; 
+        on Windows, we add the Python library (eg. python20.dll). 
+        &quot;&quot;&quot;</span>
+        <span class="s3"># The python library is always needed on Windows.  For MSVC, this</span>
+        <span class="s3"># is redundant, since the library is mentioned in a pragma in</span>
+        <span class="s3"># pyconfig.h that MSVC groks.  The other Windows compilers all seem</span>
+        <span class="s3"># to need it mentioned explicitly, though, so that's what we do.</span>
+        <span class="s3"># Append '_d' to the python import library on debug builds.</span>
+        <span class="s2">if </span><span class="s1">sys.platform == </span><span class="s4">&quot;win32&quot;</span><span class="s1">:</span>
+            <span class="s2">from </span><span class="s1">distutils._msvccompiler </span><span class="s2">import </span><span class="s1">MSVCCompiler</span>
+            <span class="s2">if not </span><span class="s1">isinstance(self.compiler</span><span class="s2">, </span><span class="s1">MSVCCompiler):</span>
+                <span class="s1">template = </span><span class="s4">&quot;python%d%d&quot;</span>
+                <span class="s2">if </span><span class="s1">self.debug:</span>
+                    <span class="s1">template = template + </span><span class="s4">'_d'</span>
+                <span class="s1">pythonlib = (template %</span>
+                       <span class="s1">(sys.hexversion &gt;&gt; </span><span class="s5">24</span><span class="s2">, </span><span class="s1">(sys.hexversion &gt;&gt; </span><span class="s5">16</span><span class="s1">) &amp; </span><span class="s5">0xff</span><span class="s1">))</span>
+                <span class="s3"># don't extend ext.libraries, it may be shared with other</span>
+                <span class="s3"># extensions, it is a reference to the original list</span>
+                <span class="s2">return </span><span class="s1">ext.libraries + [pythonlib]</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s3"># On Android only the main executable and LD_PRELOADs are considered</span>
+            <span class="s3"># to be RTLD_GLOBAL, all the dependencies of the main executable</span>
+            <span class="s3"># remain RTLD_LOCAL and so the shared libraries must be linked with</span>
+            <span class="s3"># libpython when python is built with a shared python library (issue</span>
+            <span class="s3"># bpo-21536).</span>
+            <span class="s3"># On Cygwin (and if required, other POSIX-like platforms based on</span>
+            <span class="s3"># Windows like MinGW) it is simply necessary that all symbols in</span>
+            <span class="s3"># shared libraries are resolved at link time.</span>
+            <span class="s2">from </span><span class="s1">distutils.sysconfig </span><span class="s2">import </span><span class="s1">get_config_var</span>
+            <span class="s1">link_libpython = </span><span class="s2">False</span>
+            <span class="s2">if </span><span class="s1">get_config_var(</span><span class="s4">'Py_ENABLE_SHARED'</span><span class="s1">):</span>
+                <span class="s3"># A native build on an Android device or on Cygwin</span>
+                <span class="s2">if </span><span class="s1">hasattr(sys</span><span class="s2">, </span><span class="s4">'getandroidapilevel'</span><span class="s1">):</span>
+                    <span class="s1">link_libpython = </span><span class="s2">True</span>
+                <span class="s2">elif </span><span class="s1">sys.platform == </span><span class="s4">'cygwin'</span><span class="s1">:</span>
+                    <span class="s1">link_libpython = </span><span class="s2">True</span>
+                <span class="s2">elif </span><span class="s4">'_PYTHON_HOST_PLATFORM' </span><span class="s2">in </span><span class="s1">os.environ:</span>
+                    <span class="s3"># We are cross-compiling for one of the relevant platforms</span>
+                    <span class="s2">if </span><span class="s1">get_config_var(</span><span class="s4">'ANDROID_API_LEVEL'</span><span class="s1">) != </span><span class="s5">0</span><span class="s1">:</span>
+                        <span class="s1">link_libpython = </span><span class="s2">True</span>
+                    <span class="s2">elif </span><span class="s1">get_config_var(</span><span class="s4">'MACHDEP'</span><span class="s1">) == </span><span class="s4">'cygwin'</span><span class="s1">:</span>
+                        <span class="s1">link_libpython = </span><span class="s2">True</span>
+
+            <span class="s2">if </span><span class="s1">link_libpython:</span>
+                <span class="s1">ldversion = get_config_var(</span><span class="s4">'LDVERSION'</span><span class="s1">)</span>
+                <span class="s2">return </span><span class="s1">ext.libraries + [</span><span class="s4">'python' </span><span class="s1">+ ldversion]</span>
+
+        <span class="s2">return </span><span class="s1">ext.libraries + py37compat.pythonlib()</span>
+</pre>
+</body>
+</html>

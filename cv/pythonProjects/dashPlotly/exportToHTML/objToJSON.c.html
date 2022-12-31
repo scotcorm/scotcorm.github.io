@@ -1,0 +1,2132 @@
+<html>
+<head>
+<title>objToJSON.c</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #0f9795;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+objToJSON.c</font>
+</center></td></tr></table>
+<pre><span class="s0">/* 
+Copyright (c) 2011-2013, ESN Social Software AB and Jonas Tarnstrom 
+All rights reserved. 
+ 
+Redistribution and use in source and binary forms, with or without 
+modification, are permitted provided that the following conditions are met: 
+* Redistributions of source code must retain the above copyright 
+notice, this list of conditions and the following disclaimer. 
+* Redistributions in binary form must reproduce the above copyright 
+notice, this list of conditions and the following disclaimer in the 
+documentation and/or other materials provided with the distribution. 
+* Neither the name of the ESN Social Software AB nor the 
+names of its contributors may be used to endorse or promote products 
+derived from this software without specific prior written permission. 
+ 
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS &quot;AS IS&quot; AND 
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED 
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE 
+DISCLAIMED. IN NO EVENT SHALL ESN SOCIAL SOFTWARE AB OR JONAS TARNSTROM BE 
+LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR 
+CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE 
+GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) 
+HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT 
+LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF 
+THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. 
+ 
+ 
+Portions of code from MODP_ASCII - Ascii transformations (upper/lower, etc) 
+https://github.com/client9/stringencoders 
+Copyright (c) 2007  Nick Galbreath -- nickg [at] modp [dot] com. All rights 
+reserved. 
+ 
+Numeric decoder derived from from TCL library 
+https://www.opensource.apple.com/source/tcl/tcl-14/tcl/license.terms 
+* Copyright (c) 1988-1993 The Regents of the University of California. 
+* Copyright (c) 1994 Sun Microsystems, Inc. 
+*/</span>
+
+<span class="s2">#define </span><span class="s1">PY_SSIZE_T_CLEAN</span>
+<span class="s2">#include </span><span class="s1">&lt;Python.h&gt;</span>
+<span class="s2">#include </span><span class="s1">&lt;math.h&gt;</span>
+
+<span class="s2">#define </span><span class="s1">NO_IMPORT_ARRAY</span>
+<span class="s2">#define </span><span class="s1">PY_ARRAY_UNIQUE_SYMBOL UJSON_NUMPY</span>
+<span class="s2">#include </span><span class="s1">&lt;numpy/arrayobject.h&gt;</span>
+<span class="s2">#include </span><span class="s1">&lt;numpy/arrayscalars.h&gt;</span>
+<span class="s2">#include </span><span class="s1">&lt;numpy/ndarraytypes.h&gt;</span>
+<span class="s2">#include </span><span class="s1">&lt;numpy/npy_math.h&gt;</span>
+<span class="s2">#include </span><span class="s1">&lt;ultrajson.h&gt;</span>
+<span class="s2">#include </span><span class="s3">&quot;date_conversions.h&quot;</span>
+<span class="s2">#include </span><span class="s3">&quot;datetime.h&quot;</span>
+
+<span class="s2">static </span><span class="s1">PyTypeObject *type_decimal;</span>
+<span class="s2">static </span><span class="s1">PyTypeObject *cls_dataframe;</span>
+<span class="s2">static </span><span class="s1">PyTypeObject *cls_series;</span>
+<span class="s2">static </span><span class="s1">PyTypeObject *cls_index;</span>
+<span class="s2">static </span><span class="s1">PyTypeObject *cls_nat;</span>
+<span class="s2">static </span><span class="s1">PyTypeObject *cls_na;</span>
+<span class="s1">PyObject *cls_timedelta;</span>
+
+<span class="s1">npy_int64 get_nat(</span><span class="s2">void</span><span class="s1">) { </span><span class="s2">return </span><span class="s1">NPY_MIN_INT64; }</span>
+
+<span class="s2">typedef char </span><span class="s1">*(*PFN_PyTypeToUTF8)(JSOBJ obj, JSONTypeContext *ti,</span>
+                                  <span class="s1">size_t *_outLen);</span>
+
+<span class="s2">typedef struct </span><span class="s1">__NpyArrContext {</span>
+    <span class="s1">PyObject *array;</span>
+    <span class="s2">char </span><span class="s1">*dataptr;</span>
+    <span class="s2">int </span><span class="s1">curdim;     </span><span class="s0">// current dimension in array's order</span>
+    <span class="s2">int </span><span class="s1">stridedim;  </span><span class="s0">// dimension we are striding over</span>
+    <span class="s2">int </span><span class="s1">inc;        </span><span class="s0">// stride dimension increment (+/- 1)</span>
+    <span class="s1">npy_intp dim;</span>
+    <span class="s1">npy_intp stride;</span>
+    <span class="s1">npy_intp ndim;</span>
+    <span class="s1">npy_intp index[NPY_MAXDIMS];</span>
+    <span class="s2">int </span><span class="s1">type_num;</span>
+    <span class="s1">PyArray_GetItemFunc *getitem;</span>
+
+    <span class="s2">char </span><span class="s1">**rowLabels;</span>
+    <span class="s2">char </span><span class="s1">**columnLabels;</span>
+<span class="s1">} NpyArrContext;</span>
+
+<span class="s2">typedef struct </span><span class="s1">__PdBlockContext {</span>
+    <span class="s2">int </span><span class="s1">colIdx;</span>
+    <span class="s2">int </span><span class="s1">ncols;</span>
+    <span class="s2">int </span><span class="s1">transpose;</span>
+
+    <span class="s1">NpyArrContext **npyCtxts;  </span><span class="s0">// NpyArrContext for each column</span>
+<span class="s1">} PdBlockContext;</span>
+
+<span class="s2">typedef struct </span><span class="s1">__TypeContext {</span>
+    <span class="s1">JSPFN_ITERBEGIN iterBegin;</span>
+    <span class="s1">JSPFN_ITEREND iterEnd;</span>
+    <span class="s1">JSPFN_ITERNEXT iterNext;</span>
+    <span class="s1">JSPFN_ITERGETNAME iterGetName;</span>
+    <span class="s1">JSPFN_ITERGETVALUE iterGetValue;</span>
+    <span class="s1">PFN_PyTypeToUTF8 PyTypeToUTF8;</span>
+    <span class="s1">PyObject *newObj;</span>
+    <span class="s1">PyObject *dictObj;</span>
+    <span class="s1">Py_ssize_t index;</span>
+    <span class="s1">Py_ssize_t size;</span>
+    <span class="s1">PyObject *itemValue;</span>
+    <span class="s1">PyObject *itemName;</span>
+    <span class="s1">PyObject *attrList;</span>
+    <span class="s1">PyObject *iterator;</span>
+
+    <span class="s2">double </span><span class="s1">doubleValue;</span>
+    <span class="s1">JSINT64 longValue;</span>
+
+    <span class="s2">char </span><span class="s1">*cStr;</span>
+    <span class="s1">NpyArrContext *npyarr;</span>
+    <span class="s1">PdBlockContext *pdblock;</span>
+    <span class="s2">int </span><span class="s1">transpose;</span>
+    <span class="s2">char </span><span class="s1">**rowLabels;</span>
+    <span class="s2">char </span><span class="s1">**columnLabels;</span>
+    <span class="s1">npy_intp rowLabelsLen;</span>
+    <span class="s1">npy_intp columnLabelsLen;</span>
+<span class="s1">} TypeContext;</span>
+
+<span class="s2">typedef struct </span><span class="s1">__PyObjectEncoder {</span>
+    <span class="s1">JSONObjectEncoder enc;</span>
+
+    <span class="s0">// pass through the NpyArrContext when encoding multi-dimensional arrays</span>
+    <span class="s1">NpyArrContext *npyCtxtPassthru;</span>
+
+    <span class="s0">// pass through the PdBlockContext when encoding blocks</span>
+    <span class="s1">PdBlockContext *blkCtxtPassthru;</span>
+
+    <span class="s0">// pass-through to encode numpy data directly</span>
+    <span class="s2">int </span><span class="s1">npyType;</span>
+    <span class="s2">void </span><span class="s1">*npyValue;</span>
+
+    <span class="s2">int </span><span class="s1">datetimeIso;</span>
+    <span class="s1">NPY_DATETIMEUNIT datetimeUnit;</span>
+
+    <span class="s0">// output format style for pandas data types</span>
+    <span class="s2">int </span><span class="s1">outputFormat;</span>
+    <span class="s2">int </span><span class="s1">originalOutputFormat;</span>
+
+    <span class="s1">PyObject *defaultHandler;</span>
+<span class="s1">} PyObjectEncoder;</span>
+
+<span class="s2">#define </span><span class="s1">GET_TC(__ptrtc) ((TypeContext *)((__ptrtc)</span><span class="s4">-&gt;</span><span class="s1">prv))</span>
+
+<span class="s2">enum </span><span class="s1">PANDAS_FORMAT { SPLIT, RECORDS, INDEX, COLUMNS, VALUES };</span>
+
+<span class="s2">int </span><span class="s1">PdBlock_iterNext(JSOBJ, JSONTypeContext *);</span>
+
+<span class="s2">void </span><span class="s1">*initObjToJSON(</span><span class="s2">void</span><span class="s1">) {</span>
+    <span class="s1">PyObject *mod_pandas;</span>
+    <span class="s1">PyObject *mod_nattype;</span>
+    <span class="s1">PyObject *mod_natype;</span>
+    <span class="s1">PyObject *mod_decimal = PyImport_ImportModule(</span><span class="s3">&quot;decimal&quot;</span><span class="s1">);</span>
+    <span class="s1">type_decimal =</span>
+        <span class="s1">(PyTypeObject *)PyObject_GetAttrString(mod_decimal, </span><span class="s3">&quot;Decimal&quot;</span><span class="s1">);</span>
+    <span class="s1">Py_DECREF(mod_decimal);</span>
+
+    <span class="s1">PyDateTime_IMPORT;</span>
+
+    <span class="s1">mod_pandas = PyImport_ImportModule(</span><span class="s3">&quot;pandas&quot;</span><span class="s1">);</span>
+    <span class="s2">if </span><span class="s1">(mod_pandas) {</span>
+        <span class="s1">cls_dataframe =</span>
+            <span class="s1">(PyTypeObject *)PyObject_GetAttrString(mod_pandas, </span><span class="s3">&quot;DataFrame&quot;</span><span class="s1">);</span>
+        <span class="s1">cls_index = (PyTypeObject *)PyObject_GetAttrString(mod_pandas, </span><span class="s3">&quot;Index&quot;</span><span class="s1">);</span>
+        <span class="s1">cls_series =</span>
+            <span class="s1">(PyTypeObject *)PyObject_GetAttrString(mod_pandas, </span><span class="s3">&quot;Series&quot;</span><span class="s1">);</span>
+        <span class="s1">Py_DECREF(mod_pandas);</span>
+    <span class="s1">}</span>
+
+    <span class="s1">mod_nattype = PyImport_ImportModule(</span><span class="s3">&quot;pandas._libs.tslibs.nattype&quot;</span><span class="s1">);</span>
+    <span class="s2">if </span><span class="s1">(mod_nattype) {</span>
+        <span class="s1">cls_nat =</span>
+            <span class="s1">(PyTypeObject *)PyObject_GetAttrString(mod_nattype, </span><span class="s3">&quot;NaTType&quot;</span><span class="s1">);</span>
+        <span class="s1">Py_DECREF(mod_nattype);</span>
+    <span class="s1">}</span>
+
+    <span class="s1">mod_natype = PyImport_ImportModule(</span><span class="s3">&quot;pandas._libs.missing&quot;</span><span class="s1">);</span>
+    <span class="s2">if </span><span class="s1">(mod_natype) {</span>
+        <span class="s1">cls_na = (PyTypeObject *)PyObject_GetAttrString(mod_natype, </span><span class="s3">&quot;NAType&quot;</span><span class="s1">);</span>
+        <span class="s1">Py_DECREF(mod_natype);</span>
+    <span class="s1">}</span>
+
+    <span class="s0">// GH 31463</span>
+    <span class="s2">return </span><span class="s1">NULL;</span>
+<span class="s1">}</span>
+
+<span class="s2">static </span><span class="s1">TypeContext *createTypeContext(</span><span class="s2">void</span><span class="s1">) {</span>
+    <span class="s1">TypeContext *pc;</span>
+
+    <span class="s1">pc = PyObject_Malloc(</span><span class="s2">sizeof</span><span class="s1">(TypeContext));</span>
+    <span class="s2">if </span><span class="s1">(!pc) {</span>
+        <span class="s1">PyErr_NoMemory();</span>
+        <span class="s2">return </span><span class="s1">NULL;</span>
+    <span class="s1">}</span>
+    <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">newObj = NULL;</span>
+    <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">dictObj = NULL;</span>
+    <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">itemValue = NULL;</span>
+    <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">itemName = NULL;</span>
+    <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">attrList = NULL;</span>
+    <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">index = </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">size = </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">longValue = </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">doubleValue = </span><span class="s5">0.0</span><span class="s1">;</span>
+    <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">cStr = NULL;</span>
+    <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">npyarr = NULL;</span>
+    <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">pdblock = NULL;</span>
+    <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">rowLabels = NULL;</span>
+    <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">columnLabels = NULL;</span>
+    <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">transpose = </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">rowLabelsLen = </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">columnLabelsLen = </span><span class="s5">0</span><span class="s1">;</span>
+
+    <span class="s2">return </span><span class="s1">pc;</span>
+<span class="s1">}</span>
+
+<span class="s2">static </span><span class="s1">PyObject *get_values(PyObject *obj) {</span>
+    <span class="s1">PyObject *values = NULL;</span>
+
+    <span class="s2">if </span><span class="s1">(PyObject_TypeCheck(obj, cls_index) ||</span>
+        <span class="s1">PyObject_TypeCheck(obj, cls_series)) {</span>
+        <span class="s0">// The special cases to worry about are dt64tz and category[dt64tz].</span>
+        <span class="s0">//  In both cases we want the UTC-localized datetime64 ndarray,</span>
+        <span class="s0">//  without going through and object array of Timestamps.</span>
+        <span class="s1">values = PyObject_GetAttrString(obj, </span><span class="s3">&quot;values&quot;</span><span class="s1">);</span>
+
+        <span class="s2">if </span><span class="s1">(values == NULL) {</span>
+            <span class="s0">// Clear so we can subsequently try another method</span>
+            <span class="s1">PyErr_Clear();</span>
+        <span class="s1">} </span><span class="s2">else if </span><span class="s1">(PyObject_HasAttrString(values, </span><span class="s3">&quot;__array__&quot;</span><span class="s1">)) {</span>
+            <span class="s0">// We may have gotten a Categorical or Sparse array so call np.array</span>
+            <span class="s1">Py_DECREF(values);</span>
+            <span class="s1">values = PyObject_CallMethod(values, </span><span class="s3">&quot;__array__&quot;</span><span class="s1">, NULL);</span>
+        <span class="s1">} </span><span class="s2">else if </span><span class="s1">(!PyArray_CheckExact(values)) {</span>
+            <span class="s0">// Didn't get a numpy array, so keep trying</span>
+            <span class="s1">Py_DECREF(values);</span>
+            <span class="s1">values = NULL;</span>
+        <span class="s1">}</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(values == NULL) {</span>
+        <span class="s1">PyObject *typeRepr = PyObject_Repr((PyObject *)Py_TYPE(obj));</span>
+        <span class="s1">PyObject *repr;</span>
+        <span class="s2">if </span><span class="s1">(PyObject_HasAttrString(obj, </span><span class="s3">&quot;dtype&quot;</span><span class="s1">)) {</span>
+            <span class="s1">PyObject *dtype = PyObject_GetAttrString(obj, </span><span class="s3">&quot;dtype&quot;</span><span class="s1">);</span>
+            <span class="s1">repr = PyObject_Repr(dtype);</span>
+            <span class="s1">Py_DECREF(dtype);</span>
+        <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+            <span class="s1">repr = PyUnicode_FromString(</span><span class="s3">&quot;&lt;unknown dtype&gt;&quot;</span><span class="s1">);</span>
+        <span class="s1">}</span>
+
+        <span class="s1">PyErr_Format(PyExc_ValueError, </span><span class="s3">&quot;%R or %R are not JSON serializable yet&quot;</span><span class="s1">,</span>
+                     <span class="s1">repr, typeRepr);</span>
+        <span class="s1">Py_DECREF(repr);</span>
+        <span class="s1">Py_DECREF(typeRepr);</span>
+
+        <span class="s2">return </span><span class="s1">NULL;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">return </span><span class="s1">values;</span>
+<span class="s1">}</span>
+
+<span class="s2">static </span><span class="s1">PyObject *get_sub_attr(PyObject *obj, </span><span class="s2">char </span><span class="s1">*attr, </span><span class="s2">char </span><span class="s1">*subAttr) {</span>
+    <span class="s1">PyObject *tmp = PyObject_GetAttrString(obj, attr);</span>
+    <span class="s1">PyObject *ret;</span>
+
+    <span class="s2">if </span><span class="s1">(tmp == </span><span class="s5">0</span><span class="s1">) {</span>
+        <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+    <span class="s1">ret = PyObject_GetAttrString(tmp, subAttr);</span>
+    <span class="s1">Py_DECREF(tmp);</span>
+
+    <span class="s2">return </span><span class="s1">ret;</span>
+<span class="s1">}</span>
+
+<span class="s2">static </span><span class="s1">Py_ssize_t get_attr_length(PyObject *obj, </span><span class="s2">char </span><span class="s1">*attr) {</span>
+    <span class="s1">PyObject *tmp = PyObject_GetAttrString(obj, attr);</span>
+    <span class="s1">Py_ssize_t ret;</span>
+
+    <span class="s2">if </span><span class="s1">(tmp == </span><span class="s5">0</span><span class="s1">) {</span>
+        <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+    <span class="s1">ret = PyObject_Length(tmp);</span>
+    <span class="s1">Py_DECREF(tmp);</span>
+
+    <span class="s2">if </span><span class="s1">(ret == -</span><span class="s5">1</span><span class="s1">) {</span>
+        <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">return </span><span class="s1">ret;</span>
+<span class="s1">}</span>
+
+<span class="s2">static int </span><span class="s1">is_simple_frame(PyObject *obj) {</span>
+    <span class="s1">PyObject *mgr = PyObject_GetAttrString(obj, </span><span class="s3">&quot;_mgr&quot;</span><span class="s1">);</span>
+    <span class="s2">if </span><span class="s1">(!mgr) {</span>
+        <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+    <span class="s2">int </span><span class="s1">ret;</span>
+    <span class="s2">if </span><span class="s1">(PyObject_HasAttrString(mgr, </span><span class="s3">&quot;blocks&quot;</span><span class="s1">)) {</span>
+        <span class="s1">ret = (get_attr_length(mgr, </span><span class="s3">&quot;blocks&quot;</span><span class="s1">) &lt;= </span><span class="s5">1</span><span class="s1">);</span>
+    <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+        <span class="s1">ret = </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">Py_DECREF(mgr);</span>
+    <span class="s2">return </span><span class="s1">ret;</span>
+<span class="s1">}</span>
+
+<span class="s2">static </span><span class="s1">npy_int64 get_long_attr(PyObject *o, </span><span class="s2">const char </span><span class="s1">*attr) {</span>
+    <span class="s1">npy_int64 long_val;</span>
+    <span class="s1">PyObject *value = PyObject_GetAttrString(o, attr);</span>
+    <span class="s1">long_val =</span>
+        <span class="s1">(PyLong_Check(value) ? PyLong_AsLongLong(value) : PyLong_AsLong(value));</span>
+    <span class="s1">Py_DECREF(value);</span>
+    <span class="s2">return </span><span class="s1">long_val;</span>
+<span class="s1">}</span>
+
+<span class="s2">static </span><span class="s1">npy_float64 total_seconds(PyObject *td) {</span>
+    <span class="s1">npy_float64 double_val;</span>
+    <span class="s1">PyObject *value = PyObject_CallMethod(td, </span><span class="s3">&quot;total_seconds&quot;</span><span class="s1">, NULL);</span>
+    <span class="s1">double_val = PyFloat_AS_DOUBLE(value);</span>
+    <span class="s1">Py_DECREF(value);</span>
+    <span class="s2">return </span><span class="s1">double_val;</span>
+<span class="s1">}</span>
+
+<span class="s2">static char </span><span class="s1">*PyBytesToUTF8(JSOBJ _obj, JSONTypeContext *Py_UNUSED(tc),</span>
+                           <span class="s1">size_t *_outLen) {</span>
+    <span class="s1">PyObject *obj = (PyObject *)_obj;</span>
+    <span class="s1">*_outLen = PyBytes_GET_SIZE(obj);</span>
+    <span class="s2">return </span><span class="s1">PyBytes_AS_STRING(obj);</span>
+<span class="s1">}</span>
+
+<span class="s2">static char </span><span class="s1">*PyUnicodeToUTF8(JSOBJ _obj, JSONTypeContext *Py_UNUSED(tc),</span>
+                             <span class="s1">size_t *_outLen) {</span>
+    <span class="s2">return </span><span class="s1">(</span><span class="s2">char </span><span class="s1">*)PyUnicode_AsUTF8AndSize(_obj, (Py_ssize_t *)_outLen);</span>
+<span class="s1">}</span>
+
+<span class="s0">/* JSON callback. returns a char* and mutates the pointer to *len */</span>
+<span class="s2">static char </span><span class="s1">*NpyDateTimeToIsoCallback(JSOBJ Py_UNUSED(unused),</span>
+                                      <span class="s1">JSONTypeContext *tc, size_t *len) {</span>
+    <span class="s1">NPY_DATETIMEUNIT base = ((PyObjectEncoder *)tc</span><span class="s4">-&gt;</span><span class="s1">encoder)</span><span class="s4">-&gt;</span><span class="s1">datetimeUnit;</span>
+    <span class="s2">return </span><span class="s1">int64ToIso(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">longValue, base, len);</span>
+<span class="s1">}</span>
+
+<span class="s0">/* JSON callback. returns a char* and mutates the pointer to *len */</span>
+<span class="s2">static char </span><span class="s1">*NpyTimeDeltaToIsoCallback(JSOBJ Py_UNUSED(unused),</span>
+                                       <span class="s1">JSONTypeContext *tc, size_t *len) {</span>
+    <span class="s2">return </span><span class="s1">int64ToIsoDuration(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">longValue, len);</span>
+<span class="s1">}</span>
+
+<span class="s0">/* JSON callback */</span>
+<span class="s2">static char </span><span class="s1">*PyDateTimeToIsoCallback(JSOBJ obj, JSONTypeContext *tc,</span>
+                                     <span class="s1">size_t *len) {</span>
+    <span class="s2">if </span><span class="s1">(!PyDate_Check(obj)) {</span>
+        <span class="s1">PyErr_SetString(PyExc_TypeError, </span><span class="s3">&quot;Expected date object&quot;</span><span class="s1">);</span>
+        <span class="s2">return </span><span class="s1">NULL;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">NPY_DATETIMEUNIT base = ((PyObjectEncoder *)tc</span><span class="s4">-&gt;</span><span class="s1">encoder)</span><span class="s4">-&gt;</span><span class="s1">datetimeUnit;</span>
+    <span class="s2">return </span><span class="s1">PyDateTimeToIso(obj, base, len);</span>
+<span class="s1">}</span>
+
+<span class="s2">static char </span><span class="s1">*PyTimeToJSON(JSOBJ _obj, JSONTypeContext *tc, size_t *outLen) {</span>
+    <span class="s1">PyObject *obj = (PyObject *)_obj;</span>
+    <span class="s1">PyObject *str;</span>
+    <span class="s1">PyObject *tmp;</span>
+
+    <span class="s1">str = PyObject_CallMethod(obj, </span><span class="s3">&quot;isoformat&quot;</span><span class="s1">, NULL);</span>
+    <span class="s2">if </span><span class="s1">(str == NULL) {</span>
+        <span class="s1">*outLen = </span><span class="s5">0</span><span class="s1">;</span>
+        <span class="s2">if </span><span class="s1">(!PyErr_Occurred()) {</span>
+            <span class="s1">PyErr_SetString(PyExc_ValueError, </span><span class="s3">&quot;Failed to convert time&quot;</span><span class="s1">);</span>
+        <span class="s1">}</span>
+        <span class="s1">((JSONObjectEncoder *)tc</span><span class="s4">-&gt;</span><span class="s1">encoder)</span><span class="s4">-&gt;</span><span class="s1">errorMsg = </span><span class="s3">&quot;&quot;</span><span class="s1">;</span>
+        <span class="s2">return </span><span class="s1">NULL;</span>
+    <span class="s1">}</span>
+    <span class="s2">if </span><span class="s1">(PyUnicode_Check(str)) {</span>
+        <span class="s1">tmp = str;</span>
+        <span class="s1">str = PyUnicode_AsUTF8String(str);</span>
+        <span class="s1">Py_DECREF(tmp);</span>
+    <span class="s1">}</span>
+
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">newObj = str;</span>
+
+    <span class="s1">*outLen = PyBytes_GET_SIZE(str);</span>
+    <span class="s2">char </span><span class="s1">*outValue = PyBytes_AS_STRING(str);</span>
+    <span class="s2">return </span><span class="s1">outValue;</span>
+<span class="s1">}</span>
+
+<span class="s0">//=============================================================================</span>
+<span class="s0">// Numpy array iteration functions</span>
+<span class="s0">//=============================================================================</span>
+
+<span class="s2">static void </span><span class="s1">NpyArr_freeItemValue(JSOBJ Py_UNUSED(_obj), JSONTypeContext *tc) {</span>
+    <span class="s2">if </span><span class="s1">(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">npyarr &amp;&amp;</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue != GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">array) {</span>
+        <span class="s1">Py_XDECREF(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue);</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue = NULL;</span>
+    <span class="s1">}</span>
+<span class="s1">}</span>
+
+<span class="s2">int </span><span class="s1">NpyArr_iterNextNone(JSOBJ Py_UNUSED(_obj), JSONTypeContext *Py_UNUSED(tc)) {</span>
+    <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+<span class="s1">}</span>
+
+<span class="s2">void </span><span class="s1">NpyArr_iterBegin(JSOBJ _obj, JSONTypeContext *tc) {</span>
+    <span class="s1">PyArrayObject *obj;</span>
+    <span class="s1">NpyArrContext *npyarr;</span>
+
+    <span class="s2">if </span><span class="s1">(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">newObj) {</span>
+        <span class="s1">obj = (PyArrayObject *)GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">newObj;</span>
+    <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+        <span class="s1">obj = (PyArrayObject *)_obj;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">npyarr = PyObject_Malloc(</span><span class="s2">sizeof</span><span class="s1">(NpyArrContext));</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">npyarr = npyarr;</span>
+
+    <span class="s2">if </span><span class="s1">(!npyarr) {</span>
+        <span class="s1">PyErr_NoMemory();</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">iterNext = NpyArr_iterNextNone;</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">array = (PyObject *)obj;</span>
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">getitem = (PyArray_GetItemFunc *)PyArray_DESCR(obj)</span><span class="s4">-&gt;</span><span class="s1">f</span><span class="s4">-&gt;</span><span class="s1">getitem;</span>
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">dataptr = PyArray_DATA(obj);</span>
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">ndim = PyArray_NDIM(obj) - </span><span class="s5">1</span><span class="s1">;</span>
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">curdim = </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">type_num = PyArray_DESCR(obj)</span><span class="s4">-&gt;</span><span class="s1">type_num;</span>
+
+    <span class="s2">if </span><span class="s1">(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">transpose) {</span>
+        <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">dim = PyArray_DIM(obj, npyarr</span><span class="s4">-&gt;</span><span class="s1">ndim);</span>
+        <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">stride = PyArray_STRIDE(obj, npyarr</span><span class="s4">-&gt;</span><span class="s1">ndim);</span>
+        <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">stridedim = npyarr</span><span class="s4">-&gt;</span><span class="s1">ndim;</span>
+        <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">index[npyarr</span><span class="s4">-&gt;</span><span class="s1">ndim] = </span><span class="s5">0</span><span class="s1">;</span>
+        <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">inc = -</span><span class="s5">1</span><span class="s1">;</span>
+    <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+        <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">dim = PyArray_DIM(obj, </span><span class="s5">0</span><span class="s1">);</span>
+        <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">stride = PyArray_STRIDE(obj, </span><span class="s5">0</span><span class="s1">);</span>
+        <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">stridedim = </span><span class="s5">0</span><span class="s1">;</span>
+        <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">index[</span><span class="s5">0</span><span class="s1">] = </span><span class="s5">0</span><span class="s1">;</span>
+        <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">inc = </span><span class="s5">1</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">columnLabels = GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">columnLabels;</span>
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">rowLabels = GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">rowLabels;</span>
+<span class="s1">}</span>
+
+<span class="s2">void </span><span class="s1">NpyArr_iterEnd(JSOBJ obj, JSONTypeContext *tc) {</span>
+    <span class="s1">NpyArrContext *npyarr = GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">npyarr;</span>
+
+    <span class="s2">if </span><span class="s1">(npyarr) {</span>
+        <span class="s1">NpyArr_freeItemValue(obj, tc);</span>
+        <span class="s1">PyObject_Free(npyarr);</span>
+    <span class="s1">}</span>
+<span class="s1">}</span>
+
+<span class="s2">void </span><span class="s1">NpyArrPassThru_iterBegin(JSOBJ Py_UNUSED(obj),</span>
+                              <span class="s1">JSONTypeContext *Py_UNUSED(tc)) {}</span>
+
+<span class="s2">void </span><span class="s1">NpyArrPassThru_iterEnd(JSOBJ obj, JSONTypeContext *tc) {</span>
+    <span class="s1">NpyArrContext *npyarr = GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">npyarr;</span>
+    <span class="s0">// finished this dimension, reset the data pointer</span>
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">curdim--;</span>
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">dataptr -= npyarr</span><span class="s4">-&gt;</span><span class="s1">stride * npyarr</span><span class="s4">-&gt;</span><span class="s1">index[npyarr</span><span class="s4">-&gt;</span><span class="s1">stridedim];</span>
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">stridedim -= npyarr</span><span class="s4">-&gt;</span><span class="s1">inc;</span>
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">dim = PyArray_DIM(npyarr</span><span class="s4">-&gt;</span><span class="s1">array, npyarr</span><span class="s4">-&gt;</span><span class="s1">stridedim);</span>
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">stride = PyArray_STRIDE(npyarr</span><span class="s4">-&gt;</span><span class="s1">array, npyarr</span><span class="s4">-&gt;</span><span class="s1">stridedim);</span>
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">dataptr += npyarr</span><span class="s4">-&gt;</span><span class="s1">stride;</span>
+
+    <span class="s1">NpyArr_freeItemValue(obj, tc);</span>
+<span class="s1">}</span>
+
+<span class="s2">int </span><span class="s1">NpyArr_iterNextItem(JSOBJ obj, JSONTypeContext *tc) {</span>
+    <span class="s1">NpyArrContext *npyarr = GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">npyarr;</span>
+
+    <span class="s2">if </span><span class="s1">(PyErr_Occurred()) {</span>
+        <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(npyarr</span><span class="s4">-&gt;</span><span class="s1">index[npyarr</span><span class="s4">-&gt;</span><span class="s1">stridedim] &gt;= npyarr</span><span class="s4">-&gt;</span><span class="s1">dim) {</span>
+        <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">NpyArr_freeItemValue(obj, tc);</span>
+
+    <span class="s2">if </span><span class="s1">(PyArray_ISDATETIME(npyarr</span><span class="s4">-&gt;</span><span class="s1">array)) {</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue = obj;</span>
+        <span class="s1">Py_INCREF(obj);</span>
+        <span class="s1">((PyObjectEncoder *)tc</span><span class="s4">-&gt;</span><span class="s1">encoder)</span><span class="s4">-&gt;</span><span class="s1">npyType = PyArray_TYPE(npyarr</span><span class="s4">-&gt;</span><span class="s1">array);</span>
+        <span class="s1">((PyObjectEncoder *)tc</span><span class="s4">-&gt;</span><span class="s1">encoder)</span><span class="s4">-&gt;</span><span class="s1">npyValue = npyarr</span><span class="s4">-&gt;</span><span class="s1">dataptr;</span>
+        <span class="s1">((PyObjectEncoder *)tc</span><span class="s4">-&gt;</span><span class="s1">encoder)</span><span class="s4">-&gt;</span><span class="s1">npyCtxtPassthru = npyarr;</span>
+    <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue = npyarr</span><span class="s4">-&gt;</span><span class="s1">getitem(npyarr</span><span class="s4">-&gt;</span><span class="s1">dataptr, npyarr</span><span class="s4">-&gt;</span><span class="s1">array);</span>
+    <span class="s1">}</span>
+
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">dataptr += npyarr</span><span class="s4">-&gt;</span><span class="s1">stride;</span>
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">index[npyarr</span><span class="s4">-&gt;</span><span class="s1">stridedim]++;</span>
+    <span class="s2">return </span><span class="s5">1</span><span class="s1">;</span>
+<span class="s1">}</span>
+
+<span class="s2">int </span><span class="s1">NpyArr_iterNext(JSOBJ _obj, JSONTypeContext *tc) {</span>
+    <span class="s1">NpyArrContext *npyarr = GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">npyarr;</span>
+
+    <span class="s2">if </span><span class="s1">(PyErr_Occurred()) {</span>
+        <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(npyarr</span><span class="s4">-&gt;</span><span class="s1">curdim &gt;= npyarr</span><span class="s4">-&gt;</span><span class="s1">ndim ||</span>
+        <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">index[npyarr</span><span class="s4">-&gt;</span><span class="s1">stridedim] &gt;= npyarr</span><span class="s4">-&gt;</span><span class="s1">dim) {</span>
+        <span class="s0">// innermost dimension, start retrieving item values</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">iterNext = NpyArr_iterNextItem;</span>
+        <span class="s2">return </span><span class="s1">NpyArr_iterNextItem(_obj, tc);</span>
+    <span class="s1">}</span>
+
+    <span class="s0">// dig a dimension deeper</span>
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">index[npyarr</span><span class="s4">-&gt;</span><span class="s1">stridedim]++;</span>
+
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">curdim++;</span>
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">stridedim += npyarr</span><span class="s4">-&gt;</span><span class="s1">inc;</span>
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">dim = PyArray_DIM(npyarr</span><span class="s4">-&gt;</span><span class="s1">array, npyarr</span><span class="s4">-&gt;</span><span class="s1">stridedim);</span>
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">stride = PyArray_STRIDE(npyarr</span><span class="s4">-&gt;</span><span class="s1">array, npyarr</span><span class="s4">-&gt;</span><span class="s1">stridedim);</span>
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">index[npyarr</span><span class="s4">-&gt;</span><span class="s1">stridedim] = </span><span class="s5">0</span><span class="s1">;</span>
+
+    <span class="s1">((PyObjectEncoder *)tc</span><span class="s4">-&gt;</span><span class="s1">encoder)</span><span class="s4">-&gt;</span><span class="s1">npyCtxtPassthru = npyarr;</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue = npyarr</span><span class="s4">-&gt;</span><span class="s1">array;</span>
+    <span class="s2">return </span><span class="s5">1</span><span class="s1">;</span>
+<span class="s1">}</span>
+
+<span class="s1">JSOBJ NpyArr_iterGetValue(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc) {</span>
+    <span class="s2">return </span><span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue;</span>
+<span class="s1">}</span>
+
+<span class="s2">char </span><span class="s1">*NpyArr_iterGetName(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc,</span>
+                         <span class="s1">size_t *outLen) {</span>
+    <span class="s1">NpyArrContext *npyarr = GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">npyarr;</span>
+    <span class="s1">npy_intp idx;</span>
+    <span class="s2">char </span><span class="s1">*cStr;</span>
+
+    <span class="s2">if </span><span class="s1">(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">iterNext == NpyArr_iterNextItem) {</span>
+        <span class="s1">idx = npyarr</span><span class="s4">-&gt;</span><span class="s1">index[npyarr</span><span class="s4">-&gt;</span><span class="s1">stridedim] - </span><span class="s5">1</span><span class="s1">;</span>
+        <span class="s1">cStr = npyarr</span><span class="s4">-&gt;</span><span class="s1">columnLabels[idx];</span>
+    <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+        <span class="s1">idx = npyarr</span><span class="s4">-&gt;</span><span class="s1">index[npyarr</span><span class="s4">-&gt;</span><span class="s1">stridedim - npyarr</span><span class="s4">-&gt;</span><span class="s1">inc] - </span><span class="s5">1</span><span class="s1">;</span>
+        <span class="s1">cStr = npyarr</span><span class="s4">-&gt;</span><span class="s1">rowLabels[idx];</span>
+    <span class="s1">}</span>
+
+    <span class="s1">*outLen = strlen(cStr);</span>
+
+    <span class="s2">return </span><span class="s1">cStr;</span>
+<span class="s1">}</span>
+
+<span class="s0">//=============================================================================</span>
+<span class="s0">// Pandas block iteration functions</span>
+<span class="s0">//</span>
+<span class="s0">// Serialises a DataFrame column by column to avoid unnecessary data copies and</span>
+<span class="s0">// more representative serialisation when dealing with mixed dtypes.</span>
+<span class="s0">//</span>
+<span class="s0">// Uses a dedicated NpyArrContext for each column.</span>
+<span class="s0">//=============================================================================</span>
+
+<span class="s2">void </span><span class="s1">PdBlockPassThru_iterEnd(JSOBJ obj, JSONTypeContext *tc) {</span>
+    <span class="s1">PdBlockContext *blkCtxt = GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">pdblock;</span>
+
+    <span class="s2">if </span><span class="s1">(blkCtxt</span><span class="s4">-&gt;</span><span class="s1">transpose) {</span>
+        <span class="s1">blkCtxt</span><span class="s4">-&gt;</span><span class="s1">colIdx++;</span>
+    <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+        <span class="s1">blkCtxt</span><span class="s4">-&gt;</span><span class="s1">colIdx = </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">NpyArr_freeItemValue(obj, tc);</span>
+<span class="s1">}</span>
+
+<span class="s2">int </span><span class="s1">PdBlock_iterNextItem(JSOBJ obj, JSONTypeContext *tc) {</span>
+    <span class="s1">PdBlockContext *blkCtxt = GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">pdblock;</span>
+
+    <span class="s2">if </span><span class="s1">(blkCtxt</span><span class="s4">-&gt;</span><span class="s1">colIdx &gt;= blkCtxt</span><span class="s4">-&gt;</span><span class="s1">ncols) {</span>
+        <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">npyarr = blkCtxt</span><span class="s4">-&gt;</span><span class="s1">npyCtxts[blkCtxt</span><span class="s4">-&gt;</span><span class="s1">colIdx];</span>
+    <span class="s1">blkCtxt</span><span class="s4">-&gt;</span><span class="s1">colIdx++;</span>
+    <span class="s2">return </span><span class="s1">NpyArr_iterNextItem(obj, tc);</span>
+<span class="s1">}</span>
+
+<span class="s2">char </span><span class="s1">*PdBlock_iterGetName(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc,</span>
+                          <span class="s1">size_t *outLen) {</span>
+    <span class="s1">PdBlockContext *blkCtxt = GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">pdblock;</span>
+    <span class="s1">NpyArrContext *npyarr = blkCtxt</span><span class="s4">-&gt;</span><span class="s1">npyCtxts[</span><span class="s5">0</span><span class="s1">];</span>
+    <span class="s1">npy_intp idx;</span>
+    <span class="s2">char </span><span class="s1">*cStr;</span>
+
+    <span class="s2">if </span><span class="s1">(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">iterNext == PdBlock_iterNextItem) {</span>
+        <span class="s1">idx = blkCtxt</span><span class="s4">-&gt;</span><span class="s1">colIdx - </span><span class="s5">1</span><span class="s1">;</span>
+        <span class="s1">cStr = npyarr</span><span class="s4">-&gt;</span><span class="s1">columnLabels[idx];</span>
+    <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+        <span class="s1">idx = GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">iterNext != PdBlock_iterNext</span>
+                  <span class="s1">? npyarr</span><span class="s4">-&gt;</span><span class="s1">index[npyarr</span><span class="s4">-&gt;</span><span class="s1">stridedim - npyarr</span><span class="s4">-&gt;</span><span class="s1">inc] - </span><span class="s5">1</span>
+                  <span class="s1">: npyarr</span><span class="s4">-&gt;</span><span class="s1">index[npyarr</span><span class="s4">-&gt;</span><span class="s1">stridedim];</span>
+
+        <span class="s1">cStr = npyarr</span><span class="s4">-&gt;</span><span class="s1">rowLabels[idx];</span>
+    <span class="s1">}</span>
+
+    <span class="s1">*outLen = strlen(cStr);</span>
+    <span class="s2">return </span><span class="s1">cStr;</span>
+<span class="s1">}</span>
+
+<span class="s2">char </span><span class="s1">*PdBlock_iterGetName_Transpose(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc,</span>
+                                    <span class="s1">size_t *outLen) {</span>
+    <span class="s1">PdBlockContext *blkCtxt = GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">pdblock;</span>
+    <span class="s1">NpyArrContext *npyarr = blkCtxt</span><span class="s4">-&gt;</span><span class="s1">npyCtxts[blkCtxt</span><span class="s4">-&gt;</span><span class="s1">colIdx];</span>
+    <span class="s1">npy_intp idx;</span>
+    <span class="s2">char </span><span class="s1">*cStr;</span>
+
+    <span class="s2">if </span><span class="s1">(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">iterNext == NpyArr_iterNextItem) {</span>
+        <span class="s1">idx = npyarr</span><span class="s4">-&gt;</span><span class="s1">index[npyarr</span><span class="s4">-&gt;</span><span class="s1">stridedim] - </span><span class="s5">1</span><span class="s1">;</span>
+        <span class="s1">cStr = npyarr</span><span class="s4">-&gt;</span><span class="s1">columnLabels[idx];</span>
+    <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+        <span class="s1">idx = blkCtxt</span><span class="s4">-&gt;</span><span class="s1">colIdx;</span>
+        <span class="s1">cStr = npyarr</span><span class="s4">-&gt;</span><span class="s1">rowLabels[idx];</span>
+    <span class="s1">}</span>
+
+    <span class="s1">*outLen = strlen(cStr);</span>
+    <span class="s2">return </span><span class="s1">cStr;</span>
+<span class="s1">}</span>
+
+<span class="s2">int </span><span class="s1">PdBlock_iterNext(JSOBJ obj, JSONTypeContext *tc) {</span>
+    <span class="s1">PdBlockContext *blkCtxt = GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">pdblock;</span>
+    <span class="s1">NpyArrContext *npyarr;</span>
+
+    <span class="s2">if </span><span class="s1">(PyErr_Occurred() || ((JSONObjectEncoder *)tc</span><span class="s4">-&gt;</span><span class="s1">encoder)</span><span class="s4">-&gt;</span><span class="s1">errorMsg) {</span>
+        <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(blkCtxt</span><span class="s4">-&gt;</span><span class="s1">transpose) {</span>
+        <span class="s2">if </span><span class="s1">(blkCtxt</span><span class="s4">-&gt;</span><span class="s1">colIdx &gt;= blkCtxt</span><span class="s4">-&gt;</span><span class="s1">ncols) {</span>
+            <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+        <span class="s1">}</span>
+    <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+        <span class="s1">npyarr = blkCtxt</span><span class="s4">-&gt;</span><span class="s1">npyCtxts[</span><span class="s5">0</span><span class="s1">];</span>
+        <span class="s2">if </span><span class="s1">(npyarr</span><span class="s4">-&gt;</span><span class="s1">index[npyarr</span><span class="s4">-&gt;</span><span class="s1">stridedim] &gt;= npyarr</span><span class="s4">-&gt;</span><span class="s1">dim) {</span>
+            <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+        <span class="s1">}</span>
+    <span class="s1">}</span>
+
+    <span class="s1">((PyObjectEncoder *)tc</span><span class="s4">-&gt;</span><span class="s1">encoder)</span><span class="s4">-&gt;</span><span class="s1">blkCtxtPassthru = blkCtxt;</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue = obj;</span>
+
+    <span class="s2">return </span><span class="s5">1</span><span class="s1">;</span>
+<span class="s1">}</span>
+
+<span class="s2">void </span><span class="s1">PdBlockPassThru_iterBegin(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc) {</span>
+    <span class="s1">PdBlockContext *blkCtxt = GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">pdblock;</span>
+
+    <span class="s2">if </span><span class="s1">(blkCtxt</span><span class="s4">-&gt;</span><span class="s1">transpose) {</span>
+        <span class="s0">// if transposed we exhaust each column before moving to the next</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">iterNext = NpyArr_iterNextItem;</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">iterGetName = PdBlock_iterGetName_Transpose;</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">npyarr = blkCtxt</span><span class="s4">-&gt;</span><span class="s1">npyCtxts[blkCtxt</span><span class="s4">-&gt;</span><span class="s1">colIdx];</span>
+    <span class="s1">}</span>
+<span class="s1">}</span>
+
+<span class="s2">void </span><span class="s1">PdBlock_iterBegin(JSOBJ _obj, JSONTypeContext *tc) {</span>
+    <span class="s1">PyObject *obj, *values, *arrays, *array;</span>
+    <span class="s1">PdBlockContext *blkCtxt;</span>
+    <span class="s1">NpyArrContext *npyarr;</span>
+    <span class="s1">Py_ssize_t i;</span>
+
+    <span class="s1">obj = (PyObject *)_obj;</span>
+
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">iterGetName = GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">transpose</span>
+                                  <span class="s1">? PdBlock_iterGetName_Transpose</span>
+                                  <span class="s1">: PdBlock_iterGetName;</span>
+
+    <span class="s1">blkCtxt = PyObject_Malloc(</span><span class="s2">sizeof</span><span class="s1">(PdBlockContext));</span>
+    <span class="s2">if </span><span class="s1">(!blkCtxt) {</span>
+        <span class="s1">PyErr_NoMemory();</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">iterNext = NpyArr_iterNextNone;</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">}</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">pdblock = blkCtxt;</span>
+
+    <span class="s1">blkCtxt</span><span class="s4">-&gt;</span><span class="s1">colIdx = </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">blkCtxt</span><span class="s4">-&gt;</span><span class="s1">transpose = GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">transpose;</span>
+    <span class="s1">blkCtxt</span><span class="s4">-&gt;</span><span class="s1">ncols = get_attr_length(obj, </span><span class="s3">&quot;columns&quot;</span><span class="s1">);</span>
+
+    <span class="s2">if </span><span class="s1">(blkCtxt</span><span class="s4">-&gt;</span><span class="s1">ncols == </span><span class="s5">0</span><span class="s1">) {</span>
+        <span class="s1">blkCtxt</span><span class="s4">-&gt;</span><span class="s1">npyCtxts = NULL;</span>
+
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">iterNext = NpyArr_iterNextNone;</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">blkCtxt</span><span class="s4">-&gt;</span><span class="s1">npyCtxts =</span>
+        <span class="s1">PyObject_Malloc(</span><span class="s2">sizeof</span><span class="s1">(NpyArrContext *) * blkCtxt</span><span class="s4">-&gt;</span><span class="s1">ncols);</span>
+    <span class="s2">if </span><span class="s1">(!blkCtxt</span><span class="s4">-&gt;</span><span class="s1">npyCtxts) {</span>
+        <span class="s1">PyErr_NoMemory();</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">iterNext = NpyArr_iterNextNone;</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">arrays = get_sub_attr(obj, </span><span class="s3">&quot;_mgr&quot;</span><span class="s1">, </span><span class="s3">&quot;column_arrays&quot;</span><span class="s1">);</span>
+    <span class="s2">if </span><span class="s1">(!arrays) {</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">iterNext = NpyArr_iterNextNone;</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">for </span><span class="s1">(i = </span><span class="s5">0</span><span class="s1">; i &lt; PyObject_Length(arrays); i++) {</span>
+        <span class="s1">array = PyList_GET_ITEM(arrays, i);</span>
+        <span class="s2">if </span><span class="s1">(!array) {</span>
+            <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">iterNext = NpyArr_iterNextNone;</span>
+            <span class="s2">goto </span><span class="s1">ARR_RET;</span>
+        <span class="s1">}</span>
+
+        <span class="s0">// ensure we have a numpy array (i.e. np.asarray)</span>
+        <span class="s1">values = PyObject_CallMethod(array, </span><span class="s3">&quot;__array__&quot;</span><span class="s1">, NULL);</span>
+        <span class="s2">if </span><span class="s1">((!values) || (!PyArray_CheckExact(values))) {</span>
+            <span class="s0">// Didn't get a numpy array</span>
+            <span class="s1">((JSONObjectEncoder *)tc</span><span class="s4">-&gt;</span><span class="s1">encoder)</span><span class="s4">-&gt;</span><span class="s1">errorMsg = </span><span class="s3">&quot;&quot;</span><span class="s1">;</span>
+            <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">iterNext = NpyArr_iterNextNone;</span>
+            <span class="s2">goto </span><span class="s1">ARR_RET;</span>
+        <span class="s1">}</span>
+
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">newObj = values;</span>
+
+        <span class="s0">// init a dedicated context for this column</span>
+        <span class="s1">NpyArr_iterBegin(obj, tc);</span>
+        <span class="s1">npyarr = GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">npyarr;</span>
+
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue = NULL;</span>
+        <span class="s1">((PyObjectEncoder *)tc</span><span class="s4">-&gt;</span><span class="s1">encoder)</span><span class="s4">-&gt;</span><span class="s1">npyCtxtPassthru = NULL;</span>
+
+        <span class="s1">blkCtxt</span><span class="s4">-&gt;</span><span class="s1">npyCtxts[i] = npyarr;</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">newObj = NULL;</span>
+    <span class="s1">}</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">npyarr = blkCtxt</span><span class="s4">-&gt;</span><span class="s1">npyCtxts[</span><span class="s5">0</span><span class="s1">];</span>
+    <span class="s2">goto </span><span class="s1">ARR_RET;</span>
+
+<span class="s1">ARR_RET:</span>
+    <span class="s1">Py_DECREF(arrays);</span>
+<span class="s1">}</span>
+
+<span class="s2">void </span><span class="s1">PdBlock_iterEnd(JSOBJ obj, JSONTypeContext *tc) {</span>
+    <span class="s1">PdBlockContext *blkCtxt;</span>
+    <span class="s1">NpyArrContext *npyarr;</span>
+    <span class="s2">int </span><span class="s1">i;</span>
+
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue = NULL;</span>
+    <span class="s1">npyarr = GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">npyarr;</span>
+
+    <span class="s1">blkCtxt = GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">pdblock;</span>
+
+    <span class="s2">if </span><span class="s1">(blkCtxt) {</span>
+        <span class="s2">for </span><span class="s1">(i = </span><span class="s5">0</span><span class="s1">; i &lt; blkCtxt</span><span class="s4">-&gt;</span><span class="s1">ncols; i++) {</span>
+            <span class="s1">npyarr = blkCtxt</span><span class="s4">-&gt;</span><span class="s1">npyCtxts[i];</span>
+            <span class="s2">if </span><span class="s1">(npyarr) {</span>
+                <span class="s2">if </span><span class="s1">(npyarr</span><span class="s4">-&gt;</span><span class="s1">array) {</span>
+                    <span class="s1">Py_DECREF(npyarr</span><span class="s4">-&gt;</span><span class="s1">array);</span>
+                    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">array = NULL;</span>
+                <span class="s1">}</span>
+
+                <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">npyarr = npyarr;</span>
+                <span class="s1">NpyArr_iterEnd(obj, tc);</span>
+
+                <span class="s1">blkCtxt</span><span class="s4">-&gt;</span><span class="s1">npyCtxts[i] = NULL;</span>
+            <span class="s1">}</span>
+        <span class="s1">}</span>
+
+        <span class="s2">if </span><span class="s1">(blkCtxt</span><span class="s4">-&gt;</span><span class="s1">npyCtxts) {</span>
+            <span class="s1">PyObject_Free(blkCtxt</span><span class="s4">-&gt;</span><span class="s1">npyCtxts);</span>
+        <span class="s1">}</span>
+        <span class="s1">PyObject_Free(blkCtxt);</span>
+    <span class="s1">}</span>
+<span class="s1">}</span>
+
+<span class="s0">//=============================================================================</span>
+<span class="s0">// Tuple iteration functions</span>
+<span class="s0">// itemValue is borrowed reference, no ref counting</span>
+<span class="s0">//=============================================================================</span>
+<span class="s2">void </span><span class="s1">Tuple_iterBegin(JSOBJ obj, JSONTypeContext *tc) {</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">index = </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">size = PyTuple_GET_SIZE((PyObject *)obj);</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue = NULL;</span>
+<span class="s1">}</span>
+
+<span class="s2">int </span><span class="s1">Tuple_iterNext(JSOBJ obj, JSONTypeContext *tc) {</span>
+    <span class="s1">PyObject *item;</span>
+
+    <span class="s2">if </span><span class="s1">(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">index &gt;= GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">size) {</span>
+        <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">item = PyTuple_GET_ITEM(obj, GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">index);</span>
+
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue = item;</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">index++;</span>
+    <span class="s2">return </span><span class="s5">1</span><span class="s1">;</span>
+<span class="s1">}</span>
+
+<span class="s2">void </span><span class="s1">Tuple_iterEnd(JSOBJ Py_UNUSED(obj), JSONTypeContext *Py_UNUSED(tc)) {}</span>
+
+<span class="s1">JSOBJ Tuple_iterGetValue(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc) {</span>
+    <span class="s2">return </span><span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue;</span>
+<span class="s1">}</span>
+
+<span class="s2">char </span><span class="s1">*Tuple_iterGetName(JSOBJ Py_UNUSED(obj), JSONTypeContext *Py_UNUSED(tc),</span>
+                        <span class="s1">size_t *Py_UNUSED(outLen)) {</span>
+    <span class="s2">return </span><span class="s1">NULL;</span>
+<span class="s1">}</span>
+
+<span class="s0">//=============================================================================</span>
+<span class="s0">// Set iteration functions</span>
+<span class="s0">// itemValue is borrowed reference, no ref counting</span>
+<span class="s0">//=============================================================================</span>
+<span class="s2">void </span><span class="s1">Set_iterBegin(JSOBJ obj, JSONTypeContext *tc) {</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue = NULL;</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">iterator = PyObject_GetIter(obj);</span>
+<span class="s1">}</span>
+
+<span class="s2">int </span><span class="s1">Set_iterNext(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc) {</span>
+    <span class="s1">PyObject *item;</span>
+
+    <span class="s2">if </span><span class="s1">(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue) {</span>
+        <span class="s1">Py_DECREF(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue);</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue = NULL;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">item = PyIter_Next(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">iterator);</span>
+
+    <span class="s2">if </span><span class="s1">(item == NULL) {</span>
+        <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue = item;</span>
+    <span class="s2">return </span><span class="s5">1</span><span class="s1">;</span>
+<span class="s1">}</span>
+
+<span class="s2">void </span><span class="s1">Set_iterEnd(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc) {</span>
+    <span class="s2">if </span><span class="s1">(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue) {</span>
+        <span class="s1">Py_DECREF(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue);</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue = NULL;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">iterator) {</span>
+        <span class="s1">Py_DECREF(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">iterator);</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">iterator = NULL;</span>
+    <span class="s1">}</span>
+<span class="s1">}</span>
+
+<span class="s1">JSOBJ Set_iterGetValue(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc) {</span>
+    <span class="s2">return </span><span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue;</span>
+<span class="s1">}</span>
+
+<span class="s2">char </span><span class="s1">*Set_iterGetName(JSOBJ Py_UNUSED(obj), JSONTypeContext *Py_UNUSED(tc),</span>
+                      <span class="s1">size_t *Py_UNUSED(outLen)) {</span>
+    <span class="s2">return </span><span class="s1">NULL;</span>
+<span class="s1">}</span>
+
+<span class="s0">//=============================================================================</span>
+<span class="s0">// Dir iteration functions</span>
+<span class="s0">// itemName ref is borrowed from PyObject_Dir (attrList). No refcount</span>
+<span class="s0">// itemValue ref is from PyObject_GetAttr. Ref counted</span>
+<span class="s0">//=============================================================================</span>
+<span class="s2">void </span><span class="s1">Dir_iterBegin(JSOBJ obj, JSONTypeContext *tc) {</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">attrList = PyObject_Dir(obj);</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">index = </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">size = PyList_GET_SIZE(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">attrList);</span>
+<span class="s1">}</span>
+
+<span class="s2">void </span><span class="s1">Dir_iterEnd(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc) {</span>
+    <span class="s2">if </span><span class="s1">(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue) {</span>
+        <span class="s1">Py_DECREF(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue);</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue = NULL;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName) {</span>
+        <span class="s1">Py_DECREF(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName);</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName = NULL;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">Py_DECREF((PyObject *)GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">attrList);</span>
+<span class="s1">}</span>
+
+<span class="s2">int </span><span class="s1">Dir_iterNext(JSOBJ _obj, JSONTypeContext *tc) {</span>
+    <span class="s1">PyObject *obj = (PyObject *)_obj;</span>
+    <span class="s1">PyObject *itemValue = GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue;</span>
+    <span class="s1">PyObject *itemName = GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName;</span>
+    <span class="s1">PyObject *attr;</span>
+    <span class="s1">PyObject *attrName;</span>
+    <span class="s2">char </span><span class="s1">*attrStr;</span>
+
+    <span class="s2">if </span><span class="s1">(PyErr_Occurred() || ((JSONObjectEncoder *)tc</span><span class="s4">-&gt;</span><span class="s1">encoder)</span><span class="s4">-&gt;</span><span class="s1">errorMsg) {</span>
+        <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(itemValue) {</span>
+        <span class="s1">Py_DECREF(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue);</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue = itemValue = NULL;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(itemName) {</span>
+        <span class="s1">Py_DECREF(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName);</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName = itemName = NULL;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">for </span><span class="s1">(; GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">index &lt; GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">size; GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">index++) {</span>
+        <span class="s1">attrName = PyList_GET_ITEM(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">attrList, GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">index);</span>
+        <span class="s1">attr = PyUnicode_AsUTF8String(attrName);</span>
+        <span class="s1">attrStr = PyBytes_AS_STRING(attr);</span>
+
+        <span class="s2">if </span><span class="s1">(attrStr[</span><span class="s5">0</span><span class="s1">] == </span><span class="s3">'_'</span><span class="s1">) {</span>
+            <span class="s1">Py_DECREF(attr);</span>
+            <span class="s2">continue</span><span class="s1">;</span>
+        <span class="s1">}</span>
+
+        <span class="s1">itemValue = PyObject_GetAttr(obj, attrName);</span>
+        <span class="s2">if </span><span class="s1">(itemValue == NULL) {</span>
+            <span class="s1">PyErr_Clear();</span>
+            <span class="s1">Py_DECREF(attr);</span>
+            <span class="s2">continue</span><span class="s1">;</span>
+        <span class="s1">}</span>
+
+        <span class="s2">if </span><span class="s1">(PyCallable_Check(itemValue)) {</span>
+            <span class="s1">Py_DECREF(itemValue);</span>
+            <span class="s1">Py_DECREF(attr);</span>
+            <span class="s2">continue</span><span class="s1">;</span>
+        <span class="s1">}</span>
+
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName = itemName;</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue = itemValue;</span>
+
+        <span class="s1">itemName = attr;</span>
+        <span class="s2">break</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(itemName == NULL) {</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">index = GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">size;</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue = NULL;</span>
+        <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName = itemName;</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue = itemValue;</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">index++;</span>
+
+    <span class="s2">return </span><span class="s5">1</span><span class="s1">;</span>
+<span class="s1">}</span>
+
+<span class="s1">JSOBJ Dir_iterGetValue(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc) {</span>
+    <span class="s2">return </span><span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue;</span>
+<span class="s1">}</span>
+
+<span class="s2">char </span><span class="s1">*Dir_iterGetName(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc,</span>
+                      <span class="s1">size_t *outLen) {</span>
+    <span class="s1">*outLen = PyBytes_GET_SIZE(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName);</span>
+    <span class="s2">return </span><span class="s1">PyBytes_AS_STRING(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName);</span>
+<span class="s1">}</span>
+
+<span class="s0">//=============================================================================</span>
+<span class="s0">// List iteration functions</span>
+<span class="s0">// itemValue is borrowed from object (which is list). No refcounting</span>
+<span class="s0">//=============================================================================</span>
+<span class="s2">void </span><span class="s1">List_iterBegin(JSOBJ obj, JSONTypeContext *tc) {</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">index = </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">size = PyList_GET_SIZE((PyObject *)obj);</span>
+<span class="s1">}</span>
+
+<span class="s2">int </span><span class="s1">List_iterNext(JSOBJ obj, JSONTypeContext *tc) {</span>
+    <span class="s2">if </span><span class="s1">(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">index &gt;= GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">size) {</span>
+        <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue = PyList_GET_ITEM(obj, GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">index);</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">index++;</span>
+    <span class="s2">return </span><span class="s5">1</span><span class="s1">;</span>
+<span class="s1">}</span>
+
+<span class="s2">void </span><span class="s1">List_iterEnd(JSOBJ Py_UNUSED(obj), JSONTypeContext *Py_UNUSED(tc)) {}</span>
+
+<span class="s1">JSOBJ List_iterGetValue(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc) {</span>
+    <span class="s2">return </span><span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue;</span>
+<span class="s1">}</span>
+
+<span class="s2">char </span><span class="s1">*List_iterGetName(JSOBJ Py_UNUSED(obj), JSONTypeContext *Py_UNUSED(tc),</span>
+                       <span class="s1">size_t *Py_UNUSED(outLen)) {</span>
+    <span class="s2">return </span><span class="s1">NULL;</span>
+<span class="s1">}</span>
+
+<span class="s0">//=============================================================================</span>
+<span class="s0">// pandas Index iteration functions</span>
+<span class="s0">//=============================================================================</span>
+<span class="s2">void </span><span class="s1">Index_iterBegin(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc) {</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">index = </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">cStr = PyObject_Malloc(</span><span class="s5">20 </span><span class="s1">* </span><span class="s2">sizeof</span><span class="s1">(</span><span class="s2">char</span><span class="s1">));</span>
+    <span class="s2">if </span><span class="s1">(!GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">cStr) {</span>
+        <span class="s1">PyErr_NoMemory();</span>
+    <span class="s1">}</span>
+<span class="s1">}</span>
+
+<span class="s2">int </span><span class="s1">Index_iterNext(JSOBJ obj, JSONTypeContext *tc) {</span>
+    <span class="s1">Py_ssize_t index;</span>
+    <span class="s2">if </span><span class="s1">(!GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">cStr) {</span>
+        <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">index = GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">index;</span>
+    <span class="s1">Py_XDECREF(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue);</span>
+    <span class="s2">if </span><span class="s1">(index == </span><span class="s5">0</span><span class="s1">) {</span>
+        <span class="s1">memcpy(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">cStr, </span><span class="s3">&quot;name&quot;</span><span class="s1">, </span><span class="s2">sizeof</span><span class="s1">(</span><span class="s2">char</span><span class="s1">) * </span><span class="s5">5</span><span class="s1">);</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue = PyObject_GetAttrString(obj, </span><span class="s3">&quot;name&quot;</span><span class="s1">);</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(index == </span><span class="s5">1</span><span class="s1">) {</span>
+        <span class="s1">memcpy(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">cStr, </span><span class="s3">&quot;data&quot;</span><span class="s1">, </span><span class="s2">sizeof</span><span class="s1">(</span><span class="s2">char</span><span class="s1">) * </span><span class="s5">5</span><span class="s1">);</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue = get_values(obj);</span>
+        <span class="s2">if </span><span class="s1">(!GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue) {</span>
+            <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+        <span class="s1">}</span>
+    <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+        <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">index++;</span>
+    <span class="s2">return </span><span class="s5">1</span><span class="s1">;</span>
+<span class="s1">}</span>
+
+<span class="s2">void </span><span class="s1">Index_iterEnd(JSOBJ Py_UNUSED(obj), JSONTypeContext *Py_UNUSED(tc)) {}</span>
+
+<span class="s1">JSOBJ Index_iterGetValue(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc) {</span>
+    <span class="s2">return </span><span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue;</span>
+<span class="s1">}</span>
+
+<span class="s2">char </span><span class="s1">*Index_iterGetName(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc,</span>
+                        <span class="s1">size_t *outLen) {</span>
+    <span class="s1">*outLen = strlen(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">cStr);</span>
+    <span class="s2">return </span><span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">cStr;</span>
+<span class="s1">}</span>
+
+<span class="s0">//=============================================================================</span>
+<span class="s0">// pandas Series iteration functions</span>
+<span class="s0">//=============================================================================</span>
+<span class="s2">void </span><span class="s1">Series_iterBegin(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc) {</span>
+    <span class="s1">PyObjectEncoder *enc = (PyObjectEncoder *)tc</span><span class="s4">-&gt;</span><span class="s1">encoder;</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">index = </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">cStr = PyObject_Malloc(</span><span class="s5">20 </span><span class="s1">* </span><span class="s2">sizeof</span><span class="s1">(</span><span class="s2">char</span><span class="s1">));</span>
+    <span class="s1">enc</span><span class="s4">-&gt;</span><span class="s1">outputFormat = VALUES;  </span><span class="s0">// for contained series</span>
+    <span class="s2">if </span><span class="s1">(!GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">cStr) {</span>
+        <span class="s1">PyErr_NoMemory();</span>
+    <span class="s1">}</span>
+<span class="s1">}</span>
+
+<span class="s2">int </span><span class="s1">Series_iterNext(JSOBJ obj, JSONTypeContext *tc) {</span>
+    <span class="s1">Py_ssize_t index;</span>
+    <span class="s2">if </span><span class="s1">(!GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">cStr) {</span>
+        <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">index = GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">index;</span>
+    <span class="s1">Py_XDECREF(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue);</span>
+    <span class="s2">if </span><span class="s1">(index == </span><span class="s5">0</span><span class="s1">) {</span>
+        <span class="s1">memcpy(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">cStr, </span><span class="s3">&quot;name&quot;</span><span class="s1">, </span><span class="s2">sizeof</span><span class="s1">(</span><span class="s2">char</span><span class="s1">) * </span><span class="s5">5</span><span class="s1">);</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue = PyObject_GetAttrString(obj, </span><span class="s3">&quot;name&quot;</span><span class="s1">);</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(index == </span><span class="s5">1</span><span class="s1">) {</span>
+        <span class="s1">memcpy(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">cStr, </span><span class="s3">&quot;index&quot;</span><span class="s1">, </span><span class="s2">sizeof</span><span class="s1">(</span><span class="s2">char</span><span class="s1">) * </span><span class="s5">6</span><span class="s1">);</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue = PyObject_GetAttrString(obj, </span><span class="s3">&quot;index&quot;</span><span class="s1">);</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(index == </span><span class="s5">2</span><span class="s1">) {</span>
+        <span class="s1">memcpy(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">cStr, </span><span class="s3">&quot;data&quot;</span><span class="s1">, </span><span class="s2">sizeof</span><span class="s1">(</span><span class="s2">char</span><span class="s1">) * </span><span class="s5">5</span><span class="s1">);</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue = get_values(obj);</span>
+        <span class="s2">if </span><span class="s1">(!GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue) {</span>
+            <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+        <span class="s1">}</span>
+    <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+        <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">index++;</span>
+    <span class="s2">return </span><span class="s5">1</span><span class="s1">;</span>
+<span class="s1">}</span>
+
+<span class="s2">void </span><span class="s1">Series_iterEnd(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc) {</span>
+    <span class="s1">PyObjectEncoder *enc = (PyObjectEncoder *)tc</span><span class="s4">-&gt;</span><span class="s1">encoder;</span>
+    <span class="s1">enc</span><span class="s4">-&gt;</span><span class="s1">outputFormat = enc</span><span class="s4">-&gt;</span><span class="s1">originalOutputFormat;</span>
+<span class="s1">}</span>
+
+<span class="s1">JSOBJ Series_iterGetValue(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc) {</span>
+    <span class="s2">return </span><span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue;</span>
+<span class="s1">}</span>
+
+<span class="s2">char </span><span class="s1">*Series_iterGetName(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc,</span>
+                         <span class="s1">size_t *outLen) {</span>
+    <span class="s1">*outLen = strlen(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">cStr);</span>
+    <span class="s2">return </span><span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">cStr;</span>
+<span class="s1">}</span>
+
+<span class="s0">//=============================================================================</span>
+<span class="s0">// pandas DataFrame iteration functions</span>
+<span class="s0">//=============================================================================</span>
+<span class="s2">void </span><span class="s1">DataFrame_iterBegin(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc) {</span>
+    <span class="s1">PyObjectEncoder *enc = (PyObjectEncoder *)tc</span><span class="s4">-&gt;</span><span class="s1">encoder;</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">index = </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">cStr = PyObject_Malloc(</span><span class="s5">20 </span><span class="s1">* </span><span class="s2">sizeof</span><span class="s1">(</span><span class="s2">char</span><span class="s1">));</span>
+    <span class="s1">enc</span><span class="s4">-&gt;</span><span class="s1">outputFormat = VALUES;  </span><span class="s0">// for contained series &amp; index</span>
+    <span class="s2">if </span><span class="s1">(!GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">cStr) {</span>
+        <span class="s1">PyErr_NoMemory();</span>
+    <span class="s1">}</span>
+<span class="s1">}</span>
+
+<span class="s2">int </span><span class="s1">DataFrame_iterNext(JSOBJ obj, JSONTypeContext *tc) {</span>
+    <span class="s1">Py_ssize_t index;</span>
+    <span class="s2">if </span><span class="s1">(!GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">cStr) {</span>
+        <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">index = GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">index;</span>
+    <span class="s1">Py_XDECREF(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue);</span>
+    <span class="s2">if </span><span class="s1">(index == </span><span class="s5">0</span><span class="s1">) {</span>
+        <span class="s1">memcpy(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">cStr, </span><span class="s3">&quot;columns&quot;</span><span class="s1">, </span><span class="s2">sizeof</span><span class="s1">(</span><span class="s2">char</span><span class="s1">) * </span><span class="s5">8</span><span class="s1">);</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue = PyObject_GetAttrString(obj, </span><span class="s3">&quot;columns&quot;</span><span class="s1">);</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(index == </span><span class="s5">1</span><span class="s1">) {</span>
+        <span class="s1">memcpy(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">cStr, </span><span class="s3">&quot;index&quot;</span><span class="s1">, </span><span class="s2">sizeof</span><span class="s1">(</span><span class="s2">char</span><span class="s1">) * </span><span class="s5">6</span><span class="s1">);</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue = PyObject_GetAttrString(obj, </span><span class="s3">&quot;index&quot;</span><span class="s1">);</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(index == </span><span class="s5">2</span><span class="s1">) {</span>
+        <span class="s1">memcpy(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">cStr, </span><span class="s3">&quot;data&quot;</span><span class="s1">, </span><span class="s2">sizeof</span><span class="s1">(</span><span class="s2">char</span><span class="s1">) * </span><span class="s5">5</span><span class="s1">);</span>
+        <span class="s2">if </span><span class="s1">(is_simple_frame(obj)) {</span>
+            <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue = PyObject_GetAttrString(obj, </span><span class="s3">&quot;values&quot;</span><span class="s1">);</span>
+            <span class="s2">if </span><span class="s1">(!GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue) {</span>
+                <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+            <span class="s1">}</span>
+        <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+            <span class="s1">Py_INCREF(obj);</span>
+            <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue = obj;</span>
+        <span class="s1">}</span>
+    <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+        <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">index++;</span>
+    <span class="s2">return </span><span class="s5">1</span><span class="s1">;</span>
+<span class="s1">}</span>
+
+<span class="s2">void </span><span class="s1">DataFrame_iterEnd(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc) {</span>
+    <span class="s1">PyObjectEncoder *enc = (PyObjectEncoder *)tc</span><span class="s4">-&gt;</span><span class="s1">encoder;</span>
+    <span class="s1">enc</span><span class="s4">-&gt;</span><span class="s1">outputFormat = enc</span><span class="s4">-&gt;</span><span class="s1">originalOutputFormat;</span>
+<span class="s1">}</span>
+
+<span class="s1">JSOBJ DataFrame_iterGetValue(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc) {</span>
+    <span class="s2">return </span><span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue;</span>
+<span class="s1">}</span>
+
+<span class="s2">char </span><span class="s1">*DataFrame_iterGetName(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc,</span>
+                            <span class="s1">size_t *outLen) {</span>
+    <span class="s1">*outLen = strlen(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">cStr);</span>
+    <span class="s2">return </span><span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">cStr;</span>
+<span class="s1">}</span>
+
+<span class="s0">//=============================================================================</span>
+<span class="s0">// Dict iteration functions</span>
+<span class="s0">// itemName might converted to string (Python_Str). Do refCounting</span>
+<span class="s0">// itemValue is borrowed from object (which is dict). No refCounting</span>
+<span class="s0">//=============================================================================</span>
+<span class="s2">void </span><span class="s1">Dict_iterBegin(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc) {</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">index = </span><span class="s5">0</span><span class="s1">;</span>
+<span class="s1">}</span>
+
+<span class="s2">int </span><span class="s1">Dict_iterNext(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc) {</span>
+    <span class="s1">PyObject *itemNameTmp;</span>
+
+    <span class="s2">if </span><span class="s1">(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName) {</span>
+        <span class="s1">Py_DECREF(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName);</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName = NULL;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(!PyDict_Next((PyObject *)GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">dictObj, &amp;GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">index,</span>
+                     <span class="s1">&amp;GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName, &amp;GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue)) {</span>
+        <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(PyUnicode_Check(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName)) {</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName = PyUnicode_AsUTF8String(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName);</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(!PyBytes_Check(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName)) {</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName = PyObject_Str(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName);</span>
+        <span class="s1">itemNameTmp = GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName;</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName = PyUnicode_AsUTF8String(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName);</span>
+        <span class="s1">Py_DECREF(itemNameTmp);</span>
+    <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+        <span class="s1">Py_INCREF(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName);</span>
+    <span class="s1">}</span>
+    <span class="s2">return </span><span class="s5">1</span><span class="s1">;</span>
+<span class="s1">}</span>
+
+<span class="s2">void </span><span class="s1">Dict_iterEnd(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc) {</span>
+    <span class="s2">if </span><span class="s1">(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName) {</span>
+        <span class="s1">Py_DECREF(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName);</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName = NULL;</span>
+    <span class="s1">}</span>
+    <span class="s1">Py_DECREF(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">dictObj);</span>
+<span class="s1">}</span>
+
+<span class="s1">JSOBJ Dict_iterGetValue(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc) {</span>
+    <span class="s2">return </span><span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemValue;</span>
+<span class="s1">}</span>
+
+<span class="s2">char </span><span class="s1">*Dict_iterGetName(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc,</span>
+                       <span class="s1">size_t *outLen) {</span>
+    <span class="s1">*outLen = PyBytes_GET_SIZE(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName);</span>
+    <span class="s2">return </span><span class="s1">PyBytes_AS_STRING(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">itemName);</span>
+<span class="s1">}</span>
+
+<span class="s2">void </span><span class="s1">NpyArr_freeLabels(</span><span class="s2">char </span><span class="s1">**labels, npy_intp len) {</span>
+    <span class="s1">npy_intp i;</span>
+
+    <span class="s2">if </span><span class="s1">(labels) {</span>
+        <span class="s2">for </span><span class="s1">(i = </span><span class="s5">0</span><span class="s1">; i &lt; len; i++) {</span>
+            <span class="s1">PyObject_Free(labels[i]);</span>
+        <span class="s1">}</span>
+        <span class="s1">PyObject_Free(labels);</span>
+    <span class="s1">}</span>
+<span class="s1">}</span>
+
+<span class="s0">/* 
+ * Function: NpyArr_encodeLabels 
+ * ----------------------------- 
+ * 
+ * Builds an array of &quot;encoded&quot; labels. 
+ * 
+ * labels: PyArrayObject pointer for labels to be &quot;encoded&quot; 
+ * num : number of labels 
+ * 
+ * &quot;encode&quot; is quoted above because we aren't really doing encoding 
+ * For historical reasons this function would actually encode the entire 
+ * array into a separate buffer with a separate call to JSON_Encode 
+ * and would leave it to complex pointer manipulation from there to 
+ * unpack values as needed. To make things simpler and more idiomatic 
+ * this has instead just stringified any input save for datetime values, 
+ * which may need to be represented in various formats. 
+ */</span>
+<span class="s2">char </span><span class="s1">**NpyArr_encodeLabels(PyArrayObject *labels, PyObjectEncoder *enc,</span>
+                           <span class="s1">npy_intp num) {</span>
+    <span class="s0">// NOTE this function steals a reference to labels.</span>
+    <span class="s1">PyObject *item = NULL;</span>
+    <span class="s1">size_t len;</span>
+    <span class="s1">npy_intp i, stride;</span>
+    <span class="s2">char </span><span class="s1">**ret;</span>
+    <span class="s2">char </span><span class="s1">*dataptr, *cLabel;</span>
+    <span class="s2">int </span><span class="s1">type_num;</span>
+    <span class="s1">NPY_DATETIMEUNIT base = enc</span><span class="s4">-&gt;</span><span class="s1">datetimeUnit;</span>
+
+    <span class="s2">if </span><span class="s1">(!labels) {</span>
+        <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(PyArray_SIZE(labels) &lt; num) {</span>
+        <span class="s1">PyErr_SetString(</span>
+            <span class="s1">PyExc_ValueError,</span>
+            <span class="s3">&quot;Label array sizes do not match corresponding data shape&quot;</span><span class="s1">);</span>
+        <span class="s1">Py_DECREF(labels);</span>
+        <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">ret = PyObject_Malloc(</span><span class="s2">sizeof</span><span class="s1">(</span><span class="s2">char </span><span class="s1">*) * num);</span>
+    <span class="s2">if </span><span class="s1">(!ret) {</span>
+        <span class="s1">PyErr_NoMemory();</span>
+        <span class="s1">Py_DECREF(labels);</span>
+        <span class="s2">return </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">for </span><span class="s1">(i = </span><span class="s5">0</span><span class="s1">; i &lt; num; i++) {</span>
+        <span class="s1">ret[i] = NULL;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">stride = PyArray_STRIDE(labels, </span><span class="s5">0</span><span class="s1">);</span>
+    <span class="s1">dataptr = PyArray_DATA(labels);</span>
+    <span class="s1">type_num = PyArray_TYPE(labels);</span>
+
+    <span class="s2">for </span><span class="s1">(i = </span><span class="s5">0</span><span class="s1">; i &lt; num; i++) {</span>
+        <span class="s1">item = PyArray_GETITEM(labels, dataptr);</span>
+        <span class="s2">if </span><span class="s1">(!item) {</span>
+            <span class="s1">NpyArr_freeLabels(ret, num);</span>
+            <span class="s1">ret = </span><span class="s5">0</span><span class="s1">;</span>
+            <span class="s2">break</span><span class="s1">;</span>
+        <span class="s1">}</span>
+
+        <span class="s2">int </span><span class="s1">is_datetimelike = </span><span class="s5">0</span><span class="s1">;</span>
+        <span class="s1">npy_int64 nanosecVal;</span>
+        <span class="s2">if </span><span class="s1">(PyTypeNum_ISDATETIME(type_num)) {</span>
+            <span class="s1">is_datetimelike = </span><span class="s5">1</span><span class="s1">;</span>
+            <span class="s1">PyArray_VectorUnaryFunc *castfunc =</span>
+                <span class="s1">PyArray_GetCastFunc(PyArray_DescrFromType(type_num), NPY_INT64);</span>
+            <span class="s2">if </span><span class="s1">(!castfunc) {</span>
+                <span class="s1">PyErr_Format(PyExc_ValueError,</span>
+                             <span class="s3">&quot;Cannot cast numpy dtype %d to long&quot;</span><span class="s1">,</span>
+                             <span class="s1">enc</span><span class="s4">-&gt;</span><span class="s1">npyType);</span>
+            <span class="s1">}</span>
+            <span class="s1">castfunc(dataptr, &amp;nanosecVal, </span><span class="s5">1</span><span class="s1">, NULL, NULL);</span>
+        <span class="s1">} </span><span class="s2">else if </span><span class="s1">(PyDate_Check(item) || PyDelta_Check(item)) {</span>
+            <span class="s1">is_datetimelike = </span><span class="s5">1</span><span class="s1">;</span>
+            <span class="s2">if </span><span class="s1">(PyObject_HasAttrString(item, </span><span class="s3">&quot;value&quot;</span><span class="s1">)) {</span>
+                <span class="s1">nanosecVal = get_long_attr(item, </span><span class="s3">&quot;value&quot;</span><span class="s1">);</span>
+            <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+                <span class="s2">if </span><span class="s1">(PyDelta_Check(item)) {</span>
+                    <span class="s1">nanosecVal = total_seconds(item) *</span>
+                                 <span class="s5">1000000000</span><span class="s1">LL;  </span><span class="s0">// nanoseconds per second</span>
+                <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+                    <span class="s0">// datetime.* objects don't follow above rules</span>
+                    <span class="s1">nanosecVal = PyDateTimeToEpoch(item, NPY_FR_ns);</span>
+                <span class="s1">}</span>
+            <span class="s1">}</span>
+        <span class="s1">}</span>
+
+        <span class="s2">if </span><span class="s1">(is_datetimelike) {</span>
+            <span class="s2">if </span><span class="s1">(nanosecVal == get_nat()) {</span>
+                <span class="s1">len = </span><span class="s5">4</span><span class="s1">;</span>
+                <span class="s1">cLabel = PyObject_Malloc(len + </span><span class="s5">1</span><span class="s1">);</span>
+                <span class="s1">strncpy(cLabel, </span><span class="s3">&quot;null&quot;</span><span class="s1">, len + </span><span class="s5">1</span><span class="s1">);</span>
+            <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+                <span class="s2">if </span><span class="s1">(enc</span><span class="s4">-&gt;</span><span class="s1">datetimeIso) {</span>
+                    <span class="s2">if </span><span class="s1">((type_num == NPY_TIMEDELTA) || (PyDelta_Check(item))) {</span>
+                        <span class="s1">cLabel = int64ToIsoDuration(nanosecVal, &amp;len);</span>
+                    <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+                        <span class="s2">if </span><span class="s1">(type_num == NPY_DATETIME) {</span>
+                            <span class="s1">cLabel = int64ToIso(nanosecVal, base, &amp;len);</span>
+                        <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+                            <span class="s1">cLabel = PyDateTimeToIso(item, base, &amp;len);</span>
+                        <span class="s1">}</span>
+                    <span class="s1">}</span>
+                    <span class="s2">if </span><span class="s1">(cLabel == NULL) {</span>
+                        <span class="s1">Py_DECREF(item);</span>
+                        <span class="s1">NpyArr_freeLabels(ret, num);</span>
+                        <span class="s1">ret = </span><span class="s5">0</span><span class="s1">;</span>
+                        <span class="s2">break</span><span class="s1">;</span>
+                    <span class="s1">}</span>
+                <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+                    <span class="s2">int </span><span class="s1">size_of_cLabel = </span><span class="s5">21</span><span class="s1">;  </span><span class="s0">// 21 chars for int 64</span>
+                    <span class="s1">cLabel = PyObject_Malloc(size_of_cLabel);</span>
+                    <span class="s1">snprintf(cLabel, size_of_cLabel, </span><span class="s3">&quot;%&quot; </span><span class="s1">NPY_DATETIME_FMT,</span>
+                            <span class="s1">NpyDateTimeToEpoch(nanosecVal, base));</span>
+                    <span class="s1">len = strlen(cLabel);</span>
+                <span class="s1">}</span>
+            <span class="s1">}</span>
+        <span class="s1">} </span><span class="s2">else </span><span class="s1">{  </span><span class="s0">// Fallback to string representation</span>
+            <span class="s0">// Replace item with the string to keep it alive.</span>
+            <span class="s1">Py_SETREF(item, PyObject_Str(item));</span>
+            <span class="s2">if </span><span class="s1">(item == NULL) {</span>
+                <span class="s1">NpyArr_freeLabels(ret, num);</span>
+                <span class="s1">ret = </span><span class="s5">0</span><span class="s1">;</span>
+                <span class="s2">break</span><span class="s1">;</span>
+            <span class="s1">}</span>
+
+            <span class="s1">cLabel = (</span><span class="s2">char </span><span class="s1">*)PyUnicode_AsUTF8(item);</span>
+            <span class="s1">len = strlen(cLabel);</span>
+        <span class="s1">}</span>
+
+        <span class="s0">// Add 1 to include NULL terminator</span>
+        <span class="s1">ret[i] = PyObject_Malloc(len + </span><span class="s5">1</span><span class="s1">);</span>
+        <span class="s1">memcpy(ret[i], cLabel, len + </span><span class="s5">1</span><span class="s1">);</span>
+        <span class="s1">Py_DECREF(item);</span>
+
+        <span class="s2">if </span><span class="s1">(is_datetimelike) {</span>
+            <span class="s1">PyObject_Free(cLabel);</span>
+        <span class="s1">}</span>
+
+        <span class="s2">if </span><span class="s1">(PyErr_Occurred()) {</span>
+            <span class="s1">NpyArr_freeLabels(ret, num);</span>
+            <span class="s1">ret = </span><span class="s5">0</span><span class="s1">;</span>
+            <span class="s2">break</span><span class="s1">;</span>
+        <span class="s1">}</span>
+
+        <span class="s2">if </span><span class="s1">(!ret[i]) {</span>
+            <span class="s1">PyErr_NoMemory();</span>
+            <span class="s1">ret = </span><span class="s5">0</span><span class="s1">;</span>
+            <span class="s2">break</span><span class="s1">;</span>
+        <span class="s1">}</span>
+
+        <span class="s1">dataptr += stride;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">Py_DECREF(labels);</span>
+    <span class="s2">return </span><span class="s1">ret;</span>
+<span class="s1">}</span>
+
+<span class="s2">void </span><span class="s1">Object_invokeDefaultHandler(PyObject *obj, PyObjectEncoder *enc) {</span>
+    <span class="s1">PyObject *tmpObj = NULL;</span>
+    <span class="s1">tmpObj = PyObject_CallFunctionObjArgs(enc</span><span class="s4">-&gt;</span><span class="s1">defaultHandler, obj, NULL);</span>
+    <span class="s2">if </span><span class="s1">(!PyErr_Occurred()) {</span>
+        <span class="s2">if </span><span class="s1">(tmpObj == NULL) {</span>
+            <span class="s1">PyErr_SetString(PyExc_TypeError,</span>
+                            <span class="s3">&quot;Failed to execute default handler&quot;</span><span class="s1">);</span>
+        <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+            <span class="s1">encode(tmpObj, (JSONObjectEncoder *)enc, NULL, </span><span class="s5">0</span><span class="s1">);</span>
+        <span class="s1">}</span>
+    <span class="s1">}</span>
+    <span class="s1">Py_XDECREF(tmpObj);</span>
+    <span class="s2">return</span><span class="s1">;</span>
+<span class="s1">}</span>
+
+<span class="s2">void </span><span class="s1">Object_beginTypeContext(JSOBJ _obj, JSONTypeContext *tc) {</span>
+    <span class="s1">PyObject *obj, *exc, *toDictFunc, *tmpObj, *values;</span>
+    <span class="s1">TypeContext *pc;</span>
+    <span class="s1">PyObjectEncoder *enc;</span>
+    <span class="s2">double </span><span class="s1">val;</span>
+    <span class="s1">npy_int64 value;</span>
+    <span class="s2">int </span><span class="s1">unit;</span>
+
+    <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">prv = NULL;</span>
+
+    <span class="s2">if </span><span class="s1">(!_obj) {</span>
+        <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_INVALID;</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">obj = (PyObject *)_obj;</span>
+    <span class="s1">enc = (PyObjectEncoder *)tc</span><span class="s4">-&gt;</span><span class="s1">encoder;</span>
+
+    <span class="s2">if </span><span class="s1">(PyBool_Check(obj)) {</span>
+        <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = (obj == Py_True) ? JT_TRUE : JT_FALSE;</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(obj == Py_None) {</span>
+        <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_NULL;</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">pc = createTypeContext();</span>
+    <span class="s2">if </span><span class="s1">(!pc) {</span>
+        <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_INVALID;</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">}</span>
+    <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">prv = pc;</span>
+
+    <span class="s2">if </span><span class="s1">(PyTypeNum_ISDATETIME(enc</span><span class="s4">-&gt;</span><span class="s1">npyType)) {</span>
+        <span class="s1">int64_t longVal;</span>
+        <span class="s1">PyArray_VectorUnaryFunc *castfunc =</span>
+            <span class="s1">PyArray_GetCastFunc(PyArray_DescrFromType(enc</span><span class="s4">-&gt;</span><span class="s1">npyType), NPY_INT64);</span>
+        <span class="s2">if </span><span class="s1">(!castfunc) {</span>
+            <span class="s1">PyErr_Format(PyExc_ValueError, </span><span class="s3">&quot;Cannot cast numpy dtype %d to long&quot;</span><span class="s1">,</span>
+                         <span class="s1">enc</span><span class="s4">-&gt;</span><span class="s1">npyType);</span>
+        <span class="s1">}</span>
+        <span class="s1">castfunc(enc</span><span class="s4">-&gt;</span><span class="s1">npyValue, &amp;longVal, </span><span class="s5">1</span><span class="s1">, NULL, NULL);</span>
+        <span class="s2">if </span><span class="s1">(longVal == get_nat()) {</span>
+            <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_NULL;</span>
+        <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+            <span class="s2">if </span><span class="s1">(enc</span><span class="s4">-&gt;</span><span class="s1">datetimeIso) {</span>
+                <span class="s2">if </span><span class="s1">(enc</span><span class="s4">-&gt;</span><span class="s1">npyType == NPY_TIMEDELTA) {</span>
+                    <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">PyTypeToUTF8 = NpyTimeDeltaToIsoCallback;</span>
+                <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+                    <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">PyTypeToUTF8 = NpyDateTimeToIsoCallback;</span>
+                <span class="s1">}</span>
+                <span class="s0">// Currently no way to pass longVal to iso function, so use</span>
+                <span class="s0">// state management</span>
+                <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">longValue = longVal;</span>
+                <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_UTF8;</span>
+            <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+                <span class="s1">NPY_DATETIMEUNIT base =</span>
+                    <span class="s1">((PyObjectEncoder *)tc</span><span class="s4">-&gt;</span><span class="s1">encoder)</span><span class="s4">-&gt;</span><span class="s1">datetimeUnit;</span>
+                <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">longValue = NpyDateTimeToEpoch(longVal, base);</span>
+                <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_LONG;</span>
+            <span class="s1">}</span>
+        <span class="s1">}</span>
+
+        <span class="s0">// TODO(username): this prevents infinite loop with</span>
+        <span class="s0">// mixed-type DataFrames;</span>
+        <span class="s0">// refactor</span>
+        <span class="s1">enc</span><span class="s4">-&gt;</span><span class="s1">npyCtxtPassthru = NULL;</span>
+        <span class="s1">enc</span><span class="s4">-&gt;</span><span class="s1">npyType = -</span><span class="s5">1</span><span class="s1">;</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(PyIter_Check(obj) ||</span>
+        <span class="s1">(PyArray_Check(obj) &amp;&amp; !PyArray_CheckScalar(obj))) {</span>
+        <span class="s2">goto </span><span class="s1">ISITERABLE;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(PyLong_Check(obj)) {</span>
+        <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_LONG;</span>
+        <span class="s2">int </span><span class="s1">overflow = </span><span class="s5">0</span><span class="s1">;</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">longValue = PyLong_AsLongLongAndOverflow(obj, &amp;overflow);</span>
+        <span class="s2">int </span><span class="s1">err;</span>
+        <span class="s1">err = (GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">longValue == -</span><span class="s5">1</span><span class="s1">) &amp;&amp; PyErr_Occurred();</span>
+
+        <span class="s2">if </span><span class="s1">(overflow) {</span>
+            <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_BIGNUM;</span>
+        <span class="s1">} </span><span class="s2">else if </span><span class="s1">(err) {</span>
+            <span class="s2">goto </span><span class="s1">INVALID;</span>
+        <span class="s1">}</span>
+
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(PyFloat_Check(obj)) {</span>
+        <span class="s1">val = PyFloat_AS_DOUBLE(obj);</span>
+        <span class="s2">if </span><span class="s1">(npy_isnan(val) || npy_isinf(val)) {</span>
+            <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_NULL;</span>
+        <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+            <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">doubleValue = val;</span>
+            <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_DOUBLE;</span>
+        <span class="s1">}</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(PyBytes_Check(obj)) {</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">PyTypeToUTF8 = PyBytesToUTF8;</span>
+        <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_UTF8;</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(PyUnicode_Check(obj)) {</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">PyTypeToUTF8 = PyUnicodeToUTF8;</span>
+        <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_UTF8;</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(PyObject_TypeCheck(obj, type_decimal)) {</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">doubleValue = PyFloat_AsDouble(obj);</span>
+        <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_DOUBLE;</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(PyDateTime_Check(obj) || PyDate_Check(obj)) {</span>
+        <span class="s2">if </span><span class="s1">(PyObject_TypeCheck(obj, cls_nat)) {</span>
+            <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_NULL;</span>
+            <span class="s2">return</span><span class="s1">;</span>
+        <span class="s1">}</span>
+
+        <span class="s2">if </span><span class="s1">(enc</span><span class="s4">-&gt;</span><span class="s1">datetimeIso) {</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">PyTypeToUTF8 = PyDateTimeToIsoCallback;</span>
+            <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_UTF8;</span>
+        <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+            <span class="s1">NPY_DATETIMEUNIT base =</span>
+                <span class="s1">((PyObjectEncoder *)tc</span><span class="s4">-&gt;</span><span class="s1">encoder)</span><span class="s4">-&gt;</span><span class="s1">datetimeUnit;</span>
+            <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">longValue = PyDateTimeToEpoch(obj, base);</span>
+            <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_LONG;</span>
+        <span class="s1">}</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(PyTime_Check(obj)) {</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">PyTypeToUTF8 = PyTimeToJSON;</span>
+        <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_UTF8;</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(PyArray_IsScalar(obj, Datetime)) {</span>
+        <span class="s2">if </span><span class="s1">(((PyDatetimeScalarObject *)obj)</span><span class="s4">-&gt;</span><span class="s1">obval == get_nat()) {</span>
+            <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_NULL;</span>
+            <span class="s2">return</span><span class="s1">;</span>
+        <span class="s1">}</span>
+
+        <span class="s2">if </span><span class="s1">(enc</span><span class="s4">-&gt;</span><span class="s1">datetimeIso) {</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">PyTypeToUTF8 = PyDateTimeToIsoCallback;</span>
+            <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_UTF8;</span>
+        <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+            <span class="s1">NPY_DATETIMEUNIT base =</span>
+                <span class="s1">((PyObjectEncoder *)tc</span><span class="s4">-&gt;</span><span class="s1">encoder)</span><span class="s4">-&gt;</span><span class="s1">datetimeUnit;</span>
+            <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">longValue = PyDateTimeToEpoch(obj, base);</span>
+            <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_LONG;</span>
+        <span class="s1">}</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(PyDelta_Check(obj)) {</span>
+        <span class="s2">if </span><span class="s1">(PyObject_HasAttrString(obj, </span><span class="s3">&quot;value&quot;</span><span class="s1">)) {</span>
+            <span class="s1">value = get_long_attr(obj, </span><span class="s3">&quot;value&quot;</span><span class="s1">);</span>
+        <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+            <span class="s1">value = total_seconds(obj) * </span><span class="s5">1000000000</span><span class="s1">LL;  </span><span class="s0">// nanoseconds per sec</span>
+        <span class="s1">}</span>
+
+        <span class="s2">if </span><span class="s1">(value == get_nat()) {</span>
+            <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_NULL;</span>
+            <span class="s2">return</span><span class="s1">;</span>
+        <span class="s1">} </span><span class="s2">else if </span><span class="s1">(enc</span><span class="s4">-&gt;</span><span class="s1">datetimeIso) {</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">PyTypeToUTF8 = NpyTimeDeltaToIsoCallback;</span>
+            <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_UTF8;</span>
+        <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+            <span class="s1">unit = ((PyObjectEncoder *)tc</span><span class="s4">-&gt;</span><span class="s1">encoder)</span><span class="s4">-&gt;</span><span class="s1">datetimeUnit;</span>
+            <span class="s2">if </span><span class="s1">(scaleNanosecToUnit(&amp;value, unit) != </span><span class="s5">0</span><span class="s1">) {</span>
+                <span class="s0">// TODO(username): Add some kind of error handling here</span>
+            <span class="s1">}</span>
+
+            <span class="s1">exc = PyErr_Occurred();</span>
+
+            <span class="s2">if </span><span class="s1">(exc &amp;&amp; PyErr_ExceptionMatches(PyExc_OverflowError)) {</span>
+                <span class="s2">goto </span><span class="s1">INVALID;</span>
+            <span class="s1">}</span>
+
+            <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_LONG;</span>
+        <span class="s1">}</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">longValue = value;</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(PyArray_IsScalar(obj, Integer)) {</span>
+        <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_LONG;</span>
+        <span class="s1">PyArray_CastScalarToCtype(obj, &amp;(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">longValue),</span>
+                                  <span class="s1">PyArray_DescrFromType(NPY_INT64));</span>
+
+        <span class="s1">exc = PyErr_Occurred();</span>
+
+        <span class="s2">if </span><span class="s1">(exc &amp;&amp; PyErr_ExceptionMatches(PyExc_OverflowError)) {</span>
+            <span class="s2">goto </span><span class="s1">INVALID;</span>
+        <span class="s1">}</span>
+
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(PyArray_IsScalar(obj, Bool)) {</span>
+        <span class="s1">PyArray_CastScalarToCtype(obj, &amp;(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">longValue),</span>
+                                  <span class="s1">PyArray_DescrFromType(NPY_BOOL));</span>
+        <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = (GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">longValue) ? JT_TRUE : JT_FALSE;</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(PyArray_IsScalar(obj, Float) || PyArray_IsScalar(obj, Double)) {</span>
+        <span class="s1">PyArray_CastScalarToCtype(obj, &amp;(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">doubleValue),</span>
+                                  <span class="s1">PyArray_DescrFromType(NPY_DOUBLE));</span>
+        <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_DOUBLE;</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(PyArray_Check(obj) &amp;&amp; PyArray_CheckScalar(obj)) {</span>
+        <span class="s1">PyErr_Format(PyExc_TypeError,</span>
+                     <span class="s3">&quot;%R (0d array) is not JSON serializable at the moment&quot;</span><span class="s1">,</span>
+                     <span class="s1">obj);</span>
+        <span class="s2">goto </span><span class="s1">INVALID;</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(PyObject_TypeCheck(obj, cls_na)) {</span>
+        <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_NULL;</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+<span class="s1">ISITERABLE:</span>
+
+    <span class="s2">if </span><span class="s1">(PyObject_TypeCheck(obj, cls_index)) {</span>
+        <span class="s2">if </span><span class="s1">(enc</span><span class="s4">-&gt;</span><span class="s1">outputFormat == SPLIT) {</span>
+            <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_OBJECT;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterBegin = Index_iterBegin;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterEnd = Index_iterEnd;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterNext = Index_iterNext;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetValue = Index_iterGetValue;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetName = Index_iterGetName;</span>
+            <span class="s2">return</span><span class="s1">;</span>
+        <span class="s1">}</span>
+
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">newObj = get_values(obj);</span>
+        <span class="s2">if </span><span class="s1">(pc</span><span class="s4">-&gt;</span><span class="s1">newObj) {</span>
+            <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_ARRAY;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterBegin = NpyArr_iterBegin;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterEnd = NpyArr_iterEnd;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterNext = NpyArr_iterNext;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetValue = NpyArr_iterGetValue;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetName = NpyArr_iterGetName;</span>
+        <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+            <span class="s2">goto </span><span class="s1">INVALID;</span>
+        <span class="s1">}</span>
+
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(PyObject_TypeCheck(obj, cls_series)) {</span>
+        <span class="s2">if </span><span class="s1">(enc</span><span class="s4">-&gt;</span><span class="s1">outputFormat == SPLIT) {</span>
+            <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_OBJECT;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterBegin = Series_iterBegin;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterEnd = Series_iterEnd;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterNext = Series_iterNext;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetValue = Series_iterGetValue;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetName = Series_iterGetName;</span>
+            <span class="s2">return</span><span class="s1">;</span>
+        <span class="s1">}</span>
+
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">newObj = get_values(obj);</span>
+        <span class="s2">if </span><span class="s1">(!pc</span><span class="s4">-&gt;</span><span class="s1">newObj) {</span>
+            <span class="s2">goto </span><span class="s1">INVALID;</span>
+        <span class="s1">}</span>
+
+        <span class="s2">if </span><span class="s1">(enc</span><span class="s4">-&gt;</span><span class="s1">outputFormat == INDEX || enc</span><span class="s4">-&gt;</span><span class="s1">outputFormat == COLUMNS) {</span>
+            <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_OBJECT;</span>
+            <span class="s1">tmpObj = PyObject_GetAttrString(obj, </span><span class="s3">&quot;index&quot;</span><span class="s1">);</span>
+            <span class="s2">if </span><span class="s1">(!tmpObj) {</span>
+                <span class="s2">goto </span><span class="s1">INVALID;</span>
+            <span class="s1">}</span>
+            <span class="s1">values = get_values(tmpObj);</span>
+            <span class="s1">Py_DECREF(tmpObj);</span>
+            <span class="s2">if </span><span class="s1">(!values) {</span>
+                <span class="s2">goto </span><span class="s1">INVALID;</span>
+            <span class="s1">}</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">columnLabelsLen = PyArray_DIM(pc</span><span class="s4">-&gt;</span><span class="s1">newObj, </span><span class="s5">0</span><span class="s1">);</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">columnLabels = NpyArr_encodeLabels((PyArrayObject *)values, enc,</span>
+                                                   <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">columnLabelsLen);</span>
+            <span class="s2">if </span><span class="s1">(!pc</span><span class="s4">-&gt;</span><span class="s1">columnLabels) {</span>
+                <span class="s2">goto </span><span class="s1">INVALID;</span>
+            <span class="s1">}</span>
+        <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+            <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_ARRAY;</span>
+        <span class="s1">}</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterBegin = NpyArr_iterBegin;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterEnd = NpyArr_iterEnd;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterNext = NpyArr_iterNext;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetValue = NpyArr_iterGetValue;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetName = NpyArr_iterGetName;</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(PyArray_Check(obj)) {</span>
+        <span class="s2">if </span><span class="s1">(enc</span><span class="s4">-&gt;</span><span class="s1">npyCtxtPassthru) {</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">npyarr = enc</span><span class="s4">-&gt;</span><span class="s1">npyCtxtPassthru;</span>
+            <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = (pc</span><span class="s4">-&gt;</span><span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">columnLabels ? JT_OBJECT : JT_ARRAY);</span>
+
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterBegin = NpyArrPassThru_iterBegin;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterNext = NpyArr_iterNext;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterEnd = NpyArrPassThru_iterEnd;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetValue = NpyArr_iterGetValue;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetName = NpyArr_iterGetName;</span>
+
+            <span class="s1">enc</span><span class="s4">-&gt;</span><span class="s1">npyCtxtPassthru = NULL;</span>
+            <span class="s2">return</span><span class="s1">;</span>
+        <span class="s1">}</span>
+
+        <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_ARRAY;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterBegin = NpyArr_iterBegin;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterEnd = NpyArr_iterEnd;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterNext = NpyArr_iterNext;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetValue = NpyArr_iterGetValue;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetName = NpyArr_iterGetName;</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(PyObject_TypeCheck(obj, cls_dataframe)) {</span>
+        <span class="s2">if </span><span class="s1">(enc</span><span class="s4">-&gt;</span><span class="s1">blkCtxtPassthru) {</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">pdblock = enc</span><span class="s4">-&gt;</span><span class="s1">blkCtxtPassthru;</span>
+            <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type =</span>
+                <span class="s1">(pc</span><span class="s4">-&gt;</span><span class="s1">pdblock</span><span class="s4">-&gt;</span><span class="s1">npyCtxts[</span><span class="s5">0</span><span class="s1">]</span><span class="s4">-&gt;</span><span class="s1">columnLabels ? JT_OBJECT : JT_ARRAY);</span>
+
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterBegin = PdBlockPassThru_iterBegin;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterEnd = PdBlockPassThru_iterEnd;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterNext = PdBlock_iterNextItem;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetName = PdBlock_iterGetName;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetValue = NpyArr_iterGetValue;</span>
+
+            <span class="s1">enc</span><span class="s4">-&gt;</span><span class="s1">blkCtxtPassthru = NULL;</span>
+            <span class="s2">return</span><span class="s1">;</span>
+        <span class="s1">}</span>
+
+        <span class="s2">if </span><span class="s1">(enc</span><span class="s4">-&gt;</span><span class="s1">outputFormat == SPLIT) {</span>
+            <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_OBJECT;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterBegin = DataFrame_iterBegin;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterEnd = DataFrame_iterEnd;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterNext = DataFrame_iterNext;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetValue = DataFrame_iterGetValue;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetName = DataFrame_iterGetName;</span>
+            <span class="s2">return</span><span class="s1">;</span>
+        <span class="s1">}</span>
+
+        <span class="s2">if </span><span class="s1">(is_simple_frame(obj)) {</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterBegin = NpyArr_iterBegin;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterEnd = NpyArr_iterEnd;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterNext = NpyArr_iterNext;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetName = NpyArr_iterGetName;</span>
+
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">newObj = PyObject_GetAttrString(obj, </span><span class="s3">&quot;values&quot;</span><span class="s1">);</span>
+            <span class="s2">if </span><span class="s1">(!pc</span><span class="s4">-&gt;</span><span class="s1">newObj) {</span>
+                <span class="s2">goto </span><span class="s1">INVALID;</span>
+            <span class="s1">}</span>
+        <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterBegin = PdBlock_iterBegin;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterEnd = PdBlock_iterEnd;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterNext = PdBlock_iterNext;</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetName = PdBlock_iterGetName;</span>
+        <span class="s1">}</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetValue = NpyArr_iterGetValue;</span>
+
+        <span class="s2">if </span><span class="s1">(enc</span><span class="s4">-&gt;</span><span class="s1">outputFormat == VALUES) {</span>
+            <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_ARRAY;</span>
+        <span class="s1">} </span><span class="s2">else if </span><span class="s1">(enc</span><span class="s4">-&gt;</span><span class="s1">outputFormat == RECORDS) {</span>
+            <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_ARRAY;</span>
+            <span class="s1">tmpObj = PyObject_GetAttrString(obj, </span><span class="s3">&quot;columns&quot;</span><span class="s1">);</span>
+            <span class="s2">if </span><span class="s1">(!tmpObj) {</span>
+                <span class="s2">goto </span><span class="s1">INVALID;</span>
+            <span class="s1">}</span>
+            <span class="s1">values = get_values(tmpObj);</span>
+            <span class="s2">if </span><span class="s1">(!values) {</span>
+                <span class="s1">Py_DECREF(tmpObj);</span>
+                <span class="s2">goto </span><span class="s1">INVALID;</span>
+            <span class="s1">}</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">columnLabelsLen = PyObject_Size(tmpObj);</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">columnLabels = NpyArr_encodeLabels((PyArrayObject *)values, enc,</span>
+                                                   <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">columnLabelsLen);</span>
+            <span class="s1">Py_DECREF(tmpObj);</span>
+            <span class="s2">if </span><span class="s1">(!pc</span><span class="s4">-&gt;</span><span class="s1">columnLabels) {</span>
+                <span class="s2">goto </span><span class="s1">INVALID;</span>
+            <span class="s1">}</span>
+        <span class="s1">} </span><span class="s2">else if </span><span class="s1">(enc</span><span class="s4">-&gt;</span><span class="s1">outputFormat == INDEX || enc</span><span class="s4">-&gt;</span><span class="s1">outputFormat == COLUMNS) {</span>
+            <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_OBJECT;</span>
+            <span class="s1">tmpObj = (enc</span><span class="s4">-&gt;</span><span class="s1">outputFormat == INDEX</span>
+                          <span class="s1">? PyObject_GetAttrString(obj, </span><span class="s3">&quot;index&quot;</span><span class="s1">)</span>
+                          <span class="s1">: PyObject_GetAttrString(obj, </span><span class="s3">&quot;columns&quot;</span><span class="s1">));</span>
+            <span class="s2">if </span><span class="s1">(!tmpObj) {</span>
+                <span class="s2">goto </span><span class="s1">INVALID;</span>
+            <span class="s1">}</span>
+            <span class="s1">values = get_values(tmpObj);</span>
+            <span class="s2">if </span><span class="s1">(!values) {</span>
+                <span class="s1">Py_DECREF(tmpObj);</span>
+                <span class="s2">goto </span><span class="s1">INVALID;</span>
+            <span class="s1">}</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">rowLabelsLen = PyObject_Size(tmpObj);</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">rowLabels = NpyArr_encodeLabels((PyArrayObject *)values, enc,</span>
+                                                <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">rowLabelsLen);</span>
+            <span class="s1">Py_DECREF(tmpObj);</span>
+            <span class="s1">tmpObj = (enc</span><span class="s4">-&gt;</span><span class="s1">outputFormat == INDEX</span>
+                          <span class="s1">? PyObject_GetAttrString(obj, </span><span class="s3">&quot;columns&quot;</span><span class="s1">)</span>
+                          <span class="s1">: PyObject_GetAttrString(obj, </span><span class="s3">&quot;index&quot;</span><span class="s1">));</span>
+            <span class="s2">if </span><span class="s1">(!tmpObj) {</span>
+                <span class="s1">NpyArr_freeLabels(pc</span><span class="s4">-&gt;</span><span class="s1">rowLabels, pc</span><span class="s4">-&gt;</span><span class="s1">rowLabelsLen);</span>
+                <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">rowLabels = NULL;</span>
+                <span class="s2">goto </span><span class="s1">INVALID;</span>
+            <span class="s1">}</span>
+            <span class="s1">values = get_values(tmpObj);</span>
+            <span class="s2">if </span><span class="s1">(!values) {</span>
+                <span class="s1">Py_DECREF(tmpObj);</span>
+                <span class="s1">NpyArr_freeLabels(pc</span><span class="s4">-&gt;</span><span class="s1">rowLabels, pc</span><span class="s4">-&gt;</span><span class="s1">rowLabelsLen);</span>
+                <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">rowLabels = NULL;</span>
+                <span class="s2">goto </span><span class="s1">INVALID;</span>
+            <span class="s1">}</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">columnLabelsLen = PyObject_Size(tmpObj);</span>
+            <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">columnLabels = NpyArr_encodeLabels((PyArrayObject *)values, enc,</span>
+                                                   <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">columnLabelsLen);</span>
+            <span class="s1">Py_DECREF(tmpObj);</span>
+            <span class="s2">if </span><span class="s1">(!pc</span><span class="s4">-&gt;</span><span class="s1">columnLabels) {</span>
+                <span class="s1">NpyArr_freeLabels(pc</span><span class="s4">-&gt;</span><span class="s1">rowLabels, pc</span><span class="s4">-&gt;</span><span class="s1">rowLabelsLen);</span>
+                <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">rowLabels = NULL;</span>
+                <span class="s2">goto </span><span class="s1">INVALID;</span>
+            <span class="s1">}</span>
+
+            <span class="s2">if </span><span class="s1">(enc</span><span class="s4">-&gt;</span><span class="s1">outputFormat == COLUMNS) {</span>
+                <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">transpose = </span><span class="s5">1</span><span class="s1">;</span>
+            <span class="s1">}</span>
+        <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+            <span class="s2">goto </span><span class="s1">INVALID;</span>
+        <span class="s1">}</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(PyDict_Check(obj)) {</span>
+        <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_OBJECT;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterBegin = Dict_iterBegin;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterEnd = Dict_iterEnd;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterNext = Dict_iterNext;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetValue = Dict_iterGetValue;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetName = Dict_iterGetName;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">dictObj = obj;</span>
+        <span class="s1">Py_INCREF(obj);</span>
+
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(PyList_Check(obj)) {</span>
+        <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_ARRAY;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterBegin = List_iterBegin;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterEnd = List_iterEnd;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterNext = List_iterNext;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetValue = List_iterGetValue;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetName = List_iterGetName;</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(PyTuple_Check(obj)) {</span>
+        <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_ARRAY;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterBegin = Tuple_iterBegin;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterEnd = Tuple_iterEnd;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterNext = Tuple_iterNext;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetValue = Tuple_iterGetValue;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetName = Tuple_iterGetName;</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(PyAnySet_Check(obj)) {</span>
+        <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_ARRAY;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterBegin = Set_iterBegin;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterEnd = Set_iterEnd;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterNext = Set_iterNext;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetValue = Set_iterGetValue;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetName = Set_iterGetName;</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">toDictFunc = PyObject_GetAttrString(obj, </span><span class="s3">&quot;toDict&quot;</span><span class="s1">);</span>
+
+    <span class="s2">if </span><span class="s1">(toDictFunc) {</span>
+        <span class="s1">PyObject *tuple = PyTuple_New(</span><span class="s5">0</span><span class="s1">);</span>
+        <span class="s1">PyObject *toDictResult = PyObject_Call(toDictFunc, tuple, NULL);</span>
+        <span class="s1">Py_DECREF(tuple);</span>
+        <span class="s1">Py_DECREF(toDictFunc);</span>
+
+        <span class="s2">if </span><span class="s1">(toDictResult == NULL) {</span>
+            <span class="s1">PyErr_Clear();</span>
+            <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_NULL;</span>
+            <span class="s2">return</span><span class="s1">;</span>
+        <span class="s1">}</span>
+
+        <span class="s2">if </span><span class="s1">(!PyDict_Check(toDictResult)) {</span>
+            <span class="s1">Py_DECREF(toDictResult);</span>
+            <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_NULL;</span>
+            <span class="s2">return</span><span class="s1">;</span>
+        <span class="s1">}</span>
+
+        <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_OBJECT;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterBegin = Dict_iterBegin;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterEnd = Dict_iterEnd;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterNext = Dict_iterNext;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetValue = Dict_iterGetValue;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetName = Dict_iterGetName;</span>
+        <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">dictObj = toDictResult;</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">PyErr_Clear();</span>
+
+    <span class="s2">if </span><span class="s1">(enc</span><span class="s4">-&gt;</span><span class="s1">defaultHandler) {</span>
+        <span class="s1">Object_invokeDefaultHandler(obj, enc);</span>
+        <span class="s2">goto </span><span class="s1">INVALID;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_OBJECT;</span>
+    <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterBegin = Dir_iterBegin;</span>
+    <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterEnd = Dir_iterEnd;</span>
+    <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterNext = Dir_iterNext;</span>
+    <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetValue = Dir_iterGetValue;</span>
+    <span class="s1">pc</span><span class="s4">-&gt;</span><span class="s1">iterGetName = Dir_iterGetName;</span>
+    <span class="s2">return</span><span class="s1">;</span>
+
+<span class="s1">INVALID:</span>
+    <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">type = JT_INVALID;</span>
+    <span class="s1">PyObject_Free(tc</span><span class="s4">-&gt;</span><span class="s1">prv);</span>
+    <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">prv = NULL;</span>
+    <span class="s2">return</span><span class="s1">;</span>
+<span class="s1">}</span>
+
+<span class="s2">void </span><span class="s1">Object_endTypeContext(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc) {</span>
+    <span class="s2">if </span><span class="s1">(tc</span><span class="s4">-&gt;</span><span class="s1">prv) {</span>
+        <span class="s1">Py_XDECREF(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">newObj);</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">newObj = NULL;</span>
+        <span class="s1">NpyArr_freeLabels(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">rowLabels, GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">rowLabelsLen);</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">rowLabels = NULL;</span>
+        <span class="s1">NpyArr_freeLabels(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">columnLabels,</span>
+                          <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">columnLabelsLen);</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">columnLabels = NULL;</span>
+        <span class="s1">PyObject_Free(GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">cStr);</span>
+        <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">cStr = NULL;</span>
+        <span class="s1">PyObject_Free(tc</span><span class="s4">-&gt;</span><span class="s1">prv);</span>
+        <span class="s1">tc</span><span class="s4">-&gt;</span><span class="s1">prv = NULL;</span>
+    <span class="s1">}</span>
+<span class="s1">}</span>
+
+<span class="s2">const char </span><span class="s1">*Object_getStringValue(JSOBJ obj, JSONTypeContext *tc,</span>
+                                  <span class="s1">size_t *_outLen) {</span>
+    <span class="s2">return </span><span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">PyTypeToUTF8(obj, tc, _outLen);</span>
+<span class="s1">}</span>
+
+<span class="s1">JSINT64 Object_getLongValue(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc) {</span>
+    <span class="s2">return </span><span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">longValue;</span>
+<span class="s1">}</span>
+
+<span class="s2">double </span><span class="s1">Object_getDoubleValue(JSOBJ Py_UNUSED(obj), JSONTypeContext *tc) {</span>
+    <span class="s2">return </span><span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">doubleValue;</span>
+<span class="s1">}</span>
+
+<span class="s2">const char </span><span class="s1">*Object_getBigNumStringValue(JSOBJ obj, JSONTypeContext *tc,</span>
+                                        <span class="s1">size_t *_outLen) {</span>
+    <span class="s1">PyObject *repr = PyObject_Str(obj);</span>
+    <span class="s2">const char </span><span class="s1">*str = PyUnicode_AsUTF8AndSize(repr, (Py_ssize_t *)_outLen);</span>
+    <span class="s2">char </span><span class="s1">*bytes = PyObject_Malloc(*_outLen + </span><span class="s5">1</span><span class="s1">);</span>
+    <span class="s1">memcpy(bytes, str, *_outLen + </span><span class="s5">1</span><span class="s1">);</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">cStr = bytes;</span>
+
+    <span class="s1">Py_DECREF(repr);</span>
+
+    <span class="s2">return </span><span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">cStr;</span>
+<span class="s1">}</span>
+
+<span class="s2">static void </span><span class="s1">Object_releaseObject(JSOBJ _obj) { Py_DECREF((PyObject *)_obj); }</span>
+
+<span class="s2">void </span><span class="s1">Object_iterBegin(JSOBJ obj, JSONTypeContext *tc) {</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">iterBegin(obj, tc);</span>
+<span class="s1">}</span>
+
+<span class="s2">int </span><span class="s1">Object_iterNext(JSOBJ obj, JSONTypeContext *tc) {</span>
+    <span class="s2">return </span><span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">iterNext(obj, tc);</span>
+<span class="s1">}</span>
+
+<span class="s2">void </span><span class="s1">Object_iterEnd(JSOBJ obj, JSONTypeContext *tc) {</span>
+    <span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">iterEnd(obj, tc);</span>
+<span class="s1">}</span>
+
+<span class="s1">JSOBJ Object_iterGetValue(JSOBJ obj, JSONTypeContext *tc) {</span>
+    <span class="s2">return </span><span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">iterGetValue(obj, tc);</span>
+<span class="s1">}</span>
+
+<span class="s2">char </span><span class="s1">*Object_iterGetName(JSOBJ obj, JSONTypeContext *tc, size_t *outLen) {</span>
+    <span class="s2">return </span><span class="s1">GET_TC(tc)</span><span class="s4">-&gt;</span><span class="s1">iterGetName(obj, tc, outLen);</span>
+<span class="s1">}</span>
+
+<span class="s1">PyObject *objToJSON(PyObject *Py_UNUSED(self), PyObject *args,</span>
+                    <span class="s1">PyObject *kwargs) {</span>
+    <span class="s2">static char </span><span class="s1">*kwlist[] = {</span><span class="s3">&quot;obj&quot;</span><span class="s1">,</span>
+                             <span class="s3">&quot;ensure_ascii&quot;</span><span class="s1">,</span>
+                             <span class="s3">&quot;double_precision&quot;</span><span class="s1">,</span>
+                             <span class="s3">&quot;encode_html_chars&quot;</span><span class="s1">,</span>
+                             <span class="s3">&quot;orient&quot;</span><span class="s1">,</span>
+                             <span class="s3">&quot;date_unit&quot;</span><span class="s1">,</span>
+                             <span class="s3">&quot;iso_dates&quot;</span><span class="s1">,</span>
+                             <span class="s3">&quot;default_handler&quot;</span><span class="s1">,</span>
+                             <span class="s3">&quot;indent&quot;</span><span class="s1">,</span>
+                             <span class="s1">NULL};</span>
+
+    <span class="s2">char </span><span class="s1">buffer[</span><span class="s5">65536</span><span class="s1">];</span>
+    <span class="s2">char </span><span class="s1">*ret;</span>
+    <span class="s1">PyObject *newobj;</span>
+    <span class="s1">PyObject *oinput = NULL;</span>
+    <span class="s1">PyObject *oensureAscii = NULL;</span>
+    <span class="s2">int </span><span class="s1">idoublePrecision = </span><span class="s5">10</span><span class="s1">;  </span><span class="s0">// default double precision setting</span>
+    <span class="s1">PyObject *oencodeHTMLChars = NULL;</span>
+    <span class="s2">char </span><span class="s1">*sOrient = NULL;</span>
+    <span class="s2">char </span><span class="s1">*sdateFormat = NULL;</span>
+    <span class="s1">PyObject *oisoDates = </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">PyObject *odefHandler = </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s2">int </span><span class="s1">indent = </span><span class="s5">0</span><span class="s1">;</span>
+
+    <span class="s1">PyObjectEncoder pyEncoder = {{</span>
+        <span class="s1">Object_beginTypeContext,</span>
+        <span class="s1">Object_endTypeContext,</span>
+        <span class="s1">Object_getStringValue,</span>
+        <span class="s1">Object_getLongValue,</span>
+        <span class="s1">NULL,  </span><span class="s0">// getIntValue is unused</span>
+        <span class="s1">Object_getDoubleValue,</span>
+        <span class="s1">Object_getBigNumStringValue,</span>
+        <span class="s1">Object_iterBegin,</span>
+        <span class="s1">Object_iterNext,</span>
+        <span class="s1">Object_iterEnd,</span>
+        <span class="s1">Object_iterGetValue,</span>
+        <span class="s1">Object_iterGetName,</span>
+        <span class="s1">Object_releaseObject,</span>
+        <span class="s1">PyObject_Malloc,</span>
+        <span class="s1">PyObject_Realloc,</span>
+        <span class="s1">PyObject_Free,</span>
+        <span class="s1">-</span><span class="s5">1</span><span class="s1">,  </span><span class="s0">// recursionMax</span>
+        <span class="s1">idoublePrecision,</span>
+        <span class="s5">1</span><span class="s1">,  </span><span class="s0">// forceAscii</span>
+        <span class="s5">0</span><span class="s1">,  </span><span class="s0">// encodeHTMLChars</span>
+        <span class="s5">0</span><span class="s1">,  </span><span class="s0">// indent</span>
+    <span class="s1">}};</span>
+    <span class="s1">JSONObjectEncoder *encoder = (JSONObjectEncoder *)&amp;pyEncoder;</span>
+
+    <span class="s1">pyEncoder.npyCtxtPassthru = NULL;</span>
+    <span class="s1">pyEncoder.blkCtxtPassthru = NULL;</span>
+    <span class="s1">pyEncoder.npyType = -</span><span class="s5">1</span><span class="s1">;</span>
+    <span class="s1">pyEncoder.npyValue = NULL;</span>
+    <span class="s1">pyEncoder.datetimeIso = </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">pyEncoder.datetimeUnit = NPY_FR_ms;</span>
+    <span class="s1">pyEncoder.outputFormat = COLUMNS;</span>
+    <span class="s1">pyEncoder.defaultHandler = </span><span class="s5">0</span><span class="s1">;</span>
+
+    <span class="s2">if </span><span class="s1">(!PyArg_ParseTupleAndKeywords(args, kwargs, </span><span class="s3">&quot;O|OiOssOOi&quot;</span><span class="s1">, kwlist,</span>
+                                     <span class="s1">&amp;oinput, &amp;oensureAscii, &amp;idoublePrecision,</span>
+                                     <span class="s1">&amp;oencodeHTMLChars, &amp;sOrient, &amp;sdateFormat,</span>
+                                     <span class="s1">&amp;oisoDates, &amp;odefHandler, &amp;indent)) {</span>
+        <span class="s2">return </span><span class="s1">NULL;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(oensureAscii != NULL &amp;&amp; !PyObject_IsTrue(oensureAscii)) {</span>
+        <span class="s1">encoder</span><span class="s4">-&gt;</span><span class="s1">forceASCII = </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(oencodeHTMLChars != NULL &amp;&amp; PyObject_IsTrue(oencodeHTMLChars)) {</span>
+        <span class="s1">encoder</span><span class="s4">-&gt;</span><span class="s1">encodeHTMLChars = </span><span class="s5">1</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(idoublePrecision &gt; JSON_DOUBLE_MAX_DECIMALS || idoublePrecision &lt; </span><span class="s5">0</span><span class="s1">) {</span>
+        <span class="s1">PyErr_Format(</span>
+            <span class="s1">PyExc_ValueError,</span>
+            <span class="s3">&quot;Invalid value '%d' for option 'double_precision', max is '%u'&quot;</span><span class="s1">,</span>
+            <span class="s1">idoublePrecision, JSON_DOUBLE_MAX_DECIMALS);</span>
+        <span class="s2">return </span><span class="s1">NULL;</span>
+    <span class="s1">}</span>
+    <span class="s1">encoder</span><span class="s4">-&gt;</span><span class="s1">doublePrecision = idoublePrecision;</span>
+
+    <span class="s2">if </span><span class="s1">(sOrient != NULL) {</span>
+        <span class="s2">if </span><span class="s1">(strcmp(sOrient, </span><span class="s3">&quot;records&quot;</span><span class="s1">) == </span><span class="s5">0</span><span class="s1">) {</span>
+            <span class="s1">pyEncoder.outputFormat = RECORDS;</span>
+        <span class="s1">} </span><span class="s2">else if </span><span class="s1">(strcmp(sOrient, </span><span class="s3">&quot;index&quot;</span><span class="s1">) == </span><span class="s5">0</span><span class="s1">) {</span>
+            <span class="s1">pyEncoder.outputFormat = INDEX;</span>
+        <span class="s1">} </span><span class="s2">else if </span><span class="s1">(strcmp(sOrient, </span><span class="s3">&quot;split&quot;</span><span class="s1">) == </span><span class="s5">0</span><span class="s1">) {</span>
+            <span class="s1">pyEncoder.outputFormat = SPLIT;</span>
+        <span class="s1">} </span><span class="s2">else if </span><span class="s1">(strcmp(sOrient, </span><span class="s3">&quot;values&quot;</span><span class="s1">) == </span><span class="s5">0</span><span class="s1">) {</span>
+            <span class="s1">pyEncoder.outputFormat = VALUES;</span>
+        <span class="s1">} </span><span class="s2">else if </span><span class="s1">(strcmp(sOrient, </span><span class="s3">&quot;columns&quot;</span><span class="s1">) != </span><span class="s5">0</span><span class="s1">) {</span>
+            <span class="s1">PyErr_Format(PyExc_ValueError,</span>
+                         <span class="s3">&quot;Invalid value '%s' for option 'orient'&quot;</span><span class="s1">, sOrient);</span>
+            <span class="s2">return </span><span class="s1">NULL;</span>
+        <span class="s1">}</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(sdateFormat != NULL) {</span>
+        <span class="s2">if </span><span class="s1">(strcmp(sdateFormat, </span><span class="s3">&quot;s&quot;</span><span class="s1">) == </span><span class="s5">0</span><span class="s1">) {</span>
+            <span class="s1">pyEncoder.datetimeUnit = NPY_FR_s;</span>
+        <span class="s1">} </span><span class="s2">else if </span><span class="s1">(strcmp(sdateFormat, </span><span class="s3">&quot;ms&quot;</span><span class="s1">) == </span><span class="s5">0</span><span class="s1">) {</span>
+            <span class="s1">pyEncoder.datetimeUnit = NPY_FR_ms;</span>
+        <span class="s1">} </span><span class="s2">else if </span><span class="s1">(strcmp(sdateFormat, </span><span class="s3">&quot;us&quot;</span><span class="s1">) == </span><span class="s5">0</span><span class="s1">) {</span>
+            <span class="s1">pyEncoder.datetimeUnit = NPY_FR_us;</span>
+        <span class="s1">} </span><span class="s2">else if </span><span class="s1">(strcmp(sdateFormat, </span><span class="s3">&quot;ns&quot;</span><span class="s1">) == </span><span class="s5">0</span><span class="s1">) {</span>
+            <span class="s1">pyEncoder.datetimeUnit = NPY_FR_ns;</span>
+        <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+            <span class="s1">PyErr_Format(PyExc_ValueError,</span>
+                         <span class="s3">&quot;Invalid value '%s' for option 'date_unit'&quot;</span><span class="s1">,</span>
+                         <span class="s1">sdateFormat);</span>
+            <span class="s2">return </span><span class="s1">NULL;</span>
+        <span class="s1">}</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(oisoDates != NULL &amp;&amp; PyObject_IsTrue(oisoDates)) {</span>
+        <span class="s1">pyEncoder.datetimeIso = </span><span class="s5">1</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(odefHandler != NULL &amp;&amp; odefHandler != Py_None) {</span>
+        <span class="s2">if </span><span class="s1">(!PyCallable_Check(odefHandler)) {</span>
+            <span class="s1">PyErr_SetString(PyExc_TypeError, </span><span class="s3">&quot;Default handler is not callable&quot;</span><span class="s1">);</span>
+            <span class="s2">return </span><span class="s1">NULL;</span>
+        <span class="s1">}</span>
+        <span class="s1">pyEncoder.defaultHandler = odefHandler;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">encoder</span><span class="s4">-&gt;</span><span class="s1">indent = indent;</span>
+
+    <span class="s1">pyEncoder.originalOutputFormat = pyEncoder.outputFormat;</span>
+    <span class="s1">ret = JSON_EncodeObject(oinput, encoder, buffer, </span><span class="s2">sizeof</span><span class="s1">(buffer));</span>
+    <span class="s2">if </span><span class="s1">(PyErr_Occurred()) {</span>
+        <span class="s2">return </span><span class="s1">NULL;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(encoder</span><span class="s4">-&gt;</span><span class="s1">errorMsg) {</span>
+        <span class="s2">if </span><span class="s1">(ret != buffer) {</span>
+            <span class="s1">encoder</span><span class="s4">-&gt;</span><span class="s1">free(ret);</span>
+        <span class="s1">}</span>
+        <span class="s1">PyErr_Format(PyExc_OverflowError, </span><span class="s3">&quot;%s&quot;</span><span class="s1">, encoder</span><span class="s4">-&gt;</span><span class="s1">errorMsg);</span>
+        <span class="s2">return </span><span class="s1">NULL;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">newobj = PyUnicode_FromString(ret);</span>
+
+    <span class="s2">if </span><span class="s1">(ret != buffer) {</span>
+        <span class="s1">encoder</span><span class="s4">-&gt;</span><span class="s1">free(ret);</span>
+    <span class="s1">}</span>
+
+    <span class="s2">return </span><span class="s1">newobj;</span>
+<span class="s1">}</span>
+</pre>
+</body>
+</html>

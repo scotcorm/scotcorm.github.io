@@ -1,0 +1,621 @@
+<html>
+<head>
+<title>mingw32ccompiler.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #808080;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+.s6 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+mingw32ccompiler.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+Support code for building Python extensions on Windows. 
+ 
+    # NT stuff 
+    # 1. Make sure libpython&lt;version&gt;.a exists for gcc.  If not, build it. 
+    # 2. Force windows to use gcc (we're struggling with MSVC and g77 support) 
+    # 3. Force windows to use g77 
+ 
+&quot;&quot;&quot;</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">platform</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">subprocess</span>
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">textwrap</span>
+
+<span class="s3"># Overwrite certain distutils.ccompiler functions:</span>
+<span class="s2">import </span><span class="s1">numpy.distutils.ccompiler  </span><span class="s3"># noqa: F401</span>
+<span class="s2">from </span><span class="s1">numpy.distutils </span><span class="s2">import </span><span class="s1">log</span>
+<span class="s3"># NT stuff</span>
+<span class="s3"># 1. Make sure libpython&lt;version&gt;.a exists for gcc.  If not, build it.</span>
+<span class="s3"># 2. Force windows to use gcc (we're struggling with MSVC and g77 support)</span>
+<span class="s3">#    --&gt; this is done in numpy/distutils/ccompiler.py</span>
+<span class="s3"># 3. Force windows to use g77</span>
+
+<span class="s2">import </span><span class="s1">distutils.cygwinccompiler</span>
+<span class="s2">from </span><span class="s1">distutils.unixccompiler </span><span class="s2">import </span><span class="s1">UnixCCompiler</span>
+<span class="s2">from </span><span class="s1">distutils.msvccompiler </span><span class="s2">import </span><span class="s1">get_build_version </span><span class="s2">as </span><span class="s1">get_build_msvc_version</span>
+<span class="s2">from </span><span class="s1">distutils.errors </span><span class="s2">import </span><span class="s1">UnknownFileError</span>
+<span class="s2">from </span><span class="s1">numpy.distutils.misc_util </span><span class="s2">import </span><span class="s1">(msvc_runtime_library</span><span class="s2">,</span>
+                                       <span class="s1">msvc_runtime_version</span><span class="s2">,</span>
+                                       <span class="s1">msvc_runtime_major</span><span class="s2">,</span>
+                                       <span class="s1">get_build_architecture)</span>
+
+<span class="s2">def </span><span class="s1">get_msvcr_replacement():</span>
+    <span class="s0">&quot;&quot;&quot;Replacement for outdated version of get_msvcr from cygwinccompiler&quot;&quot;&quot;</span>
+    <span class="s1">msvcr = msvc_runtime_library()</span>
+    <span class="s2">return </span><span class="s1">[] </span><span class="s2">if </span><span class="s1">msvcr </span><span class="s2">is None else </span><span class="s1">[msvcr]</span>
+
+<span class="s3"># monkey-patch cygwinccompiler with our updated version from misc_util</span>
+<span class="s3"># to avoid getting an exception raised on Python 3.5</span>
+<span class="s1">distutils.cygwinccompiler.get_msvcr = get_msvcr_replacement</span>
+
+<span class="s3"># Useful to generate table of symbols from a dll</span>
+<span class="s1">_START = re.compile(</span><span class="s4">r'\[Ordinal/Name Pointer\] Table'</span><span class="s1">)</span>
+<span class="s1">_TABLE = re.compile(</span><span class="s4">r'^\s+\[([\s*[0-9]*)\] ([a-zA-Z0-9_]*)'</span><span class="s1">)</span>
+
+<span class="s3"># the same as cygwin plus some additional parameters</span>
+<span class="s2">class </span><span class="s1">Mingw32CCompiler(distutils.cygwinccompiler.CygwinCCompiler):</span>
+    <span class="s0">&quot;&quot;&quot; A modified MingW32 compiler compatible with an MSVC built Python. 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">compiler_type = </span><span class="s4">'mingw32'</span>
+
+    <span class="s2">def </span><span class="s1">__init__ (self</span><span class="s2">,</span>
+                  <span class="s1">verbose=</span><span class="s5">0</span><span class="s2">,</span>
+                  <span class="s1">dry_run=</span><span class="s5">0</span><span class="s2">,</span>
+                  <span class="s1">force=</span><span class="s5">0</span><span class="s1">):</span>
+
+        <span class="s1">distutils.cygwinccompiler.CygwinCCompiler.__init__ (self</span><span class="s2">, </span><span class="s1">verbose</span><span class="s2">,</span>
+                                                            <span class="s1">dry_run</span><span class="s2">, </span><span class="s1">force)</span>
+
+        <span class="s3"># **changes: eric jones 4/11/01</span>
+        <span class="s3"># 1. Check for import library on Windows.  Build if it doesn't exist.</span>
+
+        <span class="s1">build_import_library()</span>
+
+        <span class="s3"># Check for custom msvc runtime library on Windows. Build if it doesn't exist.</span>
+        <span class="s1">msvcr_success = build_msvcr_library()</span>
+        <span class="s1">msvcr_dbg_success = build_msvcr_library(debug=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">msvcr_success </span><span class="s2">or </span><span class="s1">msvcr_dbg_success:</span>
+            <span class="s3"># add preprocessor statement for using customized msvcr lib</span>
+            <span class="s1">self.define_macro(</span><span class="s4">'NPY_MINGW_USE_CUSTOM_MSVCR'</span><span class="s1">)</span>
+
+        <span class="s3"># Define the MSVC version as hint for MinGW</span>
+        <span class="s1">msvcr_version = msvc_runtime_version()</span>
+        <span class="s2">if </span><span class="s1">msvcr_version:</span>
+            <span class="s1">self.define_macro(</span><span class="s4">'__MSVCRT_VERSION__'</span><span class="s2">, </span><span class="s4">'0x%04i' </span><span class="s1">% msvcr_version)</span>
+
+        <span class="s3"># MS_WIN64 should be defined when building for amd64 on windows,</span>
+        <span class="s3"># but python headers define it only for MS compilers, which has all</span>
+        <span class="s3"># kind of bad consequences, like using Py_ModuleInit4 instead of</span>
+        <span class="s3"># Py_ModuleInit4_64, etc... So we add it here</span>
+        <span class="s2">if </span><span class="s1">get_build_architecture() == </span><span class="s4">'AMD64'</span><span class="s1">:</span>
+            <span class="s1">self.set_executables(</span>
+                <span class="s1">compiler=</span><span class="s4">'gcc -g -DDEBUG -DMS_WIN64 -O0 -Wall'</span><span class="s2">,</span>
+                <span class="s1">compiler_so=</span><span class="s4">'gcc -g -DDEBUG -DMS_WIN64 -O0 -Wall '</span>
+                            <span class="s4">'-Wstrict-prototypes'</span><span class="s2">,</span>
+                <span class="s1">linker_exe=</span><span class="s4">'gcc -g'</span><span class="s2">,</span>
+                <span class="s1">linker_so=</span><span class="s4">'gcc -g -shared'</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.set_executables(</span>
+                <span class="s1">compiler=</span><span class="s4">'gcc -O2 -Wall'</span><span class="s2">,</span>
+                <span class="s1">compiler_so=</span><span class="s4">'gcc -O2 -Wall -Wstrict-prototypes'</span><span class="s2">,</span>
+                <span class="s1">linker_exe=</span><span class="s4">'g++ '</span><span class="s2">,</span>
+                <span class="s1">linker_so=</span><span class="s4">'g++ -shared'</span><span class="s1">)</span>
+        <span class="s3"># added for python2.3 support</span>
+        <span class="s3"># we can't pass it through set_executables because pre 2.2 would fail</span>
+        <span class="s1">self.compiler_cxx = [</span><span class="s4">'g++'</span><span class="s1">]</span>
+
+        <span class="s3"># Maybe we should also append -mthreads, but then the finished dlls</span>
+        <span class="s3"># need another dll (mingwm10.dll see Mingw32 docs) (-mthreads: Support</span>
+        <span class="s3"># thread-safe exception handling on `Mingw32')</span>
+
+        <span class="s3"># no additional libraries needed</span>
+        <span class="s3">#self.dll_libraries=[]</span>
+        <span class="s2">return</span>
+
+    <span class="s3"># __init__ ()</span>
+
+    <span class="s2">def </span><span class="s1">link(self</span><span class="s2">,</span>
+             <span class="s1">target_desc</span><span class="s2">,</span>
+             <span class="s1">objects</span><span class="s2">,</span>
+             <span class="s1">output_filename</span><span class="s2">,</span>
+             <span class="s1">output_dir</span><span class="s2">,</span>
+             <span class="s1">libraries</span><span class="s2">,</span>
+             <span class="s1">library_dirs</span><span class="s2">,</span>
+             <span class="s1">runtime_library_dirs</span><span class="s2">,</span>
+             <span class="s1">export_symbols = </span><span class="s2">None,</span>
+             <span class="s1">debug=</span><span class="s5">0</span><span class="s2">,</span>
+             <span class="s1">extra_preargs=</span><span class="s2">None,</span>
+             <span class="s1">extra_postargs=</span><span class="s2">None,</span>
+             <span class="s1">build_temp=</span><span class="s2">None,</span>
+             <span class="s1">target_lang=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s3"># Include the appropriate MSVC runtime library if Python was built</span>
+        <span class="s3"># with MSVC &gt;= 7.0 (MinGW standard is msvcrt)</span>
+        <span class="s1">runtime_library = msvc_runtime_library()</span>
+        <span class="s2">if </span><span class="s1">runtime_library:</span>
+            <span class="s2">if not </span><span class="s1">libraries:</span>
+                <span class="s1">libraries = []</span>
+            <span class="s1">libraries.append(runtime_library)</span>
+        <span class="s1">args = (self</span><span class="s2">,</span>
+                <span class="s1">target_desc</span><span class="s2">,</span>
+                <span class="s1">objects</span><span class="s2">,</span>
+                <span class="s1">output_filename</span><span class="s2">,</span>
+                <span class="s1">output_dir</span><span class="s2">,</span>
+                <span class="s1">libraries</span><span class="s2">,</span>
+                <span class="s1">library_dirs</span><span class="s2">,</span>
+                <span class="s1">runtime_library_dirs</span><span class="s2">,</span>
+                <span class="s2">None, </span><span class="s3">#export_symbols, we do this in our def-file</span>
+                <span class="s1">debug</span><span class="s2">,</span>
+                <span class="s1">extra_preargs</span><span class="s2">,</span>
+                <span class="s1">extra_postargs</span><span class="s2">,</span>
+                <span class="s1">build_temp</span><span class="s2">,</span>
+                <span class="s1">target_lang)</span>
+        <span class="s1">func = UnixCCompiler.link</span>
+        <span class="s1">func(*args[:func.__code__.co_argcount])</span>
+        <span class="s2">return</span>
+
+    <span class="s2">def </span><span class="s1">object_filenames (self</span><span class="s2">,</span>
+                          <span class="s1">source_filenames</span><span class="s2">,</span>
+                          <span class="s1">strip_dir=</span><span class="s5">0</span><span class="s2">,</span>
+                          <span class="s1">output_dir=</span><span class="s4">''</span><span class="s1">):</span>
+        <span class="s2">if </span><span class="s1">output_dir </span><span class="s2">is None</span><span class="s1">: output_dir = </span><span class="s4">''</span>
+        <span class="s1">obj_names = []</span>
+        <span class="s2">for </span><span class="s1">src_name </span><span class="s2">in </span><span class="s1">source_filenames:</span>
+            <span class="s3"># use normcase to make sure '.rc' is really '.rc' and not '.RC'</span>
+            <span class="s1">(base</span><span class="s2">, </span><span class="s1">ext) = os.path.splitext (os.path.normcase(src_name))</span>
+
+            <span class="s3"># added these lines to strip off windows drive letters</span>
+            <span class="s3"># without it, .o files are placed next to .c files</span>
+            <span class="s3"># instead of the build directory</span>
+            <span class="s1">drv</span><span class="s2">, </span><span class="s1">base = os.path.splitdrive(base)</span>
+            <span class="s2">if </span><span class="s1">drv:</span>
+                <span class="s1">base = base[</span><span class="s5">1</span><span class="s1">:]</span>
+
+            <span class="s2">if </span><span class="s1">ext </span><span class="s2">not in </span><span class="s1">(self.src_extensions + [</span><span class="s4">'.rc'</span><span class="s2">, </span><span class="s4">'.res'</span><span class="s1">]):</span>
+                <span class="s2">raise </span><span class="s1">UnknownFileError(</span>
+                      <span class="s4">&quot;unknown file type '%s' (from '%s')&quot; </span><span class="s1">% \</span>
+                      <span class="s1">(ext</span><span class="s2">, </span><span class="s1">src_name))</span>
+            <span class="s2">if </span><span class="s1">strip_dir:</span>
+                <span class="s1">base = os.path.basename (base)</span>
+            <span class="s2">if </span><span class="s1">ext == </span><span class="s4">'.res' </span><span class="s2">or </span><span class="s1">ext == </span><span class="s4">'.rc'</span><span class="s1">:</span>
+                <span class="s3"># these need to be compiled to object files</span>
+                <span class="s1">obj_names.append (os.path.join (output_dir</span><span class="s2">,</span>
+                                                <span class="s1">base + ext + self.obj_extension))</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">obj_names.append (os.path.join (output_dir</span><span class="s2">,</span>
+                                                <span class="s1">base + self.obj_extension))</span>
+        <span class="s2">return </span><span class="s1">obj_names</span>
+
+    <span class="s3"># object_filenames ()</span>
+
+
+<span class="s2">def </span><span class="s1">find_python_dll():</span>
+    <span class="s3"># We can't do much here:</span>
+    <span class="s3"># - find it in the virtualenv (sys.prefix)</span>
+    <span class="s3"># - find it in python main dir (sys.base_prefix, if in a virtualenv)</span>
+    <span class="s3"># - sys.real_prefix is main dir for virtualenvs in Python 2.7</span>
+    <span class="s3"># - in system32,</span>
+    <span class="s3"># - ortherwise (Sxs), I don't know how to get it.</span>
+    <span class="s1">stems = [sys.prefix]</span>
+    <span class="s2">if </span><span class="s1">hasattr(sys</span><span class="s2">, </span><span class="s4">'base_prefix'</span><span class="s1">) </span><span class="s2">and </span><span class="s1">sys.base_prefix != sys.prefix:</span>
+        <span class="s1">stems.append(sys.base_prefix)</span>
+    <span class="s2">elif </span><span class="s1">hasattr(sys</span><span class="s2">, </span><span class="s4">'real_prefix'</span><span class="s1">) </span><span class="s2">and </span><span class="s1">sys.real_prefix != sys.prefix:</span>
+        <span class="s1">stems.append(sys.real_prefix)</span>
+
+    <span class="s1">sub_dirs = [</span><span class="s4">''</span><span class="s2">, </span><span class="s4">'lib'</span><span class="s2">, </span><span class="s4">'bin'</span><span class="s1">]</span>
+    <span class="s3"># generate possible combinations of directory trees and sub-directories</span>
+    <span class="s1">lib_dirs = []</span>
+    <span class="s2">for </span><span class="s1">stem </span><span class="s2">in </span><span class="s1">stems:</span>
+        <span class="s2">for </span><span class="s1">folder </span><span class="s2">in </span><span class="s1">sub_dirs:</span>
+            <span class="s1">lib_dirs.append(os.path.join(stem</span><span class="s2">, </span><span class="s1">folder))</span>
+
+    <span class="s3"># add system directory as well</span>
+    <span class="s2">if </span><span class="s4">'SYSTEMROOT' </span><span class="s2">in </span><span class="s1">os.environ:</span>
+        <span class="s1">lib_dirs.append(os.path.join(os.environ[</span><span class="s4">'SYSTEMROOT'</span><span class="s1">]</span><span class="s2">, </span><span class="s4">'System32'</span><span class="s1">))</span>
+
+    <span class="s3"># search in the file system for possible candidates</span>
+    <span class="s1">major_version</span><span class="s2">, </span><span class="s1">minor_version = tuple(sys.version_info[:</span><span class="s5">2</span><span class="s1">])</span>
+    <span class="s1">implementation = platform.python_implementation()</span>
+    <span class="s2">if </span><span class="s1">implementation == </span><span class="s4">'CPython'</span><span class="s1">:</span>
+        <span class="s1">dllname = </span><span class="s4">f'python</span><span class="s2">{</span><span class="s1">major_version</span><span class="s2">}{</span><span class="s1">minor_version</span><span class="s2">}</span><span class="s4">.dll'</span>
+    <span class="s2">elif </span><span class="s1">implementation == </span><span class="s4">'PyPy'</span><span class="s1">:</span>
+        <span class="s1">dllname = </span><span class="s4">f'libpypy</span><span class="s2">{</span><span class="s1">major_version</span><span class="s2">}</span><span class="s4">-c.dll'</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">dllname = </span><span class="s4">'Unknown platform {implementation}' </span>
+    <span class="s1">print(</span><span class="s4">&quot;Looking for %s&quot; </span><span class="s1">% dllname)</span>
+    <span class="s2">for </span><span class="s1">folder </span><span class="s2">in </span><span class="s1">lib_dirs:</span>
+        <span class="s1">dll = os.path.join(folder</span><span class="s2">, </span><span class="s1">dllname)</span>
+        <span class="s2">if </span><span class="s1">os.path.exists(dll):</span>
+            <span class="s2">return </span><span class="s1">dll</span>
+ 
+    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;%s not found in %s&quot; </span><span class="s1">% (dllname</span><span class="s2">, </span><span class="s1">lib_dirs))</span>
+
+<span class="s2">def </span><span class="s1">dump_table(dll):</span>
+    <span class="s1">st = subprocess.check_output([</span><span class="s4">&quot;objdump.exe&quot;</span><span class="s2">, </span><span class="s4">&quot;-p&quot;</span><span class="s2">, </span><span class="s1">dll])</span>
+    <span class="s2">return </span><span class="s1">st.split(</span><span class="s6">b'</span><span class="s2">\n</span><span class="s6">'</span><span class="s1">)</span>
+
+<span class="s2">def </span><span class="s1">generate_def(dll</span><span class="s2">, </span><span class="s1">dfile):</span>
+    <span class="s0">&quot;&quot;&quot;Given a dll file location,  get all its exported symbols and dump them 
+    into the given def file. 
+ 
+    The .def file will be overwritten&quot;&quot;&quot;</span>
+    <span class="s1">dump = dump_table(dll)</span>
+    <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(len(dump)):</span>
+        <span class="s2">if </span><span class="s1">_START.match(dump[i].decode()):</span>
+            <span class="s2">break</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Symbol table not found&quot;</span><span class="s1">)</span>
+
+    <span class="s1">syms = []</span>
+    <span class="s2">for </span><span class="s1">j </span><span class="s2">in </span><span class="s1">range(i+</span><span class="s5">1</span><span class="s2">, </span><span class="s1">len(dump)):</span>
+        <span class="s1">m = _TABLE.match(dump[j].decode())</span>
+        <span class="s2">if </span><span class="s1">m:</span>
+            <span class="s1">syms.append((int(m.group(</span><span class="s5">1</span><span class="s1">).strip())</span><span class="s2">, </span><span class="s1">m.group(</span><span class="s5">2</span><span class="s1">)))</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">break</span>
+
+    <span class="s2">if </span><span class="s1">len(syms) == </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s1">log.warn(</span><span class="s4">'No symbols found in %s' </span><span class="s1">% dll)</span>
+
+    <span class="s2">with </span><span class="s1">open(dfile</span><span class="s2">, </span><span class="s4">'w'</span><span class="s1">) </span><span class="s2">as </span><span class="s1">d:</span>
+        <span class="s1">d.write(</span><span class="s4">'LIBRARY        %s</span><span class="s2">\n</span><span class="s4">' </span><span class="s1">% os.path.basename(dll))</span>
+        <span class="s1">d.write(</span><span class="s4">';CODE          PRELOAD MOVEABLE DISCARDABLE</span><span class="s2">\n</span><span class="s4">'</span><span class="s1">)</span>
+        <span class="s1">d.write(</span><span class="s4">';DATA          PRELOAD SINGLE</span><span class="s2">\n</span><span class="s4">'</span><span class="s1">)</span>
+        <span class="s1">d.write(</span><span class="s4">'</span><span class="s2">\n</span><span class="s4">EXPORTS</span><span class="s2">\n</span><span class="s4">'</span><span class="s1">)</span>
+        <span class="s2">for </span><span class="s1">s </span><span class="s2">in </span><span class="s1">syms:</span>
+            <span class="s3">#d.write('@%d    %s\n' % (s[0], s[1]))</span>
+            <span class="s1">d.write(</span><span class="s4">'%s</span><span class="s2">\n</span><span class="s4">' </span><span class="s1">% s[</span><span class="s5">1</span><span class="s1">])</span>
+
+<span class="s2">def </span><span class="s1">find_dll(dll_name):</span>
+
+    <span class="s1">arch = {</span><span class="s4">'AMD64' </span><span class="s1">: </span><span class="s4">'amd64'</span><span class="s2">,</span>
+            <span class="s4">'Intel' </span><span class="s1">: </span><span class="s4">'x86'</span><span class="s1">}[get_build_architecture()]</span>
+
+    <span class="s2">def </span><span class="s1">_find_dll_in_winsxs(dll_name):</span>
+        <span class="s3"># Walk through the WinSxS directory to find the dll.</span>
+        <span class="s1">winsxs_path = os.path.join(os.environ.get(</span><span class="s4">'WINDIR'</span><span class="s2">, </span><span class="s4">r'C:\WINDOWS'</span><span class="s1">)</span><span class="s2">,</span>
+                                   <span class="s4">'winsxs'</span><span class="s1">)</span>
+        <span class="s2">if not </span><span class="s1">os.path.exists(winsxs_path):</span>
+            <span class="s2">return None</span>
+        <span class="s2">for </span><span class="s1">root</span><span class="s2">, </span><span class="s1">dirs</span><span class="s2">, </span><span class="s1">files </span><span class="s2">in </span><span class="s1">os.walk(winsxs_path):</span>
+            <span class="s2">if </span><span class="s1">dll_name </span><span class="s2">in </span><span class="s1">files </span><span class="s2">and </span><span class="s1">arch </span><span class="s2">in </span><span class="s1">root:</span>
+                <span class="s2">return </span><span class="s1">os.path.join(root</span><span class="s2">, </span><span class="s1">dll_name)</span>
+        <span class="s2">return None</span>
+
+    <span class="s2">def </span><span class="s1">_find_dll_in_path(dll_name):</span>
+        <span class="s3"># First, look in the Python directory, then scan PATH for</span>
+        <span class="s3"># the given dll name.</span>
+        <span class="s2">for </span><span class="s1">path </span><span class="s2">in </span><span class="s1">[sys.prefix] + os.environ[</span><span class="s4">'PATH'</span><span class="s1">].split(</span><span class="s4">';'</span><span class="s1">):</span>
+            <span class="s1">filepath = os.path.join(path</span><span class="s2">, </span><span class="s1">dll_name)</span>
+            <span class="s2">if </span><span class="s1">os.path.exists(filepath):</span>
+                <span class="s2">return </span><span class="s1">os.path.abspath(filepath)</span>
+
+    <span class="s2">return </span><span class="s1">_find_dll_in_winsxs(dll_name) </span><span class="s2">or </span><span class="s1">_find_dll_in_path(dll_name)</span>
+
+<span class="s2">def </span><span class="s1">build_msvcr_library(debug=</span><span class="s2">False</span><span class="s1">):</span>
+    <span class="s2">if </span><span class="s1">os.name != </span><span class="s4">'nt'</span><span class="s1">:</span>
+        <span class="s2">return False</span>
+
+    <span class="s3"># If the version number is None, then we couldn't find the MSVC runtime at</span>
+    <span class="s3"># all, because we are running on a Python distribution which is customed</span>
+    <span class="s3"># compiled; trust that the compiler is the same as the one available to us</span>
+    <span class="s3"># now, and that it is capable of linking with the correct runtime without</span>
+    <span class="s3"># any extra options.</span>
+    <span class="s1">msvcr_ver = msvc_runtime_major()</span>
+    <span class="s2">if </span><span class="s1">msvcr_ver </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">log.debug(</span><span class="s4">'Skip building import library: '</span>
+                  <span class="s4">'Runtime is not compiled with MSVC'</span><span class="s1">)</span>
+        <span class="s2">return False</span>
+
+    <span class="s3"># Skip using a custom library for versions &lt; MSVC 8.0</span>
+    <span class="s2">if </span><span class="s1">msvcr_ver &lt; </span><span class="s5">80</span><span class="s1">:</span>
+        <span class="s1">log.debug(</span><span class="s4">'Skip building msvcr library:'</span>
+                  <span class="s4">' custom functionality not present'</span><span class="s1">)</span>
+        <span class="s2">return False</span>
+
+    <span class="s1">msvcr_name = msvc_runtime_library()</span>
+    <span class="s2">if </span><span class="s1">debug:</span>
+        <span class="s1">msvcr_name += </span><span class="s4">'d'</span>
+
+    <span class="s3"># Skip if custom library already exists</span>
+    <span class="s1">out_name = </span><span class="s4">&quot;lib%s.a&quot; </span><span class="s1">% msvcr_name</span>
+    <span class="s1">out_file = os.path.join(sys.prefix</span><span class="s2">, </span><span class="s4">'libs'</span><span class="s2">, </span><span class="s1">out_name)</span>
+    <span class="s2">if </span><span class="s1">os.path.isfile(out_file):</span>
+        <span class="s1">log.debug(</span><span class="s4">'Skip building msvcr library: &quot;%s&quot; exists' </span><span class="s1">%</span>
+                  <span class="s1">(out_file</span><span class="s2">,</span><span class="s1">))</span>
+        <span class="s2">return True</span>
+
+    <span class="s3"># Find the msvcr dll</span>
+    <span class="s1">msvcr_dll_name = msvcr_name + </span><span class="s4">'.dll'</span>
+    <span class="s1">dll_file = find_dll(msvcr_dll_name)</span>
+    <span class="s2">if not </span><span class="s1">dll_file:</span>
+        <span class="s1">log.warn(</span><span class="s4">'Cannot build msvcr library: &quot;%s&quot; not found' </span><span class="s1">%</span>
+                 <span class="s1">msvcr_dll_name)</span>
+        <span class="s2">return False</span>
+
+    <span class="s1">def_name = </span><span class="s4">&quot;lib%s.def&quot; </span><span class="s1">% msvcr_name</span>
+    <span class="s1">def_file = os.path.join(sys.prefix</span><span class="s2">, </span><span class="s4">'libs'</span><span class="s2">, </span><span class="s1">def_name)</span>
+
+    <span class="s1">log.info(</span><span class="s4">'Building msvcr library: &quot;%s&quot; (from %s)' </span><span class="s1">\</span>
+             <span class="s1">% (out_file</span><span class="s2">, </span><span class="s1">dll_file))</span>
+
+    <span class="s3"># Generate a symbol definition file from the msvcr dll</span>
+    <span class="s1">generate_def(dll_file</span><span class="s2">, </span><span class="s1">def_file)</span>
+
+    <span class="s3"># Create a custom mingw library for the given symbol definitions</span>
+    <span class="s1">cmd = [</span><span class="s4">'dlltool'</span><span class="s2">, </span><span class="s4">'-d'</span><span class="s2">, </span><span class="s1">def_file</span><span class="s2">, </span><span class="s4">'-l'</span><span class="s2">, </span><span class="s1">out_file]</span>
+    <span class="s1">retcode = subprocess.call(cmd)</span>
+
+    <span class="s3"># Clean up symbol definitions</span>
+    <span class="s1">os.remove(def_file)</span>
+
+    <span class="s2">return </span><span class="s1">(</span><span class="s2">not </span><span class="s1">retcode)</span>
+
+<span class="s2">def </span><span class="s1">build_import_library():</span>
+    <span class="s2">if </span><span class="s1">os.name != </span><span class="s4">'nt'</span><span class="s1">:</span>
+        <span class="s2">return</span>
+
+    <span class="s1">arch = get_build_architecture()</span>
+    <span class="s2">if </span><span class="s1">arch == </span><span class="s4">'AMD64'</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">_build_import_library_amd64()</span>
+    <span class="s2">elif </span><span class="s1">arch == </span><span class="s4">'Intel'</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">_build_import_library_x86()</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Unhandled arch %s&quot; </span><span class="s1">% arch)</span>
+
+<span class="s2">def </span><span class="s1">_check_for_import_lib():</span>
+    <span class="s0">&quot;&quot;&quot;Check if an import library for the Python runtime already exists.&quot;&quot;&quot;</span>
+    <span class="s1">major_version</span><span class="s2">, </span><span class="s1">minor_version = tuple(sys.version_info[:</span><span class="s5">2</span><span class="s1">])</span>
+
+    <span class="s3"># patterns for the file name of the library itself</span>
+    <span class="s1">patterns = [</span><span class="s4">'libpython%d%d.a'</span><span class="s2">,</span>
+                <span class="s4">'libpython%d%d.dll.a'</span><span class="s2">,</span>
+                <span class="s4">'libpython%d.%d.dll.a'</span><span class="s1">]</span>
+
+    <span class="s3"># directory trees that may contain the library</span>
+    <span class="s1">stems = [sys.prefix]</span>
+    <span class="s2">if </span><span class="s1">hasattr(sys</span><span class="s2">, </span><span class="s4">'base_prefix'</span><span class="s1">) </span><span class="s2">and </span><span class="s1">sys.base_prefix != sys.prefix:</span>
+        <span class="s1">stems.append(sys.base_prefix)</span>
+    <span class="s2">elif </span><span class="s1">hasattr(sys</span><span class="s2">, </span><span class="s4">'real_prefix'</span><span class="s1">) </span><span class="s2">and </span><span class="s1">sys.real_prefix != sys.prefix:</span>
+        <span class="s1">stems.append(sys.real_prefix)</span>
+
+    <span class="s3"># possible subdirectories within those trees where it is placed</span>
+    <span class="s1">sub_dirs = [</span><span class="s4">'libs'</span><span class="s2">, </span><span class="s4">'lib'</span><span class="s1">]</span>
+
+    <span class="s3"># generate a list of candidate locations</span>
+    <span class="s1">candidates = []</span>
+    <span class="s2">for </span><span class="s1">pat </span><span class="s2">in </span><span class="s1">patterns:</span>
+        <span class="s1">filename = pat % (major_version</span><span class="s2">, </span><span class="s1">minor_version)</span>
+        <span class="s2">for </span><span class="s1">stem_dir </span><span class="s2">in </span><span class="s1">stems:</span>
+            <span class="s2">for </span><span class="s1">folder </span><span class="s2">in </span><span class="s1">sub_dirs:</span>
+                <span class="s1">candidates.append(os.path.join(stem_dir</span><span class="s2">, </span><span class="s1">folder</span><span class="s2">, </span><span class="s1">filename))</span>
+
+    <span class="s3"># test the filesystem to see if we can find any of these</span>
+    <span class="s2">for </span><span class="s1">fullname </span><span class="s2">in </span><span class="s1">candidates:</span>
+        <span class="s2">if </span><span class="s1">os.path.isfile(fullname):</span>
+            <span class="s3"># already exists, in location given</span>
+            <span class="s2">return </span><span class="s1">(</span><span class="s2">True, </span><span class="s1">fullname)</span>
+
+    <span class="s3"># needs to be built, preferred location given first</span>
+    <span class="s2">return </span><span class="s1">(</span><span class="s2">False, </span><span class="s1">candidates[</span><span class="s5">0</span><span class="s1">])</span>
+
+<span class="s2">def </span><span class="s1">_build_import_library_amd64():</span>
+    <span class="s1">out_exists</span><span class="s2">, </span><span class="s1">out_file = _check_for_import_lib()</span>
+    <span class="s2">if </span><span class="s1">out_exists:</span>
+        <span class="s1">log.debug(</span><span class="s4">'Skip building import library: &quot;%s&quot; exists'</span><span class="s2">, </span><span class="s1">out_file)</span>
+        <span class="s2">return</span>
+
+    <span class="s3"># get the runtime dll for which we are building import library</span>
+    <span class="s1">dll_file = find_python_dll()</span>
+    <span class="s1">log.info(</span><span class="s4">'Building import library (arch=AMD64): &quot;%s&quot; (from %s)' </span><span class="s1">%</span>
+             <span class="s1">(out_file</span><span class="s2">, </span><span class="s1">dll_file))</span>
+
+    <span class="s3"># generate symbol list from this library</span>
+    <span class="s1">def_name = </span><span class="s4">&quot;python%d%d.def&quot; </span><span class="s1">% tuple(sys.version_info[:</span><span class="s5">2</span><span class="s1">])</span>
+    <span class="s1">def_file = os.path.join(sys.prefix</span><span class="s2">, </span><span class="s4">'libs'</span><span class="s2">, </span><span class="s1">def_name)</span>
+    <span class="s1">generate_def(dll_file</span><span class="s2">, </span><span class="s1">def_file)</span>
+
+    <span class="s3"># generate import library from this symbol list</span>
+    <span class="s1">cmd = [</span><span class="s4">'dlltool'</span><span class="s2">, </span><span class="s4">'-d'</span><span class="s2">, </span><span class="s1">def_file</span><span class="s2">, </span><span class="s4">'-l'</span><span class="s2">, </span><span class="s1">out_file]</span>
+    <span class="s1">subprocess.check_call(cmd)</span>
+
+<span class="s2">def </span><span class="s1">_build_import_library_x86():</span>
+    <span class="s0">&quot;&quot;&quot; Build the import libraries for Mingw32-gcc on Windows 
+    &quot;&quot;&quot;</span>
+    <span class="s1">out_exists</span><span class="s2">, </span><span class="s1">out_file = _check_for_import_lib()</span>
+    <span class="s2">if </span><span class="s1">out_exists:</span>
+        <span class="s1">log.debug(</span><span class="s4">'Skip building import library: &quot;%s&quot; exists'</span><span class="s2">, </span><span class="s1">out_file)</span>
+        <span class="s2">return</span>
+
+    <span class="s1">lib_name = </span><span class="s4">&quot;python%d%d.lib&quot; </span><span class="s1">% tuple(sys.version_info[:</span><span class="s5">2</span><span class="s1">])</span>
+    <span class="s1">lib_file = os.path.join(sys.prefix</span><span class="s2">, </span><span class="s4">'libs'</span><span class="s2">, </span><span class="s1">lib_name)</span>
+    <span class="s2">if not </span><span class="s1">os.path.isfile(lib_file):</span>
+        <span class="s3"># didn't find library file in virtualenv, try base distribution, too,</span>
+        <span class="s3"># and use that instead if found there. for Python 2.7 venvs, the base</span>
+        <span class="s3"># directory is in attribute real_prefix instead of base_prefix.</span>
+        <span class="s2">if </span><span class="s1">hasattr(sys</span><span class="s2">, </span><span class="s4">'base_prefix'</span><span class="s1">):</span>
+            <span class="s1">base_lib = os.path.join(sys.base_prefix</span><span class="s2">, </span><span class="s4">'libs'</span><span class="s2">, </span><span class="s1">lib_name)</span>
+        <span class="s2">elif </span><span class="s1">hasattr(sys</span><span class="s2">, </span><span class="s4">'real_prefix'</span><span class="s1">):</span>
+            <span class="s1">base_lib = os.path.join(sys.real_prefix</span><span class="s2">, </span><span class="s4">'libs'</span><span class="s2">, </span><span class="s1">lib_name)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">base_lib = </span><span class="s4">''  </span><span class="s3"># os.path.isfile('') == False</span>
+
+        <span class="s2">if </span><span class="s1">os.path.isfile(base_lib):</span>
+            <span class="s1">lib_file = base_lib</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">log.warn(</span><span class="s4">'Cannot build import library: &quot;%s&quot; not found'</span><span class="s2">, </span><span class="s1">lib_file)</span>
+            <span class="s2">return</span>
+    <span class="s1">log.info(</span><span class="s4">'Building import library (ARCH=x86): &quot;%s&quot;'</span><span class="s2">, </span><span class="s1">out_file)</span>
+
+    <span class="s2">from </span><span class="s1">numpy.distutils </span><span class="s2">import </span><span class="s1">lib2def</span>
+
+    <span class="s1">def_name = </span><span class="s4">&quot;python%d%d.def&quot; </span><span class="s1">% tuple(sys.version_info[:</span><span class="s5">2</span><span class="s1">])</span>
+    <span class="s1">def_file = os.path.join(sys.prefix</span><span class="s2">, </span><span class="s4">'libs'</span><span class="s2">, </span><span class="s1">def_name)</span>
+    <span class="s1">nm_output = lib2def.getnm(</span>
+            <span class="s1">lib2def.DEFAULT_NM + [lib_file]</span><span class="s2">, </span><span class="s1">shell=</span><span class="s2">False</span><span class="s1">)</span>
+    <span class="s1">dlist</span><span class="s2">, </span><span class="s1">flist = lib2def.parse_nm(nm_output)</span>
+    <span class="s2">with </span><span class="s1">open(def_file</span><span class="s2">, </span><span class="s4">'w'</span><span class="s1">) </span><span class="s2">as </span><span class="s1">fid:</span>
+        <span class="s1">lib2def.output_def(dlist</span><span class="s2">, </span><span class="s1">flist</span><span class="s2">, </span><span class="s1">lib2def.DEF_HEADER</span><span class="s2">, </span><span class="s1">fid)</span>
+
+    <span class="s1">dll_name = find_python_dll ()</span>
+
+    <span class="s1">cmd = [</span><span class="s4">&quot;dlltool&quot;</span><span class="s2">,</span>
+           <span class="s4">&quot;--dllname&quot;</span><span class="s2">, </span><span class="s1">dll_name</span><span class="s2">,</span>
+           <span class="s4">&quot;--def&quot;</span><span class="s2">, </span><span class="s1">def_file</span><span class="s2">,</span>
+           <span class="s4">&quot;--output-lib&quot;</span><span class="s2">, </span><span class="s1">out_file]</span>
+    <span class="s1">status = subprocess.check_output(cmd)</span>
+    <span class="s2">if </span><span class="s1">status:</span>
+        <span class="s1">log.warn(</span><span class="s4">'Failed to build import library for gcc. Linking will fail.'</span><span class="s1">)</span>
+    <span class="s2">return</span>
+
+<span class="s3">#=====================================</span>
+<span class="s3"># Dealing with Visual Studio MANIFESTS</span>
+<span class="s3">#=====================================</span>
+
+<span class="s3"># Functions to deal with visual studio manifests. Manifest are a mechanism to</span>
+<span class="s3"># enforce strong DLL versioning on windows, and has nothing to do with</span>
+<span class="s3"># distutils MANIFEST. manifests are XML files with version info, and used by</span>
+<span class="s3"># the OS loader; they are necessary when linking against a DLL not in the</span>
+<span class="s3"># system path; in particular, official python 2.6 binary is built against the</span>
+<span class="s3"># MS runtime 9 (the one from VS 2008), which is not available on most windows</span>
+<span class="s3"># systems; python 2.6 installer does install it in the Win SxS (Side by side)</span>
+<span class="s3"># directory, but this requires the manifest for this to work. This is a big</span>
+<span class="s3"># mess, thanks MS for a wonderful system.</span>
+
+<span class="s3"># XXX: ideally, we should use exactly the same version as used by python. I</span>
+<span class="s3"># submitted a patch to get this version, but it was only included for python</span>
+<span class="s3"># 2.6.1 and above. So for versions below, we use a &quot;best guess&quot;.</span>
+<span class="s1">_MSVCRVER_TO_FULLVER = {}</span>
+<span class="s2">if </span><span class="s1">sys.platform == </span><span class="s4">'win32'</span><span class="s1">:</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s2">import </span><span class="s1">msvcrt</span>
+        <span class="s3"># I took one version in my SxS directory: no idea if it is the good</span>
+        <span class="s3"># one, and we can't retrieve it from python</span>
+        <span class="s1">_MSVCRVER_TO_FULLVER[</span><span class="s4">'80'</span><span class="s1">] = </span><span class="s4">&quot;8.0.50727.42&quot;</span>
+        <span class="s1">_MSVCRVER_TO_FULLVER[</span><span class="s4">'90'</span><span class="s1">] = </span><span class="s4">&quot;9.0.21022.8&quot;</span>
+        <span class="s3"># Value from msvcrt.CRT_ASSEMBLY_VERSION under Python 3.3.0</span>
+        <span class="s3"># on Windows XP:</span>
+        <span class="s1">_MSVCRVER_TO_FULLVER[</span><span class="s4">'100'</span><span class="s1">] = </span><span class="s4">&quot;10.0.30319.460&quot;</span>
+        <span class="s1">crt_ver = getattr(msvcrt</span><span class="s2">, </span><span class="s4">'CRT_ASSEMBLY_VERSION'</span><span class="s2">, None</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">crt_ver </span><span class="s2">is not None</span><span class="s1">:  </span><span class="s3"># Available at least back to Python 3.3</span>
+            <span class="s1">maj</span><span class="s2">, </span><span class="s1">min = re.match(</span><span class="s4">r'(\d+)\.(\d)'</span><span class="s2">, </span><span class="s1">crt_ver).groups()</span>
+            <span class="s1">_MSVCRVER_TO_FULLVER[maj + min] = crt_ver</span>
+            <span class="s2">del </span><span class="s1">maj</span><span class="s2">, </span><span class="s1">min</span>
+        <span class="s2">del </span><span class="s1">crt_ver</span>
+    <span class="s2">except </span><span class="s1">ImportError:</span>
+        <span class="s3"># If we are here, means python was not built with MSVC. Not sure what</span>
+        <span class="s3"># to do in that case: manifest building will fail, but it should not be</span>
+        <span class="s3"># used in that case anyway</span>
+        <span class="s1">log.warn(</span><span class="s4">'Cannot import msvcrt: using manifest will not be possible'</span><span class="s1">)</span>
+
+<span class="s2">def </span><span class="s1">msvc_manifest_xml(maj</span><span class="s2">, </span><span class="s1">min):</span>
+    <span class="s0">&quot;&quot;&quot;Given a major and minor version of the MSVCR, returns the 
+    corresponding XML file.&quot;&quot;&quot;</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">fullver = _MSVCRVER_TO_FULLVER[str(maj * </span><span class="s5">10 </span><span class="s1">+ min)]</span>
+    <span class="s2">except </span><span class="s1">KeyError:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Version %d,%d of MSVCRT not supported yet&quot; </span><span class="s1">%</span>
+                         <span class="s1">(maj</span><span class="s2">, </span><span class="s1">min)) </span><span class="s2">from None</span>
+    <span class="s3"># Don't be fooled, it looks like an XML, but it is not. In particular, it</span>
+    <span class="s3"># should not have any space before starting, and its size should be</span>
+    <span class="s3"># divisible by 4, most likely for alignment constraints when the xml is</span>
+    <span class="s3"># embedded in the binary...</span>
+    <span class="s3"># This template was copied directly from the python 2.6 binary (using</span>
+    <span class="s3"># strings.exe from mingw on python.exe).</span>
+    <span class="s1">template = textwrap.dedent(</span><span class="s4">&quot;&quot;&quot;</span><span class="s2">\ 
+        </span><span class="s4">&lt;assembly xmlns=&quot;urn:schemas-microsoft-com:asm.v1&quot; manifestVersion=&quot;1.0&quot;&gt; 
+          &lt;trustInfo xmlns=&quot;urn:schemas-microsoft-com:asm.v3&quot;&gt; 
+            &lt;security&gt; 
+              &lt;requestedPrivileges&gt; 
+                &lt;requestedExecutionLevel level=&quot;asInvoker&quot; uiAccess=&quot;false&quot;&gt;&lt;/requestedExecutionLevel&gt; 
+              &lt;/requestedPrivileges&gt; 
+            &lt;/security&gt; 
+          &lt;/trustInfo&gt; 
+          &lt;dependency&gt; 
+            &lt;dependentAssembly&gt; 
+              &lt;assemblyIdentity type=&quot;win32&quot; name=&quot;Microsoft.VC%(maj)d%(min)d.CRT&quot; version=&quot;%(fullver)s&quot; processorArchitecture=&quot;*&quot; publicKeyToken=&quot;1fc8b3b9a1e18e3b&quot;&gt;&lt;/assemblyIdentity&gt; 
+            &lt;/dependentAssembly&gt; 
+          &lt;/dependency&gt; 
+        &lt;/assembly&gt;&quot;&quot;&quot;</span><span class="s1">)</span>
+
+    <span class="s2">return </span><span class="s1">template % {</span><span class="s4">'fullver'</span><span class="s1">: fullver</span><span class="s2">, </span><span class="s4">'maj'</span><span class="s1">: maj</span><span class="s2">, </span><span class="s4">'min'</span><span class="s1">: min}</span>
+
+<span class="s2">def </span><span class="s1">manifest_rc(name</span><span class="s2">, </span><span class="s1">type=</span><span class="s4">'dll'</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot;Return the rc file used to generate the res file which will be embedded 
+    as manifest for given manifest file name, of given type ('dll' or 
+    'exe'). 
+ 
+    Parameters 
+    ---------- 
+    name : str 
+            name of the manifest file to embed 
+    type : str {'dll', 'exe'} 
+            type of the binary which will embed the manifest 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">type == </span><span class="s4">'dll'</span><span class="s1">:</span>
+        <span class="s1">rctype = </span><span class="s5">2</span>
+    <span class="s2">elif </span><span class="s1">type == </span><span class="s4">'exe'</span><span class="s1">:</span>
+        <span class="s1">rctype = </span><span class="s5">1</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Type %s not supported&quot; </span><span class="s1">% type)</span>
+
+    <span class="s2">return </span><span class="s4">&quot;&quot;&quot;</span><span class="s2">\ 
+</span><span class="s4">#include &quot;winuser.h&quot; 
+%d RT_MANIFEST %s&quot;&quot;&quot; </span><span class="s1">% (rctype</span><span class="s2">, </span><span class="s1">name)</span>
+
+<span class="s2">def </span><span class="s1">check_embedded_msvcr_match_linked(msver):</span>
+    <span class="s0">&quot;&quot;&quot;msver is the ms runtime version used for the MANIFEST.&quot;&quot;&quot;</span>
+    <span class="s3"># check msvcr major version are the same for linking and</span>
+    <span class="s3"># embedding</span>
+    <span class="s1">maj = msvc_runtime_major()</span>
+    <span class="s2">if </span><span class="s1">maj:</span>
+        <span class="s2">if not </span><span class="s1">maj == int(msver):</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span>
+                  <span class="s4">&quot;Discrepancy between linked msvcr &quot; </span><span class="s1">\</span>
+                  <span class="s4">&quot;(%d) and the one about to be embedded &quot; </span><span class="s1">\</span>
+                  <span class="s4">&quot;(%d)&quot; </span><span class="s1">% (int(msver)</span><span class="s2">, </span><span class="s1">maj))</span>
+
+<span class="s2">def </span><span class="s1">configtest_name(config):</span>
+    <span class="s1">base = os.path.basename(config._gen_temp_sourcefile(</span><span class="s4">&quot;yo&quot;</span><span class="s2">, </span><span class="s1">[]</span><span class="s2">, </span><span class="s4">&quot;c&quot;</span><span class="s1">))</span>
+    <span class="s2">return </span><span class="s1">os.path.splitext(base)[</span><span class="s5">0</span><span class="s1">]</span>
+
+<span class="s2">def </span><span class="s1">manifest_name(config):</span>
+    <span class="s3"># Get configest name (including suffix)</span>
+    <span class="s1">root = configtest_name(config)</span>
+    <span class="s1">exext = config.compiler.exe_extension</span>
+    <span class="s2">return </span><span class="s1">root + exext + </span><span class="s4">&quot;.manifest&quot;</span>
+
+<span class="s2">def </span><span class="s1">rc_name(config):</span>
+    <span class="s3"># Get configtest name (including suffix)</span>
+    <span class="s1">root = configtest_name(config)</span>
+    <span class="s2">return </span><span class="s1">root + </span><span class="s4">&quot;.rc&quot;</span>
+
+<span class="s2">def </span><span class="s1">generate_manifest(config):</span>
+    <span class="s1">msver = get_build_msvc_version()</span>
+    <span class="s2">if </span><span class="s1">msver </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">msver &gt;= </span><span class="s5">8</span><span class="s1">:</span>
+            <span class="s1">check_embedded_msvcr_match_linked(msver)</span>
+            <span class="s1">ma_str</span><span class="s2">, </span><span class="s1">mi_str = str(msver).split(</span><span class="s4">'.'</span><span class="s1">)</span>
+            <span class="s3"># Write the manifest file</span>
+            <span class="s1">manxml = msvc_manifest_xml(int(ma_str)</span><span class="s2">, </span><span class="s1">int(mi_str))</span>
+            <span class="s2">with </span><span class="s1">open(manifest_name(config)</span><span class="s2">, </span><span class="s4">&quot;w&quot;</span><span class="s1">) </span><span class="s2">as </span><span class="s1">man:</span>
+                <span class="s1">config.temp_files.append(manifest_name(config))</span>
+                <span class="s1">man.write(manxml)</span>
+</pre>
+</body>
+</html>

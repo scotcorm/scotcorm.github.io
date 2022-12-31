@@ -1,0 +1,1360 @@
+<html>
+<head>
+<title>test_writers.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #6a8759;}
+.s4 { color: #808080;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test_writers.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">datetime </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">date</span><span class="s0">,</span>
+    <span class="s1">datetime</span><span class="s0">,</span>
+    <span class="s1">timedelta</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">functools </span><span class="s0">import </span><span class="s1">partial</span>
+<span class="s0">from </span><span class="s1">io </span><span class="s0">import </span><span class="s1">BytesIO</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">re</span>
+
+<span class="s0">import </span><span class="s1">numpy </span><span class="s0">as </span><span class="s1">np</span>
+<span class="s0">import </span><span class="s1">pytest</span>
+
+<span class="s0">import </span><span class="s1">pandas.util._test_decorators </span><span class="s0">as </span><span class="s1">td</span>
+
+<span class="s0">import </span><span class="s1">pandas </span><span class="s0">as </span><span class="s1">pd</span>
+<span class="s0">from </span><span class="s1">pandas </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">DataFrame</span><span class="s0">,</span>
+    <span class="s1">Index</span><span class="s0">,</span>
+    <span class="s1">MultiIndex</span><span class="s0">,</span>
+    <span class="s1">get_option</span><span class="s0">,</span>
+    <span class="s1">set_option</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">import </span><span class="s1">pandas._testing </span><span class="s0">as </span><span class="s1">tm</span>
+
+<span class="s0">from </span><span class="s1">pandas.io.excel </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">ExcelFile</span><span class="s0">,</span>
+    <span class="s1">ExcelWriter</span><span class="s0">,</span>
+    <span class="s1">_OpenpyxlWriter</span><span class="s0">,</span>
+    <span class="s1">_XlsxWriter</span><span class="s0">,</span>
+    <span class="s1">_XlwtWriter</span><span class="s0">,</span>
+    <span class="s1">register_writer</span><span class="s0">,</span>
+<span class="s1">)</span>
+
+
+<span class="s1">@pytest.fixture</span>
+<span class="s0">def </span><span class="s1">path(ext):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Fixture to open file for use in each test case. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">with </span><span class="s1">tm.ensure_clean(ext) </span><span class="s0">as </span><span class="s1">file_path:</span>
+        <span class="s0">yield </span><span class="s1">file_path</span>
+
+
+<span class="s1">@pytest.fixture</span>
+<span class="s0">def </span><span class="s1">set_engine(engine</span><span class="s0">, </span><span class="s1">ext):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Fixture to set engine for use in each test case. 
+ 
+    Rather than requiring `engine=...` to be provided explicitly as an 
+    argument in each test, this fixture sets a global option to dictate 
+    which engine should be used to write Excel files. After executing 
+    the test it rolls back said change to the global option. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">option_name = </span><span class="s3">f&quot;io.excel.</span><span class="s0">{</span><span class="s1">ext.strip(</span><span class="s3">'.'</span><span class="s1">)</span><span class="s0">}</span><span class="s3">.writer&quot;</span>
+    <span class="s1">prev_engine = get_option(option_name)</span>
+    <span class="s1">set_option(option_name</span><span class="s0">, </span><span class="s1">engine)</span>
+    <span class="s0">yield</span>
+    <span class="s1">set_option(option_name</span><span class="s0">, </span><span class="s1">prev_engine)  </span><span class="s4"># Roll back option change</span>
+
+
+<span class="s1">@pytest.mark.parametrize(</span>
+    <span class="s3">&quot;ext&quot;</span><span class="s0">,</span>
+    <span class="s1">[</span>
+        <span class="s1">pytest.param(</span><span class="s3">&quot;.xlsx&quot;</span><span class="s0">, </span><span class="s1">marks=[td.skip_if_no(</span><span class="s3">&quot;openpyxl&quot;</span><span class="s1">)</span><span class="s0">, </span><span class="s1">td.skip_if_no(</span><span class="s3">&quot;xlrd&quot;</span><span class="s1">)])</span><span class="s0">,</span>
+        <span class="s1">pytest.param(</span><span class="s3">&quot;.xlsm&quot;</span><span class="s0">, </span><span class="s1">marks=[td.skip_if_no(</span><span class="s3">&quot;openpyxl&quot;</span><span class="s1">)</span><span class="s0">, </span><span class="s1">td.skip_if_no(</span><span class="s3">&quot;xlrd&quot;</span><span class="s1">)])</span><span class="s0">,</span>
+        <span class="s1">pytest.param(</span><span class="s3">&quot;.xls&quot;</span><span class="s0">, </span><span class="s1">marks=[td.skip_if_no(</span><span class="s3">&quot;xlwt&quot;</span><span class="s1">)</span><span class="s0">, </span><span class="s1">td.skip_if_no(</span><span class="s3">&quot;xlrd&quot;</span><span class="s1">)])</span><span class="s0">,</span>
+        <span class="s1">pytest.param(</span>
+            <span class="s3">&quot;.xlsx&quot;</span><span class="s0">, </span><span class="s1">marks=[td.skip_if_no(</span><span class="s3">&quot;xlsxwriter&quot;</span><span class="s1">)</span><span class="s0">, </span><span class="s1">td.skip_if_no(</span><span class="s3">&quot;xlrd&quot;</span><span class="s1">)]</span>
+        <span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">pytest.param(</span><span class="s3">&quot;.ods&quot;</span><span class="s0">, </span><span class="s1">marks=td.skip_if_no(</span><span class="s3">&quot;odf&quot;</span><span class="s1">))</span><span class="s0">,</span>
+    <span class="s1">]</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">class </span><span class="s1">TestRoundTrip:</span>
+    <span class="s1">@pytest.mark.parametrize(</span>
+        <span class="s3">&quot;header,expected&quot;</span><span class="s0">,</span>
+        <span class="s1">[(</span><span class="s0">None, </span><span class="s1">DataFrame([np.nan] * </span><span class="s5">4</span><span class="s1">))</span><span class="s0">, </span><span class="s1">(</span><span class="s5">0</span><span class="s0">, </span><span class="s1">DataFrame({</span><span class="s3">&quot;Unnamed: 0&quot;</span><span class="s1">: [np.nan] * </span><span class="s5">3</span><span class="s1">}))]</span><span class="s0">,</span>
+    <span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">test_read_one_empty_col_no_header(self</span><span class="s0">, </span><span class="s1">ext</span><span class="s0">, </span><span class="s1">header</span><span class="s0">, </span><span class="s1">expected):</span>
+        <span class="s4"># xref gh-12292</span>
+        <span class="s1">filename = </span><span class="s3">&quot;no_header&quot;</span>
+        <span class="s1">df = DataFrame([[</span><span class="s3">&quot;&quot;</span><span class="s0">, </span><span class="s5">1</span><span class="s0">, </span><span class="s5">100</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s3">&quot;&quot;</span><span class="s0">, </span><span class="s5">2</span><span class="s0">, </span><span class="s5">200</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s3">&quot;&quot;</span><span class="s0">, </span><span class="s5">3</span><span class="s0">, </span><span class="s5">300</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s3">&quot;&quot;</span><span class="s0">, </span><span class="s5">4</span><span class="s0">, </span><span class="s5">400</span><span class="s1">]])</span>
+
+        <span class="s0">with </span><span class="s1">tm.ensure_clean(ext) </span><span class="s0">as </span><span class="s1">path:</span>
+            <span class="s1">df.to_excel(path</span><span class="s0">, </span><span class="s1">filename</span><span class="s0">, </span><span class="s1">index=</span><span class="s0">False, </span><span class="s1">header=</span><span class="s0">False</span><span class="s1">)</span>
+            <span class="s1">result = pd.read_excel(</span>
+                <span class="s1">path</span><span class="s0">, </span><span class="s1">sheet_name=filename</span><span class="s0">, </span><span class="s1">usecols=[</span><span class="s5">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">header=header</span>
+            <span class="s1">)</span>
+
+        <span class="s1">tm.assert_frame_equal(result</span><span class="s0">, </span><span class="s1">expected)</span>
+
+    <span class="s1">@pytest.mark.parametrize(</span>
+        <span class="s3">&quot;header,expected&quot;</span><span class="s0">,</span>
+        <span class="s1">[(</span><span class="s0">None, </span><span class="s1">DataFrame([</span><span class="s5">0</span><span class="s1">] + [np.nan] * </span><span class="s5">4</span><span class="s1">))</span><span class="s0">, </span><span class="s1">(</span><span class="s5">0</span><span class="s0">, </span><span class="s1">DataFrame([np.nan] * </span><span class="s5">4</span><span class="s1">))]</span><span class="s0">,</span>
+    <span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">test_read_one_empty_col_with_header(self</span><span class="s0">, </span><span class="s1">ext</span><span class="s0">, </span><span class="s1">header</span><span class="s0">, </span><span class="s1">expected):</span>
+        <span class="s1">filename = </span><span class="s3">&quot;with_header&quot;</span>
+        <span class="s1">df = DataFrame([[</span><span class="s3">&quot;&quot;</span><span class="s0">, </span><span class="s5">1</span><span class="s0">, </span><span class="s5">100</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s3">&quot;&quot;</span><span class="s0">, </span><span class="s5">2</span><span class="s0">, </span><span class="s5">200</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s3">&quot;&quot;</span><span class="s0">, </span><span class="s5">3</span><span class="s0">, </span><span class="s5">300</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s3">&quot;&quot;</span><span class="s0">, </span><span class="s5">4</span><span class="s0">, </span><span class="s5">400</span><span class="s1">]])</span>
+
+        <span class="s0">with </span><span class="s1">tm.ensure_clean(ext) </span><span class="s0">as </span><span class="s1">path:</span>
+            <span class="s1">df.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;with_header&quot;</span><span class="s0">, </span><span class="s1">index=</span><span class="s0">False, </span><span class="s1">header=</span><span class="s0">True</span><span class="s1">)</span>
+            <span class="s1">result = pd.read_excel(</span>
+                <span class="s1">path</span><span class="s0">, </span><span class="s1">sheet_name=filename</span><span class="s0">, </span><span class="s1">usecols=[</span><span class="s5">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">header=header</span>
+            <span class="s1">)</span>
+
+        <span class="s1">tm.assert_frame_equal(result</span><span class="s0">, </span><span class="s1">expected)</span>
+
+    <span class="s0">def </span><span class="s1">test_set_column_names_in_parameter(self</span><span class="s0">, </span><span class="s1">ext):</span>
+        <span class="s4"># GH 12870 : pass down column names associated with</span>
+        <span class="s4"># keyword argument names</span>
+        <span class="s1">refdf = DataFrame([[</span><span class="s5">1</span><span class="s0">, </span><span class="s3">&quot;foo&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s5">2</span><span class="s0">, </span><span class="s3">&quot;bar&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s5">3</span><span class="s0">, </span><span class="s3">&quot;baz&quot;</span><span class="s1">]]</span><span class="s0">, </span><span class="s1">columns=[</span><span class="s3">&quot;a&quot;</span><span class="s0">, </span><span class="s3">&quot;b&quot;</span><span class="s1">])</span>
+
+        <span class="s0">with </span><span class="s1">tm.ensure_clean(ext) </span><span class="s0">as </span><span class="s1">pth:</span>
+            <span class="s0">with </span><span class="s1">ExcelWriter(pth) </span><span class="s0">as </span><span class="s1">writer:</span>
+                <span class="s1">refdf.to_excel(writer</span><span class="s0">, </span><span class="s3">&quot;Data_no_head&quot;</span><span class="s0">, </span><span class="s1">header=</span><span class="s0">False, </span><span class="s1">index=</span><span class="s0">False</span><span class="s1">)</span>
+                <span class="s1">refdf.to_excel(writer</span><span class="s0">, </span><span class="s3">&quot;Data_with_head&quot;</span><span class="s0">, </span><span class="s1">index=</span><span class="s0">False</span><span class="s1">)</span>
+
+            <span class="s1">refdf.columns = [</span><span class="s3">&quot;A&quot;</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">]</span>
+
+            <span class="s0">with </span><span class="s1">ExcelFile(pth) </span><span class="s0">as </span><span class="s1">reader:</span>
+                <span class="s1">xlsdf_no_head = pd.read_excel(</span>
+                    <span class="s1">reader</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;Data_no_head&quot;</span><span class="s0">, </span><span class="s1">header=</span><span class="s0">None, </span><span class="s1">names=[</span><span class="s3">&quot;A&quot;</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">]</span>
+                <span class="s1">)</span>
+                <span class="s1">xlsdf_with_head = pd.read_excel(</span>
+                    <span class="s1">reader</span><span class="s0">,</span>
+                    <span class="s1">sheet_name=</span><span class="s3">&quot;Data_with_head&quot;</span><span class="s0">,</span>
+                    <span class="s1">index_col=</span><span class="s0">None,</span>
+                    <span class="s1">names=[</span><span class="s3">&quot;A&quot;</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">]</span><span class="s0">,</span>
+                <span class="s1">)</span>
+
+            <span class="s1">tm.assert_frame_equal(xlsdf_no_head</span><span class="s0">, </span><span class="s1">refdf)</span>
+            <span class="s1">tm.assert_frame_equal(xlsdf_with_head</span><span class="s0">, </span><span class="s1">refdf)</span>
+
+    <span class="s0">def </span><span class="s1">test_creating_and_reading_multiple_sheets(self</span><span class="s0">, </span><span class="s1">ext):</span>
+        <span class="s4"># see gh-9450</span>
+        <span class="s4">#</span>
+        <span class="s4"># Test reading multiple sheets, from a runtime</span>
+        <span class="s4"># created Excel file with multiple sheets.</span>
+        <span class="s0">def </span><span class="s1">tdf(col_sheet_name):</span>
+            <span class="s1">d</span><span class="s0">, </span><span class="s1">i = [</span><span class="s5">11</span><span class="s0">, </span><span class="s5">22</span><span class="s0">, </span><span class="s5">33</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s5">1</span><span class="s0">, </span><span class="s5">2</span><span class="s0">, </span><span class="s5">3</span><span class="s1">]</span>
+            <span class="s0">return </span><span class="s1">DataFrame(d</span><span class="s0">, </span><span class="s1">i</span><span class="s0">, </span><span class="s1">columns=[col_sheet_name])</span>
+
+        <span class="s1">sheets = [</span><span class="s3">&quot;AAA&quot;</span><span class="s0">, </span><span class="s3">&quot;BBB&quot;</span><span class="s0">, </span><span class="s3">&quot;CCC&quot;</span><span class="s1">]</span>
+
+        <span class="s1">dfs = [tdf(s) </span><span class="s0">for </span><span class="s1">s </span><span class="s0">in </span><span class="s1">sheets]</span>
+        <span class="s1">dfs = dict(zip(sheets</span><span class="s0">, </span><span class="s1">dfs))</span>
+
+        <span class="s0">with </span><span class="s1">tm.ensure_clean(ext) </span><span class="s0">as </span><span class="s1">pth:</span>
+            <span class="s0">with </span><span class="s1">ExcelWriter(pth) </span><span class="s0">as </span><span class="s1">ew:</span>
+                <span class="s0">for </span><span class="s1">sheetname</span><span class="s0">, </span><span class="s1">df </span><span class="s0">in </span><span class="s1">dfs.items():</span>
+                    <span class="s1">df.to_excel(ew</span><span class="s0">, </span><span class="s1">sheetname)</span>
+
+            <span class="s1">dfs_returned = pd.read_excel(pth</span><span class="s0">, </span><span class="s1">sheet_name=sheets</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+
+            <span class="s0">for </span><span class="s1">s </span><span class="s0">in </span><span class="s1">sheets:</span>
+                <span class="s1">tm.assert_frame_equal(dfs[s]</span><span class="s0">, </span><span class="s1">dfs_returned[s])</span>
+
+    <span class="s0">def </span><span class="s1">test_read_excel_multiindex_empty_level(self</span><span class="s0">, </span><span class="s1">ext):</span>
+        <span class="s4"># see gh-12453</span>
+        <span class="s0">with </span><span class="s1">tm.ensure_clean(ext) </span><span class="s0">as </span><span class="s1">path:</span>
+            <span class="s1">df = DataFrame(</span>
+                <span class="s1">{</span>
+                    <span class="s1">(</span><span class="s3">&quot;One&quot;</span><span class="s0">, </span><span class="s3">&quot;x&quot;</span><span class="s1">): {</span><span class="s5">0</span><span class="s1">: </span><span class="s5">1</span><span class="s1">}</span><span class="s0">,</span>
+                    <span class="s1">(</span><span class="s3">&quot;Two&quot;</span><span class="s0">, </span><span class="s3">&quot;X&quot;</span><span class="s1">): {</span><span class="s5">0</span><span class="s1">: </span><span class="s5">3</span><span class="s1">}</span><span class="s0">,</span>
+                    <span class="s1">(</span><span class="s3">&quot;Two&quot;</span><span class="s0">, </span><span class="s3">&quot;Y&quot;</span><span class="s1">): {</span><span class="s5">0</span><span class="s1">: </span><span class="s5">7</span><span class="s1">}</span><span class="s0">,</span>
+                    <span class="s1">(</span><span class="s3">&quot;Zero&quot;</span><span class="s0">, </span><span class="s3">&quot;&quot;</span><span class="s1">): {</span><span class="s5">0</span><span class="s1">: </span><span class="s5">0</span><span class="s1">}</span><span class="s0">,</span>
+                <span class="s1">}</span>
+            <span class="s1">)</span>
+
+            <span class="s1">expected = DataFrame(</span>
+                <span class="s1">{</span>
+                    <span class="s1">(</span><span class="s3">&quot;One&quot;</span><span class="s0">, </span><span class="s3">&quot;x&quot;</span><span class="s1">): {</span><span class="s5">0</span><span class="s1">: </span><span class="s5">1</span><span class="s1">}</span><span class="s0">,</span>
+                    <span class="s1">(</span><span class="s3">&quot;Two&quot;</span><span class="s0">, </span><span class="s3">&quot;X&quot;</span><span class="s1">): {</span><span class="s5">0</span><span class="s1">: </span><span class="s5">3</span><span class="s1">}</span><span class="s0">,</span>
+                    <span class="s1">(</span><span class="s3">&quot;Two&quot;</span><span class="s0">, </span><span class="s3">&quot;Y&quot;</span><span class="s1">): {</span><span class="s5">0</span><span class="s1">: </span><span class="s5">7</span><span class="s1">}</span><span class="s0">,</span>
+                    <span class="s1">(</span><span class="s3">&quot;Zero&quot;</span><span class="s0">, </span><span class="s3">&quot;Unnamed: 4_level_1&quot;</span><span class="s1">): {</span><span class="s5">0</span><span class="s1">: </span><span class="s5">0</span><span class="s1">}</span><span class="s0">,</span>
+                <span class="s1">}</span>
+            <span class="s1">)</span>
+
+            <span class="s1">df.to_excel(path)</span>
+            <span class="s1">actual = pd.read_excel(path</span><span class="s0">, </span><span class="s1">header=[</span><span class="s5">0</span><span class="s0">, </span><span class="s5">1</span><span class="s1">]</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s1">tm.assert_frame_equal(actual</span><span class="s0">, </span><span class="s1">expected)</span>
+
+            <span class="s1">df = DataFrame(</span>
+                <span class="s1">{</span>
+                    <span class="s1">(</span><span class="s3">&quot;Beg&quot;</span><span class="s0">, </span><span class="s3">&quot;&quot;</span><span class="s1">): {</span><span class="s5">0</span><span class="s1">: </span><span class="s5">0</span><span class="s1">}</span><span class="s0">,</span>
+                    <span class="s1">(</span><span class="s3">&quot;Middle&quot;</span><span class="s0">, </span><span class="s3">&quot;x&quot;</span><span class="s1">): {</span><span class="s5">0</span><span class="s1">: </span><span class="s5">1</span><span class="s1">}</span><span class="s0">,</span>
+                    <span class="s1">(</span><span class="s3">&quot;Tail&quot;</span><span class="s0">, </span><span class="s3">&quot;X&quot;</span><span class="s1">): {</span><span class="s5">0</span><span class="s1">: </span><span class="s5">3</span><span class="s1">}</span><span class="s0">,</span>
+                    <span class="s1">(</span><span class="s3">&quot;Tail&quot;</span><span class="s0">, </span><span class="s3">&quot;Y&quot;</span><span class="s1">): {</span><span class="s5">0</span><span class="s1">: </span><span class="s5">7</span><span class="s1">}</span><span class="s0">,</span>
+                <span class="s1">}</span>
+            <span class="s1">)</span>
+
+            <span class="s1">expected = DataFrame(</span>
+                <span class="s1">{</span>
+                    <span class="s1">(</span><span class="s3">&quot;Beg&quot;</span><span class="s0">, </span><span class="s3">&quot;Unnamed: 1_level_1&quot;</span><span class="s1">): {</span><span class="s5">0</span><span class="s1">: </span><span class="s5">0</span><span class="s1">}</span><span class="s0">,</span>
+                    <span class="s1">(</span><span class="s3">&quot;Middle&quot;</span><span class="s0">, </span><span class="s3">&quot;x&quot;</span><span class="s1">): {</span><span class="s5">0</span><span class="s1">: </span><span class="s5">1</span><span class="s1">}</span><span class="s0">,</span>
+                    <span class="s1">(</span><span class="s3">&quot;Tail&quot;</span><span class="s0">, </span><span class="s3">&quot;X&quot;</span><span class="s1">): {</span><span class="s5">0</span><span class="s1">: </span><span class="s5">3</span><span class="s1">}</span><span class="s0">,</span>
+                    <span class="s1">(</span><span class="s3">&quot;Tail&quot;</span><span class="s0">, </span><span class="s3">&quot;Y&quot;</span><span class="s1">): {</span><span class="s5">0</span><span class="s1">: </span><span class="s5">7</span><span class="s1">}</span><span class="s0">,</span>
+                <span class="s1">}</span>
+            <span class="s1">)</span>
+
+            <span class="s1">df.to_excel(path)</span>
+            <span class="s1">actual = pd.read_excel(path</span><span class="s0">, </span><span class="s1">header=[</span><span class="s5">0</span><span class="s0">, </span><span class="s5">1</span><span class="s1">]</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s1">tm.assert_frame_equal(actual</span><span class="s0">, </span><span class="s1">expected)</span>
+
+    <span class="s1">@pytest.mark.parametrize(</span><span class="s3">&quot;c_idx_names&quot;</span><span class="s0">, </span><span class="s1">[</span><span class="s0">True, False</span><span class="s1">])</span>
+    <span class="s1">@pytest.mark.parametrize(</span><span class="s3">&quot;r_idx_names&quot;</span><span class="s0">, </span><span class="s1">[</span><span class="s0">True, False</span><span class="s1">])</span>
+    <span class="s1">@pytest.mark.parametrize(</span><span class="s3">&quot;c_idx_levels&quot;</span><span class="s0">, </span><span class="s1">[</span><span class="s5">1</span><span class="s0">, </span><span class="s5">3</span><span class="s1">])</span>
+    <span class="s1">@pytest.mark.parametrize(</span><span class="s3">&quot;r_idx_levels&quot;</span><span class="s0">, </span><span class="s1">[</span><span class="s5">1</span><span class="s0">, </span><span class="s5">3</span><span class="s1">])</span>
+    <span class="s0">def </span><span class="s1">test_excel_multindex_roundtrip(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">ext</span><span class="s0">, </span><span class="s1">c_idx_names</span><span class="s0">, </span><span class="s1">r_idx_names</span><span class="s0">, </span><span class="s1">c_idx_levels</span><span class="s0">, </span><span class="s1">r_idx_levels</span><span class="s0">, </span><span class="s1">request</span>
+    <span class="s1">):</span>
+        <span class="s4"># see gh-4679</span>
+        <span class="s0">with </span><span class="s1">tm.ensure_clean(ext) </span><span class="s0">as </span><span class="s1">pth:</span>
+            <span class="s0">if </span><span class="s1">(c_idx_levels == </span><span class="s5">1 </span><span class="s0">and </span><span class="s1">c_idx_names) </span><span class="s0">and not </span><span class="s1">(</span>
+                <span class="s1">r_idx_levels == </span><span class="s5">3 </span><span class="s0">and not </span><span class="s1">r_idx_names</span>
+            <span class="s1">):</span>
+                <span class="s1">mark = pytest.mark.xfail(</span>
+                    <span class="s1">reason=</span><span class="s3">&quot;Column index name cannot be serialized unless &quot;</span>
+                    <span class="s3">&quot;it's a MultiIndex&quot;</span>
+                <span class="s1">)</span>
+                <span class="s1">request.node.add_marker(mark)</span>
+
+            <span class="s4"># Empty name case current read in as</span>
+            <span class="s4"># unnamed levels, not Nones.</span>
+            <span class="s1">check_names = r_idx_names </span><span class="s0">or </span><span class="s1">r_idx_levels &lt;= </span><span class="s5">1</span>
+
+            <span class="s1">df = tm.makeCustomDataframe(</span>
+                <span class="s5">5</span><span class="s0">, </span><span class="s5">5</span><span class="s0">, </span><span class="s1">c_idx_names</span><span class="s0">, </span><span class="s1">r_idx_names</span><span class="s0">, </span><span class="s1">c_idx_levels</span><span class="s0">, </span><span class="s1">r_idx_levels</span>
+            <span class="s1">)</span>
+            <span class="s1">df.to_excel(pth)</span>
+
+            <span class="s1">act = pd.read_excel(</span>
+                <span class="s1">pth</span><span class="s0">,</span>
+                <span class="s1">index_col=list(range(r_idx_levels))</span><span class="s0">,</span>
+                <span class="s1">header=list(range(c_idx_levels))</span><span class="s0">,</span>
+            <span class="s1">)</span>
+            <span class="s1">tm.assert_frame_equal(df</span><span class="s0">, </span><span class="s1">act</span><span class="s0">, </span><span class="s1">check_names=check_names)</span>
+
+            <span class="s1">df.iloc[</span><span class="s5">0</span><span class="s0">, </span><span class="s1">:] = np.nan</span>
+            <span class="s1">df.to_excel(pth)</span>
+
+            <span class="s1">act = pd.read_excel(</span>
+                <span class="s1">pth</span><span class="s0">,</span>
+                <span class="s1">index_col=list(range(r_idx_levels))</span><span class="s0">,</span>
+                <span class="s1">header=list(range(c_idx_levels))</span><span class="s0">,</span>
+            <span class="s1">)</span>
+            <span class="s1">tm.assert_frame_equal(df</span><span class="s0">, </span><span class="s1">act</span><span class="s0">, </span><span class="s1">check_names=check_names)</span>
+
+            <span class="s1">df.iloc[-</span><span class="s5">1</span><span class="s0">, </span><span class="s1">:] = np.nan</span>
+            <span class="s1">df.to_excel(pth)</span>
+            <span class="s1">act = pd.read_excel(</span>
+                <span class="s1">pth</span><span class="s0">,</span>
+                <span class="s1">index_col=list(range(r_idx_levels))</span><span class="s0">,</span>
+                <span class="s1">header=list(range(c_idx_levels))</span><span class="s0">,</span>
+            <span class="s1">)</span>
+            <span class="s1">tm.assert_frame_equal(df</span><span class="s0">, </span><span class="s1">act</span><span class="s0">, </span><span class="s1">check_names=check_names)</span>
+
+    <span class="s0">def </span><span class="s1">test_read_excel_parse_dates(self</span><span class="s0">, </span><span class="s1">ext):</span>
+        <span class="s4"># see gh-11544, gh-12051</span>
+        <span class="s1">df = DataFrame(</span>
+            <span class="s1">{</span><span class="s3">&quot;col&quot;</span><span class="s1">: [</span><span class="s5">1</span><span class="s0">, </span><span class="s5">2</span><span class="s0">, </span><span class="s5">3</span><span class="s1">]</span><span class="s0">, </span><span class="s3">&quot;date_strings&quot;</span><span class="s1">: pd.date_range(</span><span class="s3">&quot;2012-01-01&quot;</span><span class="s0">, </span><span class="s1">periods=</span><span class="s5">3</span><span class="s1">)}</span>
+        <span class="s1">)</span>
+        <span class="s1">df2 = df.copy()</span>
+        <span class="s1">df2[</span><span class="s3">&quot;date_strings&quot;</span><span class="s1">] = df2[</span><span class="s3">&quot;date_strings&quot;</span><span class="s1">].dt.strftime(</span><span class="s3">&quot;%m/%d/%Y&quot;</span><span class="s1">)</span>
+
+        <span class="s0">with </span><span class="s1">tm.ensure_clean(ext) </span><span class="s0">as </span><span class="s1">pth:</span>
+            <span class="s1">df2.to_excel(pth)</span>
+
+            <span class="s1">res = pd.read_excel(pth</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s1">tm.assert_frame_equal(df2</span><span class="s0">, </span><span class="s1">res)</span>
+
+            <span class="s1">res = pd.read_excel(pth</span><span class="s0">, </span><span class="s1">parse_dates=[</span><span class="s3">&quot;date_strings&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s1">tm.assert_frame_equal(df</span><span class="s0">, </span><span class="s1">res)</span>
+
+            <span class="s1">date_parser = </span><span class="s0">lambda </span><span class="s1">x: datetime.strptime(x</span><span class="s0">, </span><span class="s3">&quot;%m/%d/%Y&quot;</span><span class="s1">)</span>
+            <span class="s1">res = pd.read_excel(</span>
+                <span class="s1">pth</span><span class="s0">, </span><span class="s1">parse_dates=[</span><span class="s3">&quot;date_strings&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">date_parser=date_parser</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span>
+            <span class="s1">)</span>
+            <span class="s1">tm.assert_frame_equal(df</span><span class="s0">, </span><span class="s1">res)</span>
+
+    <span class="s0">def </span><span class="s1">test_multiindex_interval_datetimes(self</span><span class="s0">, </span><span class="s1">ext):</span>
+        <span class="s4"># GH 30986</span>
+        <span class="s1">midx = MultiIndex.from_arrays(</span>
+            <span class="s1">[</span>
+                <span class="s1">range(</span><span class="s5">4</span><span class="s1">)</span><span class="s0">,</span>
+                <span class="s1">pd.interval_range(</span>
+                    <span class="s1">start=pd.Timestamp(</span><span class="s3">&quot;2020-01-01&quot;</span><span class="s1">)</span><span class="s0">, </span><span class="s1">periods=</span><span class="s5">4</span><span class="s0">, </span><span class="s1">freq=</span><span class="s3">&quot;6M&quot;</span>
+                <span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">]</span>
+        <span class="s1">)</span>
+        <span class="s1">df = DataFrame(range(</span><span class="s5">4</span><span class="s1">)</span><span class="s0">, </span><span class="s1">index=midx)</span>
+        <span class="s0">with </span><span class="s1">tm.ensure_clean(ext) </span><span class="s0">as </span><span class="s1">pth:</span>
+            <span class="s1">df.to_excel(pth)</span>
+            <span class="s1">result = pd.read_excel(pth</span><span class="s0">, </span><span class="s1">index_col=[</span><span class="s5">0</span><span class="s0">, </span><span class="s5">1</span><span class="s1">])</span>
+        <span class="s1">expected = DataFrame(</span>
+            <span class="s1">range(</span><span class="s5">4</span><span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">MultiIndex.from_arrays(</span>
+                <span class="s1">[</span>
+                    <span class="s1">range(</span><span class="s5">4</span><span class="s1">)</span><span class="s0">,</span>
+                    <span class="s1">[</span>
+                        <span class="s3">&quot;(2020-01-31, 2020-07-31]&quot;</span><span class="s0">,</span>
+                        <span class="s3">&quot;(2020-07-31, 2021-01-31]&quot;</span><span class="s0">,</span>
+                        <span class="s3">&quot;(2021-01-31, 2021-07-31]&quot;</span><span class="s0">,</span>
+                        <span class="s3">&quot;(2021-07-31, 2022-01-31]&quot;</span><span class="s0">,</span>
+                    <span class="s1">]</span><span class="s0">,</span>
+                <span class="s1">]</span>
+            <span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s1">tm.assert_frame_equal(result</span><span class="s0">, </span><span class="s1">expected)</span>
+
+
+<span class="s1">@pytest.mark.parametrize(</span>
+    <span class="s3">&quot;engine,ext&quot;</span><span class="s0">,</span>
+    <span class="s1">[</span>
+        <span class="s1">pytest.param(</span>
+            <span class="s3">&quot;openpyxl&quot;</span><span class="s0">,</span>
+            <span class="s3">&quot;.xlsx&quot;</span><span class="s0">,</span>
+            <span class="s1">marks=[td.skip_if_no(</span><span class="s3">&quot;openpyxl&quot;</span><span class="s1">)</span><span class="s0">, </span><span class="s1">td.skip_if_no(</span><span class="s3">&quot;xlrd&quot;</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">pytest.param(</span>
+            <span class="s3">&quot;openpyxl&quot;</span><span class="s0">,</span>
+            <span class="s3">&quot;.xlsm&quot;</span><span class="s0">,</span>
+            <span class="s1">marks=[td.skip_if_no(</span><span class="s3">&quot;openpyxl&quot;</span><span class="s1">)</span><span class="s0">, </span><span class="s1">td.skip_if_no(</span><span class="s3">&quot;xlrd&quot;</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">pytest.param(</span>
+            <span class="s3">&quot;xlwt&quot;</span><span class="s0">, </span><span class="s3">&quot;.xls&quot;</span><span class="s0">, </span><span class="s1">marks=[td.skip_if_no(</span><span class="s3">&quot;xlwt&quot;</span><span class="s1">)</span><span class="s0">, </span><span class="s1">td.skip_if_no(</span><span class="s3">&quot;xlrd&quot;</span><span class="s1">)]</span>
+        <span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">pytest.param(</span>
+            <span class="s3">&quot;xlsxwriter&quot;</span><span class="s0">,</span>
+            <span class="s3">&quot;.xlsx&quot;</span><span class="s0">,</span>
+            <span class="s1">marks=[td.skip_if_no(</span><span class="s3">&quot;xlsxwriter&quot;</span><span class="s1">)</span><span class="s0">, </span><span class="s1">td.skip_if_no(</span><span class="s3">&quot;xlrd&quot;</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">pytest.param(</span><span class="s3">&quot;odf&quot;</span><span class="s0">, </span><span class="s3">&quot;.ods&quot;</span><span class="s0">, </span><span class="s1">marks=td.skip_if_no(</span><span class="s3">&quot;odf&quot;</span><span class="s1">))</span><span class="s0">,</span>
+    <span class="s1">]</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s1">@pytest.mark.usefixtures(</span><span class="s3">&quot;set_engine&quot;</span><span class="s1">)</span>
+<span class="s0">class </span><span class="s1">TestExcelWriter:</span>
+    <span class="s0">def </span><span class="s1">test_excel_sheet_size(self</span><span class="s0">, </span><span class="s1">path):</span>
+
+        <span class="s4"># GH 26080</span>
+        <span class="s1">breaking_row_count = </span><span class="s5">2 </span><span class="s1">** </span><span class="s5">20 </span><span class="s1">+ </span><span class="s5">1</span>
+        <span class="s1">breaking_col_count = </span><span class="s5">2 </span><span class="s1">** </span><span class="s5">14 </span><span class="s1">+ </span><span class="s5">1</span>
+        <span class="s4"># purposely using two arrays to prevent memory issues while testing</span>
+        <span class="s1">row_arr = np.zeros(shape=(breaking_row_count</span><span class="s0">, </span><span class="s5">1</span><span class="s1">))</span>
+        <span class="s1">col_arr = np.zeros(shape=(</span><span class="s5">1</span><span class="s0">, </span><span class="s1">breaking_col_count))</span>
+        <span class="s1">row_df = DataFrame(row_arr)</span>
+        <span class="s1">col_df = DataFrame(col_arr)</span>
+
+        <span class="s1">msg = </span><span class="s3">&quot;sheet is too large&quot;</span>
+        <span class="s0">with </span><span class="s1">pytest.raises(ValueError</span><span class="s0">, </span><span class="s1">match=msg):</span>
+            <span class="s1">row_df.to_excel(path)</span>
+
+        <span class="s0">with </span><span class="s1">pytest.raises(ValueError</span><span class="s0">, </span><span class="s1">match=msg):</span>
+            <span class="s1">col_df.to_excel(path)</span>
+
+    <span class="s0">def </span><span class="s1">test_excel_sheet_by_name_raise(self</span><span class="s0">, </span><span class="s1">path</span><span class="s0">, </span><span class="s1">engine):</span>
+        <span class="s1">gt = DataFrame(np.random.randn(</span><span class="s5">10</span><span class="s0">, </span><span class="s5">2</span><span class="s1">))</span>
+        <span class="s1">gt.to_excel(path)</span>
+
+        <span class="s0">with </span><span class="s1">ExcelFile(path) </span><span class="s0">as </span><span class="s1">xl:</span>
+            <span class="s1">df = pd.read_excel(xl</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s5">0</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+
+        <span class="s1">tm.assert_frame_equal(gt</span><span class="s0">, </span><span class="s1">df)</span>
+
+        <span class="s1">msg = </span><span class="s3">&quot;Worksheet named '0' not found&quot;</span>
+        <span class="s0">with </span><span class="s1">pytest.raises(ValueError</span><span class="s0">, </span><span class="s1">match=msg):</span>
+            <span class="s1">pd.read_excel(xl</span><span class="s0">, </span><span class="s3">&quot;0&quot;</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_excel_writer_context_manager(self</span><span class="s0">, </span><span class="s1">frame</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s0">with </span><span class="s1">ExcelWriter(path) </span><span class="s0">as </span><span class="s1">writer:</span>
+            <span class="s1">frame.to_excel(writer</span><span class="s0">, </span><span class="s3">&quot;Data1&quot;</span><span class="s1">)</span>
+            <span class="s1">frame2 = frame.copy()</span>
+            <span class="s1">frame2.columns = frame.columns[::-</span><span class="s5">1</span><span class="s1">]</span>
+            <span class="s1">frame2.to_excel(writer</span><span class="s0">, </span><span class="s3">&quot;Data2&quot;</span><span class="s1">)</span>
+
+        <span class="s0">with </span><span class="s1">ExcelFile(path) </span><span class="s0">as </span><span class="s1">reader:</span>
+            <span class="s1">found_df = pd.read_excel(reader</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;Data1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s1">found_df2 = pd.read_excel(reader</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;Data2&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+
+            <span class="s1">tm.assert_frame_equal(found_df</span><span class="s0">, </span><span class="s1">frame)</span>
+            <span class="s1">tm.assert_frame_equal(found_df2</span><span class="s0">, </span><span class="s1">frame2)</span>
+
+    <span class="s0">def </span><span class="s1">test_roundtrip(self</span><span class="s0">, </span><span class="s1">frame</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s1">frame = frame.copy()</span>
+        <span class="s1">frame[</span><span class="s3">&quot;A&quot;</span><span class="s1">][:</span><span class="s5">5</span><span class="s1">] = np.nan</span>
+
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s1">)</span>
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">columns=[</span><span class="s3">&quot;A&quot;</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">])</span>
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">header=</span><span class="s0">False</span><span class="s1">)</span>
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index=</span><span class="s0">False</span><span class="s1">)</span>
+
+        <span class="s4"># test roundtrip</span>
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s1">)</span>
+        <span class="s1">recons = pd.read_excel(path</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s1">tm.assert_frame_equal(frame</span><span class="s0">, </span><span class="s1">recons)</span>
+
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index=</span><span class="s0">False</span><span class="s1">)</span>
+        <span class="s1">recons = pd.read_excel(path</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s0">None</span><span class="s1">)</span>
+        <span class="s1">recons.index = frame.index</span>
+        <span class="s1">tm.assert_frame_equal(frame</span><span class="s0">, </span><span class="s1">recons)</span>
+
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">na_rep=</span><span class="s3">&quot;NA&quot;</span><span class="s1">)</span>
+        <span class="s1">recons = pd.read_excel(path</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s0">, </span><span class="s1">na_values=[</span><span class="s3">&quot;NA&quot;</span><span class="s1">])</span>
+        <span class="s1">tm.assert_frame_equal(frame</span><span class="s0">, </span><span class="s1">recons)</span>
+
+        <span class="s4"># GH 3611</span>
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">na_rep=</span><span class="s3">&quot;88&quot;</span><span class="s1">)</span>
+        <span class="s1">recons = pd.read_excel(path</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s0">, </span><span class="s1">na_values=[</span><span class="s3">&quot;88&quot;</span><span class="s1">])</span>
+        <span class="s1">tm.assert_frame_equal(frame</span><span class="s0">, </span><span class="s1">recons)</span>
+
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">na_rep=</span><span class="s3">&quot;88&quot;</span><span class="s1">)</span>
+        <span class="s1">recons = pd.read_excel(</span>
+            <span class="s1">path</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s0">, </span><span class="s1">na_values=[</span><span class="s5">88</span><span class="s0">, </span><span class="s5">88.0</span><span class="s1">]</span>
+        <span class="s1">)</span>
+        <span class="s1">tm.assert_frame_equal(frame</span><span class="s0">, </span><span class="s1">recons)</span>
+
+        <span class="s4"># GH 6573</span>
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;Sheet1&quot;</span><span class="s1">)</span>
+        <span class="s1">recons = pd.read_excel(path</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s1">tm.assert_frame_equal(frame</span><span class="s0">, </span><span class="s1">recons)</span>
+
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;0&quot;</span><span class="s1">)</span>
+        <span class="s1">recons = pd.read_excel(path</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s1">tm.assert_frame_equal(frame</span><span class="s0">, </span><span class="s1">recons)</span>
+
+        <span class="s4"># GH 8825 Pandas Series should provide to_excel method</span>
+        <span class="s1">s = frame[</span><span class="s3">&quot;A&quot;</span><span class="s1">]</span>
+        <span class="s1">s.to_excel(path)</span>
+        <span class="s1">recons = pd.read_excel(path</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s1">tm.assert_frame_equal(s.to_frame()</span><span class="s0">, </span><span class="s1">recons)</span>
+
+    <span class="s0">def </span><span class="s1">test_mixed(self</span><span class="s0">, </span><span class="s1">frame</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s1">mixed_frame = frame.copy()</span>
+        <span class="s1">mixed_frame[</span><span class="s3">&quot;foo&quot;</span><span class="s1">] = </span><span class="s3">&quot;bar&quot;</span>
+
+        <span class="s1">mixed_frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s1">)</span>
+        <span class="s0">with </span><span class="s1">ExcelFile(path) </span><span class="s0">as </span><span class="s1">reader:</span>
+            <span class="s1">recons = pd.read_excel(reader</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s1">tm.assert_frame_equal(mixed_frame</span><span class="s0">, </span><span class="s1">recons)</span>
+
+    <span class="s0">def </span><span class="s1">test_ts_frame(self</span><span class="s0">, </span><span class="s1">tsframe</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s1">df = tsframe</span>
+
+        <span class="s4"># freq doesn't round-trip</span>
+        <span class="s1">index = pd.DatetimeIndex(np.asarray(df.index)</span><span class="s0">, </span><span class="s1">freq=</span><span class="s0">None</span><span class="s1">)</span>
+        <span class="s1">df.index = index</span>
+
+        <span class="s1">df.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s1">)</span>
+        <span class="s0">with </span><span class="s1">ExcelFile(path) </span><span class="s0">as </span><span class="s1">reader:</span>
+            <span class="s1">recons = pd.read_excel(reader</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s1">tm.assert_frame_equal(df</span><span class="s0">, </span><span class="s1">recons)</span>
+
+    <span class="s0">def </span><span class="s1">test_basics_with_nan(self</span><span class="s0">, </span><span class="s1">frame</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s1">frame = frame.copy()</span>
+        <span class="s1">frame[</span><span class="s3">&quot;A&quot;</span><span class="s1">][:</span><span class="s5">5</span><span class="s1">] = np.nan</span>
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s1">)</span>
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">columns=[</span><span class="s3">&quot;A&quot;</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">])</span>
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">header=</span><span class="s0">False</span><span class="s1">)</span>
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index=</span><span class="s0">False</span><span class="s1">)</span>
+
+    <span class="s1">@pytest.mark.parametrize(</span><span class="s3">&quot;np_type&quot;</span><span class="s0">, </span><span class="s1">[np.int8</span><span class="s0">, </span><span class="s1">np.int16</span><span class="s0">, </span><span class="s1">np.int32</span><span class="s0">, </span><span class="s1">np.int64])</span>
+    <span class="s0">def </span><span class="s1">test_int_types(self</span><span class="s0">, </span><span class="s1">np_type</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s4"># Test np.int values read come back as int</span>
+        <span class="s4"># (rather than float which is Excel's format).</span>
+        <span class="s1">df = DataFrame(np.random.randint(-</span><span class="s5">10</span><span class="s0">, </span><span class="s5">10</span><span class="s0">, </span><span class="s1">size=(</span><span class="s5">10</span><span class="s0">, </span><span class="s5">2</span><span class="s1">))</span><span class="s0">, </span><span class="s1">dtype=np_type)</span>
+        <span class="s1">df.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s1">)</span>
+
+        <span class="s0">with </span><span class="s1">ExcelFile(path) </span><span class="s0">as </span><span class="s1">reader:</span>
+            <span class="s1">recons = pd.read_excel(reader</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+
+        <span class="s1">int_frame = df.astype(np.int64)</span>
+        <span class="s1">tm.assert_frame_equal(int_frame</span><span class="s0">, </span><span class="s1">recons)</span>
+
+        <span class="s1">recons2 = pd.read_excel(path</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s1">tm.assert_frame_equal(int_frame</span><span class="s0">, </span><span class="s1">recons2)</span>
+
+        <span class="s4"># Test with convert_float=False comes back as float.</span>
+        <span class="s1">float_frame = df.astype(float)</span>
+        <span class="s1">float_frame.columns = float_frame.columns.astype(float)</span>
+        <span class="s1">float_frame.index = float_frame.index.astype(float)</span>
+        <span class="s0">with </span><span class="s1">tm.assert_produces_warning(</span>
+            <span class="s1">FutureWarning</span><span class="s0">, </span><span class="s1">match=</span><span class="s3">&quot;convert_float is deprecated&quot;</span>
+        <span class="s1">):</span>
+            <span class="s1">recons = pd.read_excel(</span>
+                <span class="s1">path</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">convert_float=</span><span class="s0">False, </span><span class="s1">index_col=</span><span class="s5">0</span>
+            <span class="s1">)</span>
+        <span class="s1">tm.assert_frame_equal(recons</span><span class="s0">, </span><span class="s1">float_frame)</span>
+
+    <span class="s1">@pytest.mark.parametrize(</span><span class="s3">&quot;np_type&quot;</span><span class="s0">, </span><span class="s1">[np.float16</span><span class="s0">, </span><span class="s1">np.float32</span><span class="s0">, </span><span class="s1">np.float64])</span>
+    <span class="s0">def </span><span class="s1">test_float_types(self</span><span class="s0">, </span><span class="s1">np_type</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s4"># Test np.float values read come back as float.</span>
+        <span class="s1">df = DataFrame(np.random.random_sample(</span><span class="s5">10</span><span class="s1">)</span><span class="s0">, </span><span class="s1">dtype=np_type)</span>
+        <span class="s1">df.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s1">)</span>
+
+        <span class="s0">with </span><span class="s1">ExcelFile(path) </span><span class="s0">as </span><span class="s1">reader:</span>
+            <span class="s1">recons = pd.read_excel(reader</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">).astype(</span>
+                <span class="s1">np_type</span>
+            <span class="s1">)</span>
+
+        <span class="s1">tm.assert_frame_equal(df</span><span class="s0">, </span><span class="s1">recons)</span>
+
+    <span class="s1">@pytest.mark.parametrize(</span><span class="s3">&quot;np_type&quot;</span><span class="s0">, </span><span class="s1">[np.bool8</span><span class="s0">, </span><span class="s1">np.bool_])</span>
+    <span class="s0">def </span><span class="s1">test_bool_types(self</span><span class="s0">, </span><span class="s1">np_type</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s4"># Test np.bool8 and np.bool_ values read come back as float.</span>
+        <span class="s1">df = DataFrame([</span><span class="s5">1</span><span class="s0">, </span><span class="s5">0</span><span class="s0">, True, False</span><span class="s1">]</span><span class="s0">, </span><span class="s1">dtype=np_type)</span>
+        <span class="s1">df.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s1">)</span>
+
+        <span class="s0">with </span><span class="s1">ExcelFile(path) </span><span class="s0">as </span><span class="s1">reader:</span>
+            <span class="s1">recons = pd.read_excel(reader</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">).astype(</span>
+                <span class="s1">np_type</span>
+            <span class="s1">)</span>
+
+        <span class="s1">tm.assert_frame_equal(df</span><span class="s0">, </span><span class="s1">recons)</span>
+
+    <span class="s0">def </span><span class="s1">test_inf_roundtrip(self</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s1">df = DataFrame([(</span><span class="s5">1</span><span class="s0">, </span><span class="s1">np.inf)</span><span class="s0">, </span><span class="s1">(</span><span class="s5">2</span><span class="s0">, </span><span class="s5">3</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s5">5</span><span class="s0">, </span><span class="s1">-np.inf)])</span>
+        <span class="s1">df.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s1">)</span>
+
+        <span class="s0">with </span><span class="s1">ExcelFile(path) </span><span class="s0">as </span><span class="s1">reader:</span>
+            <span class="s1">recons = pd.read_excel(reader</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+
+        <span class="s1">tm.assert_frame_equal(df</span><span class="s0">, </span><span class="s1">recons)</span>
+
+    <span class="s0">def </span><span class="s1">test_sheets(self</span><span class="s0">, </span><span class="s1">frame</span><span class="s0">, </span><span class="s1">tsframe</span><span class="s0">, </span><span class="s1">path):</span>
+
+        <span class="s4"># freq doesn't round-trip</span>
+        <span class="s1">index = pd.DatetimeIndex(np.asarray(tsframe.index)</span><span class="s0">, </span><span class="s1">freq=</span><span class="s0">None</span><span class="s1">)</span>
+        <span class="s1">tsframe.index = index</span>
+
+        <span class="s1">frame = frame.copy()</span>
+        <span class="s1">frame[</span><span class="s3">&quot;A&quot;</span><span class="s1">][:</span><span class="s5">5</span><span class="s1">] = np.nan</span>
+
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s1">)</span>
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">columns=[</span><span class="s3">&quot;A&quot;</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">])</span>
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">header=</span><span class="s0">False</span><span class="s1">)</span>
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index=</span><span class="s0">False</span><span class="s1">)</span>
+
+        <span class="s4"># Test writing to separate sheets</span>
+        <span class="s0">with </span><span class="s1">ExcelWriter(path) </span><span class="s0">as </span><span class="s1">writer:</span>
+            <span class="s1">frame.to_excel(writer</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s1">)</span>
+            <span class="s1">tsframe.to_excel(writer</span><span class="s0">, </span><span class="s3">&quot;test2&quot;</span><span class="s1">)</span>
+        <span class="s0">with </span><span class="s1">ExcelFile(path) </span><span class="s0">as </span><span class="s1">reader:</span>
+            <span class="s1">recons = pd.read_excel(reader</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s1">tm.assert_frame_equal(frame</span><span class="s0">, </span><span class="s1">recons)</span>
+            <span class="s1">recons = pd.read_excel(reader</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test2&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s1">tm.assert_frame_equal(tsframe</span><span class="s0">, </span><span class="s1">recons)</span>
+        <span class="s0">assert </span><span class="s5">2 </span><span class="s1">== len(reader.sheet_names)</span>
+        <span class="s0">assert </span><span class="s3">&quot;test1&quot; </span><span class="s1">== reader.sheet_names[</span><span class="s5">0</span><span class="s1">]</span>
+        <span class="s0">assert </span><span class="s3">&quot;test2&quot; </span><span class="s1">== reader.sheet_names[</span><span class="s5">1</span><span class="s1">]</span>
+
+    <span class="s0">def </span><span class="s1">test_colaliases(self</span><span class="s0">, </span><span class="s1">frame</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s1">frame = frame.copy()</span>
+        <span class="s1">frame[</span><span class="s3">&quot;A&quot;</span><span class="s1">][:</span><span class="s5">5</span><span class="s1">] = np.nan</span>
+
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s1">)</span>
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">columns=[</span><span class="s3">&quot;A&quot;</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">])</span>
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">header=</span><span class="s0">False</span><span class="s1">)</span>
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index=</span><span class="s0">False</span><span class="s1">)</span>
+
+        <span class="s4"># column aliases</span>
+        <span class="s1">col_aliases = Index([</span><span class="s3">&quot;AA&quot;</span><span class="s0">, </span><span class="s3">&quot;X&quot;</span><span class="s0">, </span><span class="s3">&quot;Y&quot;</span><span class="s0">, </span><span class="s3">&quot;Z&quot;</span><span class="s1">])</span>
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">header=col_aliases)</span>
+        <span class="s0">with </span><span class="s1">ExcelFile(path) </span><span class="s0">as </span><span class="s1">reader:</span>
+            <span class="s1">rs = pd.read_excel(reader</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s1">xp = frame.copy()</span>
+        <span class="s1">xp.columns = col_aliases</span>
+        <span class="s1">tm.assert_frame_equal(xp</span><span class="s0">, </span><span class="s1">rs)</span>
+
+    <span class="s0">def </span><span class="s1">test_roundtrip_indexlabels(self</span><span class="s0">, </span><span class="s1">merge_cells</span><span class="s0">, </span><span class="s1">frame</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s1">frame = frame.copy()</span>
+        <span class="s1">frame[</span><span class="s3">&quot;A&quot;</span><span class="s1">][:</span><span class="s5">5</span><span class="s1">] = np.nan</span>
+
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s1">)</span>
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">columns=[</span><span class="s3">&quot;A&quot;</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">])</span>
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">header=</span><span class="s0">False</span><span class="s1">)</span>
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index=</span><span class="s0">False</span><span class="s1">)</span>
+
+        <span class="s4"># test index_label</span>
+        <span class="s1">df = DataFrame(np.random.randn(</span><span class="s5">10</span><span class="s0">, </span><span class="s5">2</span><span class="s1">)) &gt;= </span><span class="s5">0</span>
+        <span class="s1">df.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_label=[</span><span class="s3">&quot;test&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">merge_cells=merge_cells)</span>
+        <span class="s0">with </span><span class="s1">ExcelFile(path) </span><span class="s0">as </span><span class="s1">reader:</span>
+            <span class="s1">recons = pd.read_excel(reader</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">).astype(</span>
+                <span class="s1">np.int64</span>
+            <span class="s1">)</span>
+        <span class="s1">df.index.names = [</span><span class="s3">&quot;test&quot;</span><span class="s1">]</span>
+        <span class="s0">assert </span><span class="s1">df.index.names == recons.index.names</span>
+
+        <span class="s1">df = DataFrame(np.random.randn(</span><span class="s5">10</span><span class="s0">, </span><span class="s5">2</span><span class="s1">)) &gt;= </span><span class="s5">0</span>
+        <span class="s1">df.to_excel(</span>
+            <span class="s1">path</span><span class="s0">,</span>
+            <span class="s3">&quot;test1&quot;</span><span class="s0">,</span>
+            <span class="s1">index_label=[</span><span class="s3">&quot;test&quot;</span><span class="s0">, </span><span class="s3">&quot;dummy&quot;</span><span class="s0">, </span><span class="s3">&quot;dummy2&quot;</span><span class="s1">]</span><span class="s0">,</span>
+            <span class="s1">merge_cells=merge_cells</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s0">with </span><span class="s1">ExcelFile(path) </span><span class="s0">as </span><span class="s1">reader:</span>
+            <span class="s1">recons = pd.read_excel(reader</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">).astype(</span>
+                <span class="s1">np.int64</span>
+            <span class="s1">)</span>
+        <span class="s1">df.index.names = [</span><span class="s3">&quot;test&quot;</span><span class="s1">]</span>
+        <span class="s0">assert </span><span class="s1">df.index.names == recons.index.names</span>
+
+        <span class="s1">df = DataFrame(np.random.randn(</span><span class="s5">10</span><span class="s0">, </span><span class="s5">2</span><span class="s1">)) &gt;= </span><span class="s5">0</span>
+        <span class="s1">df.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_label=</span><span class="s3">&quot;test&quot;</span><span class="s0">, </span><span class="s1">merge_cells=merge_cells)</span>
+        <span class="s0">with </span><span class="s1">ExcelFile(path) </span><span class="s0">as </span><span class="s1">reader:</span>
+            <span class="s1">recons = pd.read_excel(reader</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">).astype(</span>
+                <span class="s1">np.int64</span>
+            <span class="s1">)</span>
+        <span class="s1">df.index.names = [</span><span class="s3">&quot;test&quot;</span><span class="s1">]</span>
+        <span class="s1">tm.assert_frame_equal(df</span><span class="s0">, </span><span class="s1">recons.astype(bool))</span>
+
+        <span class="s1">frame.to_excel(</span>
+            <span class="s1">path</span><span class="s0">,</span>
+            <span class="s3">&quot;test1&quot;</span><span class="s0">,</span>
+            <span class="s1">columns=[</span><span class="s3">&quot;A&quot;</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s0">, </span><span class="s3">&quot;C&quot;</span><span class="s0">, </span><span class="s3">&quot;D&quot;</span><span class="s1">]</span><span class="s0">,</span>
+            <span class="s1">index=</span><span class="s0">False,</span>
+            <span class="s1">merge_cells=merge_cells</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s4"># take 'A' and 'B' as indexes (same row as cols 'C', 'D')</span>
+        <span class="s1">df = frame.copy()</span>
+        <span class="s1">df = df.set_index([</span><span class="s3">&quot;A&quot;</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">])</span>
+
+        <span class="s0">with </span><span class="s1">ExcelFile(path) </span><span class="s0">as </span><span class="s1">reader:</span>
+            <span class="s1">recons = pd.read_excel(reader</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=[</span><span class="s5">0</span><span class="s0">, </span><span class="s5">1</span><span class="s1">])</span>
+        <span class="s1">tm.assert_frame_equal(df</span><span class="s0">, </span><span class="s1">recons)</span>
+
+    <span class="s0">def </span><span class="s1">test_excel_roundtrip_indexname(self</span><span class="s0">, </span><span class="s1">merge_cells</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s1">df = DataFrame(np.random.randn(</span><span class="s5">10</span><span class="s0">, </span><span class="s5">4</span><span class="s1">))</span>
+        <span class="s1">df.index.name = </span><span class="s3">&quot;foo&quot;</span>
+
+        <span class="s1">df.to_excel(path</span><span class="s0">, </span><span class="s1">merge_cells=merge_cells)</span>
+
+        <span class="s0">with </span><span class="s1">ExcelFile(path) </span><span class="s0">as </span><span class="s1">xf:</span>
+            <span class="s1">result = pd.read_excel(xf</span><span class="s0">, </span><span class="s1">sheet_name=xf.sheet_names[</span><span class="s5">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+
+        <span class="s1">tm.assert_frame_equal(result</span><span class="s0">, </span><span class="s1">df)</span>
+        <span class="s0">assert </span><span class="s1">result.index.name == </span><span class="s3">&quot;foo&quot;</span>
+
+    <span class="s0">def </span><span class="s1">test_excel_roundtrip_datetime(self</span><span class="s0">, </span><span class="s1">merge_cells</span><span class="s0">, </span><span class="s1">tsframe</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s4"># datetime.date, not sure what to test here exactly</span>
+
+        <span class="s4"># freq does not round-trip</span>
+        <span class="s1">index = pd.DatetimeIndex(np.asarray(tsframe.index)</span><span class="s0">, </span><span class="s1">freq=</span><span class="s0">None</span><span class="s1">)</span>
+        <span class="s1">tsframe.index = index</span>
+
+        <span class="s1">tsf = tsframe.copy()</span>
+
+        <span class="s1">tsf.index = [x.date() </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">tsframe.index]</span>
+        <span class="s1">tsf.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">merge_cells=merge_cells)</span>
+
+        <span class="s0">with </span><span class="s1">ExcelFile(path) </span><span class="s0">as </span><span class="s1">reader:</span>
+            <span class="s1">recons = pd.read_excel(reader</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+
+        <span class="s1">tm.assert_frame_equal(tsframe</span><span class="s0">, </span><span class="s1">recons)</span>
+
+    <span class="s0">def </span><span class="s1">test_excel_date_datetime_format(self</span><span class="s0">, </span><span class="s1">engine</span><span class="s0">, </span><span class="s1">ext</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s4"># see gh-4133</span>
+        <span class="s4">#</span>
+        <span class="s4"># Excel output format strings</span>
+        <span class="s1">df = DataFrame(</span>
+            <span class="s1">[</span>
+                <span class="s1">[date(</span><span class="s5">2014</span><span class="s0">, </span><span class="s5">1</span><span class="s0">, </span><span class="s5">31</span><span class="s1">)</span><span class="s0">, </span><span class="s1">date(</span><span class="s5">1999</span><span class="s0">, </span><span class="s5">9</span><span class="s0">, </span><span class="s5">24</span><span class="s1">)]</span><span class="s0">,</span>
+                <span class="s1">[datetime(</span><span class="s5">1998</span><span class="s0">, </span><span class="s5">5</span><span class="s0">, </span><span class="s5">26</span><span class="s0">, </span><span class="s5">23</span><span class="s0">, </span><span class="s5">33</span><span class="s0">, </span><span class="s5">4</span><span class="s1">)</span><span class="s0">, </span><span class="s1">datetime(</span><span class="s5">2014</span><span class="s0">, </span><span class="s5">2</span><span class="s0">, </span><span class="s5">28</span><span class="s0">, </span><span class="s5">13</span><span class="s0">, </span><span class="s5">5</span><span class="s0">, </span><span class="s5">13</span><span class="s1">)]</span><span class="s0">,</span>
+            <span class="s1">]</span><span class="s0">,</span>
+            <span class="s1">index=[</span><span class="s3">&quot;DATE&quot;</span><span class="s0">, </span><span class="s3">&quot;DATETIME&quot;</span><span class="s1">]</span><span class="s0">,</span>
+            <span class="s1">columns=[</span><span class="s3">&quot;X&quot;</span><span class="s0">, </span><span class="s3">&quot;Y&quot;</span><span class="s1">]</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s1">df_expected = DataFrame(</span>
+            <span class="s1">[</span>
+                <span class="s1">[datetime(</span><span class="s5">2014</span><span class="s0">, </span><span class="s5">1</span><span class="s0">, </span><span class="s5">31</span><span class="s1">)</span><span class="s0">, </span><span class="s1">datetime(</span><span class="s5">1999</span><span class="s0">, </span><span class="s5">9</span><span class="s0">, </span><span class="s5">24</span><span class="s1">)]</span><span class="s0">,</span>
+                <span class="s1">[datetime(</span><span class="s5">1998</span><span class="s0">, </span><span class="s5">5</span><span class="s0">, </span><span class="s5">26</span><span class="s0">, </span><span class="s5">23</span><span class="s0">, </span><span class="s5">33</span><span class="s0">, </span><span class="s5">4</span><span class="s1">)</span><span class="s0">, </span><span class="s1">datetime(</span><span class="s5">2014</span><span class="s0">, </span><span class="s5">2</span><span class="s0">, </span><span class="s5">28</span><span class="s0">, </span><span class="s5">13</span><span class="s0">, </span><span class="s5">5</span><span class="s0">, </span><span class="s5">13</span><span class="s1">)]</span><span class="s0">,</span>
+            <span class="s1">]</span><span class="s0">,</span>
+            <span class="s1">index=[</span><span class="s3">&quot;DATE&quot;</span><span class="s0">, </span><span class="s3">&quot;DATETIME&quot;</span><span class="s1">]</span><span class="s0">,</span>
+            <span class="s1">columns=[</span><span class="s3">&quot;X&quot;</span><span class="s0">, </span><span class="s3">&quot;Y&quot;</span><span class="s1">]</span><span class="s0">,</span>
+        <span class="s1">)</span>
+
+        <span class="s0">with </span><span class="s1">tm.ensure_clean(ext) </span><span class="s0">as </span><span class="s1">filename2:</span>
+            <span class="s0">with </span><span class="s1">ExcelWriter(path) </span><span class="s0">as </span><span class="s1">writer1:</span>
+                <span class="s1">df.to_excel(writer1</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s1">)</span>
+
+            <span class="s0">with </span><span class="s1">ExcelWriter(</span>
+                <span class="s1">filename2</span><span class="s0">,</span>
+                <span class="s1">date_format=</span><span class="s3">&quot;DD.MM.YYYY&quot;</span><span class="s0">,</span>
+                <span class="s1">datetime_format=</span><span class="s3">&quot;DD.MM.YYYY HH-MM-SS&quot;</span><span class="s0">,</span>
+            <span class="s1">) </span><span class="s0">as </span><span class="s1">writer2:</span>
+                <span class="s1">df.to_excel(writer2</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s1">)</span>
+
+            <span class="s0">with </span><span class="s1">ExcelFile(path) </span><span class="s0">as </span><span class="s1">reader1:</span>
+                <span class="s1">rs1 = pd.read_excel(reader1</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+
+            <span class="s0">with </span><span class="s1">ExcelFile(filename2) </span><span class="s0">as </span><span class="s1">reader2:</span>
+                <span class="s1">rs2 = pd.read_excel(reader2</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+
+        <span class="s1">tm.assert_frame_equal(rs1</span><span class="s0">, </span><span class="s1">rs2)</span>
+
+        <span class="s4"># Since the reader returns a datetime object for dates,</span>
+        <span class="s4"># we need to use df_expected to check the result.</span>
+        <span class="s1">tm.assert_frame_equal(rs2</span><span class="s0">, </span><span class="s1">df_expected)</span>
+
+    <span class="s0">def </span><span class="s1">test_to_excel_interval_no_labels(self</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s4"># see gh-19242</span>
+        <span class="s4">#</span>
+        <span class="s4"># Test writing Interval without labels.</span>
+        <span class="s1">df = DataFrame(np.random.randint(-</span><span class="s5">10</span><span class="s0">, </span><span class="s5">10</span><span class="s0">, </span><span class="s1">size=(</span><span class="s5">20</span><span class="s0">, </span><span class="s5">1</span><span class="s1">))</span><span class="s0">, </span><span class="s1">dtype=np.int64)</span>
+        <span class="s1">expected = df.copy()</span>
+
+        <span class="s1">df[</span><span class="s3">&quot;new&quot;</span><span class="s1">] = pd.cut(df[</span><span class="s5">0</span><span class="s1">]</span><span class="s0">, </span><span class="s5">10</span><span class="s1">)</span>
+        <span class="s1">expected[</span><span class="s3">&quot;new&quot;</span><span class="s1">] = pd.cut(expected[</span><span class="s5">0</span><span class="s1">]</span><span class="s0">, </span><span class="s5">10</span><span class="s1">).astype(str)</span>
+
+        <span class="s1">df.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s1">)</span>
+        <span class="s0">with </span><span class="s1">ExcelFile(path) </span><span class="s0">as </span><span class="s1">reader:</span>
+            <span class="s1">recons = pd.read_excel(reader</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s1">tm.assert_frame_equal(expected</span><span class="s0">, </span><span class="s1">recons)</span>
+
+    <span class="s0">def </span><span class="s1">test_to_excel_interval_labels(self</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s4"># see gh-19242</span>
+        <span class="s4">#</span>
+        <span class="s4"># Test writing Interval with labels.</span>
+        <span class="s1">df = DataFrame(np.random.randint(-</span><span class="s5">10</span><span class="s0">, </span><span class="s5">10</span><span class="s0">, </span><span class="s1">size=(</span><span class="s5">20</span><span class="s0">, </span><span class="s5">1</span><span class="s1">))</span><span class="s0">, </span><span class="s1">dtype=np.int64)</span>
+        <span class="s1">expected = df.copy()</span>
+        <span class="s1">intervals = pd.cut(</span>
+            <span class="s1">df[</span><span class="s5">0</span><span class="s1">]</span><span class="s0">, </span><span class="s5">10</span><span class="s0">, </span><span class="s1">labels=[</span><span class="s3">&quot;A&quot;</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s0">, </span><span class="s3">&quot;C&quot;</span><span class="s0">, </span><span class="s3">&quot;D&quot;</span><span class="s0">, </span><span class="s3">&quot;E&quot;</span><span class="s0">, </span><span class="s3">&quot;F&quot;</span><span class="s0">, </span><span class="s3">&quot;G&quot;</span><span class="s0">, </span><span class="s3">&quot;H&quot;</span><span class="s0">, </span><span class="s3">&quot;I&quot;</span><span class="s0">, </span><span class="s3">&quot;J&quot;</span><span class="s1">]</span>
+        <span class="s1">)</span>
+        <span class="s1">df[</span><span class="s3">&quot;new&quot;</span><span class="s1">] = intervals</span>
+        <span class="s1">expected[</span><span class="s3">&quot;new&quot;</span><span class="s1">] = pd.Series(list(intervals))</span>
+
+        <span class="s1">df.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s1">)</span>
+        <span class="s0">with </span><span class="s1">ExcelFile(path) </span><span class="s0">as </span><span class="s1">reader:</span>
+            <span class="s1">recons = pd.read_excel(reader</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s1">tm.assert_frame_equal(expected</span><span class="s0">, </span><span class="s1">recons)</span>
+
+    <span class="s0">def </span><span class="s1">test_to_excel_timedelta(self</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s4"># see gh-19242, gh-9155</span>
+        <span class="s4">#</span>
+        <span class="s4"># Test writing timedelta to xls.</span>
+        <span class="s1">df = DataFrame(</span>
+            <span class="s1">np.random.randint(-</span><span class="s5">10</span><span class="s0">, </span><span class="s5">10</span><span class="s0">, </span><span class="s1">size=(</span><span class="s5">20</span><span class="s0">, </span><span class="s5">1</span><span class="s1">))</span><span class="s0">, </span><span class="s1">columns=[</span><span class="s3">&quot;A&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">dtype=np.int64</span>
+        <span class="s1">)</span>
+        <span class="s1">expected = df.copy()</span>
+
+        <span class="s1">df[</span><span class="s3">&quot;new&quot;</span><span class="s1">] = df[</span><span class="s3">&quot;A&quot;</span><span class="s1">].apply(</span><span class="s0">lambda </span><span class="s1">x: timedelta(seconds=x))</span>
+        <span class="s1">expected[</span><span class="s3">&quot;new&quot;</span><span class="s1">] = expected[</span><span class="s3">&quot;A&quot;</span><span class="s1">].apply(</span>
+            <span class="s0">lambda </span><span class="s1">x: timedelta(seconds=x).total_seconds() / </span><span class="s5">86400</span>
+        <span class="s1">)</span>
+
+        <span class="s1">df.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s1">)</span>
+        <span class="s0">with </span><span class="s1">ExcelFile(path) </span><span class="s0">as </span><span class="s1">reader:</span>
+            <span class="s1">recons = pd.read_excel(reader</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s1">tm.assert_frame_equal(expected</span><span class="s0">, </span><span class="s1">recons)</span>
+
+    <span class="s0">def </span><span class="s1">test_to_excel_periodindex(self</span><span class="s0">, </span><span class="s1">tsframe</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s1">xp = tsframe.resample(</span><span class="s3">&quot;M&quot;</span><span class="s0">, </span><span class="s1">kind=</span><span class="s3">&quot;period&quot;</span><span class="s1">).mean()</span>
+
+        <span class="s1">xp.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;sht1&quot;</span><span class="s1">)</span>
+
+        <span class="s0">with </span><span class="s1">ExcelFile(path) </span><span class="s0">as </span><span class="s1">reader:</span>
+            <span class="s1">rs = pd.read_excel(reader</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;sht1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s1">tm.assert_frame_equal(xp</span><span class="s0">, </span><span class="s1">rs.to_period(</span><span class="s3">&quot;M&quot;</span><span class="s1">))</span>
+
+    <span class="s0">def </span><span class="s1">test_to_excel_multiindex(self</span><span class="s0">, </span><span class="s1">merge_cells</span><span class="s0">, </span><span class="s1">frame</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s1">arrays = np.arange(len(frame.index) * </span><span class="s5">2</span><span class="s1">).reshape(</span><span class="s5">2</span><span class="s0">, </span><span class="s1">-</span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s1">new_index = MultiIndex.from_arrays(arrays</span><span class="s0">, </span><span class="s1">names=[</span><span class="s3">&quot;first&quot;</span><span class="s0">, </span><span class="s3">&quot;second&quot;</span><span class="s1">])</span>
+        <span class="s1">frame.index = new_index</span>
+
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">header=</span><span class="s0">False</span><span class="s1">)</span>
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">columns=[</span><span class="s3">&quot;A&quot;</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">])</span>
+
+        <span class="s4"># round trip</span>
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">merge_cells=merge_cells)</span>
+        <span class="s0">with </span><span class="s1">ExcelFile(path) </span><span class="s0">as </span><span class="s1">reader:</span>
+            <span class="s1">df = pd.read_excel(reader</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=[</span><span class="s5">0</span><span class="s0">, </span><span class="s5">1</span><span class="s1">])</span>
+        <span class="s1">tm.assert_frame_equal(frame</span><span class="s0">, </span><span class="s1">df)</span>
+
+    <span class="s4"># GH13511</span>
+    <span class="s0">def </span><span class="s1">test_to_excel_multiindex_nan_label(self</span><span class="s0">, </span><span class="s1">merge_cells</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s1">df = DataFrame({</span><span class="s3">&quot;A&quot;</span><span class="s1">: [</span><span class="s0">None, </span><span class="s5">2</span><span class="s0">, </span><span class="s5">3</span><span class="s1">]</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">: [</span><span class="s5">10</span><span class="s0">, </span><span class="s5">20</span><span class="s0">, </span><span class="s5">30</span><span class="s1">]</span><span class="s0">, </span><span class="s3">&quot;C&quot;</span><span class="s1">: np.random.sample(</span><span class="s5">3</span><span class="s1">)})</span>
+        <span class="s1">df = df.set_index([</span><span class="s3">&quot;A&quot;</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">])</span>
+
+        <span class="s1">df.to_excel(path</span><span class="s0">, </span><span class="s1">merge_cells=merge_cells)</span>
+        <span class="s1">df1 = pd.read_excel(path</span><span class="s0">, </span><span class="s1">index_col=[</span><span class="s5">0</span><span class="s0">, </span><span class="s5">1</span><span class="s1">])</span>
+        <span class="s1">tm.assert_frame_equal(df</span><span class="s0">, </span><span class="s1">df1)</span>
+
+    <span class="s4"># Test for Issue 11328. If column indices are integers, make</span>
+    <span class="s4"># sure they are handled correctly for either setting of</span>
+    <span class="s4"># merge_cells</span>
+    <span class="s0">def </span><span class="s1">test_to_excel_multiindex_cols(self</span><span class="s0">, </span><span class="s1">merge_cells</span><span class="s0">, </span><span class="s1">frame</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s1">arrays = np.arange(len(frame.index) * </span><span class="s5">2</span><span class="s1">).reshape(</span><span class="s5">2</span><span class="s0">, </span><span class="s1">-</span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s1">new_index = MultiIndex.from_arrays(arrays</span><span class="s0">, </span><span class="s1">names=[</span><span class="s3">&quot;first&quot;</span><span class="s0">, </span><span class="s3">&quot;second&quot;</span><span class="s1">])</span>
+        <span class="s1">frame.index = new_index</span>
+
+        <span class="s1">new_cols_index = MultiIndex.from_tuples([(</span><span class="s5">40</span><span class="s0">, </span><span class="s5">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s5">40</span><span class="s0">, </span><span class="s5">2</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s5">50</span><span class="s0">, </span><span class="s5">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s5">50</span><span class="s0">, </span><span class="s5">2</span><span class="s1">)])</span>
+        <span class="s1">frame.columns = new_cols_index</span>
+        <span class="s1">header = [</span><span class="s5">0</span><span class="s0">, </span><span class="s5">1</span><span class="s1">]</span>
+        <span class="s0">if not </span><span class="s1">merge_cells:</span>
+            <span class="s1">header = </span><span class="s5">0</span>
+
+        <span class="s4"># round trip</span>
+        <span class="s1">frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">merge_cells=merge_cells)</span>
+        <span class="s0">with </span><span class="s1">ExcelFile(path) </span><span class="s0">as </span><span class="s1">reader:</span>
+            <span class="s1">df = pd.read_excel(</span>
+                <span class="s1">reader</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">header=header</span><span class="s0">, </span><span class="s1">index_col=[</span><span class="s5">0</span><span class="s0">, </span><span class="s5">1</span><span class="s1">]</span>
+            <span class="s1">)</span>
+        <span class="s0">if not </span><span class="s1">merge_cells:</span>
+            <span class="s1">fm = frame.columns.format(sparsify=</span><span class="s0">False, </span><span class="s1">adjoin=</span><span class="s0">False, </span><span class="s1">names=</span><span class="s0">False</span><span class="s1">)</span>
+            <span class="s1">frame.columns = [</span><span class="s3">&quot;.&quot;</span><span class="s1">.join(map(str</span><span class="s0">, </span><span class="s1">q)) </span><span class="s0">for </span><span class="s1">q </span><span class="s0">in </span><span class="s1">zip(*fm)]</span>
+        <span class="s1">tm.assert_frame_equal(frame</span><span class="s0">, </span><span class="s1">df)</span>
+
+    <span class="s0">def </span><span class="s1">test_to_excel_multiindex_dates(self</span><span class="s0">, </span><span class="s1">merge_cells</span><span class="s0">, </span><span class="s1">tsframe</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s4"># try multiindex with dates</span>
+        <span class="s1">new_index = [tsframe.index</span><span class="s0">, </span><span class="s1">np.arange(len(tsframe.index))]</span>
+        <span class="s1">tsframe.index = MultiIndex.from_arrays(new_index)</span>
+
+        <span class="s1">tsframe.index.names = [</span><span class="s3">&quot;time&quot;</span><span class="s0">, </span><span class="s3">&quot;foo&quot;</span><span class="s1">]</span>
+        <span class="s1">tsframe.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">merge_cells=merge_cells)</span>
+        <span class="s0">with </span><span class="s1">ExcelFile(path) </span><span class="s0">as </span><span class="s1">reader:</span>
+            <span class="s1">recons = pd.read_excel(reader</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=[</span><span class="s5">0</span><span class="s0">, </span><span class="s5">1</span><span class="s1">])</span>
+
+        <span class="s1">tm.assert_frame_equal(tsframe</span><span class="s0">, </span><span class="s1">recons)</span>
+        <span class="s0">assert </span><span class="s1">recons.index.names == (</span><span class="s3">&quot;time&quot;</span><span class="s0">, </span><span class="s3">&quot;foo&quot;</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_to_excel_multiindex_no_write_index(self</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s4"># Test writing and re-reading a MI without the index. GH 5616.</span>
+
+        <span class="s4"># Initial non-MI frame.</span>
+        <span class="s1">frame1 = DataFrame({</span><span class="s3">&quot;a&quot;</span><span class="s1">: [</span><span class="s5">10</span><span class="s0">, </span><span class="s5">20</span><span class="s1">]</span><span class="s0">, </span><span class="s3">&quot;b&quot;</span><span class="s1">: [</span><span class="s5">30</span><span class="s0">, </span><span class="s5">40</span><span class="s1">]</span><span class="s0">, </span><span class="s3">&quot;c&quot;</span><span class="s1">: [</span><span class="s5">50</span><span class="s0">, </span><span class="s5">60</span><span class="s1">]})</span>
+
+        <span class="s4"># Add a MI.</span>
+        <span class="s1">frame2 = frame1.copy()</span>
+        <span class="s1">multi_index = MultiIndex.from_tuples([(</span><span class="s5">70</span><span class="s0">, </span><span class="s5">80</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s5">90</span><span class="s0">, </span><span class="s5">100</span><span class="s1">)])</span>
+        <span class="s1">frame2.index = multi_index</span>
+
+        <span class="s4"># Write out to Excel without the index.</span>
+        <span class="s1">frame2.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index=</span><span class="s0">False</span><span class="s1">)</span>
+
+        <span class="s4"># Read it back in.</span>
+        <span class="s0">with </span><span class="s1">ExcelFile(path) </span><span class="s0">as </span><span class="s1">reader:</span>
+            <span class="s1">frame3 = pd.read_excel(reader</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s1">)</span>
+
+        <span class="s4"># Test that it is the same as the initial frame.</span>
+        <span class="s1">tm.assert_frame_equal(frame1</span><span class="s0">, </span><span class="s1">frame3)</span>
+
+    <span class="s0">def </span><span class="s1">test_to_excel_float_format(self</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s1">df = DataFrame(</span>
+            <span class="s1">[[</span><span class="s5">0.123456</span><span class="s0">, </span><span class="s5">0.234567</span><span class="s0">, </span><span class="s5">0.567567</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s5">12.32112</span><span class="s0">, </span><span class="s5">123123.2</span><span class="s0">, </span><span class="s5">321321.2</span><span class="s1">]]</span><span class="s0">,</span>
+            <span class="s1">index=[</span><span class="s3">&quot;A&quot;</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">]</span><span class="s0">,</span>
+            <span class="s1">columns=[</span><span class="s3">&quot;X&quot;</span><span class="s0">, </span><span class="s3">&quot;Y&quot;</span><span class="s0">, </span><span class="s3">&quot;Z&quot;</span><span class="s1">]</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s1">df.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">float_format=</span><span class="s3">&quot;%.2f&quot;</span><span class="s1">)</span>
+
+        <span class="s0">with </span><span class="s1">ExcelFile(path) </span><span class="s0">as </span><span class="s1">reader:</span>
+            <span class="s1">result = pd.read_excel(reader</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+
+        <span class="s1">expected = DataFrame(</span>
+            <span class="s1">[[</span><span class="s5">0.12</span><span class="s0">, </span><span class="s5">0.23</span><span class="s0">, </span><span class="s5">0.57</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s5">12.32</span><span class="s0">, </span><span class="s5">123123.20</span><span class="s0">, </span><span class="s5">321321.20</span><span class="s1">]]</span><span class="s0">,</span>
+            <span class="s1">index=[</span><span class="s3">&quot;A&quot;</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">]</span><span class="s0">,</span>
+            <span class="s1">columns=[</span><span class="s3">&quot;X&quot;</span><span class="s0">, </span><span class="s3">&quot;Y&quot;</span><span class="s0">, </span><span class="s3">&quot;Z&quot;</span><span class="s1">]</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s1">tm.assert_frame_equal(result</span><span class="s0">, </span><span class="s1">expected)</span>
+
+    <span class="s0">def </span><span class="s1">test_to_excel_output_encoding(self</span><span class="s0">, </span><span class="s1">ext):</span>
+        <span class="s4"># Avoid mixed inferred_type.</span>
+        <span class="s1">df = DataFrame(</span>
+            <span class="s1">[[</span><span class="s3">&quot;</span><span class="s0">\u0192</span><span class="s3">&quot;</span><span class="s0">, </span><span class="s3">&quot;</span><span class="s0">\u0193</span><span class="s3">&quot;</span><span class="s0">, </span><span class="s3">&quot;</span><span class="s0">\u0194</span><span class="s3">&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s3">&quot;</span><span class="s0">\u0195</span><span class="s3">&quot;</span><span class="s0">, </span><span class="s3">&quot;</span><span class="s0">\u0196</span><span class="s3">&quot;</span><span class="s0">, </span><span class="s3">&quot;</span><span class="s0">\u0197</span><span class="s3">&quot;</span><span class="s1">]]</span><span class="s0">,</span>
+            <span class="s1">index=[</span><span class="s3">&quot;A</span><span class="s0">\u0192</span><span class="s3">&quot;</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">]</span><span class="s0">,</span>
+            <span class="s1">columns=[</span><span class="s3">&quot;X</span><span class="s0">\u0193</span><span class="s3">&quot;</span><span class="s0">, </span><span class="s3">&quot;Y&quot;</span><span class="s0">, </span><span class="s3">&quot;Z&quot;</span><span class="s1">]</span><span class="s0">,</span>
+        <span class="s1">)</span>
+
+        <span class="s0">with </span><span class="s1">tm.ensure_clean(</span><span class="s3">&quot;__tmp_to_excel_float_format__.&quot; </span><span class="s1">+ ext) </span><span class="s0">as </span><span class="s1">filename:</span>
+            <span class="s1">df.to_excel(filename</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;TestSheet&quot;</span><span class="s0">, </span><span class="s1">encoding=</span><span class="s3">&quot;utf8&quot;</span><span class="s1">)</span>
+            <span class="s1">result = pd.read_excel(filename</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;TestSheet&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s1">tm.assert_frame_equal(result</span><span class="s0">, </span><span class="s1">df)</span>
+
+    <span class="s0">def </span><span class="s1">test_to_excel_unicode_filename(self</span><span class="s0">, </span><span class="s1">ext</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s0">with </span><span class="s1">tm.ensure_clean(</span><span class="s3">&quot;</span><span class="s0">\u0192</span><span class="s3">u.&quot; </span><span class="s1">+ ext) </span><span class="s0">as </span><span class="s1">filename:</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">f = open(filename</span><span class="s0">, </span><span class="s3">&quot;wb&quot;</span><span class="s1">)</span>
+            <span class="s0">except </span><span class="s1">UnicodeEncodeError:</span>
+                <span class="s1">pytest.skip(</span><span class="s3">&quot;No unicode file names on this system&quot;</span><span class="s1">)</span>
+            <span class="s0">finally</span><span class="s1">:</span>
+                <span class="s1">f.close()</span>
+
+            <span class="s1">df = DataFrame(</span>
+                <span class="s1">[[</span><span class="s5">0.123456</span><span class="s0">, </span><span class="s5">0.234567</span><span class="s0">, </span><span class="s5">0.567567</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s5">12.32112</span><span class="s0">, </span><span class="s5">123123.2</span><span class="s0">, </span><span class="s5">321321.2</span><span class="s1">]]</span><span class="s0">,</span>
+                <span class="s1">index=[</span><span class="s3">&quot;A&quot;</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">]</span><span class="s0">,</span>
+                <span class="s1">columns=[</span><span class="s3">&quot;X&quot;</span><span class="s0">, </span><span class="s3">&quot;Y&quot;</span><span class="s0">, </span><span class="s3">&quot;Z&quot;</span><span class="s1">]</span><span class="s0">,</span>
+            <span class="s1">)</span>
+            <span class="s1">df.to_excel(filename</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">float_format=</span><span class="s3">&quot;%.2f&quot;</span><span class="s1">)</span>
+
+            <span class="s0">with </span><span class="s1">ExcelFile(filename) </span><span class="s0">as </span><span class="s1">reader:</span>
+                <span class="s1">result = pd.read_excel(reader</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+
+        <span class="s1">expected = DataFrame(</span>
+            <span class="s1">[[</span><span class="s5">0.12</span><span class="s0">, </span><span class="s5">0.23</span><span class="s0">, </span><span class="s5">0.57</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s5">12.32</span><span class="s0">, </span><span class="s5">123123.20</span><span class="s0">, </span><span class="s5">321321.20</span><span class="s1">]]</span><span class="s0">,</span>
+            <span class="s1">index=[</span><span class="s3">&quot;A&quot;</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">]</span><span class="s0">,</span>
+            <span class="s1">columns=[</span><span class="s3">&quot;X&quot;</span><span class="s0">, </span><span class="s3">&quot;Y&quot;</span><span class="s0">, </span><span class="s3">&quot;Z&quot;</span><span class="s1">]</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s1">tm.assert_frame_equal(result</span><span class="s0">, </span><span class="s1">expected)</span>
+
+    <span class="s1">@pytest.mark.parametrize(</span><span class="s3">&quot;use_headers&quot;</span><span class="s0">, </span><span class="s1">[</span><span class="s0">True, False</span><span class="s1">])</span>
+    <span class="s1">@pytest.mark.parametrize(</span><span class="s3">&quot;r_idx_nlevels&quot;</span><span class="s0">, </span><span class="s1">[</span><span class="s5">1</span><span class="s0">, </span><span class="s5">2</span><span class="s0">, </span><span class="s5">3</span><span class="s1">])</span>
+    <span class="s1">@pytest.mark.parametrize(</span><span class="s3">&quot;c_idx_nlevels&quot;</span><span class="s0">, </span><span class="s1">[</span><span class="s5">1</span><span class="s0">, </span><span class="s5">2</span><span class="s0">, </span><span class="s5">3</span><span class="s1">])</span>
+    <span class="s0">def </span><span class="s1">test_excel_010_hemstring(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">merge_cells</span><span class="s0">, </span><span class="s1">c_idx_nlevels</span><span class="s0">, </span><span class="s1">r_idx_nlevels</span><span class="s0">, </span><span class="s1">use_headers</span><span class="s0">, </span><span class="s1">path</span>
+    <span class="s1">):</span>
+        <span class="s0">def </span><span class="s1">roundtrip(data</span><span class="s0">, </span><span class="s1">header=</span><span class="s0">True, </span><span class="s1">parser_hdr=</span><span class="s5">0</span><span class="s0">, </span><span class="s1">index=</span><span class="s0">True</span><span class="s1">):</span>
+            <span class="s1">data.to_excel(path</span><span class="s0">, </span><span class="s1">header=header</span><span class="s0">, </span><span class="s1">merge_cells=merge_cells</span><span class="s0">, </span><span class="s1">index=index)</span>
+
+            <span class="s0">with </span><span class="s1">ExcelFile(path) </span><span class="s0">as </span><span class="s1">xf:</span>
+                <span class="s0">return </span><span class="s1">pd.read_excel(</span>
+                    <span class="s1">xf</span><span class="s0">, </span><span class="s1">sheet_name=xf.sheet_names[</span><span class="s5">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">header=parser_hdr</span>
+                <span class="s1">)</span>
+
+        <span class="s4"># Basic test.</span>
+        <span class="s1">parser_header = </span><span class="s5">0 </span><span class="s0">if </span><span class="s1">use_headers </span><span class="s0">else None</span>
+        <span class="s1">res = roundtrip(DataFrame([</span><span class="s5">0</span><span class="s1">])</span><span class="s0">, </span><span class="s1">use_headers</span><span class="s0">, </span><span class="s1">parser_header)</span>
+
+        <span class="s0">assert </span><span class="s1">res.shape == (</span><span class="s5">1</span><span class="s0">, </span><span class="s5">2</span><span class="s1">)</span>
+        <span class="s0">assert </span><span class="s1">res.iloc[</span><span class="s5">0</span><span class="s0">, </span><span class="s5">0</span><span class="s1">] </span><span class="s0">is not </span><span class="s1">np.nan</span>
+
+        <span class="s4"># More complex tests with multi-index.</span>
+        <span class="s1">nrows = </span><span class="s5">5</span>
+        <span class="s1">ncols = </span><span class="s5">3</span>
+
+        <span class="s4"># ensure limited functionality in 0.10</span>
+        <span class="s4"># override of gh-2370 until sorted out in 0.11</span>
+
+        <span class="s1">df = tm.makeCustomDataframe(</span>
+            <span class="s1">nrows</span><span class="s0">, </span><span class="s1">ncols</span><span class="s0">, </span><span class="s1">r_idx_nlevels=r_idx_nlevels</span><span class="s0">, </span><span class="s1">c_idx_nlevels=c_idx_nlevels</span>
+        <span class="s1">)</span>
+
+        <span class="s4"># This if will be removed once multi-column Excel writing</span>
+        <span class="s4"># is implemented. For now fixing gh-9794.</span>
+        <span class="s0">if </span><span class="s1">c_idx_nlevels &gt; </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s1">msg = (</span>
+                <span class="s3">&quot;Writing to Excel with MultiIndex columns and no index &quot;</span>
+                <span class="s3">&quot;</span><span class="s0">\\</span><span class="s3">('index'=False</span><span class="s0">\\</span><span class="s3">) is not yet implemented.&quot;</span>
+            <span class="s1">)</span>
+            <span class="s0">with </span><span class="s1">pytest.raises(NotImplementedError</span><span class="s0">, </span><span class="s1">match=msg):</span>
+                <span class="s1">roundtrip(df</span><span class="s0">, </span><span class="s1">use_headers</span><span class="s0">, </span><span class="s1">index=</span><span class="s0">False</span><span class="s1">)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">res = roundtrip(df</span><span class="s0">, </span><span class="s1">use_headers)</span>
+
+            <span class="s0">if </span><span class="s1">use_headers:</span>
+                <span class="s0">assert </span><span class="s1">res.shape == (nrows</span><span class="s0">, </span><span class="s1">ncols + r_idx_nlevels)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s4"># First row taken as columns.</span>
+                <span class="s0">assert </span><span class="s1">res.shape == (nrows - </span><span class="s5">1</span><span class="s0">, </span><span class="s1">ncols + r_idx_nlevels)</span>
+
+            <span class="s4"># No NaNs.</span>
+            <span class="s0">for </span><span class="s1">r </span><span class="s0">in </span><span class="s1">range(len(res.index)):</span>
+                <span class="s0">for </span><span class="s1">c </span><span class="s0">in </span><span class="s1">range(len(res.columns)):</span>
+                    <span class="s0">assert </span><span class="s1">res.iloc[r</span><span class="s0">, </span><span class="s1">c] </span><span class="s0">is not </span><span class="s1">np.nan</span>
+
+    <span class="s0">def </span><span class="s1">test_duplicated_columns(self</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s4"># see gh-5235</span>
+        <span class="s1">df = DataFrame([[</span><span class="s5">1</span><span class="s0">, </span><span class="s5">2</span><span class="s0">, </span><span class="s5">3</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s5">1</span><span class="s0">, </span><span class="s5">2</span><span class="s0">, </span><span class="s5">3</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s5">1</span><span class="s0">, </span><span class="s5">2</span><span class="s0">, </span><span class="s5">3</span><span class="s1">]]</span><span class="s0">, </span><span class="s1">columns=[</span><span class="s3">&quot;A&quot;</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">])</span>
+        <span class="s1">df.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s1">)</span>
+        <span class="s1">expected = DataFrame(</span>
+            <span class="s1">[[</span><span class="s5">1</span><span class="s0">, </span><span class="s5">2</span><span class="s0">, </span><span class="s5">3</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s5">1</span><span class="s0">, </span><span class="s5">2</span><span class="s0">, </span><span class="s5">3</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s5">1</span><span class="s0">, </span><span class="s5">2</span><span class="s0">, </span><span class="s5">3</span><span class="s1">]]</span><span class="s0">, </span><span class="s1">columns=[</span><span class="s3">&quot;A&quot;</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s0">, </span><span class="s3">&quot;B.1&quot;</span><span class="s1">]</span>
+        <span class="s1">)</span>
+
+        <span class="s4"># By default, we mangle.</span>
+        <span class="s1">result = pd.read_excel(path</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s1">tm.assert_frame_equal(result</span><span class="s0">, </span><span class="s1">expected)</span>
+
+        <span class="s4"># Explicitly, we pass in the parameter.</span>
+        <span class="s1">result = pd.read_excel(</span>
+            <span class="s1">path</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s0">, </span><span class="s1">mangle_dupe_cols=</span><span class="s0">True</span>
+        <span class="s1">)</span>
+        <span class="s1">tm.assert_frame_equal(result</span><span class="s0">, </span><span class="s1">expected)</span>
+
+        <span class="s4"># see gh-11007, gh-10970</span>
+        <span class="s1">df = DataFrame([[</span><span class="s5">1</span><span class="s0">, </span><span class="s5">2</span><span class="s0">, </span><span class="s5">3</span><span class="s0">, </span><span class="s5">4</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s5">5</span><span class="s0">, </span><span class="s5">6</span><span class="s0">, </span><span class="s5">7</span><span class="s0">, </span><span class="s5">8</span><span class="s1">]]</span><span class="s0">, </span><span class="s1">columns=[</span><span class="s3">&quot;A&quot;</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s0">, </span><span class="s3">&quot;A&quot;</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">])</span>
+        <span class="s1">df.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s1">)</span>
+
+        <span class="s1">result = pd.read_excel(path</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s1">expected = DataFrame(</span>
+            <span class="s1">[[</span><span class="s5">1</span><span class="s0">, </span><span class="s5">2</span><span class="s0">, </span><span class="s5">3</span><span class="s0">, </span><span class="s5">4</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s5">5</span><span class="s0">, </span><span class="s5">6</span><span class="s0">, </span><span class="s5">7</span><span class="s0">, </span><span class="s5">8</span><span class="s1">]]</span><span class="s0">, </span><span class="s1">columns=[</span><span class="s3">&quot;A&quot;</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s0">, </span><span class="s3">&quot;A.1&quot;</span><span class="s0">, </span><span class="s3">&quot;B.1&quot;</span><span class="s1">]</span>
+        <span class="s1">)</span>
+        <span class="s1">tm.assert_frame_equal(result</span><span class="s0">, </span><span class="s1">expected)</span>
+
+        <span class="s4"># see gh-10982</span>
+        <span class="s1">df.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">index=</span><span class="s0">False, </span><span class="s1">header=</span><span class="s0">False</span><span class="s1">)</span>
+        <span class="s1">result = pd.read_excel(path</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">header=</span><span class="s0">None</span><span class="s1">)</span>
+
+        <span class="s1">expected = DataFrame([[</span><span class="s5">1</span><span class="s0">, </span><span class="s5">2</span><span class="s0">, </span><span class="s5">3</span><span class="s0">, </span><span class="s5">4</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s5">5</span><span class="s0">, </span><span class="s5">6</span><span class="s0">, </span><span class="s5">7</span><span class="s0">, </span><span class="s5">8</span><span class="s1">]])</span>
+        <span class="s1">tm.assert_frame_equal(result</span><span class="s0">, </span><span class="s1">expected)</span>
+
+        <span class="s1">msg = </span><span class="s3">&quot;Setting mangle_dupe_cols=False is not supported yet&quot;</span>
+        <span class="s0">with </span><span class="s1">pytest.raises(ValueError</span><span class="s0">, </span><span class="s1">match=msg):</span>
+            <span class="s1">pd.read_excel(path</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">header=</span><span class="s0">None, </span><span class="s1">mangle_dupe_cols=</span><span class="s0">False</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_swapped_columns(self</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s4"># Test for issue #5427.</span>
+        <span class="s1">write_frame = DataFrame({</span><span class="s3">&quot;A&quot;</span><span class="s1">: [</span><span class="s5">1</span><span class="s0">, </span><span class="s5">1</span><span class="s0">, </span><span class="s5">1</span><span class="s1">]</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">: [</span><span class="s5">2</span><span class="s0">, </span><span class="s5">2</span><span class="s0">, </span><span class="s5">2</span><span class="s1">]})</span>
+        <span class="s1">write_frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">columns=[</span><span class="s3">&quot;B&quot;</span><span class="s0">, </span><span class="s3">&quot;A&quot;</span><span class="s1">])</span>
+
+        <span class="s1">read_frame = pd.read_excel(path</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">header=</span><span class="s5">0</span><span class="s1">)</span>
+
+        <span class="s1">tm.assert_series_equal(write_frame[</span><span class="s3">&quot;A&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">read_frame[</span><span class="s3">&quot;A&quot;</span><span class="s1">])</span>
+        <span class="s1">tm.assert_series_equal(write_frame[</span><span class="s3">&quot;B&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">read_frame[</span><span class="s3">&quot;B&quot;</span><span class="s1">])</span>
+
+    <span class="s0">def </span><span class="s1">test_invalid_columns(self</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s4"># see gh-10982</span>
+        <span class="s1">write_frame = DataFrame({</span><span class="s3">&quot;A&quot;</span><span class="s1">: [</span><span class="s5">1</span><span class="s0">, </span><span class="s5">1</span><span class="s0">, </span><span class="s5">1</span><span class="s1">]</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">: [</span><span class="s5">2</span><span class="s0">, </span><span class="s5">2</span><span class="s0">, </span><span class="s5">2</span><span class="s1">]})</span>
+
+        <span class="s0">with </span><span class="s1">pytest.raises(KeyError</span><span class="s0">, </span><span class="s1">match=</span><span class="s3">&quot;Not all names specified&quot;</span><span class="s1">):</span>
+            <span class="s1">write_frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">columns=[</span><span class="s3">&quot;B&quot;</span><span class="s0">, </span><span class="s3">&quot;C&quot;</span><span class="s1">])</span>
+
+        <span class="s0">with </span><span class="s1">pytest.raises(</span>
+            <span class="s1">KeyError</span><span class="s0">, </span><span class="s1">match=</span><span class="s3">&quot;'passes columns are not ALL present dataframe'&quot;</span>
+        <span class="s1">):</span>
+            <span class="s1">write_frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test1&quot;</span><span class="s0">, </span><span class="s1">columns=[</span><span class="s3">&quot;C&quot;</span><span class="s0">, </span><span class="s3">&quot;D&quot;</span><span class="s1">])</span>
+
+    <span class="s1">@pytest.mark.parametrize(</span>
+        <span class="s3">&quot;to_excel_index,read_excel_index_col&quot;</span><span class="s0">,</span>
+        <span class="s1">[</span>
+            <span class="s1">(</span><span class="s0">True, </span><span class="s5">0</span><span class="s1">)</span><span class="s0">,  </span><span class="s4"># Include index in write to file</span>
+            <span class="s1">(</span><span class="s0">False, None</span><span class="s1">)</span><span class="s0">,  </span><span class="s4"># Dont include index in write to file</span>
+        <span class="s1">]</span><span class="s0">,</span>
+    <span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">test_write_subset_columns(self</span><span class="s0">, </span><span class="s1">path</span><span class="s0">, </span><span class="s1">to_excel_index</span><span class="s0">, </span><span class="s1">read_excel_index_col):</span>
+        <span class="s4"># GH 31677</span>
+        <span class="s1">write_frame = DataFrame({</span><span class="s3">&quot;A&quot;</span><span class="s1">: [</span><span class="s5">1</span><span class="s0">, </span><span class="s5">1</span><span class="s0">, </span><span class="s5">1</span><span class="s1">]</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">: [</span><span class="s5">2</span><span class="s0">, </span><span class="s5">2</span><span class="s0">, </span><span class="s5">2</span><span class="s1">]</span><span class="s0">, </span><span class="s3">&quot;C&quot;</span><span class="s1">: [</span><span class="s5">3</span><span class="s0">, </span><span class="s5">3</span><span class="s0">, </span><span class="s5">3</span><span class="s1">]})</span>
+        <span class="s1">write_frame.to_excel(</span>
+            <span class="s1">path</span><span class="s0">, </span><span class="s3">&quot;col_subset_bug&quot;</span><span class="s0">, </span><span class="s1">columns=[</span><span class="s3">&quot;A&quot;</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">index=to_excel_index</span>
+        <span class="s1">)</span>
+
+        <span class="s1">expected = write_frame[[</span><span class="s3">&quot;A&quot;</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">]]</span>
+        <span class="s1">read_frame = pd.read_excel(</span>
+            <span class="s1">path</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;col_subset_bug&quot;</span><span class="s0">, </span><span class="s1">index_col=read_excel_index_col</span>
+        <span class="s1">)</span>
+
+        <span class="s1">tm.assert_frame_equal(expected</span><span class="s0">, </span><span class="s1">read_frame)</span>
+
+    <span class="s0">def </span><span class="s1">test_comment_arg(self</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s4"># see gh-18735</span>
+        <span class="s4">#</span>
+        <span class="s4"># Test the comment argument functionality to pd.read_excel.</span>
+
+        <span class="s4"># Create file to read in.</span>
+        <span class="s1">df = DataFrame({</span><span class="s3">&quot;A&quot;</span><span class="s1">: [</span><span class="s3">&quot;one&quot;</span><span class="s0">, </span><span class="s3">&quot;#one&quot;</span><span class="s0">, </span><span class="s3">&quot;one&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">: [</span><span class="s3">&quot;two&quot;</span><span class="s0">, </span><span class="s3">&quot;two&quot;</span><span class="s0">, </span><span class="s3">&quot;#two&quot;</span><span class="s1">]})</span>
+        <span class="s1">df.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test_c&quot;</span><span class="s1">)</span>
+
+        <span class="s4"># Read file without comment arg.</span>
+        <span class="s1">result1 = pd.read_excel(path</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test_c&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+
+        <span class="s1">result1.iloc[</span><span class="s5">1</span><span class="s0">, </span><span class="s5">0</span><span class="s1">] = </span><span class="s0">None</span>
+        <span class="s1">result1.iloc[</span><span class="s5">1</span><span class="s0">, </span><span class="s5">1</span><span class="s1">] = </span><span class="s0">None</span>
+        <span class="s1">result1.iloc[</span><span class="s5">2</span><span class="s0">, </span><span class="s5">1</span><span class="s1">] = </span><span class="s0">None</span>
+
+        <span class="s1">result2 = pd.read_excel(path</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test_c&quot;</span><span class="s0">, </span><span class="s1">comment=</span><span class="s3">&quot;#&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s1">tm.assert_frame_equal(result1</span><span class="s0">, </span><span class="s1">result2)</span>
+
+    <span class="s0">def </span><span class="s1">test_comment_default(self</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s4"># Re issue #18735</span>
+        <span class="s4"># Test the comment argument default to pd.read_excel</span>
+
+        <span class="s4"># Create file to read in</span>
+        <span class="s1">df = DataFrame({</span><span class="s3">&quot;A&quot;</span><span class="s1">: [</span><span class="s3">&quot;one&quot;</span><span class="s0">, </span><span class="s3">&quot;#one&quot;</span><span class="s0">, </span><span class="s3">&quot;one&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">: [</span><span class="s3">&quot;two&quot;</span><span class="s0">, </span><span class="s3">&quot;two&quot;</span><span class="s0">, </span><span class="s3">&quot;#two&quot;</span><span class="s1">]})</span>
+        <span class="s1">df.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test_c&quot;</span><span class="s1">)</span>
+
+        <span class="s4"># Read file with default and explicit comment=None</span>
+        <span class="s1">result1 = pd.read_excel(path</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test_c&quot;</span><span class="s1">)</span>
+        <span class="s1">result2 = pd.read_excel(path</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test_c&quot;</span><span class="s0">, </span><span class="s1">comment=</span><span class="s0">None</span><span class="s1">)</span>
+        <span class="s1">tm.assert_frame_equal(result1</span><span class="s0">, </span><span class="s1">result2)</span>
+
+    <span class="s0">def </span><span class="s1">test_comment_used(self</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s4"># see gh-18735</span>
+        <span class="s4">#</span>
+        <span class="s4"># Test the comment argument is working as expected when used.</span>
+
+        <span class="s4"># Create file to read in.</span>
+        <span class="s1">df = DataFrame({</span><span class="s3">&quot;A&quot;</span><span class="s1">: [</span><span class="s3">&quot;one&quot;</span><span class="s0">, </span><span class="s3">&quot;#one&quot;</span><span class="s0">, </span><span class="s3">&quot;one&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">: [</span><span class="s3">&quot;two&quot;</span><span class="s0">, </span><span class="s3">&quot;two&quot;</span><span class="s0">, </span><span class="s3">&quot;#two&quot;</span><span class="s1">]})</span>
+        <span class="s1">df.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;test_c&quot;</span><span class="s1">)</span>
+
+        <span class="s4"># Test read_frame_comment against manually produced expected output.</span>
+        <span class="s1">expected = DataFrame({</span><span class="s3">&quot;A&quot;</span><span class="s1">: [</span><span class="s3">&quot;one&quot;</span><span class="s0">, None, </span><span class="s3">&quot;one&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">: [</span><span class="s3">&quot;two&quot;</span><span class="s0">, None, None</span><span class="s1">]})</span>
+        <span class="s1">result = pd.read_excel(path</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;test_c&quot;</span><span class="s0">, </span><span class="s1">comment=</span><span class="s3">&quot;#&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s1">tm.assert_frame_equal(result</span><span class="s0">, </span><span class="s1">expected)</span>
+
+    <span class="s0">def </span><span class="s1">test_comment_empty_line(self</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s4"># Re issue #18735</span>
+        <span class="s4"># Test that pd.read_excel ignores commented lines at the end of file</span>
+
+        <span class="s1">df = DataFrame({</span><span class="s3">&quot;a&quot;</span><span class="s1">: [</span><span class="s3">&quot;1&quot;</span><span class="s0">, </span><span class="s3">&quot;#2&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s3">&quot;b&quot;</span><span class="s1">: [</span><span class="s3">&quot;2&quot;</span><span class="s0">, </span><span class="s3">&quot;3&quot;</span><span class="s1">]})</span>
+        <span class="s1">df.to_excel(path</span><span class="s0">, </span><span class="s1">index=</span><span class="s0">False</span><span class="s1">)</span>
+
+        <span class="s4"># Test that all-comment lines at EoF are ignored</span>
+        <span class="s1">expected = DataFrame({</span><span class="s3">&quot;a&quot;</span><span class="s1">: [</span><span class="s5">1</span><span class="s1">]</span><span class="s0">, </span><span class="s3">&quot;b&quot;</span><span class="s1">: [</span><span class="s5">2</span><span class="s1">]})</span>
+        <span class="s1">result = pd.read_excel(path</span><span class="s0">, </span><span class="s1">comment=</span><span class="s3">&quot;#&quot;</span><span class="s1">)</span>
+        <span class="s1">tm.assert_frame_equal(result</span><span class="s0">, </span><span class="s1">expected)</span>
+
+    <span class="s0">def </span><span class="s1">test_datetimes(self</span><span class="s0">, </span><span class="s1">path):</span>
+
+        <span class="s4"># Test writing and reading datetimes. For issue #9139. (xref #9185)</span>
+        <span class="s1">datetimes = [</span>
+            <span class="s1">datetime(</span><span class="s5">2013</span><span class="s0">, </span><span class="s5">1</span><span class="s0">, </span><span class="s5">13</span><span class="s0">, </span><span class="s5">1</span><span class="s0">, </span><span class="s5">2</span><span class="s0">, </span><span class="s5">3</span><span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">datetime(</span><span class="s5">2013</span><span class="s0">, </span><span class="s5">1</span><span class="s0">, </span><span class="s5">13</span><span class="s0">, </span><span class="s5">2</span><span class="s0">, </span><span class="s5">45</span><span class="s0">, </span><span class="s5">56</span><span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">datetime(</span><span class="s5">2013</span><span class="s0">, </span><span class="s5">1</span><span class="s0">, </span><span class="s5">13</span><span class="s0">, </span><span class="s5">4</span><span class="s0">, </span><span class="s5">29</span><span class="s0">, </span><span class="s5">49</span><span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">datetime(</span><span class="s5">2013</span><span class="s0">, </span><span class="s5">1</span><span class="s0">, </span><span class="s5">13</span><span class="s0">, </span><span class="s5">6</span><span class="s0">, </span><span class="s5">13</span><span class="s0">, </span><span class="s5">42</span><span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">datetime(</span><span class="s5">2013</span><span class="s0">, </span><span class="s5">1</span><span class="s0">, </span><span class="s5">13</span><span class="s0">, </span><span class="s5">7</span><span class="s0">, </span><span class="s5">57</span><span class="s0">, </span><span class="s5">35</span><span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">datetime(</span><span class="s5">2013</span><span class="s0">, </span><span class="s5">1</span><span class="s0">, </span><span class="s5">13</span><span class="s0">, </span><span class="s5">9</span><span class="s0">, </span><span class="s5">41</span><span class="s0">, </span><span class="s5">28</span><span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">datetime(</span><span class="s5">2013</span><span class="s0">, </span><span class="s5">1</span><span class="s0">, </span><span class="s5">13</span><span class="s0">, </span><span class="s5">11</span><span class="s0">, </span><span class="s5">25</span><span class="s0">, </span><span class="s5">21</span><span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">datetime(</span><span class="s5">2013</span><span class="s0">, </span><span class="s5">1</span><span class="s0">, </span><span class="s5">13</span><span class="s0">, </span><span class="s5">13</span><span class="s0">, </span><span class="s5">9</span><span class="s0">, </span><span class="s5">14</span><span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">datetime(</span><span class="s5">2013</span><span class="s0">, </span><span class="s5">1</span><span class="s0">, </span><span class="s5">13</span><span class="s0">, </span><span class="s5">14</span><span class="s0">, </span><span class="s5">53</span><span class="s0">, </span><span class="s5">7</span><span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">datetime(</span><span class="s5">2013</span><span class="s0">, </span><span class="s5">1</span><span class="s0">, </span><span class="s5">13</span><span class="s0">, </span><span class="s5">16</span><span class="s0">, </span><span class="s5">37</span><span class="s0">, </span><span class="s5">0</span><span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">datetime(</span><span class="s5">2013</span><span class="s0">, </span><span class="s5">1</span><span class="s0">, </span><span class="s5">13</span><span class="s0">, </span><span class="s5">18</span><span class="s0">, </span><span class="s5">20</span><span class="s0">, </span><span class="s5">52</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">]</span>
+
+        <span class="s1">write_frame = DataFrame({</span><span class="s3">&quot;A&quot;</span><span class="s1">: datetimes})</span>
+        <span class="s1">write_frame.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;Sheet1&quot;</span><span class="s1">)</span>
+        <span class="s0">if </span><span class="s1">path.endswith(</span><span class="s3">&quot;xlsx&quot;</span><span class="s1">) </span><span class="s0">or </span><span class="s1">path.endswith(</span><span class="s3">&quot;xlsm&quot;</span><span class="s1">):</span>
+            <span class="s1">pytest.skip(</span>
+                <span class="s3">&quot;Defaults to openpyxl and fails with floating point error on &quot;</span>
+                <span class="s3">&quot;datetimes; may be fixed on newer versions of openpyxl - GH #38644&quot;</span>
+            <span class="s1">)</span>
+        <span class="s1">read_frame = pd.read_excel(path</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;Sheet1&quot;</span><span class="s0">, </span><span class="s1">header=</span><span class="s5">0</span><span class="s1">)</span>
+
+        <span class="s1">tm.assert_series_equal(write_frame[</span><span class="s3">&quot;A&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">read_frame[</span><span class="s3">&quot;A&quot;</span><span class="s1">])</span>
+
+    <span class="s0">def </span><span class="s1">test_bytes_io(self</span><span class="s0">, </span><span class="s1">engine):</span>
+        <span class="s4"># see gh-7074</span>
+        <span class="s0">with </span><span class="s1">BytesIO() </span><span class="s0">as </span><span class="s1">bio:</span>
+            <span class="s1">df = DataFrame(np.random.randn(</span><span class="s5">10</span><span class="s0">, </span><span class="s5">2</span><span class="s1">))</span>
+
+            <span class="s4"># Pass engine explicitly, as there is no file path to infer from.</span>
+            <span class="s0">with </span><span class="s1">ExcelWriter(bio</span><span class="s0">, </span><span class="s1">engine=engine) </span><span class="s0">as </span><span class="s1">writer:</span>
+                <span class="s1">df.to_excel(writer)</span>
+
+            <span class="s1">bio.seek(</span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s1">reread_df = pd.read_excel(bio</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s1">tm.assert_frame_equal(df</span><span class="s0">, </span><span class="s1">reread_df)</span>
+
+    <span class="s0">def </span><span class="s1">test_write_lists_dict(self</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s4"># see gh-8188.</span>
+        <span class="s1">df = DataFrame(</span>
+            <span class="s1">{</span>
+                <span class="s3">&quot;mixed&quot;</span><span class="s1">: [</span><span class="s3">&quot;a&quot;</span><span class="s0">, </span><span class="s1">[</span><span class="s3">&quot;b&quot;</span><span class="s0">, </span><span class="s3">&quot;c&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">{</span><span class="s3">&quot;d&quot;</span><span class="s1">: </span><span class="s3">&quot;e&quot;</span><span class="s0">, </span><span class="s3">&quot;f&quot;</span><span class="s1">: </span><span class="s5">2</span><span class="s1">}]</span><span class="s0">,</span>
+                <span class="s3">&quot;numeric&quot;</span><span class="s1">: [</span><span class="s5">1</span><span class="s0">, </span><span class="s5">2</span><span class="s0">, </span><span class="s5">3.0</span><span class="s1">]</span><span class="s0">,</span>
+                <span class="s3">&quot;str&quot;</span><span class="s1">: [</span><span class="s3">&quot;apple&quot;</span><span class="s0">, </span><span class="s3">&quot;banana&quot;</span><span class="s0">, </span><span class="s3">&quot;cherry&quot;</span><span class="s1">]</span><span class="s0">,</span>
+            <span class="s1">}</span>
+        <span class="s1">)</span>
+        <span class="s1">df.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;Sheet1&quot;</span><span class="s1">)</span>
+        <span class="s1">read = pd.read_excel(path</span><span class="s0">, </span><span class="s1">sheet_name=</span><span class="s3">&quot;Sheet1&quot;</span><span class="s0">, </span><span class="s1">header=</span><span class="s5">0</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+
+        <span class="s1">expected = df.copy()</span>
+        <span class="s1">expected.mixed = expected.mixed.apply(str)</span>
+        <span class="s1">expected.numeric = expected.numeric.astype(</span><span class="s3">&quot;int64&quot;</span><span class="s1">)</span>
+
+        <span class="s1">tm.assert_frame_equal(read</span><span class="s0">, </span><span class="s1">expected)</span>
+
+    <span class="s0">def </span><span class="s1">test_render_as_column_name(self</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s4"># see gh-34331</span>
+        <span class="s1">df = DataFrame({</span><span class="s3">&quot;render&quot;</span><span class="s1">: [</span><span class="s5">1</span><span class="s0">, </span><span class="s5">2</span><span class="s1">]</span><span class="s0">, </span><span class="s3">&quot;data&quot;</span><span class="s1">: [</span><span class="s5">3</span><span class="s0">, </span><span class="s5">4</span><span class="s1">]})</span>
+        <span class="s1">df.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;Sheet1&quot;</span><span class="s1">)</span>
+        <span class="s1">read = pd.read_excel(path</span><span class="s0">, </span><span class="s3">&quot;Sheet1&quot;</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s1">expected = df</span>
+        <span class="s1">tm.assert_frame_equal(read</span><span class="s0">, </span><span class="s1">expected)</span>
+
+    <span class="s0">def </span><span class="s1">test_true_and_false_value_options(self</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s4"># see gh-13347</span>
+        <span class="s1">df = DataFrame([[</span><span class="s3">&quot;foo&quot;</span><span class="s0">, </span><span class="s3">&quot;bar&quot;</span><span class="s1">]]</span><span class="s0">, </span><span class="s1">columns=[</span><span class="s3">&quot;col1&quot;</span><span class="s0">, </span><span class="s3">&quot;col2&quot;</span><span class="s1">])</span>
+        <span class="s1">expected = df.replace({</span><span class="s3">&quot;foo&quot;</span><span class="s1">: </span><span class="s0">True, </span><span class="s3">&quot;bar&quot;</span><span class="s1">: </span><span class="s0">False</span><span class="s1">})</span>
+
+        <span class="s1">df.to_excel(path)</span>
+        <span class="s1">read_frame = pd.read_excel(</span>
+            <span class="s1">path</span><span class="s0">, </span><span class="s1">true_values=[</span><span class="s3">&quot;foo&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">false_values=[</span><span class="s3">&quot;bar&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span>
+        <span class="s1">)</span>
+        <span class="s1">tm.assert_frame_equal(read_frame</span><span class="s0">, </span><span class="s1">expected)</span>
+
+    <span class="s0">def </span><span class="s1">test_freeze_panes(self</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s4"># see gh-15160</span>
+        <span class="s1">expected = DataFrame([[</span><span class="s5">1</span><span class="s0">, </span><span class="s5">2</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s5">3</span><span class="s0">, </span><span class="s5">4</span><span class="s1">]]</span><span class="s0">, </span><span class="s1">columns=[</span><span class="s3">&quot;col1&quot;</span><span class="s0">, </span><span class="s3">&quot;col2&quot;</span><span class="s1">])</span>
+        <span class="s1">expected.to_excel(path</span><span class="s0">, </span><span class="s3">&quot;Sheet1&quot;</span><span class="s0">, </span><span class="s1">freeze_panes=(</span><span class="s5">1</span><span class="s0">, </span><span class="s5">1</span><span class="s1">))</span>
+
+        <span class="s1">result = pd.read_excel(path</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s1">tm.assert_frame_equal(result</span><span class="s0">, </span><span class="s1">expected)</span>
+
+    <span class="s0">def </span><span class="s1">test_path_path_lib(self</span><span class="s0">, </span><span class="s1">engine</span><span class="s0">, </span><span class="s1">ext):</span>
+        <span class="s1">df = tm.makeDataFrame()</span>
+        <span class="s1">writer = partial(df.to_excel</span><span class="s0">, </span><span class="s1">engine=engine)</span>
+
+        <span class="s1">reader = partial(pd.read_excel</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s1">result = tm.round_trip_pathlib(writer</span><span class="s0">, </span><span class="s1">reader</span><span class="s0">, </span><span class="s1">path=</span><span class="s3">f&quot;foo</span><span class="s0">{</span><span class="s1">ext</span><span class="s0">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+        <span class="s1">tm.assert_frame_equal(result</span><span class="s0">, </span><span class="s1">df)</span>
+
+    <span class="s0">def </span><span class="s1">test_path_local_path(self</span><span class="s0">, </span><span class="s1">engine</span><span class="s0">, </span><span class="s1">ext):</span>
+        <span class="s1">df = tm.makeDataFrame()</span>
+        <span class="s1">writer = partial(df.to_excel</span><span class="s0">, </span><span class="s1">engine=engine)</span>
+
+        <span class="s1">reader = partial(pd.read_excel</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s1">result = tm.round_trip_localpath(writer</span><span class="s0">, </span><span class="s1">reader</span><span class="s0">, </span><span class="s1">path=</span><span class="s3">f&quot;foo</span><span class="s0">{</span><span class="s1">ext</span><span class="s0">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+        <span class="s1">tm.assert_frame_equal(result</span><span class="s0">, </span><span class="s1">df)</span>
+
+    <span class="s0">def </span><span class="s1">test_merged_cell_custom_objects(self</span><span class="s0">, </span><span class="s1">merge_cells</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s4"># see GH-27006</span>
+        <span class="s1">mi = MultiIndex.from_tuples(</span>
+            <span class="s1">[</span>
+                <span class="s1">(pd.Period(</span><span class="s3">&quot;2018&quot;</span><span class="s1">)</span><span class="s0">, </span><span class="s1">pd.Period(</span><span class="s3">&quot;2018Q1&quot;</span><span class="s1">))</span><span class="s0">,</span>
+                <span class="s1">(pd.Period(</span><span class="s3">&quot;2018&quot;</span><span class="s1">)</span><span class="s0">, </span><span class="s1">pd.Period(</span><span class="s3">&quot;2018Q2&quot;</span><span class="s1">))</span><span class="s0">,</span>
+            <span class="s1">]</span>
+        <span class="s1">)</span>
+        <span class="s1">expected = DataFrame(np.ones((</span><span class="s5">2</span><span class="s0">, </span><span class="s5">2</span><span class="s1">))</span><span class="s0">, </span><span class="s1">columns=mi)</span>
+        <span class="s1">expected.to_excel(path)</span>
+        <span class="s0">with </span><span class="s1">tm.assert_produces_warning(</span>
+            <span class="s1">FutureWarning</span><span class="s0">, </span><span class="s1">match=</span><span class="s3">&quot;convert_float is deprecated&quot;</span>
+        <span class="s1">):</span>
+            <span class="s1">result = pd.read_excel(</span>
+                <span class="s1">path</span><span class="s0">, </span><span class="s1">header=[</span><span class="s5">0</span><span class="s0">, </span><span class="s5">1</span><span class="s1">]</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s5">0</span><span class="s0">, </span><span class="s1">convert_float=</span><span class="s0">False</span>
+            <span class="s1">)</span>
+        <span class="s4"># need to convert PeriodIndexes to standard Indexes for assert equal</span>
+        <span class="s1">expected.columns = expected.columns.set_levels(</span>
+            <span class="s1">[[str(i) </span><span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">mi.levels[</span><span class="s5">0</span><span class="s1">]]</span><span class="s0">, </span><span class="s1">[str(i) </span><span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">mi.levels[</span><span class="s5">1</span><span class="s1">]]]</span><span class="s0">,</span>
+            <span class="s1">level=[</span><span class="s5">0</span><span class="s0">, </span><span class="s5">1</span><span class="s1">]</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s1">expected.index = expected.index.astype(np.float64)</span>
+        <span class="s1">tm.assert_frame_equal(expected</span><span class="s0">, </span><span class="s1">result)</span>
+
+    <span class="s1">@pytest.mark.parametrize(</span><span class="s3">&quot;dtype&quot;</span><span class="s0">, </span><span class="s1">[</span><span class="s0">None, </span><span class="s1">object])</span>
+    <span class="s0">def </span><span class="s1">test_raise_when_saving_timezones(self</span><span class="s0">, </span><span class="s1">dtype</span><span class="s0">, </span><span class="s1">tz_aware_fixture</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s4"># GH 27008, GH 7056</span>
+        <span class="s1">tz = tz_aware_fixture</span>
+        <span class="s1">data = pd.Timestamp(</span><span class="s3">&quot;2019&quot;</span><span class="s0">, </span><span class="s1">tz=tz)</span>
+        <span class="s1">df = DataFrame([data]</span><span class="s0">, </span><span class="s1">dtype=dtype)</span>
+        <span class="s0">with </span><span class="s1">pytest.raises(ValueError</span><span class="s0">, </span><span class="s1">match=</span><span class="s3">&quot;Excel does not support&quot;</span><span class="s1">):</span>
+            <span class="s1">df.to_excel(path)</span>
+
+        <span class="s1">data = data.to_pydatetime()</span>
+        <span class="s1">df = DataFrame([data]</span><span class="s0">, </span><span class="s1">dtype=dtype)</span>
+        <span class="s0">with </span><span class="s1">pytest.raises(ValueError</span><span class="s0">, </span><span class="s1">match=</span><span class="s3">&quot;Excel does not support&quot;</span><span class="s1">):</span>
+            <span class="s1">df.to_excel(path)</span>
+
+    <span class="s0">def </span><span class="s1">test_excel_duplicate_columns_with_names(self</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s4"># GH#39695</span>
+        <span class="s1">df = DataFrame({</span><span class="s3">&quot;A&quot;</span><span class="s1">: [</span><span class="s5">0</span><span class="s0">, </span><span class="s5">1</span><span class="s1">]</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s1">: [</span><span class="s5">10</span><span class="s0">, </span><span class="s5">11</span><span class="s1">]})</span>
+        <span class="s1">df.to_excel(path</span><span class="s0">, </span><span class="s1">columns=[</span><span class="s3">&quot;A&quot;</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s0">, </span><span class="s3">&quot;A&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">index=</span><span class="s0">False</span><span class="s1">)</span>
+
+        <span class="s1">result = pd.read_excel(path)</span>
+        <span class="s1">expected = DataFrame([[</span><span class="s5">0</span><span class="s0">, </span><span class="s5">10</span><span class="s0">, </span><span class="s5">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s5">1</span><span class="s0">, </span><span class="s5">11</span><span class="s0">, </span><span class="s5">1</span><span class="s1">]]</span><span class="s0">, </span><span class="s1">columns=[</span><span class="s3">&quot;A&quot;</span><span class="s0">, </span><span class="s3">&quot;B&quot;</span><span class="s0">, </span><span class="s3">&quot;A.1&quot;</span><span class="s1">])</span>
+        <span class="s1">tm.assert_frame_equal(result</span><span class="s0">, </span><span class="s1">expected)</span>
+
+    <span class="s0">def </span><span class="s1">test_if_sheet_exists_raises(self</span><span class="s0">, </span><span class="s1">ext):</span>
+        <span class="s4"># GH 40230</span>
+        <span class="s1">msg = </span><span class="s3">&quot;if_sheet_exists is only valid in append mode (mode='a')&quot;</span>
+
+        <span class="s0">with </span><span class="s1">tm.ensure_clean(ext) </span><span class="s0">as </span><span class="s1">f:</span>
+            <span class="s0">with </span><span class="s1">pytest.raises(ValueError</span><span class="s0">, </span><span class="s1">match=re.escape(msg)):</span>
+                <span class="s1">ExcelWriter(f</span><span class="s0">, </span><span class="s1">if_sheet_exists=</span><span class="s3">&quot;replace&quot;</span><span class="s1">)</span>
+
+
+<span class="s0">class </span><span class="s1">TestExcelWriterEngineTests:</span>
+    <span class="s1">@pytest.mark.parametrize(</span>
+        <span class="s3">&quot;klass,ext&quot;</span><span class="s0">,</span>
+        <span class="s1">[</span>
+            <span class="s1">pytest.param(_XlsxWriter</span><span class="s0">, </span><span class="s3">&quot;.xlsx&quot;</span><span class="s0">, </span><span class="s1">marks=td.skip_if_no(</span><span class="s3">&quot;xlsxwriter&quot;</span><span class="s1">))</span><span class="s0">,</span>
+            <span class="s1">pytest.param(_OpenpyxlWriter</span><span class="s0">, </span><span class="s3">&quot;.xlsx&quot;</span><span class="s0">, </span><span class="s1">marks=td.skip_if_no(</span><span class="s3">&quot;openpyxl&quot;</span><span class="s1">))</span><span class="s0">,</span>
+            <span class="s1">pytest.param(_XlwtWriter</span><span class="s0">, </span><span class="s3">&quot;.xls&quot;</span><span class="s0">, </span><span class="s1">marks=td.skip_if_no(</span><span class="s3">&quot;xlwt&quot;</span><span class="s1">))</span><span class="s0">,</span>
+        <span class="s1">]</span><span class="s0">,</span>
+    <span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">test_ExcelWriter_dispatch(self</span><span class="s0">, </span><span class="s1">klass</span><span class="s0">, </span><span class="s1">ext):</span>
+        <span class="s0">with </span><span class="s1">tm.ensure_clean(ext) </span><span class="s0">as </span><span class="s1">path:</span>
+            <span class="s0">with </span><span class="s1">ExcelWriter(path) </span><span class="s0">as </span><span class="s1">writer:</span>
+                <span class="s0">if </span><span class="s1">ext == </span><span class="s3">&quot;.xlsx&quot; </span><span class="s0">and </span><span class="s1">td.safe_import(</span><span class="s3">&quot;xlsxwriter&quot;</span><span class="s1">):</span>
+                    <span class="s4"># xlsxwriter has preference over openpyxl if both installed</span>
+                    <span class="s0">assert </span><span class="s1">isinstance(writer</span><span class="s0">, </span><span class="s1">_XlsxWriter)</span>
+                <span class="s0">else</span><span class="s1">:</span>
+                    <span class="s0">assert </span><span class="s1">isinstance(writer</span><span class="s0">, </span><span class="s1">klass)</span>
+
+    <span class="s0">def </span><span class="s1">test_ExcelWriter_dispatch_raises(self):</span>
+        <span class="s0">with </span><span class="s1">pytest.raises(ValueError</span><span class="s0">, </span><span class="s1">match=</span><span class="s3">&quot;No engine&quot;</span><span class="s1">):</span>
+            <span class="s1">ExcelWriter(</span><span class="s3">&quot;nothing&quot;</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">test_register_writer(self):</span>
+        <span class="s4"># some awkward mocking to test out dispatch and such actually works</span>
+        <span class="s1">called_save = []</span>
+        <span class="s1">called_write_cells = []</span>
+
+        <span class="s0">class </span><span class="s1">DummyClass(ExcelWriter):</span>
+            <span class="s1">called_save = </span><span class="s0">False</span>
+            <span class="s1">called_write_cells = </span><span class="s0">False</span>
+            <span class="s1">supported_extensions = [</span><span class="s3">&quot;xlsx&quot;</span><span class="s0">, </span><span class="s3">&quot;xls&quot;</span><span class="s1">]</span>
+            <span class="s1">engine = </span><span class="s3">&quot;dummy&quot;</span>
+
+            <span class="s0">def </span><span class="s1">save(self):</span>
+                <span class="s1">called_save.append(</span><span class="s0">True</span><span class="s1">)</span>
+
+            <span class="s0">def </span><span class="s1">write_cells(self</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+                <span class="s1">called_write_cells.append(</span><span class="s0">True</span><span class="s1">)</span>
+
+        <span class="s0">def </span><span class="s1">check_called(func):</span>
+            <span class="s1">func()</span>
+            <span class="s0">assert </span><span class="s1">len(called_save) &gt;= </span><span class="s5">1</span>
+            <span class="s0">assert </span><span class="s1">len(called_write_cells) &gt;= </span><span class="s5">1</span>
+            <span class="s0">del </span><span class="s1">called_save[:]</span>
+            <span class="s0">del </span><span class="s1">called_write_cells[:]</span>
+
+        <span class="s0">with </span><span class="s1">pd.option_context(</span><span class="s3">&quot;io.excel.xlsx.writer&quot;</span><span class="s0">, </span><span class="s3">&quot;dummy&quot;</span><span class="s1">):</span>
+            <span class="s1">path = </span><span class="s3">&quot;something.xlsx&quot;</span>
+            <span class="s0">with </span><span class="s1">tm.ensure_clean(path) </span><span class="s0">as </span><span class="s1">filepath:</span>
+                <span class="s1">register_writer(DummyClass)</span>
+                <span class="s0">with </span><span class="s1">ExcelWriter(filepath) </span><span class="s0">as </span><span class="s1">writer:</span>
+                    <span class="s0">assert </span><span class="s1">isinstance(writer</span><span class="s0">, </span><span class="s1">DummyClass)</span>
+                <span class="s1">df = tm.makeCustomDataframe(</span><span class="s5">1</span><span class="s0">, </span><span class="s5">1</span><span class="s1">)</span>
+                <span class="s1">check_called(</span><span class="s0">lambda</span><span class="s1">: df.to_excel(filepath))</span>
+            <span class="s0">with </span><span class="s1">tm.ensure_clean(</span><span class="s3">&quot;something.xls&quot;</span><span class="s1">) </span><span class="s0">as </span><span class="s1">filepath:</span>
+                <span class="s1">check_called(</span><span class="s0">lambda</span><span class="s1">: df.to_excel(filepath</span><span class="s0">, </span><span class="s1">engine=</span><span class="s3">&quot;dummy&quot;</span><span class="s1">))</span>
+
+    <span class="s1">@pytest.mark.parametrize(</span>
+        <span class="s3">&quot;ext&quot;</span><span class="s0">,</span>
+        <span class="s1">[</span>
+            <span class="s1">pytest.param(</span><span class="s3">&quot;.xlsx&quot;</span><span class="s0">, </span><span class="s1">marks=td.skip_if_no(</span><span class="s3">&quot;xlsxwriter&quot;</span><span class="s1">))</span><span class="s0">,</span>
+            <span class="s1">pytest.param(</span><span class="s3">&quot;.xlsx&quot;</span><span class="s0">, </span><span class="s1">marks=td.skip_if_no(</span><span class="s3">&quot;openpyxl&quot;</span><span class="s1">))</span><span class="s0">,</span>
+            <span class="s1">pytest.param(</span><span class="s3">&quot;.ods&quot;</span><span class="s0">, </span><span class="s1">marks=td.skip_if_no(</span><span class="s3">&quot;odf&quot;</span><span class="s1">))</span><span class="s0">,</span>
+        <span class="s1">]</span><span class="s0">,</span>
+    <span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">test_engine_kwargs_and_kwargs_raises(self</span><span class="s0">, </span><span class="s1">ext):</span>
+        <span class="s4"># GH 40430</span>
+        <span class="s1">msg = re.escape(</span><span class="s3">&quot;Cannot use both engine_kwargs and **kwargs&quot;</span><span class="s1">)</span>
+        <span class="s0">with </span><span class="s1">pytest.raises(ValueError</span><span class="s0">, </span><span class="s1">match=msg):</span>
+            <span class="s0">with </span><span class="s1">ExcelWriter(</span><span class="s3">&quot;&quot;</span><span class="s0">, </span><span class="s1">engine_kwargs={</span><span class="s3">&quot;a&quot;</span><span class="s1">: </span><span class="s5">1</span><span class="s1">}</span><span class="s0">, </span><span class="s1">b=</span><span class="s5">2</span><span class="s1">):</span>
+                <span class="s0">pass</span>
+
+
+<span class="s1">@td.skip_if_no(</span><span class="s3">&quot;xlrd&quot;</span><span class="s1">)</span>
+<span class="s1">@td.skip_if_no(</span><span class="s3">&quot;openpyxl&quot;</span><span class="s1">)</span>
+<span class="s0">class </span><span class="s1">TestFSPath:</span>
+    <span class="s0">def </span><span class="s1">test_excelfile_fspath(self):</span>
+        <span class="s0">with </span><span class="s1">tm.ensure_clean(</span><span class="s3">&quot;foo.xlsx&quot;</span><span class="s1">) </span><span class="s0">as </span><span class="s1">path:</span>
+            <span class="s1">df = DataFrame({</span><span class="s3">&quot;A&quot;</span><span class="s1">: [</span><span class="s5">1</span><span class="s0">, </span><span class="s5">2</span><span class="s1">]})</span>
+            <span class="s1">df.to_excel(path)</span>
+            <span class="s0">with </span><span class="s1">ExcelFile(path) </span><span class="s0">as </span><span class="s1">xl:</span>
+                <span class="s1">result = os.fspath(xl)</span>
+            <span class="s0">assert </span><span class="s1">result == path</span>
+
+    <span class="s0">def </span><span class="s1">test_excelwriter_fspath(self):</span>
+        <span class="s0">with </span><span class="s1">tm.ensure_clean(</span><span class="s3">&quot;foo.xlsx&quot;</span><span class="s1">) </span><span class="s0">as </span><span class="s1">path:</span>
+            <span class="s0">with </span><span class="s1">ExcelWriter(path) </span><span class="s0">as </span><span class="s1">writer:</span>
+                <span class="s0">assert </span><span class="s1">os.fspath(writer) == str(path)</span>
+</pre>
+</body>
+</html>

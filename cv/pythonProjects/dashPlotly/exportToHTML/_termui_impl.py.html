@@ -1,0 +1,741 @@
+<html>
+<head>
+<title>_termui_impl.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #808080;}
+.s6 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_termui_impl.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+This module contains implementations for the termui module. To keep the 
+import time of Click down, some infrequently used functionality is 
+placed in this module and only imported as needed. 
+&quot;&quot;&quot;</span>
+<span class="s2">import </span><span class="s1">contextlib</span>
+<span class="s2">import </span><span class="s1">math</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">time</span>
+<span class="s2">import </span><span class="s1">typing </span><span class="s2">as </span><span class="s1">t</span>
+<span class="s2">from </span><span class="s1">gettext </span><span class="s2">import </span><span class="s1">gettext </span><span class="s2">as </span><span class="s1">_</span>
+
+<span class="s2">from </span><span class="s1">._compat </span><span class="s2">import </span><span class="s1">_default_text_stdout</span>
+<span class="s2">from </span><span class="s1">._compat </span><span class="s2">import </span><span class="s1">CYGWIN</span>
+<span class="s2">from </span><span class="s1">._compat </span><span class="s2">import </span><span class="s1">get_best_encoding</span>
+<span class="s2">from </span><span class="s1">._compat </span><span class="s2">import </span><span class="s1">isatty</span>
+<span class="s2">from </span><span class="s1">._compat </span><span class="s2">import </span><span class="s1">open_stream</span>
+<span class="s2">from </span><span class="s1">._compat </span><span class="s2">import </span><span class="s1">strip_ansi</span>
+<span class="s2">from </span><span class="s1">._compat </span><span class="s2">import </span><span class="s1">term_len</span>
+<span class="s2">from </span><span class="s1">._compat </span><span class="s2">import </span><span class="s1">WIN</span>
+<span class="s2">from </span><span class="s1">.exceptions </span><span class="s2">import </span><span class="s1">ClickException</span>
+<span class="s2">from </span><span class="s1">.utils </span><span class="s2">import </span><span class="s1">echo</span>
+
+<span class="s1">V = t.TypeVar(</span><span class="s3">&quot;V&quot;</span><span class="s1">)</span>
+
+<span class="s2">if </span><span class="s1">os.name == </span><span class="s3">&quot;nt&quot;</span><span class="s1">:</span>
+    <span class="s1">BEFORE_BAR = </span><span class="s3">&quot;</span><span class="s2">\r</span><span class="s3">&quot;</span>
+    <span class="s1">AFTER_BAR = </span><span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">&quot;</span>
+<span class="s2">else</span><span class="s1">:</span>
+    <span class="s1">BEFORE_BAR = </span><span class="s3">&quot;</span><span class="s2">\r\033</span><span class="s3">[?25l&quot;</span>
+    <span class="s1">AFTER_BAR = </span><span class="s3">&quot;</span><span class="s2">\033</span><span class="s3">[?25h</span><span class="s2">\n</span><span class="s3">&quot;</span>
+
+
+<span class="s2">class </span><span class="s1">ProgressBar(t.Generic[V]):</span>
+    <span class="s2">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">iterable: t.Optional[t.Iterable[V]]</span><span class="s2">,</span>
+        <span class="s1">length: t.Optional[int] = </span><span class="s2">None,</span>
+        <span class="s1">fill_char: str = </span><span class="s3">&quot;#&quot;</span><span class="s2">,</span>
+        <span class="s1">empty_char: str = </span><span class="s3">&quot; &quot;</span><span class="s2">,</span>
+        <span class="s1">bar_template: str = </span><span class="s3">&quot;%(bar)s&quot;</span><span class="s2">,</span>
+        <span class="s1">info_sep: str = </span><span class="s3">&quot;  &quot;</span><span class="s2">,</span>
+        <span class="s1">show_eta: bool = </span><span class="s2">True,</span>
+        <span class="s1">show_percent: t.Optional[bool] = </span><span class="s2">None,</span>
+        <span class="s1">show_pos: bool = </span><span class="s2">False,</span>
+        <span class="s1">item_show_func: t.Optional[t.Callable[[t.Optional[V]]</span><span class="s2">, </span><span class="s1">t.Optional[str]]] = </span><span class="s2">None,</span>
+        <span class="s1">label: t.Optional[str] = </span><span class="s2">None,</span>
+        <span class="s1">file: t.Optional[t.TextIO] = </span><span class="s2">None,</span>
+        <span class="s1">color: t.Optional[bool] = </span><span class="s2">None,</span>
+        <span class="s1">update_min_steps: int = </span><span class="s4">1</span><span class="s2">,</span>
+        <span class="s1">width: int = </span><span class="s4">30</span><span class="s2">,</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.fill_char = fill_char</span>
+        <span class="s1">self.empty_char = empty_char</span>
+        <span class="s1">self.bar_template = bar_template</span>
+        <span class="s1">self.info_sep = info_sep</span>
+        <span class="s1">self.show_eta = show_eta</span>
+        <span class="s1">self.show_percent = show_percent</span>
+        <span class="s1">self.show_pos = show_pos</span>
+        <span class="s1">self.item_show_func = item_show_func</span>
+        <span class="s1">self.label = label </span><span class="s2">or </span><span class="s3">&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">file </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">file = _default_text_stdout()</span>
+        <span class="s1">self.file = file</span>
+        <span class="s1">self.color = color</span>
+        <span class="s1">self.update_min_steps = update_min_steps</span>
+        <span class="s1">self._completed_intervals = </span><span class="s4">0</span>
+        <span class="s1">self.width = width</span>
+        <span class="s1">self.autowidth = width == </span><span class="s4">0</span>
+
+        <span class="s2">if </span><span class="s1">length </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">from </span><span class="s1">operator </span><span class="s2">import </span><span class="s1">length_hint</span>
+
+            <span class="s1">length = length_hint(iterable</span><span class="s2">, </span><span class="s1">-</span><span class="s4">1</span><span class="s1">)</span>
+
+            <span class="s2">if </span><span class="s1">length == -</span><span class="s4">1</span><span class="s1">:</span>
+                <span class="s1">length = </span><span class="s2">None</span>
+        <span class="s2">if </span><span class="s1">iterable </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">length </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;iterable or length is required&quot;</span><span class="s1">)</span>
+            <span class="s1">iterable = t.cast(t.Iterable[V]</span><span class="s2">, </span><span class="s1">range(length))</span>
+        <span class="s1">self.iter = iter(iterable)</span>
+        <span class="s1">self.length = length</span>
+        <span class="s1">self.pos = </span><span class="s4">0</span>
+        <span class="s1">self.avg: t.List[float] = []</span>
+        <span class="s1">self.start = self.last_eta = time.time()</span>
+        <span class="s1">self.eta_known = </span><span class="s2">False</span>
+        <span class="s1">self.finished = </span><span class="s2">False</span>
+        <span class="s1">self.max_width: t.Optional[int] = </span><span class="s2">None</span>
+        <span class="s1">self.entered = </span><span class="s2">False</span>
+        <span class="s1">self.current_item: t.Optional[V] = </span><span class="s2">None</span>
+        <span class="s1">self.is_hidden = </span><span class="s2">not </span><span class="s1">isatty(self.file)</span>
+        <span class="s1">self._last_line: t.Optional[str] = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">__enter__(self) -&gt; </span><span class="s3">&quot;ProgressBar&quot;</span><span class="s1">:</span>
+        <span class="s1">self.entered = </span><span class="s2">True</span>
+        <span class="s1">self.render_progress()</span>
+        <span class="s2">return </span><span class="s1">self</span>
+
+    <span class="s2">def </span><span class="s1">__exit__(self</span><span class="s2">, </span><span class="s1">exc_type</span><span class="s2">, </span><span class="s1">exc_value</span><span class="s2">, </span><span class="s1">tb):  </span><span class="s5"># type: ignore</span>
+        <span class="s1">self.render_finish()</span>
+
+    <span class="s2">def </span><span class="s1">__iter__(self) -&gt; t.Iterator[V]:</span>
+        <span class="s2">if not </span><span class="s1">self.entered:</span>
+            <span class="s2">raise </span><span class="s1">RuntimeError(</span><span class="s3">&quot;You need to use progress bars in a with block.&quot;</span><span class="s1">)</span>
+        <span class="s1">self.render_progress()</span>
+        <span class="s2">return </span><span class="s1">self.generator()</span>
+
+    <span class="s2">def </span><span class="s1">__next__(self) -&gt; V:</span>
+        <span class="s5"># Iteration is defined in terms of a generator function,</span>
+        <span class="s5"># returned by iter(self); use that to define next(). This works</span>
+        <span class="s5"># because `self.iter` is an iterable consumed by that generator,</span>
+        <span class="s5"># so it is re-entry safe. Calling `next(self.generator())`</span>
+        <span class="s5"># twice works and does &quot;what you want&quot;.</span>
+        <span class="s2">return </span><span class="s1">next(iter(self))</span>
+
+    <span class="s2">def </span><span class="s1">render_finish(self) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">self.is_hidden:</span>
+            <span class="s2">return</span>
+        <span class="s1">self.file.write(AFTER_BAR)</span>
+        <span class="s1">self.file.flush()</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">pct(self) -&gt; float:</span>
+        <span class="s2">if </span><span class="s1">self.finished:</span>
+            <span class="s2">return </span><span class="s4">1.0</span>
+        <span class="s2">return </span><span class="s1">min(self.pos / (float(self.length </span><span class="s2">or </span><span class="s4">1</span><span class="s1">) </span><span class="s2">or </span><span class="s4">1</span><span class="s1">)</span><span class="s2">, </span><span class="s4">1.0</span><span class="s1">)</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">time_per_iteration(self) -&gt; float:</span>
+        <span class="s2">if not </span><span class="s1">self.avg:</span>
+            <span class="s2">return </span><span class="s4">0.0</span>
+        <span class="s2">return </span><span class="s1">sum(self.avg) / float(len(self.avg))</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">eta(self) -&gt; float:</span>
+        <span class="s2">if </span><span class="s1">self.length </span><span class="s2">is not None and not </span><span class="s1">self.finished:</span>
+            <span class="s2">return </span><span class="s1">self.time_per_iteration * (self.length - self.pos)</span>
+        <span class="s2">return </span><span class="s4">0.0</span>
+
+    <span class="s2">def </span><span class="s1">format_eta(self) -&gt; str:</span>
+        <span class="s2">if </span><span class="s1">self.eta_known:</span>
+            <span class="s1">t = int(self.eta)</span>
+            <span class="s1">seconds = t % </span><span class="s4">60</span>
+            <span class="s1">t //= </span><span class="s4">60</span>
+            <span class="s1">minutes = t % </span><span class="s4">60</span>
+            <span class="s1">t //= </span><span class="s4">60</span>
+            <span class="s1">hours = t % </span><span class="s4">24</span>
+            <span class="s1">t //= </span><span class="s4">24</span>
+            <span class="s2">if </span><span class="s1">t &gt; </span><span class="s4">0</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">t</span><span class="s2">}</span><span class="s3">d </span><span class="s2">{</span><span class="s1">hours</span><span class="s2">:</span><span class="s3">02</span><span class="s2">}</span><span class="s3">:</span><span class="s2">{</span><span class="s1">minutes</span><span class="s2">:</span><span class="s3">02</span><span class="s2">}</span><span class="s3">:</span><span class="s2">{</span><span class="s1">seconds</span><span class="s2">:</span><span class="s3">02</span><span class="s2">}</span><span class="s3">&quot;</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">hours</span><span class="s2">:</span><span class="s3">02</span><span class="s2">}</span><span class="s3">:</span><span class="s2">{</span><span class="s1">minutes</span><span class="s2">:</span><span class="s3">02</span><span class="s2">}</span><span class="s3">:</span><span class="s2">{</span><span class="s1">seconds</span><span class="s2">:</span><span class="s3">02</span><span class="s2">}</span><span class="s3">&quot;</span>
+        <span class="s2">return </span><span class="s3">&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">format_pos(self) -&gt; str:</span>
+        <span class="s1">pos = str(self.pos)</span>
+        <span class="s2">if </span><span class="s1">self.length </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">pos += </span><span class="s3">f&quot;/</span><span class="s2">{</span><span class="s1">self.length</span><span class="s2">}</span><span class="s3">&quot;</span>
+        <span class="s2">return </span><span class="s1">pos</span>
+
+    <span class="s2">def </span><span class="s1">format_pct(self) -&gt; str:</span>
+        <span class="s2">return </span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">int(self.pct * </span><span class="s4">100</span><span class="s1">)</span><span class="s2">: </span><span class="s3">4</span><span class="s2">}</span><span class="s3">%&quot;</span><span class="s1">[</span><span class="s4">1</span><span class="s1">:]</span>
+
+    <span class="s2">def </span><span class="s1">format_bar(self) -&gt; str:</span>
+        <span class="s2">if </span><span class="s1">self.length </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">bar_length = int(self.pct * self.width)</span>
+            <span class="s1">bar = self.fill_char * bar_length</span>
+            <span class="s1">bar += self.empty_char * (self.width - bar_length)</span>
+        <span class="s2">elif </span><span class="s1">self.finished:</span>
+            <span class="s1">bar = self.fill_char * self.width</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">chars = list(self.empty_char * (self.width </span><span class="s2">or </span><span class="s4">1</span><span class="s1">))</span>
+            <span class="s2">if </span><span class="s1">self.time_per_iteration != </span><span class="s4">0</span><span class="s1">:</span>
+                <span class="s1">chars[</span>
+                    <span class="s1">int(</span>
+                        <span class="s1">(math.cos(self.pos * self.time_per_iteration) / </span><span class="s4">2.0 </span><span class="s1">+ </span><span class="s4">0.5</span><span class="s1">)</span>
+                        <span class="s1">* self.width</span>
+                    <span class="s1">)</span>
+                <span class="s1">] = self.fill_char</span>
+            <span class="s1">bar = </span><span class="s3">&quot;&quot;</span><span class="s1">.join(chars)</span>
+        <span class="s2">return </span><span class="s1">bar</span>
+
+    <span class="s2">def </span><span class="s1">format_progress_line(self) -&gt; str:</span>
+        <span class="s1">show_percent = self.show_percent</span>
+
+        <span class="s1">info_bits = []</span>
+        <span class="s2">if </span><span class="s1">self.length </span><span class="s2">is not None and </span><span class="s1">show_percent </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">show_percent = </span><span class="s2">not </span><span class="s1">self.show_pos</span>
+
+        <span class="s2">if </span><span class="s1">self.show_pos:</span>
+            <span class="s1">info_bits.append(self.format_pos())</span>
+        <span class="s2">if </span><span class="s1">show_percent:</span>
+            <span class="s1">info_bits.append(self.format_pct())</span>
+        <span class="s2">if </span><span class="s1">self.show_eta </span><span class="s2">and </span><span class="s1">self.eta_known </span><span class="s2">and not </span><span class="s1">self.finished:</span>
+            <span class="s1">info_bits.append(self.format_eta())</span>
+        <span class="s2">if </span><span class="s1">self.item_show_func </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">item_info = self.item_show_func(self.current_item)</span>
+            <span class="s2">if </span><span class="s1">item_info </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s1">info_bits.append(item_info)</span>
+
+        <span class="s2">return </span><span class="s1">(</span>
+            <span class="s1">self.bar_template</span>
+            <span class="s1">% {</span>
+                <span class="s3">&quot;label&quot;</span><span class="s1">: self.label</span><span class="s2">,</span>
+                <span class="s3">&quot;bar&quot;</span><span class="s1">: self.format_bar()</span><span class="s2">,</span>
+                <span class="s3">&quot;info&quot;</span><span class="s1">: self.info_sep.join(info_bits)</span><span class="s2">,</span>
+            <span class="s1">}</span>
+        <span class="s1">).rstrip()</span>
+
+    <span class="s2">def </span><span class="s1">render_progress(self) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">import </span><span class="s1">shutil</span>
+
+        <span class="s2">if </span><span class="s1">self.is_hidden:</span>
+            <span class="s5"># Only output the label as it changes if the output is not a</span>
+            <span class="s5"># TTY. Use file=stderr if you expect to be piping stdout.</span>
+            <span class="s2">if </span><span class="s1">self._last_line != self.label:</span>
+                <span class="s1">self._last_line = self.label</span>
+                <span class="s1">echo(self.label</span><span class="s2">, </span><span class="s1">file=self.file</span><span class="s2">, </span><span class="s1">color=self.color)</span>
+
+            <span class="s2">return</span>
+
+        <span class="s1">buf = []</span>
+        <span class="s5"># Update width in case the terminal has been resized</span>
+        <span class="s2">if </span><span class="s1">self.autowidth:</span>
+            <span class="s1">old_width = self.width</span>
+            <span class="s1">self.width = </span><span class="s4">0</span>
+            <span class="s1">clutter_length = term_len(self.format_progress_line())</span>
+            <span class="s1">new_width = max(</span><span class="s4">0</span><span class="s2">, </span><span class="s1">shutil.get_terminal_size().columns - clutter_length)</span>
+            <span class="s2">if </span><span class="s1">new_width &lt; old_width:</span>
+                <span class="s1">buf.append(BEFORE_BAR)</span>
+                <span class="s1">buf.append(</span><span class="s3">&quot; &quot; </span><span class="s1">* self.max_width)  </span><span class="s5"># type: ignore</span>
+                <span class="s1">self.max_width = new_width</span>
+            <span class="s1">self.width = new_width</span>
+
+        <span class="s1">clear_width = self.width</span>
+        <span class="s2">if </span><span class="s1">self.max_width </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">clear_width = self.max_width</span>
+
+        <span class="s1">buf.append(BEFORE_BAR)</span>
+        <span class="s1">line = self.format_progress_line()</span>
+        <span class="s1">line_len = term_len(line)</span>
+        <span class="s2">if </span><span class="s1">self.max_width </span><span class="s2">is None or </span><span class="s1">self.max_width &lt; line_len:</span>
+            <span class="s1">self.max_width = line_len</span>
+
+        <span class="s1">buf.append(line)</span>
+        <span class="s1">buf.append(</span><span class="s3">&quot; &quot; </span><span class="s1">* (clear_width - line_len))</span>
+        <span class="s1">line = </span><span class="s3">&quot;&quot;</span><span class="s1">.join(buf)</span>
+        <span class="s5"># Render the line only if it changed.</span>
+
+        <span class="s2">if </span><span class="s1">line != self._last_line:</span>
+            <span class="s1">self._last_line = line</span>
+            <span class="s1">echo(line</span><span class="s2">, </span><span class="s1">file=self.file</span><span class="s2">, </span><span class="s1">color=self.color</span><span class="s2">, </span><span class="s1">nl=</span><span class="s2">False</span><span class="s1">)</span>
+            <span class="s1">self.file.flush()</span>
+
+    <span class="s2">def </span><span class="s1">make_step(self</span><span class="s2">, </span><span class="s1">n_steps: int) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.pos += n_steps</span>
+        <span class="s2">if </span><span class="s1">self.length </span><span class="s2">is not None and </span><span class="s1">self.pos &gt;= self.length:</span>
+            <span class="s1">self.finished = </span><span class="s2">True</span>
+
+        <span class="s2">if </span><span class="s1">(time.time() - self.last_eta) &lt; </span><span class="s4">1.0</span><span class="s1">:</span>
+            <span class="s2">return</span>
+
+        <span class="s1">self.last_eta = time.time()</span>
+
+        <span class="s5"># self.avg is a rolling list of length &lt;= 7 of steps where steps are</span>
+        <span class="s5"># defined as time elapsed divided by the total progress through</span>
+        <span class="s5"># self.length.</span>
+        <span class="s2">if </span><span class="s1">self.pos:</span>
+            <span class="s1">step = (time.time() - self.start) / self.pos</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">step = time.time() - self.start</span>
+
+        <span class="s1">self.avg = self.avg[-</span><span class="s4">6</span><span class="s1">:] + [step]</span>
+
+        <span class="s1">self.eta_known = self.length </span><span class="s2">is not None</span>
+
+    <span class="s2">def </span><span class="s1">update(self</span><span class="s2">, </span><span class="s1">n_steps: int</span><span class="s2">, </span><span class="s1">current_item: t.Optional[V] = </span><span class="s2">None</span><span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Update the progress bar by advancing a specified number of 
+        steps, and optionally set the ``current_item`` for this new 
+        position. 
+ 
+        :param n_steps: Number of steps to advance. 
+        :param current_item: Optional item to set as ``current_item`` 
+            for the updated position. 
+ 
+        .. versionchanged:: 8.0 
+            Added the ``current_item`` optional parameter. 
+ 
+        .. versionchanged:: 8.0 
+            Only render when the number of steps meets the 
+            ``update_min_steps`` threshold. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">current_item </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self.current_item = current_item</span>
+
+        <span class="s1">self._completed_intervals += n_steps</span>
+
+        <span class="s2">if </span><span class="s1">self._completed_intervals &gt;= self.update_min_steps:</span>
+            <span class="s1">self.make_step(self._completed_intervals)</span>
+            <span class="s1">self.render_progress()</span>
+            <span class="s1">self._completed_intervals = </span><span class="s4">0</span>
+
+    <span class="s2">def </span><span class="s1">finish(self) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.eta_known = </span><span class="s2">False</span>
+        <span class="s1">self.current_item = </span><span class="s2">None</span>
+        <span class="s1">self.finished = </span><span class="s2">True</span>
+
+    <span class="s2">def </span><span class="s1">generator(self) -&gt; t.Iterator[V]:</span>
+        <span class="s0">&quot;&quot;&quot;Return a generator which yields the items added to the bar 
+        during construction, and updates the progress bar *after* the 
+        yielded block returns. 
+        &quot;&quot;&quot;</span>
+        <span class="s5"># WARNING: the iterator interface for `ProgressBar` relies on</span>
+        <span class="s5"># this and only works because this is a simple generator which</span>
+        <span class="s5"># doesn't create or manage additional state. If this function</span>
+        <span class="s5"># changes, the impact should be evaluated both against</span>
+        <span class="s5"># `iter(bar)` and `next(bar)`. `next()` in particular may call</span>
+        <span class="s5"># `self.generator()` repeatedly, and this must remain safe in</span>
+        <span class="s5"># order for that interface to work.</span>
+        <span class="s2">if not </span><span class="s1">self.entered:</span>
+            <span class="s2">raise </span><span class="s1">RuntimeError(</span><span class="s3">&quot;You need to use progress bars in a with block.&quot;</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">self.is_hidden:</span>
+            <span class="s2">yield from </span><span class="s1">self.iter</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">for </span><span class="s1">rv </span><span class="s2">in </span><span class="s1">self.iter:</span>
+                <span class="s1">self.current_item = rv</span>
+
+                <span class="s5"># This allows show_item_func to be updated before the</span>
+                <span class="s5"># item is processed. Only trigger at the beginning of</span>
+                <span class="s5"># the update interval.</span>
+                <span class="s2">if </span><span class="s1">self._completed_intervals == </span><span class="s4">0</span><span class="s1">:</span>
+                    <span class="s1">self.render_progress()</span>
+
+                <span class="s2">yield </span><span class="s1">rv</span>
+                <span class="s1">self.update(</span><span class="s4">1</span><span class="s1">)</span>
+
+            <span class="s1">self.finish()</span>
+            <span class="s1">self.render_progress()</span>
+
+
+<span class="s2">def </span><span class="s1">pager(generator: t.Iterable[str]</span><span class="s2">, </span><span class="s1">color: t.Optional[bool] = </span><span class="s2">None</span><span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+    <span class="s0">&quot;&quot;&quot;Decide what method to use for paging through text.&quot;&quot;&quot;</span>
+    <span class="s1">stdout = _default_text_stdout()</span>
+    <span class="s2">if not </span><span class="s1">isatty(sys.stdin) </span><span class="s2">or not </span><span class="s1">isatty(stdout):</span>
+        <span class="s2">return </span><span class="s1">_nullpager(stdout</span><span class="s2">, </span><span class="s1">generator</span><span class="s2">, </span><span class="s1">color)</span>
+    <span class="s1">pager_cmd = (os.environ.get(</span><span class="s3">&quot;PAGER&quot;</span><span class="s2">, None</span><span class="s1">) </span><span class="s2">or </span><span class="s3">&quot;&quot;</span><span class="s1">).strip()</span>
+    <span class="s2">if </span><span class="s1">pager_cmd:</span>
+        <span class="s2">if </span><span class="s1">WIN:</span>
+            <span class="s2">return </span><span class="s1">_tempfilepager(generator</span><span class="s2">, </span><span class="s1">pager_cmd</span><span class="s2">, </span><span class="s1">color)</span>
+        <span class="s2">return </span><span class="s1">_pipepager(generator</span><span class="s2">, </span><span class="s1">pager_cmd</span><span class="s2">, </span><span class="s1">color)</span>
+    <span class="s2">if </span><span class="s1">os.environ.get(</span><span class="s3">&quot;TERM&quot;</span><span class="s1">) </span><span class="s2">in </span><span class="s1">(</span><span class="s3">&quot;dumb&quot;</span><span class="s2">, </span><span class="s3">&quot;emacs&quot;</span><span class="s1">):</span>
+        <span class="s2">return </span><span class="s1">_nullpager(stdout</span><span class="s2">, </span><span class="s1">generator</span><span class="s2">, </span><span class="s1">color)</span>
+    <span class="s2">if </span><span class="s1">WIN </span><span class="s2">or </span><span class="s1">sys.platform.startswith(</span><span class="s3">&quot;os2&quot;</span><span class="s1">):</span>
+        <span class="s2">return </span><span class="s1">_tempfilepager(generator</span><span class="s2">, </span><span class="s3">&quot;more &lt;&quot;</span><span class="s2">, </span><span class="s1">color)</span>
+    <span class="s2">if </span><span class="s1">hasattr(os</span><span class="s2">, </span><span class="s3">&quot;system&quot;</span><span class="s1">) </span><span class="s2">and </span><span class="s1">os.system(</span><span class="s3">&quot;(less) 2&gt;/dev/null&quot;</span><span class="s1">) == </span><span class="s4">0</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">_pipepager(generator</span><span class="s2">, </span><span class="s3">&quot;less&quot;</span><span class="s2">, </span><span class="s1">color)</span>
+
+    <span class="s2">import </span><span class="s1">tempfile</span>
+
+    <span class="s1">fd</span><span class="s2">, </span><span class="s1">filename = tempfile.mkstemp()</span>
+    <span class="s1">os.close(fd)</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">hasattr(os</span><span class="s2">, </span><span class="s3">&quot;system&quot;</span><span class="s1">) </span><span class="s2">and </span><span class="s1">os.system(</span><span class="s3">f'more &quot;</span><span class="s2">{</span><span class="s1">filename</span><span class="s2">}</span><span class="s3">&quot;'</span><span class="s1">) == </span><span class="s4">0</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">_pipepager(generator</span><span class="s2">, </span><span class="s3">&quot;more&quot;</span><span class="s2">, </span><span class="s1">color)</span>
+        <span class="s2">return </span><span class="s1">_nullpager(stdout</span><span class="s2">, </span><span class="s1">generator</span><span class="s2">, </span><span class="s1">color)</span>
+    <span class="s2">finally</span><span class="s1">:</span>
+        <span class="s1">os.unlink(filename)</span>
+
+
+<span class="s2">def </span><span class="s1">_pipepager(generator: t.Iterable[str]</span><span class="s2">, </span><span class="s1">cmd: str</span><span class="s2">, </span><span class="s1">color: t.Optional[bool]) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+    <span class="s0">&quot;&quot;&quot;Page through text by feeding it to another program.  Invoking a 
+    pager through this might support colors. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">import </span><span class="s1">subprocess</span>
+
+    <span class="s1">env = dict(os.environ)</span>
+
+    <span class="s5"># If we're piping to less we might support colors under the</span>
+    <span class="s5"># condition that</span>
+    <span class="s1">cmd_detail = cmd.rsplit(</span><span class="s3">&quot;/&quot;</span><span class="s2">, </span><span class="s4">1</span><span class="s1">)[-</span><span class="s4">1</span><span class="s1">].split()</span>
+    <span class="s2">if </span><span class="s1">color </span><span class="s2">is None and </span><span class="s1">cmd_detail[</span><span class="s4">0</span><span class="s1">] == </span><span class="s3">&quot;less&quot;</span><span class="s1">:</span>
+        <span class="s1">less_flags = </span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">os.environ.get(</span><span class="s3">'LESS'</span><span class="s2">, </span><span class="s3">''</span><span class="s1">)</span><span class="s2">}{</span><span class="s3">' '</span><span class="s1">.join(cmd_detail[</span><span class="s4">1</span><span class="s1">:])</span><span class="s2">}</span><span class="s3">&quot;</span>
+        <span class="s2">if not </span><span class="s1">less_flags:</span>
+            <span class="s1">env[</span><span class="s3">&quot;LESS&quot;</span><span class="s1">] = </span><span class="s3">&quot;-R&quot;</span>
+            <span class="s1">color = </span><span class="s2">True</span>
+        <span class="s2">elif </span><span class="s3">&quot;r&quot; </span><span class="s2">in </span><span class="s1">less_flags </span><span class="s2">or </span><span class="s3">&quot;R&quot; </span><span class="s2">in </span><span class="s1">less_flags:</span>
+            <span class="s1">color = </span><span class="s2">True</span>
+
+    <span class="s1">c = subprocess.Popen(cmd</span><span class="s2">, </span><span class="s1">shell=</span><span class="s2">True, </span><span class="s1">stdin=subprocess.PIPE</span><span class="s2">, </span><span class="s1">env=env)</span>
+    <span class="s1">stdin = t.cast(t.BinaryIO</span><span class="s2">, </span><span class="s1">c.stdin)</span>
+    <span class="s1">encoding = get_best_encoding(stdin)</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s2">for </span><span class="s1">text </span><span class="s2">in </span><span class="s1">generator:</span>
+            <span class="s2">if not </span><span class="s1">color:</span>
+                <span class="s1">text = strip_ansi(text)</span>
+
+            <span class="s1">stdin.write(text.encode(encoding</span><span class="s2">, </span><span class="s3">&quot;replace&quot;</span><span class="s1">))</span>
+    <span class="s2">except </span><span class="s1">(OSError</span><span class="s2">, </span><span class="s1">KeyboardInterrupt):</span>
+        <span class="s2">pass</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">stdin.close()</span>
+
+    <span class="s5"># Less doesn't respect ^C, but catches it for its own UI purposes (aborting</span>
+    <span class="s5"># search or other commands inside less).</span>
+    <span class="s5">#</span>
+    <span class="s5"># That means when the user hits ^C, the parent process (click) terminates,</span>
+    <span class="s5"># but less is still alive, paging the output and messing up the terminal.</span>
+    <span class="s5">#</span>
+    <span class="s5"># If the user wants to make the pager exit on ^C, they should set</span>
+    <span class="s5"># `LESS='-K'`. It's not our decision to make.</span>
+    <span class="s2">while True</span><span class="s1">:</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">c.wait()</span>
+        <span class="s2">except </span><span class="s1">KeyboardInterrupt:</span>
+            <span class="s2">pass</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">break</span>
+
+
+<span class="s2">def </span><span class="s1">_tempfilepager(</span>
+    <span class="s1">generator: t.Iterable[str]</span><span class="s2">, </span><span class="s1">cmd: str</span><span class="s2">, </span><span class="s1">color: t.Optional[bool]</span>
+<span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+    <span class="s0">&quot;&quot;&quot;Page through text by invoking a program on a temporary file.&quot;&quot;&quot;</span>
+    <span class="s2">import </span><span class="s1">tempfile</span>
+
+    <span class="s1">fd</span><span class="s2">, </span><span class="s1">filename = tempfile.mkstemp()</span>
+    <span class="s5"># TODO: This never terminates if the passed generator never terminates.</span>
+    <span class="s1">text = </span><span class="s3">&quot;&quot;</span><span class="s1">.join(generator)</span>
+    <span class="s2">if not </span><span class="s1">color:</span>
+        <span class="s1">text = strip_ansi(text)</span>
+    <span class="s1">encoding = get_best_encoding(sys.stdout)</span>
+    <span class="s2">with </span><span class="s1">open_stream(filename</span><span class="s2">, </span><span class="s3">&quot;wb&quot;</span><span class="s1">)[</span><span class="s4">0</span><span class="s1">] </span><span class="s2">as </span><span class="s1">f:</span>
+        <span class="s1">f.write(text.encode(encoding))</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">os.system(</span><span class="s3">f'</span><span class="s2">{</span><span class="s1">cmd</span><span class="s2">} </span><span class="s3">&quot;</span><span class="s2">{</span><span class="s1">filename</span><span class="s2">}</span><span class="s3">&quot;'</span><span class="s1">)</span>
+    <span class="s2">finally</span><span class="s1">:</span>
+        <span class="s1">os.close(fd)</span>
+        <span class="s1">os.unlink(filename)</span>
+
+
+<span class="s2">def </span><span class="s1">_nullpager(</span>
+    <span class="s1">stream: t.TextIO</span><span class="s2">, </span><span class="s1">generator: t.Iterable[str]</span><span class="s2">, </span><span class="s1">color: t.Optional[bool]</span>
+<span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+    <span class="s0">&quot;&quot;&quot;Simply print unformatted text.  This is the ultimate fallback.&quot;&quot;&quot;</span>
+    <span class="s2">for </span><span class="s1">text </span><span class="s2">in </span><span class="s1">generator:</span>
+        <span class="s2">if not </span><span class="s1">color:</span>
+            <span class="s1">text = strip_ansi(text)</span>
+        <span class="s1">stream.write(text)</span>
+
+
+<span class="s2">class </span><span class="s1">Editor:</span>
+    <span class="s2">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">editor: t.Optional[str] = </span><span class="s2">None,</span>
+        <span class="s1">env: t.Optional[t.Mapping[str</span><span class="s2">, </span><span class="s1">str]] = </span><span class="s2">None,</span>
+        <span class="s1">require_save: bool = </span><span class="s2">True,</span>
+        <span class="s1">extension: str = </span><span class="s3">&quot;.txt&quot;</span><span class="s2">,</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.editor = editor</span>
+        <span class="s1">self.env = env</span>
+        <span class="s1">self.require_save = require_save</span>
+        <span class="s1">self.extension = extension</span>
+
+    <span class="s2">def </span><span class="s1">get_editor(self) -&gt; str:</span>
+        <span class="s2">if </span><span class="s1">self.editor </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">self.editor</span>
+        <span class="s2">for </span><span class="s1">key </span><span class="s2">in </span><span class="s3">&quot;VISUAL&quot;</span><span class="s2">, </span><span class="s3">&quot;EDITOR&quot;</span><span class="s1">:</span>
+            <span class="s1">rv = os.environ.get(key)</span>
+            <span class="s2">if </span><span class="s1">rv:</span>
+                <span class="s2">return </span><span class="s1">rv</span>
+        <span class="s2">if </span><span class="s1">WIN:</span>
+            <span class="s2">return </span><span class="s3">&quot;notepad&quot;</span>
+        <span class="s2">for </span><span class="s1">editor </span><span class="s2">in </span><span class="s3">&quot;sensible-editor&quot;</span><span class="s2">, </span><span class="s3">&quot;vim&quot;</span><span class="s2">, </span><span class="s3">&quot;nano&quot;</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">os.system(</span><span class="s3">f&quot;which </span><span class="s2">{</span><span class="s1">editor</span><span class="s2">} </span><span class="s3">&gt;/dev/null 2&gt;&amp;1&quot;</span><span class="s1">) == </span><span class="s4">0</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">editor</span>
+        <span class="s2">return </span><span class="s3">&quot;vi&quot;</span>
+
+    <span class="s2">def </span><span class="s1">edit_file(self</span><span class="s2">, </span><span class="s1">filename: str) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">import </span><span class="s1">subprocess</span>
+
+        <span class="s1">editor = self.get_editor()</span>
+        <span class="s1">environ: t.Optional[t.Dict[str</span><span class="s2">, </span><span class="s1">str]] = </span><span class="s2">None</span>
+
+        <span class="s2">if </span><span class="s1">self.env:</span>
+            <span class="s1">environ = os.environ.copy()</span>
+            <span class="s1">environ.update(self.env)</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">c = subprocess.Popen(</span><span class="s3">f'</span><span class="s2">{</span><span class="s1">editor</span><span class="s2">} </span><span class="s3">&quot;</span><span class="s2">{</span><span class="s1">filename</span><span class="s2">}</span><span class="s3">&quot;'</span><span class="s2">, </span><span class="s1">env=environ</span><span class="s2">, </span><span class="s1">shell=</span><span class="s2">True</span><span class="s1">)</span>
+            <span class="s1">exit_code = c.wait()</span>
+            <span class="s2">if </span><span class="s1">exit_code != </span><span class="s4">0</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">ClickException(</span>
+                    <span class="s1">_(</span><span class="s3">&quot;{editor}: Editing failed&quot;</span><span class="s1">).format(editor=editor)</span>
+                <span class="s1">)</span>
+        <span class="s2">except </span><span class="s1">OSError </span><span class="s2">as </span><span class="s1">e:</span>
+            <span class="s2">raise </span><span class="s1">ClickException(</span>
+                <span class="s1">_(</span><span class="s3">&quot;{editor}: Editing failed: {e}&quot;</span><span class="s1">).format(editor=editor</span><span class="s2">, </span><span class="s1">e=e)</span>
+            <span class="s1">) </span><span class="s2">from </span><span class="s1">e</span>
+
+    <span class="s2">def </span><span class="s1">edit(self</span><span class="s2">, </span><span class="s1">text: t.Optional[t.AnyStr]) -&gt; t.Optional[t.AnyStr]:</span>
+        <span class="s2">import </span><span class="s1">tempfile</span>
+
+        <span class="s2">if not </span><span class="s1">text:</span>
+            <span class="s1">data = </span><span class="s6">b&quot;&quot;</span>
+        <span class="s2">elif </span><span class="s1">isinstance(text</span><span class="s2">, </span><span class="s1">(bytes</span><span class="s2">, </span><span class="s1">bytearray)):</span>
+            <span class="s1">data = text</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">text </span><span class="s2">and not </span><span class="s1">text.endswith(</span><span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">&quot;</span><span class="s1">):</span>
+                <span class="s1">text += </span><span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">&quot;</span>
+
+            <span class="s2">if </span><span class="s1">WIN:</span>
+                <span class="s1">data = text.replace(</span><span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">&quot;</span><span class="s2">, </span><span class="s3">&quot;</span><span class="s2">\r\n</span><span class="s3">&quot;</span><span class="s1">).encode(</span><span class="s3">&quot;utf-8-sig&quot;</span><span class="s1">)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">data = text.encode(</span><span class="s3">&quot;utf-8&quot;</span><span class="s1">)</span>
+
+        <span class="s1">fd</span><span class="s2">, </span><span class="s1">name = tempfile.mkstemp(prefix=</span><span class="s3">&quot;editor-&quot;</span><span class="s2">, </span><span class="s1">suffix=self.extension)</span>
+        <span class="s1">f: t.BinaryIO</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">with </span><span class="s1">os.fdopen(fd</span><span class="s2">, </span><span class="s3">&quot;wb&quot;</span><span class="s1">) </span><span class="s2">as </span><span class="s1">f:</span>
+                <span class="s1">f.write(data)</span>
+
+            <span class="s5"># If the filesystem resolution is 1 second, like Mac OS</span>
+            <span class="s5"># 10.12 Extended, or 2 seconds, like FAT32, and the editor</span>
+            <span class="s5"># closes very fast, require_save can fail. Set the modified</span>
+            <span class="s5"># time to be 2 seconds in the past to work around this.</span>
+            <span class="s1">os.utime(name</span><span class="s2">, </span><span class="s1">(os.path.getatime(name)</span><span class="s2">, </span><span class="s1">os.path.getmtime(name) - </span><span class="s4">2</span><span class="s1">))</span>
+            <span class="s5"># Depending on the resolution, the exact value might not be</span>
+            <span class="s5"># recorded, so get the new recorded value.</span>
+            <span class="s1">timestamp = os.path.getmtime(name)</span>
+
+            <span class="s1">self.edit_file(name)</span>
+
+            <span class="s2">if </span><span class="s1">self.require_save </span><span class="s2">and </span><span class="s1">os.path.getmtime(name) == timestamp:</span>
+                <span class="s2">return None</span>
+
+            <span class="s2">with </span><span class="s1">open(name</span><span class="s2">, </span><span class="s3">&quot;rb&quot;</span><span class="s1">) </span><span class="s2">as </span><span class="s1">f:</span>
+                <span class="s1">rv = f.read()</span>
+
+            <span class="s2">if </span><span class="s1">isinstance(text</span><span class="s2">, </span><span class="s1">(bytes</span><span class="s2">, </span><span class="s1">bytearray)):</span>
+                <span class="s2">return </span><span class="s1">rv</span>
+
+            <span class="s2">return </span><span class="s1">rv.decode(</span><span class="s3">&quot;utf-8-sig&quot;</span><span class="s1">).replace(</span><span class="s3">&quot;</span><span class="s2">\r\n</span><span class="s3">&quot;</span><span class="s2">, </span><span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">&quot;</span><span class="s1">)  </span><span class="s5"># type: ignore</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">os.unlink(name)</span>
+
+
+<span class="s2">def </span><span class="s1">open_url(url: str</span><span class="s2">, </span><span class="s1">wait: bool = </span><span class="s2">False, </span><span class="s1">locate: bool = </span><span class="s2">False</span><span class="s1">) -&gt; int:</span>
+    <span class="s2">import </span><span class="s1">subprocess</span>
+
+    <span class="s2">def </span><span class="s1">_unquote_file(url: str) -&gt; str:</span>
+        <span class="s2">from </span><span class="s1">urllib.parse </span><span class="s2">import </span><span class="s1">unquote</span>
+
+        <span class="s2">if </span><span class="s1">url.startswith(</span><span class="s3">&quot;file://&quot;</span><span class="s1">):</span>
+            <span class="s1">url = unquote(url[</span><span class="s4">7</span><span class="s1">:])</span>
+
+        <span class="s2">return </span><span class="s1">url</span>
+
+    <span class="s2">if </span><span class="s1">sys.platform == </span><span class="s3">&quot;darwin&quot;</span><span class="s1">:</span>
+        <span class="s1">args = [</span><span class="s3">&quot;open&quot;</span><span class="s1">]</span>
+        <span class="s2">if </span><span class="s1">wait:</span>
+            <span class="s1">args.append(</span><span class="s3">&quot;-W&quot;</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">locate:</span>
+            <span class="s1">args.append(</span><span class="s3">&quot;-R&quot;</span><span class="s1">)</span>
+        <span class="s1">args.append(_unquote_file(url))</span>
+        <span class="s1">null = open(</span><span class="s3">&quot;/dev/null&quot;</span><span class="s2">, </span><span class="s3">&quot;w&quot;</span><span class="s1">)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">subprocess.Popen(args</span><span class="s2">, </span><span class="s1">stderr=null).wait()</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">null.close()</span>
+    <span class="s2">elif </span><span class="s1">WIN:</span>
+        <span class="s2">if </span><span class="s1">locate:</span>
+            <span class="s1">url = _unquote_file(url.replace(</span><span class="s3">'&quot;'</span><span class="s2">, </span><span class="s3">&quot;&quot;</span><span class="s1">))</span>
+            <span class="s1">args = </span><span class="s3">f'explorer /select,&quot;</span><span class="s2">{</span><span class="s1">url</span><span class="s2">}</span><span class="s3">&quot;'</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">url = url.replace(</span><span class="s3">'&quot;'</span><span class="s2">, </span><span class="s3">&quot;&quot;</span><span class="s1">)</span>
+            <span class="s1">wait_str = </span><span class="s3">&quot;/WAIT&quot; </span><span class="s2">if </span><span class="s1">wait </span><span class="s2">else </span><span class="s3">&quot;&quot;</span>
+            <span class="s1">args = </span><span class="s3">f'start </span><span class="s2">{</span><span class="s1">wait_str</span><span class="s2">} </span><span class="s3">&quot;&quot; &quot;</span><span class="s2">{</span><span class="s1">url</span><span class="s2">}</span><span class="s3">&quot;'</span>
+        <span class="s2">return </span><span class="s1">os.system(args)</span>
+    <span class="s2">elif </span><span class="s1">CYGWIN:</span>
+        <span class="s2">if </span><span class="s1">locate:</span>
+            <span class="s1">url = os.path.dirname(_unquote_file(url).replace(</span><span class="s3">'&quot;'</span><span class="s2">, </span><span class="s3">&quot;&quot;</span><span class="s1">))</span>
+            <span class="s1">args = </span><span class="s3">f'cygstart &quot;</span><span class="s2">{</span><span class="s1">url</span><span class="s2">}</span><span class="s3">&quot;'</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">url = url.replace(</span><span class="s3">'&quot;'</span><span class="s2">, </span><span class="s3">&quot;&quot;</span><span class="s1">)</span>
+            <span class="s1">wait_str = </span><span class="s3">&quot;-w&quot; </span><span class="s2">if </span><span class="s1">wait </span><span class="s2">else </span><span class="s3">&quot;&quot;</span>
+            <span class="s1">args = </span><span class="s3">f'cygstart </span><span class="s2">{</span><span class="s1">wait_str</span><span class="s2">} </span><span class="s3">&quot;</span><span class="s2">{</span><span class="s1">url</span><span class="s2">}</span><span class="s3">&quot;'</span>
+        <span class="s2">return </span><span class="s1">os.system(args)</span>
+
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">locate:</span>
+            <span class="s1">url = os.path.dirname(_unquote_file(url)) </span><span class="s2">or </span><span class="s3">&quot;.&quot;</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">url = _unquote_file(url)</span>
+        <span class="s1">c = subprocess.Popen([</span><span class="s3">&quot;xdg-open&quot;</span><span class="s2">, </span><span class="s1">url])</span>
+        <span class="s2">if </span><span class="s1">wait:</span>
+            <span class="s2">return </span><span class="s1">c.wait()</span>
+        <span class="s2">return </span><span class="s4">0</span>
+    <span class="s2">except </span><span class="s1">OSError:</span>
+        <span class="s2">if </span><span class="s1">url.startswith((</span><span class="s3">&quot;http://&quot;</span><span class="s2">, </span><span class="s3">&quot;https://&quot;</span><span class="s1">)) </span><span class="s2">and not </span><span class="s1">locate </span><span class="s2">and not </span><span class="s1">wait:</span>
+            <span class="s2">import </span><span class="s1">webbrowser</span>
+
+            <span class="s1">webbrowser.open(url)</span>
+            <span class="s2">return </span><span class="s4">0</span>
+        <span class="s2">return </span><span class="s4">1</span>
+
+
+<span class="s2">def </span><span class="s1">_translate_ch_to_exc(ch: str) -&gt; t.Optional[BaseException]:</span>
+    <span class="s2">if </span><span class="s1">ch == </span><span class="s3">&quot;</span><span class="s2">\x03</span><span class="s3">&quot;</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">KeyboardInterrupt()</span>
+
+    <span class="s2">if </span><span class="s1">ch == </span><span class="s3">&quot;</span><span class="s2">\x04</span><span class="s3">&quot; </span><span class="s2">and not </span><span class="s1">WIN:  </span><span class="s5"># Unix-like, Ctrl+D</span>
+        <span class="s2">raise </span><span class="s1">EOFError()</span>
+
+    <span class="s2">if </span><span class="s1">ch == </span><span class="s3">&quot;</span><span class="s2">\x1a</span><span class="s3">&quot; </span><span class="s2">and </span><span class="s1">WIN:  </span><span class="s5"># Windows, Ctrl+Z</span>
+        <span class="s2">raise </span><span class="s1">EOFError()</span>
+
+    <span class="s2">return None</span>
+
+
+<span class="s2">if </span><span class="s1">WIN:</span>
+    <span class="s2">import </span><span class="s1">msvcrt</span>
+
+    <span class="s1">@contextlib.contextmanager</span>
+    <span class="s2">def </span><span class="s1">raw_terminal() -&gt; t.Iterator[int]:</span>
+        <span class="s2">yield </span><span class="s1">-</span><span class="s4">1</span>
+
+    <span class="s2">def </span><span class="s1">getchar(echo: bool) -&gt; str:</span>
+        <span class="s5"># The function `getch` will return a bytes object corresponding to</span>
+        <span class="s5"># the pressed character. Since Windows 10 build 1803, it will also</span>
+        <span class="s5"># return \x00 when called a second time after pressing a regular key.</span>
+        <span class="s5">#</span>
+        <span class="s5"># `getwch` does not share this probably-bugged behavior. Moreover, it</span>
+        <span class="s5"># returns a Unicode object by default, which is what we want.</span>
+        <span class="s5">#</span>
+        <span class="s5"># Either of these functions will return \x00 or \xe0 to indicate</span>
+        <span class="s5"># a special key, and you need to call the same function again to get</span>
+        <span class="s5"># the &quot;rest&quot; of the code. The fun part is that \u00e0 is</span>
+        <span class="s5"># &quot;latin small letter a with grave&quot;, so if you type that on a French</span>
+        <span class="s5"># keyboard, you _also_ get a \xe0.</span>
+        <span class="s5"># E.g., consider the Up arrow. This returns \xe0 and then \x48. The</span>
+        <span class="s5"># resulting Unicode string reads as &quot;a with grave&quot; + &quot;capital H&quot;.</span>
+        <span class="s5"># This is indistinguishable from when the user actually types</span>
+        <span class="s5"># &quot;a with grave&quot; and then &quot;capital H&quot;.</span>
+        <span class="s5">#</span>
+        <span class="s5"># When \xe0 is returned, we assume it's part of a special-key sequence</span>
+        <span class="s5"># and call `getwch` again, but that means that when the user types</span>
+        <span class="s5"># the \u00e0 character, `getchar` doesn't return until a second</span>
+        <span class="s5"># character is typed.</span>
+        <span class="s5"># The alternative is returning immediately, but that would mess up</span>
+        <span class="s5"># cross-platform handling of arrow keys and others that start with</span>
+        <span class="s5"># \xe0. Another option is using `getch`, but then we can't reliably</span>
+        <span class="s5"># read non-ASCII characters, because return values of `getch` are</span>
+        <span class="s5"># limited to the current 8-bit codepage.</span>
+        <span class="s5">#</span>
+        <span class="s5"># Anyway, Click doesn't claim to do this Right(tm), and using `getwch`</span>
+        <span class="s5"># is doing the right thing in more situations than with `getch`.</span>
+        <span class="s1">func: t.Callable[[]</span><span class="s2">, </span><span class="s1">str]</span>
+
+        <span class="s2">if </span><span class="s1">echo:</span>
+            <span class="s1">func = msvcrt.getwche  </span><span class="s5"># type: ignore</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">func = msvcrt.getwch  </span><span class="s5"># type: ignore</span>
+
+        <span class="s1">rv = func()</span>
+
+        <span class="s2">if </span><span class="s1">rv </span><span class="s2">in </span><span class="s1">(</span><span class="s3">&quot;</span><span class="s2">\x00</span><span class="s3">&quot;</span><span class="s2">, </span><span class="s3">&quot;</span><span class="s2">\xe0</span><span class="s3">&quot;</span><span class="s1">):</span>
+            <span class="s5"># \x00 and \xe0 are control characters that indicate special key,</span>
+            <span class="s5"># see above.</span>
+            <span class="s1">rv += func()</span>
+
+        <span class="s1">_translate_ch_to_exc(rv)</span>
+        <span class="s2">return </span><span class="s1">rv</span>
+
+
+<span class="s2">else</span><span class="s1">:</span>
+    <span class="s2">import </span><span class="s1">tty</span>
+    <span class="s2">import </span><span class="s1">termios</span>
+
+    <span class="s1">@contextlib.contextmanager</span>
+    <span class="s2">def </span><span class="s1">raw_terminal() -&gt; t.Iterator[int]:</span>
+        <span class="s1">f: t.Optional[t.TextIO]</span>
+        <span class="s1">fd: int</span>
+
+        <span class="s2">if not </span><span class="s1">isatty(sys.stdin):</span>
+            <span class="s1">f = open(</span><span class="s3">&quot;/dev/tty&quot;</span><span class="s1">)</span>
+            <span class="s1">fd = f.fileno()</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">fd = sys.stdin.fileno()</span>
+            <span class="s1">f = </span><span class="s2">None</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">old_settings = termios.tcgetattr(fd)</span>
+
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">tty.setraw(fd)</span>
+                <span class="s2">yield </span><span class="s1">fd</span>
+            <span class="s2">finally</span><span class="s1">:</span>
+                <span class="s1">termios.tcsetattr(fd</span><span class="s2">, </span><span class="s1">termios.TCSADRAIN</span><span class="s2">, </span><span class="s1">old_settings)</span>
+                <span class="s1">sys.stdout.flush()</span>
+
+                <span class="s2">if </span><span class="s1">f </span><span class="s2">is not None</span><span class="s1">:</span>
+                    <span class="s1">f.close()</span>
+        <span class="s2">except </span><span class="s1">termios.error:</span>
+            <span class="s2">pass</span>
+
+    <span class="s2">def </span><span class="s1">getchar(echo: bool) -&gt; str:</span>
+        <span class="s2">with </span><span class="s1">raw_terminal() </span><span class="s2">as </span><span class="s1">fd:</span>
+            <span class="s1">ch = os.read(fd</span><span class="s2">, </span><span class="s4">32</span><span class="s1">).decode(get_best_encoding(sys.stdin)</span><span class="s2">, </span><span class="s3">&quot;replace&quot;</span><span class="s1">)</span>
+
+            <span class="s2">if </span><span class="s1">echo </span><span class="s2">and </span><span class="s1">isatty(sys.stdout):</span>
+                <span class="s1">sys.stdout.write(ch)</span>
+
+            <span class="s1">_translate_ch_to_exc(ch)</span>
+            <span class="s2">return </span><span class="s1">ch</span>
+</pre>
+</body>
+</html>

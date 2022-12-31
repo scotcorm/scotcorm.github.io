@@ -1,0 +1,1005 @@
+<html>
+<head>
+<title>wsgi.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #6a8759;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6897bb;}
+.s6 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+wsgi.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">io</span>
+<span class="s0">import </span><span class="s1">re</span>
+<span class="s0">import </span><span class="s1">typing </span><span class="s0">as </span><span class="s1">t</span>
+<span class="s0">from </span><span class="s1">functools </span><span class="s0">import </span><span class="s1">partial</span>
+<span class="s0">from </span><span class="s1">functools </span><span class="s0">import </span><span class="s1">update_wrapper</span>
+<span class="s0">from </span><span class="s1">itertools </span><span class="s0">import </span><span class="s1">chain</span>
+
+<span class="s0">from </span><span class="s1">._internal </span><span class="s0">import </span><span class="s1">_make_encode_wrapper</span>
+<span class="s0">from </span><span class="s1">._internal </span><span class="s0">import </span><span class="s1">_to_bytes</span>
+<span class="s0">from </span><span class="s1">._internal </span><span class="s0">import </span><span class="s1">_to_str</span>
+<span class="s0">from </span><span class="s1">.sansio </span><span class="s0">import </span><span class="s1">utils </span><span class="s0">as </span><span class="s1">_sansio_utils</span>
+<span class="s0">from </span><span class="s1">.sansio.utils </span><span class="s0">import </span><span class="s1">host_is_trusted  </span><span class="s2"># noqa: F401 # Imported as part of API</span>
+<span class="s0">from </span><span class="s1">.urls </span><span class="s0">import </span><span class="s1">_URLTuple</span>
+<span class="s0">from </span><span class="s1">.urls </span><span class="s0">import </span><span class="s1">uri_to_iri</span>
+<span class="s0">from </span><span class="s1">.urls </span><span class="s0">import </span><span class="s1">url_join</span>
+<span class="s0">from </span><span class="s1">.urls </span><span class="s0">import </span><span class="s1">url_parse</span>
+<span class="s0">from </span><span class="s1">.urls </span><span class="s0">import </span><span class="s1">url_quote</span>
+
+<span class="s0">if </span><span class="s1">t.TYPE_CHECKING:</span>
+    <span class="s0">from </span><span class="s1">_typeshed.wsgi </span><span class="s0">import </span><span class="s1">WSGIApplication</span>
+    <span class="s0">from </span><span class="s1">_typeshed.wsgi </span><span class="s0">import </span><span class="s1">WSGIEnvironment</span>
+
+
+<span class="s0">def </span><span class="s1">responder(f: t.Callable[...</span><span class="s0">, </span><span class="s3">&quot;WSGIApplication&quot;</span><span class="s1">]) -&gt; </span><span class="s3">&quot;WSGIApplication&quot;</span><span class="s1">:</span>
+    <span class="s4">&quot;&quot;&quot;Marks a function as responder.  Decorate a function with it and it 
+    will automatically call the return value as WSGI application. 
+ 
+    Example:: 
+ 
+        @responder 
+        def application(environ, start_response): 
+            return Response('Hello World!') 
+    &quot;&quot;&quot;</span>
+    <span class="s0">return </span><span class="s1">update_wrapper(</span><span class="s0">lambda </span><span class="s1">*a: f(*a)(*a[-</span><span class="s5">2</span><span class="s1">:])</span><span class="s0">, </span><span class="s1">f)</span>
+
+
+<span class="s0">def </span><span class="s1">get_current_url(</span>
+    <span class="s1">environ: </span><span class="s3">&quot;WSGIEnvironment&quot;</span><span class="s0">,</span>
+    <span class="s1">root_only: bool = </span><span class="s0">False,</span>
+    <span class="s1">strip_querystring: bool = </span><span class="s0">False,</span>
+    <span class="s1">host_only: bool = </span><span class="s0">False,</span>
+    <span class="s1">trusted_hosts: t.Optional[t.Iterable[str]] = </span><span class="s0">None,</span>
+<span class="s1">) -&gt; str:</span>
+    <span class="s4">&quot;&quot;&quot;Recreate the URL for a request from the parts in a WSGI 
+    environment. 
+ 
+    The URL is an IRI, not a URI, so it may contain Unicode characters. 
+    Use :func:`~werkzeug.urls.iri_to_uri` to convert it to ASCII. 
+ 
+    :param environ: The WSGI environment to get the URL parts from. 
+    :param root_only: Only build the root path, don't include the 
+        remaining path or query string. 
+    :param strip_querystring: Don't include the query string. 
+    :param host_only: Only build the scheme and host. 
+    :param trusted_hosts: A list of trusted host names to validate the 
+        host against. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">parts = {</span>
+        <span class="s3">&quot;scheme&quot;</span><span class="s1">: environ[</span><span class="s3">&quot;wsgi.url_scheme&quot;</span><span class="s1">]</span><span class="s0">,</span>
+        <span class="s3">&quot;host&quot;</span><span class="s1">: get_host(environ</span><span class="s0">, </span><span class="s1">trusted_hosts)</span><span class="s0">,</span>
+    <span class="s1">}</span>
+
+    <span class="s0">if not </span><span class="s1">host_only:</span>
+        <span class="s1">parts[</span><span class="s3">&quot;root_path&quot;</span><span class="s1">] = environ.get(</span><span class="s3">&quot;SCRIPT_NAME&quot;</span><span class="s0">, </span><span class="s3">&quot;&quot;</span><span class="s1">)</span>
+
+        <span class="s0">if not </span><span class="s1">root_only:</span>
+            <span class="s1">parts[</span><span class="s3">&quot;path&quot;</span><span class="s1">] = environ.get(</span><span class="s3">&quot;PATH_INFO&quot;</span><span class="s0">, </span><span class="s3">&quot;&quot;</span><span class="s1">)</span>
+
+            <span class="s0">if not </span><span class="s1">strip_querystring:</span>
+                <span class="s1">parts[</span><span class="s3">&quot;query_string&quot;</span><span class="s1">] = environ.get(</span><span class="s3">&quot;QUERY_STRING&quot;</span><span class="s0">, </span><span class="s3">&quot;&quot;</span><span class="s1">).encode(</span><span class="s3">&quot;latin1&quot;</span><span class="s1">)</span>
+
+    <span class="s0">return </span><span class="s1">_sansio_utils.get_current_url(**parts)</span>
+
+
+<span class="s0">def </span><span class="s1">_get_server(</span>
+    <span class="s1">environ: </span><span class="s3">&quot;WSGIEnvironment&quot;</span><span class="s0">,</span>
+<span class="s1">) -&gt; t.Optional[t.Tuple[str</span><span class="s0">, </span><span class="s1">t.Optional[int]]]:</span>
+    <span class="s1">name = environ.get(</span><span class="s3">&quot;SERVER_NAME&quot;</span><span class="s1">)</span>
+
+    <span class="s0">if </span><span class="s1">name </span><span class="s0">is None</span><span class="s1">:</span>
+        <span class="s0">return None</span>
+
+    <span class="s0">try</span><span class="s1">:</span>
+        <span class="s1">port: t.Optional[int] = int(environ.get(</span><span class="s3">&quot;SERVER_PORT&quot;</span><span class="s0">, None</span><span class="s1">))</span>
+    <span class="s0">except </span><span class="s1">(TypeError</span><span class="s0">, </span><span class="s1">ValueError):</span>
+        <span class="s2"># unix socket</span>
+        <span class="s1">port = </span><span class="s0">None</span>
+
+    <span class="s0">return </span><span class="s1">name</span><span class="s0">, </span><span class="s1">port</span>
+
+
+<span class="s0">def </span><span class="s1">get_host(</span>
+    <span class="s1">environ: </span><span class="s3">&quot;WSGIEnvironment&quot;</span><span class="s0">, </span><span class="s1">trusted_hosts: t.Optional[t.Iterable[str]] = </span><span class="s0">None</span>
+<span class="s1">) -&gt; str:</span>
+    <span class="s4">&quot;&quot;&quot;Return the host for the given WSGI environment. 
+ 
+    The ``Host`` header is preferred, then ``SERVER_NAME`` if it's not 
+    set. The returned host will only contain the port if it is different 
+    than the standard port for the protocol. 
+ 
+    Optionally, verify that the host is trusted using 
+    :func:`host_is_trusted` and raise a 
+    :exc:`~werkzeug.exceptions.SecurityError` if it is not. 
+ 
+    :param environ: A WSGI environment dict. 
+    :param trusted_hosts: A list of trusted host names. 
+ 
+    :return: Host, with port if necessary. 
+    :raise ~werkzeug.exceptions.SecurityError: If the host is not 
+        trusted. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">return </span><span class="s1">_sansio_utils.get_host(</span>
+        <span class="s1">environ[</span><span class="s3">&quot;wsgi.url_scheme&quot;</span><span class="s1">]</span><span class="s0">,</span>
+        <span class="s1">environ.get(</span><span class="s3">&quot;HTTP_HOST&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">_get_server(environ)</span><span class="s0">,</span>
+        <span class="s1">trusted_hosts</span><span class="s0">,</span>
+    <span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">get_content_length(environ: </span><span class="s3">&quot;WSGIEnvironment&quot;</span><span class="s1">) -&gt; t.Optional[int]:</span>
+    <span class="s4">&quot;&quot;&quot;Returns the content length from the WSGI environment as 
+    integer. If it's not available or chunked transfer encoding is used, 
+    ``None`` is returned. 
+ 
+    .. versionadded:: 0.9 
+ 
+    :param environ: the WSGI environ to fetch the content length from. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">environ.get(</span><span class="s3">&quot;HTTP_TRANSFER_ENCODING&quot;</span><span class="s0">, </span><span class="s3">&quot;&quot;</span><span class="s1">) == </span><span class="s3">&quot;chunked&quot;</span><span class="s1">:</span>
+        <span class="s0">return None</span>
+
+    <span class="s1">content_length = environ.get(</span><span class="s3">&quot;CONTENT_LENGTH&quot;</span><span class="s1">)</span>
+    <span class="s0">if </span><span class="s1">content_length </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">max(</span><span class="s5">0</span><span class="s0">, </span><span class="s1">int(content_length))</span>
+        <span class="s0">except </span><span class="s1">(ValueError</span><span class="s0">, </span><span class="s1">TypeError):</span>
+            <span class="s0">pass</span>
+    <span class="s0">return None</span>
+
+
+<span class="s0">def </span><span class="s1">get_input_stream(</span>
+    <span class="s1">environ: </span><span class="s3">&quot;WSGIEnvironment&quot;</span><span class="s0">, </span><span class="s1">safe_fallback: bool = </span><span class="s0">True</span>
+<span class="s1">) -&gt; t.IO[bytes]:</span>
+    <span class="s4">&quot;&quot;&quot;Returns the input stream from the WSGI environment and wraps it 
+    in the most sensible way possible. The stream returned is not the 
+    raw WSGI stream in most cases but one that is safe to read from 
+    without taking into account the content length. 
+ 
+    If content length is not set, the stream will be empty for safety reasons. 
+    If the WSGI server supports chunked or infinite streams, it should set 
+    the ``wsgi.input_terminated`` value in the WSGI environ to indicate that. 
+ 
+    .. versionadded:: 0.9 
+ 
+    :param environ: the WSGI environ to fetch the stream from. 
+    :param safe_fallback: use an empty stream as a safe fallback when the 
+        content length is not set. Disabling this allows infinite streams, 
+        which can be a denial-of-service risk. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">stream = t.cast(t.IO[bytes]</span><span class="s0">, </span><span class="s1">environ[</span><span class="s3">&quot;wsgi.input&quot;</span><span class="s1">])</span>
+    <span class="s1">content_length = get_content_length(environ)</span>
+
+    <span class="s2"># A wsgi extension that tells us if the input is terminated.  In</span>
+    <span class="s2"># that case we return the stream unchanged as we know we can safely</span>
+    <span class="s2"># read it until the end.</span>
+    <span class="s0">if </span><span class="s1">environ.get(</span><span class="s3">&quot;wsgi.input_terminated&quot;</span><span class="s1">):</span>
+        <span class="s0">return </span><span class="s1">stream</span>
+
+    <span class="s2"># If the request doesn't specify a content length, returning the stream is</span>
+    <span class="s2"># potentially dangerous because it could be infinite, malicious or not. If</span>
+    <span class="s2"># safe_fallback is true, return an empty stream instead for safety.</span>
+    <span class="s0">if </span><span class="s1">content_length </span><span class="s0">is None</span><span class="s1">:</span>
+        <span class="s0">return </span><span class="s1">io.BytesIO() </span><span class="s0">if </span><span class="s1">safe_fallback </span><span class="s0">else </span><span class="s1">stream</span>
+
+    <span class="s2"># Otherwise limit the stream to the content length</span>
+    <span class="s0">return </span><span class="s1">t.cast(t.IO[bytes]</span><span class="s0">, </span><span class="s1">LimitedStream(stream</span><span class="s0">, </span><span class="s1">content_length))</span>
+
+
+<span class="s0">def </span><span class="s1">get_query_string(environ: </span><span class="s3">&quot;WSGIEnvironment&quot;</span><span class="s1">) -&gt; str:</span>
+    <span class="s4">&quot;&quot;&quot;Returns the ``QUERY_STRING`` from the WSGI environment. This also 
+    takes care of the WSGI decoding dance. The string returned will be 
+    restricted to ASCII characters. 
+ 
+    :param environ: WSGI environment to get the query string from. 
+ 
+    .. versionadded:: 0.9 
+    &quot;&quot;&quot;</span>
+    <span class="s1">qs = environ.get(</span><span class="s3">&quot;QUERY_STRING&quot;</span><span class="s0">, </span><span class="s3">&quot;&quot;</span><span class="s1">).encode(</span><span class="s3">&quot;latin1&quot;</span><span class="s1">)</span>
+    <span class="s2"># QUERY_STRING really should be ascii safe but some browsers</span>
+    <span class="s2"># will send us some unicode stuff (I am looking at you IE).</span>
+    <span class="s2"># In that case we want to urllib quote it badly.</span>
+    <span class="s0">return </span><span class="s1">url_quote(qs</span><span class="s0">, </span><span class="s1">safe=</span><span class="s3">&quot;:&amp;%=+$!*'(),&quot;</span><span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">get_path_info(</span>
+    <span class="s1">environ: </span><span class="s3">&quot;WSGIEnvironment&quot;</span><span class="s0">, </span><span class="s1">charset: str = </span><span class="s3">&quot;utf-8&quot;</span><span class="s0">, </span><span class="s1">errors: str = </span><span class="s3">&quot;replace&quot;</span>
+<span class="s1">) -&gt; str:</span>
+    <span class="s4">&quot;&quot;&quot;Return the ``PATH_INFO`` from the WSGI environment and decode it 
+    unless ``charset`` is ``None``. 
+ 
+    :param environ: WSGI environment to get the path from. 
+    :param charset: The charset for the path info, or ``None`` if no 
+        decoding should be performed. 
+    :param errors: The decoding error handling. 
+ 
+    .. versionadded:: 0.9 
+    &quot;&quot;&quot;</span>
+    <span class="s1">path = environ.get(</span><span class="s3">&quot;PATH_INFO&quot;</span><span class="s0">, </span><span class="s3">&quot;&quot;</span><span class="s1">).encode(</span><span class="s3">&quot;latin1&quot;</span><span class="s1">)</span>
+    <span class="s0">return </span><span class="s1">_to_str(path</span><span class="s0">, </span><span class="s1">charset</span><span class="s0">, </span><span class="s1">errors</span><span class="s0">, </span><span class="s1">allow_none_charset=</span><span class="s0">True</span><span class="s1">)  </span><span class="s2"># type: ignore</span>
+
+
+<span class="s0">def </span><span class="s1">get_script_name(</span>
+    <span class="s1">environ: </span><span class="s3">&quot;WSGIEnvironment&quot;</span><span class="s0">, </span><span class="s1">charset: str = </span><span class="s3">&quot;utf-8&quot;</span><span class="s0">, </span><span class="s1">errors: str = </span><span class="s3">&quot;replace&quot;</span>
+<span class="s1">) -&gt; str:</span>
+    <span class="s4">&quot;&quot;&quot;Return the ``SCRIPT_NAME`` from the WSGI environment and decode 
+    it unless `charset` is set to ``None``. 
+ 
+    :param environ: WSGI environment to get the path from. 
+    :param charset: The charset for the path, or ``None`` if no decoding 
+        should be performed. 
+    :param errors: The decoding error handling. 
+ 
+    .. versionadded:: 0.9 
+    &quot;&quot;&quot;</span>
+    <span class="s1">path = environ.get(</span><span class="s3">&quot;SCRIPT_NAME&quot;</span><span class="s0">, </span><span class="s3">&quot;&quot;</span><span class="s1">).encode(</span><span class="s3">&quot;latin1&quot;</span><span class="s1">)</span>
+    <span class="s0">return </span><span class="s1">_to_str(path</span><span class="s0">, </span><span class="s1">charset</span><span class="s0">, </span><span class="s1">errors</span><span class="s0">, </span><span class="s1">allow_none_charset=</span><span class="s0">True</span><span class="s1">)  </span><span class="s2"># type: ignore</span>
+
+
+<span class="s0">def </span><span class="s1">pop_path_info(</span>
+    <span class="s1">environ: </span><span class="s3">&quot;WSGIEnvironment&quot;</span><span class="s0">, </span><span class="s1">charset: str = </span><span class="s3">&quot;utf-8&quot;</span><span class="s0">, </span><span class="s1">errors: str = </span><span class="s3">&quot;replace&quot;</span>
+<span class="s1">) -&gt; t.Optional[str]:</span>
+    <span class="s4">&quot;&quot;&quot;Removes and returns the next segment of `PATH_INFO`, pushing it onto 
+    `SCRIPT_NAME`.  Returns `None` if there is nothing left on `PATH_INFO`. 
+ 
+    If the `charset` is set to `None` bytes are returned. 
+ 
+    If there are empty segments (``'/foo//bar``) these are ignored but 
+    properly pushed to the `SCRIPT_NAME`: 
+ 
+    &gt;&gt;&gt; env = {'SCRIPT_NAME': '/foo', 'PATH_INFO': '/a/b'} 
+    &gt;&gt;&gt; pop_path_info(env) 
+    'a' 
+    &gt;&gt;&gt; env['SCRIPT_NAME'] 
+    '/foo/a' 
+    &gt;&gt;&gt; pop_path_info(env) 
+    'b' 
+    &gt;&gt;&gt; env['SCRIPT_NAME'] 
+    '/foo/a/b' 
+ 
+    .. versionadded:: 0.5 
+ 
+    .. versionchanged:: 0.9 
+       The path is now decoded and a charset and encoding 
+       parameter can be provided. 
+ 
+    :param environ: the WSGI environment that is modified. 
+    :param charset: The ``encoding`` parameter passed to 
+        :func:`bytes.decode`. 
+    :param errors: The ``errors`` paramater passed to 
+        :func:`bytes.decode`. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">path = environ.get(</span><span class="s3">&quot;PATH_INFO&quot;</span><span class="s1">)</span>
+    <span class="s0">if not </span><span class="s1">path:</span>
+        <span class="s0">return None</span>
+
+    <span class="s1">script_name = environ.get(</span><span class="s3">&quot;SCRIPT_NAME&quot;</span><span class="s0">, </span><span class="s3">&quot;&quot;</span><span class="s1">)</span>
+
+    <span class="s2"># shift multiple leading slashes over</span>
+    <span class="s1">old_path = path</span>
+    <span class="s1">path = path.lstrip(</span><span class="s3">&quot;/&quot;</span><span class="s1">)</span>
+    <span class="s0">if </span><span class="s1">path != old_path:</span>
+        <span class="s1">script_name += </span><span class="s3">&quot;/&quot; </span><span class="s1">* (len(old_path) - len(path))</span>
+
+    <span class="s0">if </span><span class="s3">&quot;/&quot; </span><span class="s0">not in </span><span class="s1">path:</span>
+        <span class="s1">environ[</span><span class="s3">&quot;PATH_INFO&quot;</span><span class="s1">] = </span><span class="s3">&quot;&quot;</span>
+        <span class="s1">environ[</span><span class="s3">&quot;SCRIPT_NAME&quot;</span><span class="s1">] = script_name + path</span>
+        <span class="s1">rv = path.encode(</span><span class="s3">&quot;latin1&quot;</span><span class="s1">)</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">segment</span><span class="s0">, </span><span class="s1">path = path.split(</span><span class="s3">&quot;/&quot;</span><span class="s0">, </span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s1">environ[</span><span class="s3">&quot;PATH_INFO&quot;</span><span class="s1">] = </span><span class="s3">f&quot;/</span><span class="s0">{</span><span class="s1">path</span><span class="s0">}</span><span class="s3">&quot;</span>
+        <span class="s1">environ[</span><span class="s3">&quot;SCRIPT_NAME&quot;</span><span class="s1">] = script_name + segment</span>
+        <span class="s1">rv = segment.encode(</span><span class="s3">&quot;latin1&quot;</span><span class="s1">)</span>
+
+    <span class="s0">return </span><span class="s1">_to_str(rv</span><span class="s0">, </span><span class="s1">charset</span><span class="s0">, </span><span class="s1">errors</span><span class="s0">, </span><span class="s1">allow_none_charset=</span><span class="s0">True</span><span class="s1">)  </span><span class="s2"># type: ignore</span>
+
+
+<span class="s0">def </span><span class="s1">peek_path_info(</span>
+    <span class="s1">environ: </span><span class="s3">&quot;WSGIEnvironment&quot;</span><span class="s0">, </span><span class="s1">charset: str = </span><span class="s3">&quot;utf-8&quot;</span><span class="s0">, </span><span class="s1">errors: str = </span><span class="s3">&quot;replace&quot;</span>
+<span class="s1">) -&gt; t.Optional[str]:</span>
+    <span class="s4">&quot;&quot;&quot;Returns the next segment on the `PATH_INFO` or `None` if there 
+    is none.  Works like :func:`pop_path_info` without modifying the 
+    environment: 
+ 
+    &gt;&gt;&gt; env = {'SCRIPT_NAME': '/foo', 'PATH_INFO': '/a/b'} 
+    &gt;&gt;&gt; peek_path_info(env) 
+    'a' 
+    &gt;&gt;&gt; peek_path_info(env) 
+    'a' 
+ 
+    If the `charset` is set to `None` bytes are returned. 
+ 
+    .. versionadded:: 0.5 
+ 
+    .. versionchanged:: 0.9 
+       The path is now decoded and a charset and encoding 
+       parameter can be provided. 
+ 
+    :param environ: the WSGI environment that is checked. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">segments = environ.get(</span><span class="s3">&quot;PATH_INFO&quot;</span><span class="s0">, </span><span class="s3">&quot;&quot;</span><span class="s1">).lstrip(</span><span class="s3">&quot;/&quot;</span><span class="s1">).split(</span><span class="s3">&quot;/&quot;</span><span class="s0">, </span><span class="s5">1</span><span class="s1">)</span>
+    <span class="s0">if </span><span class="s1">segments:</span>
+        <span class="s0">return </span><span class="s1">_to_str(  </span><span class="s2"># type: ignore</span>
+            <span class="s1">segments[</span><span class="s5">0</span><span class="s1">].encode(</span><span class="s3">&quot;latin1&quot;</span><span class="s1">)</span><span class="s0">, </span><span class="s1">charset</span><span class="s0">, </span><span class="s1">errors</span><span class="s0">, </span><span class="s1">allow_none_charset=</span><span class="s0">True</span>
+        <span class="s1">)</span>
+    <span class="s0">return None</span>
+
+
+<span class="s0">def </span><span class="s1">extract_path_info(</span>
+    <span class="s1">environ_or_baseurl: t.Union[str</span><span class="s0">, </span><span class="s3">&quot;WSGIEnvironment&quot;</span><span class="s1">]</span><span class="s0">,</span>
+    <span class="s1">path_or_url: t.Union[str</span><span class="s0">, </span><span class="s1">_URLTuple]</span><span class="s0">,</span>
+    <span class="s1">charset: str = </span><span class="s3">&quot;utf-8&quot;</span><span class="s0">,</span>
+    <span class="s1">errors: str = </span><span class="s3">&quot;werkzeug.url_quote&quot;</span><span class="s0">,</span>
+    <span class="s1">collapse_http_schemes: bool = </span><span class="s0">True,</span>
+<span class="s1">) -&gt; t.Optional[str]:</span>
+    <span class="s4">&quot;&quot;&quot;Extracts the path info from the given URL (or WSGI environment) and 
+    path. The path info returned is a string. The URLs might also be IRIs. 
+ 
+    If the path info could not be determined, `None` is returned. 
+ 
+    Some examples: 
+ 
+    &gt;&gt;&gt; extract_path_info('http://example.com/app', '/app/hello') 
+    '/hello' 
+    &gt;&gt;&gt; extract_path_info('http://example.com/app', 
+    ...                   'https://example.com/app/hello') 
+    '/hello' 
+    &gt;&gt;&gt; extract_path_info('http://example.com/app', 
+    ...                   'https://example.com/app/hello', 
+    ...                   collapse_http_schemes=False) is None 
+    True 
+ 
+    Instead of providing a base URL you can also pass a WSGI environment. 
+ 
+    :param environ_or_baseurl: a WSGI environment dict, a base URL or 
+                               base IRI.  This is the root of the 
+                               application. 
+    :param path_or_url: an absolute path from the server root, a 
+                        relative path (in which case it's the path info) 
+                        or a full URL. 
+    :param charset: the charset for byte data in URLs 
+    :param errors: the error handling on decode 
+    :param collapse_http_schemes: if set to `False` the algorithm does 
+                                  not assume that http and https on the 
+                                  same server point to the same 
+                                  resource. 
+ 
+    .. versionchanged:: 0.15 
+        The ``errors`` parameter defaults to leaving invalid bytes 
+        quoted instead of replacing them. 
+ 
+    .. versionadded:: 0.6 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">_normalize_netloc(scheme: str</span><span class="s0">, </span><span class="s1">netloc: str) -&gt; str:</span>
+        <span class="s1">parts = netloc.split(</span><span class="s3">&quot;@&quot;</span><span class="s0">, </span><span class="s5">1</span><span class="s1">)[-</span><span class="s5">1</span><span class="s1">].split(</span><span class="s3">&quot;:&quot;</span><span class="s0">, </span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s1">port: t.Optional[str]</span>
+
+        <span class="s0">if </span><span class="s1">len(parts) == </span><span class="s5">2</span><span class="s1">:</span>
+            <span class="s1">netloc</span><span class="s0">, </span><span class="s1">port = parts</span>
+            <span class="s0">if </span><span class="s1">(scheme == </span><span class="s3">&quot;http&quot; </span><span class="s0">and </span><span class="s1">port == </span><span class="s3">&quot;80&quot;</span><span class="s1">) </span><span class="s0">or </span><span class="s1">(</span>
+                <span class="s1">scheme == </span><span class="s3">&quot;https&quot; </span><span class="s0">and </span><span class="s1">port == </span><span class="s3">&quot;443&quot;</span>
+            <span class="s1">):</span>
+                <span class="s1">port = </span><span class="s0">None</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">netloc = parts[</span><span class="s5">0</span><span class="s1">]</span>
+            <span class="s1">port = </span><span class="s0">None</span>
+
+        <span class="s0">if </span><span class="s1">port </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">netloc += </span><span class="s3">f&quot;:</span><span class="s0">{</span><span class="s1">port</span><span class="s0">}</span><span class="s3">&quot;</span>
+
+        <span class="s0">return </span><span class="s1">netloc</span>
+
+    <span class="s2"># make sure whatever we are working on is a IRI and parse it</span>
+    <span class="s1">path = uri_to_iri(path_or_url</span><span class="s0">, </span><span class="s1">charset</span><span class="s0">, </span><span class="s1">errors)</span>
+    <span class="s0">if </span><span class="s1">isinstance(environ_or_baseurl</span><span class="s0">, </span><span class="s1">dict):</span>
+        <span class="s1">environ_or_baseurl = get_current_url(environ_or_baseurl</span><span class="s0">, </span><span class="s1">root_only=</span><span class="s0">True</span><span class="s1">)</span>
+    <span class="s1">base_iri = uri_to_iri(environ_or_baseurl</span><span class="s0">, </span><span class="s1">charset</span><span class="s0">, </span><span class="s1">errors)</span>
+    <span class="s1">base_scheme</span><span class="s0">, </span><span class="s1">base_netloc</span><span class="s0">, </span><span class="s1">base_path = url_parse(base_iri)[:</span><span class="s5">3</span><span class="s1">]</span>
+    <span class="s1">cur_scheme</span><span class="s0">, </span><span class="s1">cur_netloc</span><span class="s0">, </span><span class="s1">cur_path = url_parse(url_join(base_iri</span><span class="s0">, </span><span class="s1">path))[:</span><span class="s5">3</span><span class="s1">]</span>
+
+    <span class="s2"># normalize the network location</span>
+    <span class="s1">base_netloc = _normalize_netloc(base_scheme</span><span class="s0">, </span><span class="s1">base_netloc)</span>
+    <span class="s1">cur_netloc = _normalize_netloc(cur_scheme</span><span class="s0">, </span><span class="s1">cur_netloc)</span>
+
+    <span class="s2"># is that IRI even on a known HTTP scheme?</span>
+    <span class="s0">if </span><span class="s1">collapse_http_schemes:</span>
+        <span class="s0">for </span><span class="s1">scheme </span><span class="s0">in </span><span class="s1">base_scheme</span><span class="s0">, </span><span class="s1">cur_scheme:</span>
+            <span class="s0">if </span><span class="s1">scheme </span><span class="s0">not in </span><span class="s1">(</span><span class="s3">&quot;http&quot;</span><span class="s0">, </span><span class="s3">&quot;https&quot;</span><span class="s1">):</span>
+                <span class="s0">return None</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s0">if not </span><span class="s1">(base_scheme </span><span class="s0">in </span><span class="s1">(</span><span class="s3">&quot;http&quot;</span><span class="s0">, </span><span class="s3">&quot;https&quot;</span><span class="s1">) </span><span class="s0">and </span><span class="s1">base_scheme == cur_scheme):</span>
+            <span class="s0">return None</span>
+
+    <span class="s2"># are the netlocs compatible?</span>
+    <span class="s0">if </span><span class="s1">base_netloc != cur_netloc:</span>
+        <span class="s0">return None</span>
+
+    <span class="s2"># are we below the application path?</span>
+    <span class="s1">base_path = base_path.rstrip(</span><span class="s3">&quot;/&quot;</span><span class="s1">)</span>
+    <span class="s0">if not </span><span class="s1">cur_path.startswith(base_path):</span>
+        <span class="s0">return None</span>
+
+    <span class="s0">return </span><span class="s3">f&quot;/</span><span class="s0">{</span><span class="s1">cur_path[len(base_path) :].lstrip(</span><span class="s3">'/'</span><span class="s1">)</span><span class="s0">}</span><span class="s3">&quot;</span>
+
+
+<span class="s0">class </span><span class="s1">ClosingIterator:</span>
+    <span class="s4">&quot;&quot;&quot;The WSGI specification requires that all middlewares and gateways 
+    respect the `close` callback of the iterable returned by the application. 
+    Because it is useful to add another close action to a returned iterable 
+    and adding a custom iterable is a boring task this class can be used for 
+    that:: 
+ 
+        return ClosingIterator(app(environ, start_response), [cleanup_session, 
+                                                              cleanup_locals]) 
+ 
+    If there is just one close function it can be passed instead of the list. 
+ 
+    A closing iterator is not needed if the application uses response objects 
+    and finishes the processing if the response is started:: 
+ 
+        try: 
+            return response(environ, start_response) 
+        finally: 
+            cleanup_session() 
+            cleanup_locals() 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">iterable: t.Iterable[bytes]</span><span class="s0">,</span>
+        <span class="s1">callbacks: t.Optional[</span>
+            <span class="s1">t.Union[t.Callable[[]</span><span class="s0">, None</span><span class="s1">]</span><span class="s0">, </span><span class="s1">t.Iterable[t.Callable[[]</span><span class="s0">, None</span><span class="s1">]]]</span>
+        <span class="s1">] = </span><span class="s0">None,</span>
+    <span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">iterator = iter(iterable)</span>
+        <span class="s1">self._next = t.cast(t.Callable[[]</span><span class="s0">, </span><span class="s1">bytes]</span><span class="s0">, </span><span class="s1">partial(next</span><span class="s0">, </span><span class="s1">iterator))</span>
+        <span class="s0">if </span><span class="s1">callbacks </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">callbacks = []</span>
+        <span class="s0">elif </span><span class="s1">callable(callbacks):</span>
+            <span class="s1">callbacks = [callbacks]</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">callbacks = list(callbacks)</span>
+        <span class="s1">iterable_close = getattr(iterable</span><span class="s0">, </span><span class="s3">&quot;close&quot;</span><span class="s0">, None</span><span class="s1">)</span>
+        <span class="s0">if </span><span class="s1">iterable_close:</span>
+            <span class="s1">callbacks.insert(</span><span class="s5">0</span><span class="s0">, </span><span class="s1">iterable_close)</span>
+        <span class="s1">self._callbacks = callbacks</span>
+
+    <span class="s0">def </span><span class="s1">__iter__(self) -&gt; </span><span class="s3">&quot;ClosingIterator&quot;</span><span class="s1">:</span>
+        <span class="s0">return </span><span class="s1">self</span>
+
+    <span class="s0">def </span><span class="s1">__next__(self) -&gt; bytes:</span>
+        <span class="s0">return </span><span class="s1">self._next()</span>
+
+    <span class="s0">def </span><span class="s1">close(self) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s0">for </span><span class="s1">callback </span><span class="s0">in </span><span class="s1">self._callbacks:</span>
+            <span class="s1">callback()</span>
+
+
+<span class="s0">def </span><span class="s1">wrap_file(</span>
+    <span class="s1">environ: </span><span class="s3">&quot;WSGIEnvironment&quot;</span><span class="s0">, </span><span class="s1">file: t.IO[bytes]</span><span class="s0">, </span><span class="s1">buffer_size: int = </span><span class="s5">8192</span>
+<span class="s1">) -&gt; t.Iterable[bytes]:</span>
+    <span class="s4">&quot;&quot;&quot;Wraps a file.  This uses the WSGI server's file wrapper if available 
+    or otherwise the generic :class:`FileWrapper`. 
+ 
+    .. versionadded:: 0.5 
+ 
+    If the file wrapper from the WSGI server is used it's important to not 
+    iterate over it from inside the application but to pass it through 
+    unchanged.  If you want to pass out a file wrapper inside a response 
+    object you have to set :attr:`Response.direct_passthrough` to `True`. 
+ 
+    More information about file wrappers are available in :pep:`333`. 
+ 
+    :param file: a :class:`file`-like object with a :meth:`~file.read` method. 
+    :param buffer_size: number of bytes for one iteration. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">return </span><span class="s1">environ.get(</span><span class="s3">&quot;wsgi.file_wrapper&quot;</span><span class="s0">, </span><span class="s1">FileWrapper)(  </span><span class="s2"># type: ignore</span>
+        <span class="s1">file</span><span class="s0">, </span><span class="s1">buffer_size</span>
+    <span class="s1">)</span>
+
+
+<span class="s0">class </span><span class="s1">FileWrapper:</span>
+    <span class="s4">&quot;&quot;&quot;This class can be used to convert a :class:`file`-like object into 
+    an iterable.  It yields `buffer_size` blocks until the file is fully 
+    read. 
+ 
+    You should not use this class directly but rather use the 
+    :func:`wrap_file` function that uses the WSGI server's file wrapper 
+    support if it's available. 
+ 
+    .. versionadded:: 0.5 
+ 
+    If you're using this object together with a :class:`Response` you have 
+    to use the `direct_passthrough` mode. 
+ 
+    :param file: a :class:`file`-like object with a :meth:`~file.read` method. 
+    :param buffer_size: number of bytes for one iteration. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">file: t.IO[bytes]</span><span class="s0">, </span><span class="s1">buffer_size: int = </span><span class="s5">8192</span><span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self.file = file</span>
+        <span class="s1">self.buffer_size = buffer_size</span>
+
+    <span class="s0">def </span><span class="s1">close(self) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s0">if </span><span class="s1">hasattr(self.file</span><span class="s0">, </span><span class="s3">&quot;close&quot;</span><span class="s1">):</span>
+            <span class="s1">self.file.close()</span>
+
+    <span class="s0">def </span><span class="s1">seekable(self) -&gt; bool:</span>
+        <span class="s0">if </span><span class="s1">hasattr(self.file</span><span class="s0">, </span><span class="s3">&quot;seekable&quot;</span><span class="s1">):</span>
+            <span class="s0">return </span><span class="s1">self.file.seekable()</span>
+        <span class="s0">if </span><span class="s1">hasattr(self.file</span><span class="s0">, </span><span class="s3">&quot;seek&quot;</span><span class="s1">):</span>
+            <span class="s0">return True</span>
+        <span class="s0">return False</span>
+
+    <span class="s0">def </span><span class="s1">seek(self</span><span class="s0">, </span><span class="s1">*args: t.Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s0">if </span><span class="s1">hasattr(self.file</span><span class="s0">, </span><span class="s3">&quot;seek&quot;</span><span class="s1">):</span>
+            <span class="s1">self.file.seek(*args)</span>
+
+    <span class="s0">def </span><span class="s1">tell(self) -&gt; t.Optional[int]:</span>
+        <span class="s0">if </span><span class="s1">hasattr(self.file</span><span class="s0">, </span><span class="s3">&quot;tell&quot;</span><span class="s1">):</span>
+            <span class="s0">return </span><span class="s1">self.file.tell()</span>
+        <span class="s0">return None</span>
+
+    <span class="s0">def </span><span class="s1">__iter__(self) -&gt; </span><span class="s3">&quot;FileWrapper&quot;</span><span class="s1">:</span>
+        <span class="s0">return </span><span class="s1">self</span>
+
+    <span class="s0">def </span><span class="s1">__next__(self) -&gt; bytes:</span>
+        <span class="s1">data = self.file.read(self.buffer_size)</span>
+        <span class="s0">if </span><span class="s1">data:</span>
+            <span class="s0">return </span><span class="s1">data</span>
+        <span class="s0">raise </span><span class="s1">StopIteration()</span>
+
+
+<span class="s0">class </span><span class="s1">_RangeWrapper:</span>
+    <span class="s2"># private for now, but should we make it public in the future ?</span>
+
+    <span class="s4">&quot;&quot;&quot;This class can be used to convert an iterable object into 
+    an iterable that will only yield a piece of the underlying content. 
+    It yields blocks until the underlying stream range is fully read. 
+    The yielded blocks will have a size that can't exceed the original 
+    iterator defined block size, but that can be smaller. 
+ 
+    If you're using this object together with a :class:`Response` you have 
+    to use the `direct_passthrough` mode. 
+ 
+    :param iterable: an iterable object with a :meth:`__next__` method. 
+    :param start_byte: byte from which read will start. 
+    :param byte_range: how many bytes to read. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">iterable: t.Union[t.Iterable[bytes]</span><span class="s0">, </span><span class="s1">t.IO[bytes]]</span><span class="s0">,</span>
+        <span class="s1">start_byte: int = </span><span class="s5">0</span><span class="s0">,</span>
+        <span class="s1">byte_range: t.Optional[int] = </span><span class="s0">None,</span>
+    <span class="s1">):</span>
+        <span class="s1">self.iterable = iter(iterable)</span>
+        <span class="s1">self.byte_range = byte_range</span>
+        <span class="s1">self.start_byte = start_byte</span>
+        <span class="s1">self.end_byte = </span><span class="s0">None</span>
+
+        <span class="s0">if </span><span class="s1">byte_range </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">self.end_byte = start_byte + byte_range</span>
+
+        <span class="s1">self.read_length = </span><span class="s5">0</span>
+        <span class="s1">self.seekable = (</span>
+            <span class="s1">hasattr(iterable</span><span class="s0">, </span><span class="s3">&quot;seekable&quot;</span><span class="s1">) </span><span class="s0">and </span><span class="s1">iterable.seekable()  </span><span class="s2"># type: ignore</span>
+        <span class="s1">)</span>
+        <span class="s1">self.end_reached = </span><span class="s0">False</span>
+
+    <span class="s0">def </span><span class="s1">__iter__(self) -&gt; </span><span class="s3">&quot;_RangeWrapper&quot;</span><span class="s1">:</span>
+        <span class="s0">return </span><span class="s1">self</span>
+
+    <span class="s0">def </span><span class="s1">_next_chunk(self) -&gt; bytes:</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">chunk = next(self.iterable)</span>
+            <span class="s1">self.read_length += len(chunk)</span>
+            <span class="s0">return </span><span class="s1">chunk</span>
+        <span class="s0">except </span><span class="s1">StopIteration:</span>
+            <span class="s1">self.end_reached = </span><span class="s0">True</span>
+            <span class="s0">raise</span>
+
+    <span class="s0">def </span><span class="s1">_first_iteration(self) -&gt; t.Tuple[t.Optional[bytes]</span><span class="s0">, </span><span class="s1">int]:</span>
+        <span class="s1">chunk = </span><span class="s0">None</span>
+        <span class="s0">if </span><span class="s1">self.seekable:</span>
+            <span class="s1">self.iterable.seek(self.start_byte)  </span><span class="s2"># type: ignore</span>
+            <span class="s1">self.read_length = self.iterable.tell()  </span><span class="s2"># type: ignore</span>
+            <span class="s1">contextual_read_length = self.read_length</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">while </span><span class="s1">self.read_length &lt;= self.start_byte:</span>
+                <span class="s1">chunk = self._next_chunk()</span>
+            <span class="s0">if </span><span class="s1">chunk </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s1">chunk = chunk[self.start_byte - self.read_length :]</span>
+            <span class="s1">contextual_read_length = self.start_byte</span>
+        <span class="s0">return </span><span class="s1">chunk</span><span class="s0">, </span><span class="s1">contextual_read_length</span>
+
+    <span class="s0">def </span><span class="s1">_next(self) -&gt; bytes:</span>
+        <span class="s0">if </span><span class="s1">self.end_reached:</span>
+            <span class="s0">raise </span><span class="s1">StopIteration()</span>
+        <span class="s1">chunk = </span><span class="s0">None</span>
+        <span class="s1">contextual_read_length = self.read_length</span>
+        <span class="s0">if </span><span class="s1">self.read_length == </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s1">chunk</span><span class="s0">, </span><span class="s1">contextual_read_length = self._first_iteration()</span>
+        <span class="s0">if </span><span class="s1">chunk </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">chunk = self._next_chunk()</span>
+        <span class="s0">if </span><span class="s1">self.end_byte </span><span class="s0">is not None and </span><span class="s1">self.read_length &gt;= self.end_byte:</span>
+            <span class="s1">self.end_reached = </span><span class="s0">True</span>
+            <span class="s0">return </span><span class="s1">chunk[: self.end_byte - contextual_read_length]</span>
+        <span class="s0">return </span><span class="s1">chunk</span>
+
+    <span class="s0">def </span><span class="s1">__next__(self) -&gt; bytes:</span>
+        <span class="s1">chunk = self._next()</span>
+        <span class="s0">if </span><span class="s1">chunk:</span>
+            <span class="s0">return </span><span class="s1">chunk</span>
+        <span class="s1">self.end_reached = </span><span class="s0">True</span>
+        <span class="s0">raise </span><span class="s1">StopIteration()</span>
+
+    <span class="s0">def </span><span class="s1">close(self) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s0">if </span><span class="s1">hasattr(self.iterable</span><span class="s0">, </span><span class="s3">&quot;close&quot;</span><span class="s1">):</span>
+            <span class="s1">self.iterable.close()  </span><span class="s2"># type: ignore</span>
+
+
+<span class="s0">def </span><span class="s1">_make_chunk_iter(</span>
+    <span class="s1">stream: t.Union[t.Iterable[bytes]</span><span class="s0">, </span><span class="s1">t.IO[bytes]]</span><span class="s0">,</span>
+    <span class="s1">limit: t.Optional[int]</span><span class="s0">,</span>
+    <span class="s1">buffer_size: int</span><span class="s0">,</span>
+<span class="s1">) -&gt; t.Iterator[bytes]:</span>
+    <span class="s4">&quot;&quot;&quot;Helper for the line and chunk iter functions.&quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">isinstance(stream</span><span class="s0">, </span><span class="s1">(bytes</span><span class="s0">, </span><span class="s1">bytearray</span><span class="s0">, </span><span class="s1">str)):</span>
+        <span class="s0">raise </span><span class="s1">TypeError(</span>
+            <span class="s3">&quot;Passed a string or byte object instead of true iterator or stream.&quot;</span>
+        <span class="s1">)</span>
+    <span class="s0">if not </span><span class="s1">hasattr(stream</span><span class="s0">, </span><span class="s3">&quot;read&quot;</span><span class="s1">):</span>
+        <span class="s0">for </span><span class="s1">item </span><span class="s0">in </span><span class="s1">stream:</span>
+            <span class="s0">if </span><span class="s1">item:</span>
+                <span class="s0">yield </span><span class="s1">item</span>
+        <span class="s0">return</span>
+    <span class="s1">stream = t.cast(t.IO[bytes]</span><span class="s0">, </span><span class="s1">stream)</span>
+    <span class="s0">if not </span><span class="s1">isinstance(stream</span><span class="s0">, </span><span class="s1">LimitedStream) </span><span class="s0">and </span><span class="s1">limit </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s1">stream = t.cast(t.IO[bytes]</span><span class="s0">, </span><span class="s1">LimitedStream(stream</span><span class="s0">, </span><span class="s1">limit))</span>
+    <span class="s1">_read = stream.read</span>
+    <span class="s0">while True</span><span class="s1">:</span>
+        <span class="s1">item = _read(buffer_size)</span>
+        <span class="s0">if not </span><span class="s1">item:</span>
+            <span class="s0">break</span>
+        <span class="s0">yield </span><span class="s1">item</span>
+
+
+<span class="s0">def </span><span class="s1">make_line_iter(</span>
+    <span class="s1">stream: t.Union[t.Iterable[bytes]</span><span class="s0">, </span><span class="s1">t.IO[bytes]]</span><span class="s0">,</span>
+    <span class="s1">limit: t.Optional[int] = </span><span class="s0">None,</span>
+    <span class="s1">buffer_size: int = </span><span class="s5">10 </span><span class="s1">* </span><span class="s5">1024</span><span class="s0">,</span>
+    <span class="s1">cap_at_buffer: bool = </span><span class="s0">False,</span>
+<span class="s1">) -&gt; t.Iterator[bytes]:</span>
+    <span class="s4">&quot;&quot;&quot;Safely iterates line-based over an input stream.  If the input stream 
+    is not a :class:`LimitedStream` the `limit` parameter is mandatory. 
+ 
+    This uses the stream's :meth:`~file.read` method internally as opposite 
+    to the :meth:`~file.readline` method that is unsafe and can only be used 
+    in violation of the WSGI specification.  The same problem applies to the 
+    `__iter__` function of the input stream which calls :meth:`~file.readline` 
+    without arguments. 
+ 
+    If you need line-by-line processing it's strongly recommended to iterate 
+    over the input stream using this helper function. 
+ 
+    .. versionchanged:: 0.8 
+       This function now ensures that the limit was reached. 
+ 
+    .. versionadded:: 0.9 
+       added support for iterators as input stream. 
+ 
+    .. versionadded:: 0.11.10 
+       added support for the `cap_at_buffer` parameter. 
+ 
+    :param stream: the stream or iterate to iterate over. 
+    :param limit: the limit in bytes for the stream.  (Usually 
+                  content length.  Not necessary if the `stream` 
+                  is a :class:`LimitedStream`. 
+    :param buffer_size: The optional buffer size. 
+    :param cap_at_buffer: if this is set chunks are split if they are longer 
+                          than the buffer size.  Internally this is implemented 
+                          that the buffer size might be exhausted by a factor 
+                          of two however. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">_iter = _make_chunk_iter(stream</span><span class="s0">, </span><span class="s1">limit</span><span class="s0">, </span><span class="s1">buffer_size)</span>
+
+    <span class="s1">first_item = next(_iter</span><span class="s0">, </span><span class="s3">&quot;&quot;</span><span class="s1">)</span>
+    <span class="s0">if not </span><span class="s1">first_item:</span>
+        <span class="s0">return</span>
+
+    <span class="s1">s = _make_encode_wrapper(first_item)</span>
+    <span class="s1">empty = t.cast(bytes</span><span class="s0">, </span><span class="s1">s(</span><span class="s3">&quot;&quot;</span><span class="s1">))</span>
+    <span class="s1">cr = t.cast(bytes</span><span class="s0">, </span><span class="s1">s(</span><span class="s3">&quot;</span><span class="s0">\r</span><span class="s3">&quot;</span><span class="s1">))</span>
+    <span class="s1">lf = t.cast(bytes</span><span class="s0">, </span><span class="s1">s(</span><span class="s3">&quot;</span><span class="s0">\n</span><span class="s3">&quot;</span><span class="s1">))</span>
+    <span class="s1">crlf = t.cast(bytes</span><span class="s0">, </span><span class="s1">s(</span><span class="s3">&quot;</span><span class="s0">\r\n</span><span class="s3">&quot;</span><span class="s1">))</span>
+
+    <span class="s1">_iter = t.cast(t.Iterator[bytes]</span><span class="s0">, </span><span class="s1">chain((first_item</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">_iter))</span>
+
+    <span class="s0">def </span><span class="s1">_iter_basic_lines() -&gt; t.Iterator[bytes]:</span>
+        <span class="s1">_join = empty.join</span>
+        <span class="s1">buffer: t.List[bytes] = []</span>
+        <span class="s0">while True</span><span class="s1">:</span>
+            <span class="s1">new_data = next(_iter</span><span class="s0">, </span><span class="s3">&quot;&quot;</span><span class="s1">)</span>
+            <span class="s0">if not </span><span class="s1">new_data:</span>
+                <span class="s0">break</span>
+            <span class="s1">new_buf: t.List[bytes] = []</span>
+            <span class="s1">buf_size = </span><span class="s5">0</span>
+            <span class="s0">for </span><span class="s1">item </span><span class="s0">in </span><span class="s1">t.cast(</span>
+                <span class="s1">t.Iterator[bytes]</span><span class="s0">, </span><span class="s1">chain(buffer</span><span class="s0">, </span><span class="s1">new_data.splitlines(</span><span class="s0">True</span><span class="s1">))</span>
+            <span class="s1">):</span>
+                <span class="s1">new_buf.append(item)</span>
+                <span class="s1">buf_size += len(item)</span>
+                <span class="s0">if </span><span class="s1">item </span><span class="s0">and </span><span class="s1">item[-</span><span class="s5">1</span><span class="s1">:] </span><span class="s0">in </span><span class="s1">crlf:</span>
+                    <span class="s0">yield </span><span class="s1">_join(new_buf)</span>
+                    <span class="s1">new_buf = []</span>
+                <span class="s0">elif </span><span class="s1">cap_at_buffer </span><span class="s0">and </span><span class="s1">buf_size &gt;= buffer_size:</span>
+                    <span class="s1">rv = _join(new_buf)</span>
+                    <span class="s0">while </span><span class="s1">len(rv) &gt;= buffer_size:</span>
+                        <span class="s0">yield </span><span class="s1">rv[:buffer_size]</span>
+                        <span class="s1">rv = rv[buffer_size:]</span>
+                    <span class="s1">new_buf = [rv]</span>
+            <span class="s1">buffer = new_buf</span>
+        <span class="s0">if </span><span class="s1">buffer:</span>
+            <span class="s0">yield </span><span class="s1">_join(buffer)</span>
+
+    <span class="s2"># This hackery is necessary to merge 'foo\r' and '\n' into one item</span>
+    <span class="s2"># of 'foo\r\n' if we were unlucky and we hit a chunk boundary.</span>
+    <span class="s1">previous = empty</span>
+    <span class="s0">for </span><span class="s1">item </span><span class="s0">in </span><span class="s1">_iter_basic_lines():</span>
+        <span class="s0">if </span><span class="s1">item == lf </span><span class="s0">and </span><span class="s1">previous[-</span><span class="s5">1</span><span class="s1">:] == cr:</span>
+            <span class="s1">previous += item</span>
+            <span class="s1">item = empty</span>
+        <span class="s0">if </span><span class="s1">previous:</span>
+            <span class="s0">yield </span><span class="s1">previous</span>
+        <span class="s1">previous = item</span>
+    <span class="s0">if </span><span class="s1">previous:</span>
+        <span class="s0">yield </span><span class="s1">previous</span>
+
+
+<span class="s0">def </span><span class="s1">make_chunk_iter(</span>
+    <span class="s1">stream: t.Union[t.Iterable[bytes]</span><span class="s0">, </span><span class="s1">t.IO[bytes]]</span><span class="s0">,</span>
+    <span class="s1">separator: bytes</span><span class="s0">,</span>
+    <span class="s1">limit: t.Optional[int] = </span><span class="s0">None,</span>
+    <span class="s1">buffer_size: int = </span><span class="s5">10 </span><span class="s1">* </span><span class="s5">1024</span><span class="s0">,</span>
+    <span class="s1">cap_at_buffer: bool = </span><span class="s0">False,</span>
+<span class="s1">) -&gt; t.Iterator[bytes]:</span>
+    <span class="s4">&quot;&quot;&quot;Works like :func:`make_line_iter` but accepts a separator 
+    which divides chunks.  If you want newline based processing 
+    you should use :func:`make_line_iter` instead as it 
+    supports arbitrary newline markers. 
+ 
+    .. versionadded:: 0.8 
+ 
+    .. versionadded:: 0.9 
+       added support for iterators as input stream. 
+ 
+    .. versionadded:: 0.11.10 
+       added support for the `cap_at_buffer` parameter. 
+ 
+    :param stream: the stream or iterate to iterate over. 
+    :param separator: the separator that divides chunks. 
+    :param limit: the limit in bytes for the stream.  (Usually 
+                  content length.  Not necessary if the `stream` 
+                  is otherwise already limited). 
+    :param buffer_size: The optional buffer size. 
+    :param cap_at_buffer: if this is set chunks are split if they are longer 
+                          than the buffer size.  Internally this is implemented 
+                          that the buffer size might be exhausted by a factor 
+                          of two however. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">_iter = _make_chunk_iter(stream</span><span class="s0">, </span><span class="s1">limit</span><span class="s0">, </span><span class="s1">buffer_size)</span>
+
+    <span class="s1">first_item = next(_iter</span><span class="s0">, </span><span class="s6">b&quot;&quot;</span><span class="s1">)</span>
+    <span class="s0">if not </span><span class="s1">first_item:</span>
+        <span class="s0">return</span>
+
+    <span class="s1">_iter = t.cast(t.Iterator[bytes]</span><span class="s0">, </span><span class="s1">chain((first_item</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">_iter))</span>
+    <span class="s0">if </span><span class="s1">isinstance(first_item</span><span class="s0">, </span><span class="s1">str):</span>
+        <span class="s1">separator = _to_str(separator)</span>
+        <span class="s1">_split = re.compile(</span><span class="s3">f&quot;(</span><span class="s0">{</span><span class="s1">re.escape(separator)</span><span class="s0">}</span><span class="s3">)&quot;</span><span class="s1">).split</span>
+        <span class="s1">_join = </span><span class="s3">&quot;&quot;</span><span class="s1">.join</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">separator = _to_bytes(separator)</span>
+        <span class="s1">_split = re.compile(</span><span class="s6">b&quot;(&quot; </span><span class="s1">+ re.escape(separator) + </span><span class="s6">b&quot;)&quot;</span><span class="s1">).split</span>
+        <span class="s1">_join = </span><span class="s6">b&quot;&quot;</span><span class="s1">.join</span>
+
+    <span class="s1">buffer: t.List[bytes] = []</span>
+    <span class="s0">while True</span><span class="s1">:</span>
+        <span class="s1">new_data = next(_iter</span><span class="s0">, </span><span class="s6">b&quot;&quot;</span><span class="s1">)</span>
+        <span class="s0">if not </span><span class="s1">new_data:</span>
+            <span class="s0">break</span>
+        <span class="s1">chunks = _split(new_data)</span>
+        <span class="s1">new_buf: t.List[bytes] = []</span>
+        <span class="s1">buf_size = </span><span class="s5">0</span>
+        <span class="s0">for </span><span class="s1">item </span><span class="s0">in </span><span class="s1">chain(buffer</span><span class="s0">, </span><span class="s1">chunks):</span>
+            <span class="s0">if </span><span class="s1">item == separator:</span>
+                <span class="s0">yield </span><span class="s1">_join(new_buf)</span>
+                <span class="s1">new_buf = []</span>
+                <span class="s1">buf_size = </span><span class="s5">0</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">buf_size += len(item)</span>
+                <span class="s1">new_buf.append(item)</span>
+
+                <span class="s0">if </span><span class="s1">cap_at_buffer </span><span class="s0">and </span><span class="s1">buf_size &gt;= buffer_size:</span>
+                    <span class="s1">rv = _join(new_buf)</span>
+                    <span class="s0">while </span><span class="s1">len(rv) &gt;= buffer_size:</span>
+                        <span class="s0">yield </span><span class="s1">rv[:buffer_size]</span>
+                        <span class="s1">rv = rv[buffer_size:]</span>
+                    <span class="s1">new_buf = [rv]</span>
+                    <span class="s1">buf_size = len(rv)</span>
+
+        <span class="s1">buffer = new_buf</span>
+    <span class="s0">if </span><span class="s1">buffer:</span>
+        <span class="s0">yield </span><span class="s1">_join(buffer)</span>
+
+
+<span class="s0">class </span><span class="s1">LimitedStream(io.IOBase):</span>
+    <span class="s4">&quot;&quot;&quot;Wraps a stream so that it doesn't read more than n bytes.  If the 
+    stream is exhausted and the caller tries to get more bytes from it 
+    :func:`on_exhausted` is called which by default returns an empty 
+    string.  The return value of that function is forwarded 
+    to the reader function.  So if it returns an empty string 
+    :meth:`read` will return an empty string as well. 
+ 
+    The limit however must never be higher than what the stream can 
+    output.  Otherwise :meth:`readlines` will try to read past the 
+    limit. 
+ 
+    .. admonition:: Note on WSGI compliance 
+ 
+       calls to :meth:`readline` and :meth:`readlines` are not 
+       WSGI compliant because it passes a size argument to the 
+       readline methods.  Unfortunately the WSGI PEP is not safely 
+       implementable without a size argument to :meth:`readline` 
+       because there is no EOF marker in the stream.  As a result 
+       of that the use of :meth:`readline` is discouraged. 
+ 
+       For the same reason iterating over the :class:`LimitedStream` 
+       is not portable.  It internally calls :meth:`readline`. 
+ 
+       We strongly suggest using :meth:`read` only or using the 
+       :func:`make_line_iter` which safely iterates line-based 
+       over a WSGI input stream. 
+ 
+    :param stream: the stream to wrap. 
+    :param limit: the limit for the stream, must not be longer than 
+                  what the string can provide if the stream does not 
+                  end with `EOF` (like `wsgi.input`) 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">stream: t.IO[bytes]</span><span class="s0">, </span><span class="s1">limit: int) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self._read = stream.read</span>
+        <span class="s1">self._readline = stream.readline</span>
+        <span class="s1">self._pos = </span><span class="s5">0</span>
+        <span class="s1">self.limit = limit</span>
+
+    <span class="s0">def </span><span class="s1">__iter__(self) -&gt; </span><span class="s3">&quot;LimitedStream&quot;</span><span class="s1">:</span>
+        <span class="s0">return </span><span class="s1">self</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">is_exhausted(self) -&gt; bool:</span>
+        <span class="s4">&quot;&quot;&quot;If the stream is exhausted this attribute is `True`.&quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self._pos &gt;= self.limit</span>
+
+    <span class="s0">def </span><span class="s1">on_exhausted(self) -&gt; bytes:</span>
+        <span class="s4">&quot;&quot;&quot;This is called when the stream tries to read past the limit. 
+        The return value of this function is returned from the reading 
+        function. 
+        &quot;&quot;&quot;</span>
+        <span class="s2"># Read null bytes from the stream so that we get the</span>
+        <span class="s2"># correct end of stream marker.</span>
+        <span class="s0">return </span><span class="s1">self._read(</span><span class="s5">0</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">on_disconnect(self) -&gt; bytes:</span>
+        <span class="s4">&quot;&quot;&quot;What should happen if a disconnect is detected?  The return 
+        value of this function is returned from read functions in case 
+        the client went away.  By default a 
+        :exc:`~werkzeug.exceptions.ClientDisconnected` exception is raised. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">from </span><span class="s1">.exceptions </span><span class="s0">import </span><span class="s1">ClientDisconnected</span>
+
+        <span class="s0">raise </span><span class="s1">ClientDisconnected()</span>
+
+    <span class="s0">def </span><span class="s1">exhaust(self</span><span class="s0">, </span><span class="s1">chunk_size: int = </span><span class="s5">1024 </span><span class="s1">* </span><span class="s5">64</span><span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s4">&quot;&quot;&quot;Exhaust the stream.  This consumes all the data left until the 
+        limit is reached. 
+ 
+        :param chunk_size: the size for a chunk.  It will read the chunk 
+                           until the stream is exhausted and throw away 
+                           the results. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">to_read = self.limit - self._pos</span>
+        <span class="s1">chunk = chunk_size</span>
+        <span class="s0">while </span><span class="s1">to_read &gt; </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s1">chunk = min(to_read</span><span class="s0">, </span><span class="s1">chunk)</span>
+            <span class="s1">self.read(chunk)</span>
+            <span class="s1">to_read -= chunk</span>
+
+    <span class="s0">def </span><span class="s1">read(self</span><span class="s0">, </span><span class="s1">size: t.Optional[int] = </span><span class="s0">None</span><span class="s1">) -&gt; bytes:</span>
+        <span class="s4">&quot;&quot;&quot;Read `size` bytes or if size is not provided everything is read. 
+ 
+        :param size: the number of bytes read. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">self._pos &gt;= self.limit:</span>
+            <span class="s0">return </span><span class="s1">self.on_exhausted()</span>
+        <span class="s0">if </span><span class="s1">size </span><span class="s0">is None or </span><span class="s1">size == -</span><span class="s5">1</span><span class="s1">:  </span><span class="s2"># -1 is for consistence with file</span>
+            <span class="s1">size = self.limit</span>
+        <span class="s1">to_read = min(self.limit - self._pos</span><span class="s0">, </span><span class="s1">size)</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">read = self._read(to_read)</span>
+        <span class="s0">except </span><span class="s1">(OSError</span><span class="s0">, </span><span class="s1">ValueError):</span>
+            <span class="s0">return </span><span class="s1">self.on_disconnect()</span>
+        <span class="s0">if </span><span class="s1">to_read </span><span class="s0">and </span><span class="s1">len(read) != to_read:</span>
+            <span class="s0">return </span><span class="s1">self.on_disconnect()</span>
+        <span class="s1">self._pos += len(read)</span>
+        <span class="s0">return </span><span class="s1">read</span>
+
+    <span class="s0">def </span><span class="s1">readline(self</span><span class="s0">, </span><span class="s1">size: t.Optional[int] = </span><span class="s0">None</span><span class="s1">) -&gt; bytes:</span>
+        <span class="s4">&quot;&quot;&quot;Reads one line from the stream.&quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">self._pos &gt;= self.limit:</span>
+            <span class="s0">return </span><span class="s1">self.on_exhausted()</span>
+        <span class="s0">if </span><span class="s1">size </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">size = self.limit - self._pos</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">size = min(size</span><span class="s0">, </span><span class="s1">self.limit - self._pos)</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">line = self._readline(size)</span>
+        <span class="s0">except </span><span class="s1">(ValueError</span><span class="s0">, </span><span class="s1">OSError):</span>
+            <span class="s0">return </span><span class="s1">self.on_disconnect()</span>
+        <span class="s0">if </span><span class="s1">size </span><span class="s0">and not </span><span class="s1">line:</span>
+            <span class="s0">return </span><span class="s1">self.on_disconnect()</span>
+        <span class="s1">self._pos += len(line)</span>
+        <span class="s0">return </span><span class="s1">line</span>
+
+    <span class="s0">def </span><span class="s1">readlines(self</span><span class="s0">, </span><span class="s1">size: t.Optional[int] = </span><span class="s0">None</span><span class="s1">) -&gt; t.List[bytes]:</span>
+        <span class="s4">&quot;&quot;&quot;Reads a file into a list of strings.  It calls :meth:`readline` 
+        until the file is read to the end.  It does support the optional 
+        `size` argument if the underlying stream supports it for 
+        `readline`. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">last_pos = self._pos</span>
+        <span class="s1">result = []</span>
+        <span class="s0">if </span><span class="s1">size </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">end = min(self.limit</span><span class="s0">, </span><span class="s1">last_pos + size)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">end = self.limit</span>
+        <span class="s0">while True</span><span class="s1">:</span>
+            <span class="s0">if </span><span class="s1">size </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s1">size -= last_pos - self._pos</span>
+            <span class="s0">if </span><span class="s1">self._pos &gt;= end:</span>
+                <span class="s0">break</span>
+            <span class="s1">result.append(self.readline(size))</span>
+            <span class="s0">if </span><span class="s1">size </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s1">last_pos = self._pos</span>
+        <span class="s0">return </span><span class="s1">result</span>
+
+    <span class="s0">def </span><span class="s1">tell(self) -&gt; int:</span>
+        <span class="s4">&quot;&quot;&quot;Returns the position of the stream. 
+ 
+        .. versionadded:: 0.9 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self._pos</span>
+
+    <span class="s0">def </span><span class="s1">__next__(self) -&gt; bytes:</span>
+        <span class="s1">line = self.readline()</span>
+        <span class="s0">if not </span><span class="s1">line:</span>
+            <span class="s0">raise </span><span class="s1">StopIteration()</span>
+        <span class="s0">return </span><span class="s1">line</span>
+
+    <span class="s0">def </span><span class="s1">readable(self) -&gt; bool:</span>
+        <span class="s0">return True</span>
+</pre>
+</body>
+</html>

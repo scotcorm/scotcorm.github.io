@@ -1,0 +1,387 @@
+<html>
+<head>
+<title>bccache.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6897bb;}
+.s4 { color: #808080;}
+.s5 { color: #a5c261;}
+.s6 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+bccache.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;The optional bytecode cache system. This is useful if you have very 
+complex template situations and the compilation of all those templates 
+slows down your application too much. 
+ 
+Situations where this is useful are often forking web applications that 
+are initialized on the first request. 
+&quot;&quot;&quot;</span>
+<span class="s2">import </span><span class="s1">errno</span>
+<span class="s2">import </span><span class="s1">fnmatch</span>
+<span class="s2">import </span><span class="s1">marshal</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">pickle</span>
+<span class="s2">import </span><span class="s1">stat</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">tempfile</span>
+<span class="s2">import </span><span class="s1">typing </span><span class="s2">as </span><span class="s1">t</span>
+<span class="s2">from </span><span class="s1">hashlib </span><span class="s2">import </span><span class="s1">sha1</span>
+<span class="s2">from </span><span class="s1">io </span><span class="s2">import </span><span class="s1">BytesIO</span>
+<span class="s2">from </span><span class="s1">types </span><span class="s2">import </span><span class="s1">CodeType</span>
+
+<span class="s2">if </span><span class="s1">t.TYPE_CHECKING:</span>
+    <span class="s2">import </span><span class="s1">typing_extensions </span><span class="s2">as </span><span class="s1">te</span>
+    <span class="s2">from </span><span class="s1">.environment </span><span class="s2">import </span><span class="s1">Environment</span>
+
+    <span class="s2">class </span><span class="s1">_MemcachedClient(te.Protocol):</span>
+        <span class="s2">def </span><span class="s1">get(self</span><span class="s2">, </span><span class="s1">key: str) -&gt; bytes:</span>
+            <span class="s1">...</span>
+
+        <span class="s2">def </span><span class="s1">set(self</span><span class="s2">, </span><span class="s1">key: str</span><span class="s2">, </span><span class="s1">value: bytes</span><span class="s2">, </span><span class="s1">timeout: t.Optional[int] = </span><span class="s2">None</span><span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+            <span class="s1">...</span>
+
+
+<span class="s1">bc_version = </span><span class="s3">5</span>
+<span class="s4"># Magic bytes to identify Jinja bytecode cache files. Contains the</span>
+<span class="s4"># Python major and minor version to avoid loading incompatible bytecode</span>
+<span class="s4"># if a project upgrades its Python version.</span>
+<span class="s1">bc_magic = (</span>
+    <span class="s5">b&quot;j2&quot;</span>
+    <span class="s1">+ pickle.dumps(bc_version</span><span class="s2">, </span><span class="s3">2</span><span class="s1">)</span>
+    <span class="s1">+ pickle.dumps((sys.version_info[</span><span class="s3">0</span><span class="s1">] &lt;&lt; </span><span class="s3">24</span><span class="s1">) | sys.version_info[</span><span class="s3">1</span><span class="s1">]</span><span class="s2">, </span><span class="s3">2</span><span class="s1">)</span>
+<span class="s1">)</span>
+
+
+<span class="s2">class </span><span class="s1">Bucket:</span>
+    <span class="s0">&quot;&quot;&quot;Buckets are used to store the bytecode for one template.  It's created 
+    and initialized by the bytecode cache and passed to the loading functions. 
+ 
+    The buckets get an internal checksum from the cache assigned and use this 
+    to automatically reject outdated cache material.  Individual bytecode 
+    cache subclasses don't have to care about cache invalidation. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">environment: </span><span class="s6">&quot;Environment&quot;</span><span class="s2">, </span><span class="s1">key: str</span><span class="s2">, </span><span class="s1">checksum: str) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.environment = environment</span>
+        <span class="s1">self.key = key</span>
+        <span class="s1">self.checksum = checksum</span>
+        <span class="s1">self.reset()</span>
+
+    <span class="s2">def </span><span class="s1">reset(self) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Resets the bucket (unloads the bytecode).&quot;&quot;&quot;</span>
+        <span class="s1">self.code: t.Optional[CodeType] = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">load_bytecode(self</span><span class="s2">, </span><span class="s1">f: t.BinaryIO) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Loads bytecode from a file or file like object.&quot;&quot;&quot;</span>
+        <span class="s4"># make sure the magic header is correct</span>
+        <span class="s1">magic = f.read(len(bc_magic))</span>
+        <span class="s2">if </span><span class="s1">magic != bc_magic:</span>
+            <span class="s1">self.reset()</span>
+            <span class="s2">return</span>
+        <span class="s4"># the source code of the file changed, we need to reload</span>
+        <span class="s1">checksum = pickle.load(f)</span>
+        <span class="s2">if </span><span class="s1">self.checksum != checksum:</span>
+            <span class="s1">self.reset()</span>
+            <span class="s2">return</span>
+        <span class="s4"># if marshal_load fails then we need to reload</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">self.code = marshal.load(f)</span>
+        <span class="s2">except </span><span class="s1">(EOFError</span><span class="s2">, </span><span class="s1">ValueError</span><span class="s2">, </span><span class="s1">TypeError):</span>
+            <span class="s1">self.reset()</span>
+            <span class="s2">return</span>
+
+    <span class="s2">def </span><span class="s1">write_bytecode(self</span><span class="s2">, </span><span class="s1">f: t.BinaryIO) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Dump the bytecode into the file or file like object passed.&quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self.code </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s6">&quot;can't write empty bucket&quot;</span><span class="s1">)</span>
+        <span class="s1">f.write(bc_magic)</span>
+        <span class="s1">pickle.dump(self.checksum</span><span class="s2">, </span><span class="s1">f</span><span class="s2">, </span><span class="s3">2</span><span class="s1">)</span>
+        <span class="s1">marshal.dump(self.code</span><span class="s2">, </span><span class="s1">f)</span>
+
+    <span class="s2">def </span><span class="s1">bytecode_from_string(self</span><span class="s2">, </span><span class="s1">string: bytes) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Load bytecode from bytes.&quot;&quot;&quot;</span>
+        <span class="s1">self.load_bytecode(BytesIO(string))</span>
+
+    <span class="s2">def </span><span class="s1">bytecode_to_string(self) -&gt; bytes:</span>
+        <span class="s0">&quot;&quot;&quot;Return the bytecode as bytes.&quot;&quot;&quot;</span>
+        <span class="s1">out = BytesIO()</span>
+        <span class="s1">self.write_bytecode(out)</span>
+        <span class="s2">return </span><span class="s1">out.getvalue()</span>
+
+
+<span class="s2">class </span><span class="s1">BytecodeCache:</span>
+    <span class="s0">&quot;&quot;&quot;To implement your own bytecode cache you have to subclass this class 
+    and override :meth:`load_bytecode` and :meth:`dump_bytecode`.  Both of 
+    these methods are passed a :class:`~jinja2.bccache.Bucket`. 
+ 
+    A very basic bytecode cache that saves the bytecode on the file system:: 
+ 
+        from os import path 
+ 
+        class MyCache(BytecodeCache): 
+ 
+            def __init__(self, directory): 
+                self.directory = directory 
+ 
+            def load_bytecode(self, bucket): 
+                filename = path.join(self.directory, bucket.key) 
+                if path.exists(filename): 
+                    with open(filename, 'rb') as f: 
+                        bucket.load_bytecode(f) 
+ 
+            def dump_bytecode(self, bucket): 
+                filename = path.join(self.directory, bucket.key) 
+                with open(filename, 'wb') as f: 
+                    bucket.write_bytecode(f) 
+ 
+    A more advanced version of a filesystem based bytecode cache is part of 
+    Jinja. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">load_bytecode(self</span><span class="s2">, </span><span class="s1">bucket: Bucket) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Subclasses have to override this method to load bytecode into a 
+        bucket.  If they are not able to find code in the cache for the 
+        bucket, it must not do anything. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">raise </span><span class="s1">NotImplementedError()</span>
+
+    <span class="s2">def </span><span class="s1">dump_bytecode(self</span><span class="s2">, </span><span class="s1">bucket: Bucket) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Subclasses have to override this method to write the bytecode 
+        from a bucket back to the cache.  If it unable to do so it must not 
+        fail silently but raise an exception. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">raise </span><span class="s1">NotImplementedError()</span>
+
+    <span class="s2">def </span><span class="s1">clear(self) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Clears the cache.  This method is not used by Jinja but should be 
+        implemented to allow applications to clear the bytecode cache used 
+        by a particular environment. 
+        &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">get_cache_key(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">name: str</span><span class="s2">, </span><span class="s1">filename: t.Optional[t.Union[str]] = </span><span class="s2">None</span>
+    <span class="s1">) -&gt; str:</span>
+        <span class="s0">&quot;&quot;&quot;Returns the unique hash key for this template name.&quot;&quot;&quot;</span>
+        <span class="s1">hash = sha1(name.encode(</span><span class="s6">&quot;utf-8&quot;</span><span class="s1">))</span>
+
+        <span class="s2">if </span><span class="s1">filename </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">hash.update(</span><span class="s6">f&quot;|</span><span class="s2">{</span><span class="s1">filename</span><span class="s2">}</span><span class="s6">&quot;</span><span class="s1">.encode())</span>
+
+        <span class="s2">return </span><span class="s1">hash.hexdigest()</span>
+
+    <span class="s2">def </span><span class="s1">get_source_checksum(self</span><span class="s2">, </span><span class="s1">source: str) -&gt; str:</span>
+        <span class="s0">&quot;&quot;&quot;Returns a checksum for the source.&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">sha1(source.encode(</span><span class="s6">&quot;utf-8&quot;</span><span class="s1">)).hexdigest()</span>
+
+    <span class="s2">def </span><span class="s1">get_bucket(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">environment: </span><span class="s6">&quot;Environment&quot;</span><span class="s2">,</span>
+        <span class="s1">name: str</span><span class="s2">,</span>
+        <span class="s1">filename: t.Optional[str]</span><span class="s2">,</span>
+        <span class="s1">source: str</span><span class="s2">,</span>
+    <span class="s1">) -&gt; Bucket:</span>
+        <span class="s0">&quot;&quot;&quot;Return a cache bucket for the given template.  All arguments are 
+        mandatory but filename may be `None`. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">key = self.get_cache_key(name</span><span class="s2">, </span><span class="s1">filename)</span>
+        <span class="s1">checksum = self.get_source_checksum(source)</span>
+        <span class="s1">bucket = Bucket(environment</span><span class="s2">, </span><span class="s1">key</span><span class="s2">, </span><span class="s1">checksum)</span>
+        <span class="s1">self.load_bytecode(bucket)</span>
+        <span class="s2">return </span><span class="s1">bucket</span>
+
+    <span class="s2">def </span><span class="s1">set_bucket(self</span><span class="s2">, </span><span class="s1">bucket: Bucket) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Put the bucket into the cache.&quot;&quot;&quot;</span>
+        <span class="s1">self.dump_bytecode(bucket)</span>
+
+
+<span class="s2">class </span><span class="s1">FileSystemBytecodeCache(BytecodeCache):</span>
+    <span class="s0">&quot;&quot;&quot;A bytecode cache that stores bytecode on the filesystem.  It accepts 
+    two arguments: The directory where the cache items are stored and a 
+    pattern string that is used to build the filename. 
+ 
+    If no directory is specified a default cache directory is selected.  On 
+    Windows the user's temp directory is used, on UNIX systems a directory 
+    is created for the user in the system temp directory. 
+ 
+    The pattern can be used to have multiple separate caches operate on the 
+    same directory.  The default pattern is ``'__jinja2_%s.cache'``.  ``%s`` 
+    is replaced with the cache key. 
+ 
+    &gt;&gt;&gt; bcc = FileSystemBytecodeCache('/tmp/jinja_cache', '%s.cache') 
+ 
+    This bytecode cache supports clearing of the cache using the clear method. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">directory: t.Optional[str] = </span><span class="s2">None, </span><span class="s1">pattern: str = </span><span class="s6">&quot;__jinja2_%s.cache&quot;</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">directory </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">directory = self._get_default_cache_dir()</span>
+        <span class="s1">self.directory = directory</span>
+        <span class="s1">self.pattern = pattern</span>
+
+    <span class="s2">def </span><span class="s1">_get_default_cache_dir(self) -&gt; str:</span>
+        <span class="s2">def </span><span class="s1">_unsafe_dir() -&gt; </span><span class="s6">&quot;te.NoReturn&quot;</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">RuntimeError(</span>
+                <span class="s6">&quot;Cannot determine safe temp directory.  You &quot;</span>
+                <span class="s6">&quot;need to explicitly provide one.&quot;</span>
+            <span class="s1">)</span>
+
+        <span class="s1">tmpdir = tempfile.gettempdir()</span>
+
+        <span class="s4"># On windows the temporary directory is used specific unless</span>
+        <span class="s4"># explicitly forced otherwise.  We can just use that.</span>
+        <span class="s2">if </span><span class="s1">os.name == </span><span class="s6">&quot;nt&quot;</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">tmpdir</span>
+        <span class="s2">if not </span><span class="s1">hasattr(os</span><span class="s2">, </span><span class="s6">&quot;getuid&quot;</span><span class="s1">):</span>
+            <span class="s1">_unsafe_dir()</span>
+
+        <span class="s1">dirname = </span><span class="s6">f&quot;_jinja2-cache-</span><span class="s2">{</span><span class="s1">os.getuid()</span><span class="s2">}</span><span class="s6">&quot;</span>
+        <span class="s1">actual_dir = os.path.join(tmpdir</span><span class="s2">, </span><span class="s1">dirname)</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">os.mkdir(actual_dir</span><span class="s2">, </span><span class="s1">stat.S_IRWXU)</span>
+        <span class="s2">except </span><span class="s1">OSError </span><span class="s2">as </span><span class="s1">e:</span>
+            <span class="s2">if </span><span class="s1">e.errno != errno.EEXIST:</span>
+                <span class="s2">raise</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">os.chmod(actual_dir</span><span class="s2">, </span><span class="s1">stat.S_IRWXU)</span>
+            <span class="s1">actual_dir_stat = os.lstat(actual_dir)</span>
+            <span class="s2">if </span><span class="s1">(</span>
+                <span class="s1">actual_dir_stat.st_uid != os.getuid()</span>
+                <span class="s2">or not </span><span class="s1">stat.S_ISDIR(actual_dir_stat.st_mode)</span>
+                <span class="s2">or </span><span class="s1">stat.S_IMODE(actual_dir_stat.st_mode) != stat.S_IRWXU</span>
+            <span class="s1">):</span>
+                <span class="s1">_unsafe_dir()</span>
+        <span class="s2">except </span><span class="s1">OSError </span><span class="s2">as </span><span class="s1">e:</span>
+            <span class="s2">if </span><span class="s1">e.errno != errno.EEXIST:</span>
+                <span class="s2">raise</span>
+
+        <span class="s1">actual_dir_stat = os.lstat(actual_dir)</span>
+        <span class="s2">if </span><span class="s1">(</span>
+            <span class="s1">actual_dir_stat.st_uid != os.getuid()</span>
+            <span class="s2">or not </span><span class="s1">stat.S_ISDIR(actual_dir_stat.st_mode)</span>
+            <span class="s2">or </span><span class="s1">stat.S_IMODE(actual_dir_stat.st_mode) != stat.S_IRWXU</span>
+        <span class="s1">):</span>
+            <span class="s1">_unsafe_dir()</span>
+
+        <span class="s2">return </span><span class="s1">actual_dir</span>
+
+    <span class="s2">def </span><span class="s1">_get_cache_filename(self</span><span class="s2">, </span><span class="s1">bucket: Bucket) -&gt; str:</span>
+        <span class="s2">return </span><span class="s1">os.path.join(self.directory</span><span class="s2">, </span><span class="s1">self.pattern % (bucket.key</span><span class="s2">,</span><span class="s1">))</span>
+
+    <span class="s2">def </span><span class="s1">load_bytecode(self</span><span class="s2">, </span><span class="s1">bucket: Bucket) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">filename = self._get_cache_filename(bucket)</span>
+
+        <span class="s2">if </span><span class="s1">os.path.exists(filename):</span>
+            <span class="s2">with </span><span class="s1">open(filename</span><span class="s2">, </span><span class="s6">&quot;rb&quot;</span><span class="s1">) </span><span class="s2">as </span><span class="s1">f:</span>
+                <span class="s1">bucket.load_bytecode(f)</span>
+
+    <span class="s2">def </span><span class="s1">dump_bytecode(self</span><span class="s2">, </span><span class="s1">bucket: Bucket) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">with </span><span class="s1">open(self._get_cache_filename(bucket)</span><span class="s2">, </span><span class="s6">&quot;wb&quot;</span><span class="s1">) </span><span class="s2">as </span><span class="s1">f:</span>
+            <span class="s1">bucket.write_bytecode(f)</span>
+
+    <span class="s2">def </span><span class="s1">clear(self) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s4"># imported lazily here because google app-engine doesn't support</span>
+        <span class="s4"># write access on the file system and the function does not exist</span>
+        <span class="s4"># normally.</span>
+        <span class="s2">from </span><span class="s1">os </span><span class="s2">import </span><span class="s1">remove</span>
+
+        <span class="s1">files = fnmatch.filter(os.listdir(self.directory)</span><span class="s2">, </span><span class="s1">self.pattern % (</span><span class="s6">&quot;*&quot;</span><span class="s2">,</span><span class="s1">))</span>
+        <span class="s2">for </span><span class="s1">filename </span><span class="s2">in </span><span class="s1">files:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">remove(os.path.join(self.directory</span><span class="s2">, </span><span class="s1">filename))</span>
+            <span class="s2">except </span><span class="s1">OSError:</span>
+                <span class="s2">pass</span>
+
+
+<span class="s2">class </span><span class="s1">MemcachedBytecodeCache(BytecodeCache):</span>
+    <span class="s0">&quot;&quot;&quot;This class implements a bytecode cache that uses a memcache cache for 
+    storing the information.  It does not enforce a specific memcache library 
+    (tummy's memcache or cmemcache) but will accept any class that provides 
+    the minimal interface required. 
+ 
+    Libraries compatible with this class: 
+ 
+    -   `cachelib &lt;https://github.com/pallets/cachelib&gt;`_ 
+    -   `python-memcached &lt;https://pypi.org/project/python-memcached/&gt;`_ 
+ 
+    (Unfortunately the django cache interface is not compatible because it 
+    does not support storing binary data, only text. You can however pass 
+    the underlying cache client to the bytecode cache which is available 
+    as `django.core.cache.cache._client`.) 
+ 
+    The minimal interface for the client passed to the constructor is this: 
+ 
+    .. class:: MinimalClientInterface 
+ 
+        .. method:: set(key, value[, timeout]) 
+ 
+            Stores the bytecode in the cache.  `value` is a string and 
+            `timeout` the timeout of the key.  If timeout is not provided 
+            a default timeout or no timeout should be assumed, if it's 
+            provided it's an integer with the number of seconds the cache 
+            item should exist. 
+ 
+        .. method:: get(key) 
+ 
+            Returns the value for the cache key.  If the item does not 
+            exist in the cache the return value must be `None`. 
+ 
+    The other arguments to the constructor are the prefix for all keys that 
+    is added before the actual cache key and the timeout for the bytecode in 
+    the cache system.  We recommend a high (or no) timeout. 
+ 
+    This bytecode cache does not support clearing of used items in the cache. 
+    The clear method is a no-operation function. 
+ 
+    .. versionadded:: 2.7 
+       Added support for ignoring memcache errors through the 
+       `ignore_memcache_errors` parameter. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">client: </span><span class="s6">&quot;_MemcachedClient&quot;</span><span class="s2">,</span>
+        <span class="s1">prefix: str = </span><span class="s6">&quot;jinja2/bytecode/&quot;</span><span class="s2">,</span>
+        <span class="s1">timeout: t.Optional[int] = </span><span class="s2">None,</span>
+        <span class="s1">ignore_memcache_errors: bool = </span><span class="s2">True,</span>
+    <span class="s1">):</span>
+        <span class="s1">self.client = client</span>
+        <span class="s1">self.prefix = prefix</span>
+        <span class="s1">self.timeout = timeout</span>
+        <span class="s1">self.ignore_memcache_errors = ignore_memcache_errors</span>
+
+    <span class="s2">def </span><span class="s1">load_bytecode(self</span><span class="s2">, </span><span class="s1">bucket: Bucket) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">code = self.client.get(self.prefix + bucket.key)</span>
+        <span class="s2">except </span><span class="s1">Exception:</span>
+            <span class="s2">if not </span><span class="s1">self.ignore_memcache_errors:</span>
+                <span class="s2">raise</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">bucket.bytecode_from_string(code)</span>
+
+    <span class="s2">def </span><span class="s1">dump_bytecode(self</span><span class="s2">, </span><span class="s1">bucket: Bucket) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">key = self.prefix + bucket.key</span>
+        <span class="s1">value = bucket.bytecode_to_string()</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">self.timeout </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s1">self.client.set(key</span><span class="s2">, </span><span class="s1">value</span><span class="s2">, </span><span class="s1">self.timeout)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">self.client.set(key</span><span class="s2">, </span><span class="s1">value)</span>
+        <span class="s2">except </span><span class="s1">Exception:</span>
+            <span class="s2">if not </span><span class="s1">self.ignore_memcache_errors:</span>
+                <span class="s2">raise</span>
+</pre>
+</body>
+</html>

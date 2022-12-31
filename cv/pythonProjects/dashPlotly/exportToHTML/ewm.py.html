@@ -1,0 +1,1047 @@
+<html>
+<head>
+<title>ewm.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #6897bb;}
+.s4 { color: #6a8759;}
+.s5 { color: #629755; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+ewm.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">datetime</span>
+<span class="s0">from </span><span class="s1">functools </span><span class="s0">import </span><span class="s1">partial</span>
+<span class="s0">from </span><span class="s1">textwrap </span><span class="s0">import </span><span class="s1">dedent</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">TYPE_CHECKING</span>
+<span class="s0">import </span><span class="s1">warnings</span>
+
+<span class="s0">import </span><span class="s1">numpy </span><span class="s0">as </span><span class="s1">np</span>
+
+<span class="s0">from </span><span class="s1">pandas._libs.tslibs </span><span class="s0">import </span><span class="s1">Timedelta</span>
+<span class="s0">import </span><span class="s1">pandas._libs.window.aggregations </span><span class="s0">as </span><span class="s1">window_aggregations</span>
+<span class="s0">from </span><span class="s1">pandas._typing </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">Axis</span><span class="s0">,</span>
+    <span class="s1">TimedeltaConvertibleTypes</span><span class="s0">,</span>
+<span class="s1">)</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING:</span>
+    <span class="s0">from </span><span class="s1">pandas </span><span class="s0">import </span><span class="s1">DataFrame</span><span class="s0">, </span><span class="s1">Series</span>
+    <span class="s0">from </span><span class="s1">pandas.core.generic </span><span class="s0">import </span><span class="s1">NDFrame</span>
+
+<span class="s0">from </span><span class="s1">pandas.compat.numpy </span><span class="s0">import </span><span class="s1">function </span><span class="s0">as </span><span class="s1">nv</span>
+<span class="s0">from </span><span class="s1">pandas.util._decorators </span><span class="s0">import </span><span class="s1">doc</span>
+<span class="s0">from </span><span class="s1">pandas.util._exceptions </span><span class="s0">import </span><span class="s1">find_stack_level</span>
+
+<span class="s0">from </span><span class="s1">pandas.core.dtypes.common </span><span class="s0">import </span><span class="s1">is_datetime64_ns_dtype</span>
+<span class="s0">from </span><span class="s1">pandas.core.dtypes.missing </span><span class="s0">import </span><span class="s1">isna</span>
+
+<span class="s0">import </span><span class="s1">pandas.core.common </span><span class="s0">as </span><span class="s1">common  </span><span class="s2"># noqa: PDF018</span>
+<span class="s0">from </span><span class="s1">pandas.core.indexers.objects </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">BaseIndexer</span><span class="s0">,</span>
+    <span class="s1">ExponentialMovingWindowIndexer</span><span class="s0">,</span>
+    <span class="s1">GroupbyIndexer</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.core.util.numba_ </span><span class="s0">import </span><span class="s1">maybe_use_numba</span>
+<span class="s0">from </span><span class="s1">pandas.core.window.common </span><span class="s0">import </span><span class="s1">zsqrt</span>
+<span class="s0">from </span><span class="s1">pandas.core.window.doc </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">_shared_docs</span><span class="s0">,</span>
+    <span class="s1">args_compat</span><span class="s0">,</span>
+    <span class="s1">create_section_header</span><span class="s0">,</span>
+    <span class="s1">kwargs_compat</span><span class="s0">,</span>
+    <span class="s1">numba_notes</span><span class="s0">,</span>
+    <span class="s1">template_header</span><span class="s0">,</span>
+    <span class="s1">template_returns</span><span class="s0">,</span>
+    <span class="s1">template_see_also</span><span class="s0">,</span>
+    <span class="s1">window_agg_numba_parameters</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.core.window.numba_ </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">generate_numba_ewm_func</span><span class="s0">,</span>
+    <span class="s1">generate_numba_ewm_table_func</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.core.window.online </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">EWMMeanState</span><span class="s0">,</span>
+    <span class="s1">generate_online_numba_ewma_func</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.core.window.rolling </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">BaseWindow</span><span class="s0">,</span>
+    <span class="s1">BaseWindowGroupby</span><span class="s0">,</span>
+<span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">get_center_of_mass(</span>
+    <span class="s1">comass: float | </span><span class="s0">None,</span>
+    <span class="s1">span: float | </span><span class="s0">None,</span>
+    <span class="s1">halflife: float | </span><span class="s0">None,</span>
+    <span class="s1">alpha: float | </span><span class="s0">None,</span>
+<span class="s1">) -&gt; float:</span>
+    <span class="s1">valid_count = common.count_not_none(comass</span><span class="s0">, </span><span class="s1">span</span><span class="s0">, </span><span class="s1">halflife</span><span class="s0">, </span><span class="s1">alpha)</span>
+    <span class="s0">if </span><span class="s1">valid_count &gt; </span><span class="s3">1</span><span class="s1">:</span>
+        <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;comass, span, halflife, and alpha are mutually exclusive&quot;</span><span class="s1">)</span>
+
+    <span class="s2"># Convert to center of mass; domain checks ensure 0 &lt; alpha &lt;= 1</span>
+    <span class="s0">if </span><span class="s1">comass </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s0">if </span><span class="s1">comass &lt; </span><span class="s3">0</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;comass must satisfy: comass &gt;= 0&quot;</span><span class="s1">)</span>
+    <span class="s0">elif </span><span class="s1">span </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s0">if </span><span class="s1">span &lt; </span><span class="s3">1</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;span must satisfy: span &gt;= 1&quot;</span><span class="s1">)</span>
+        <span class="s1">comass = (span - </span><span class="s3">1</span><span class="s1">) / </span><span class="s3">2</span>
+    <span class="s0">elif </span><span class="s1">halflife </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s0">if </span><span class="s1">halflife &lt;= </span><span class="s3">0</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;halflife must satisfy: halflife &gt; 0&quot;</span><span class="s1">)</span>
+        <span class="s1">decay = </span><span class="s3">1 </span><span class="s1">- np.exp(np.log(</span><span class="s3">0.5</span><span class="s1">) / halflife)</span>
+        <span class="s1">comass = </span><span class="s3">1 </span><span class="s1">/ decay - </span><span class="s3">1</span>
+    <span class="s0">elif </span><span class="s1">alpha </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s0">if </span><span class="s1">alpha &lt;= </span><span class="s3">0 </span><span class="s0">or </span><span class="s1">alpha &gt; </span><span class="s3">1</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;alpha must satisfy: 0 &lt; alpha &lt;= 1&quot;</span><span class="s1">)</span>
+        <span class="s1">comass = (</span><span class="s3">1 </span><span class="s1">- alpha) / alpha</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Must pass one of comass, span, halflife, or alpha&quot;</span><span class="s1">)</span>
+
+    <span class="s0">return </span><span class="s1">float(comass)</span>
+
+
+<span class="s0">def </span><span class="s1">_calculate_deltas(</span>
+    <span class="s1">times: str | np.ndarray | NDFrame | </span><span class="s0">None,</span>
+    <span class="s1">halflife: float | TimedeltaConvertibleTypes | </span><span class="s0">None,</span>
+<span class="s1">) -&gt; np.ndarray:</span>
+    <span class="s5">&quot;&quot;&quot; 
+    Return the diff of the times divided by the half-life. These values are used in 
+    the calculation of the ewm mean. 
+ 
+    Parameters 
+    ---------- 
+    times : str, np.ndarray, Series, default None 
+        Times corresponding to the observations. Must be monotonically increasing 
+        and ``datetime64[ns]`` dtype. 
+    halflife : float, str, timedelta, optional 
+        Half-life specifying the decay 
+ 
+    Returns 
+    ------- 
+    np.ndarray 
+        Diff of the times divided by the half-life 
+    &quot;&quot;&quot;</span>
+    <span class="s2"># error: Item &quot;str&quot; of &quot;Union[str, ndarray, NDFrameT, None]&quot; has no</span>
+    <span class="s2"># attribute &quot;view&quot;</span>
+    <span class="s2"># error: Item &quot;None&quot; of &quot;Union[str, ndarray, NDFrameT, None]&quot; has no</span>
+    <span class="s2"># attribute &quot;view&quot;</span>
+    <span class="s1">_times = np.asarray(</span>
+        <span class="s1">times.view(np.int64)</span><span class="s0">, </span><span class="s1">dtype=np.float64  </span><span class="s2"># type: ignore[union-attr]</span>
+    <span class="s1">)</span>
+    <span class="s1">_halflife = float(Timedelta(halflife).value)</span>
+    <span class="s0">return </span><span class="s1">np.diff(_times) / _halflife</span>
+
+
+<span class="s0">class </span><span class="s1">ExponentialMovingWindow(BaseWindow):</span>
+    <span class="s5">r&quot;&quot;&quot; 
+    Provide exponentially weighted (EW) calculations. 
+ 
+    Exactly one parameter: ``com``, ``span``, ``halflife``, or ``alpha`` must be 
+    provided. 
+ 
+    Parameters 
+    ---------- 
+    com : float, optional 
+        Specify decay in terms of center of mass 
+ 
+        :math:`\alpha = 1 / (1 + com)`, for :math:`com \geq 0`. 
+ 
+    span : float, optional 
+        Specify decay in terms of span 
+ 
+        :math:`\alpha = 2 / (span + 1)`, for :math:`span \geq 1`. 
+ 
+    halflife : float, str, timedelta, optional 
+        Specify decay in terms of half-life 
+ 
+        :math:`\alpha = 1 - \exp\left(-\ln(2) / halflife\right)`, for 
+        :math:`halflife &gt; 0`. 
+ 
+        If ``times`` is specified, the time unit (str or timedelta) over which an 
+        observation decays to half its value. Only applicable to ``mean()``, 
+        and halflife value will not apply to the other functions. 
+ 
+        .. versionadded:: 1.1.0 
+ 
+    alpha : float, optional 
+        Specify smoothing factor :math:`\alpha` directly 
+ 
+        :math:`0 &lt; \alpha \leq 1`. 
+ 
+    min_periods : int, default 0 
+        Minimum number of observations in window required to have a value; 
+        otherwise, result is ``np.nan``. 
+ 
+    adjust : bool, default True 
+        Divide by decaying adjustment factor in beginning periods to account 
+        for imbalance in relative weightings (viewing EWMA as a moving average). 
+ 
+        - When ``adjust=True`` (default), the EW function is calculated using weights 
+          :math:`w_i = (1 - \alpha)^i`. For example, the EW moving average of the series 
+          [:math:`x_0, x_1, ..., x_t`] would be: 
+ 
+        .. math:: 
+            y_t = \frac{x_t + (1 - \alpha)x_{t-1} + (1 - \alpha)^2 x_{t-2} + ... + (1 - 
+            \alpha)^t x_0}{1 + (1 - \alpha) + (1 - \alpha)^2 + ... + (1 - \alpha)^t} 
+ 
+        - When ``adjust=False``, the exponentially weighted function is calculated 
+          recursively: 
+ 
+        .. math:: 
+            \begin{split} 
+                y_0 &amp;= x_0\\ 
+                y_t &amp;= (1 - \alpha) y_{t-1} + \alpha x_t, 
+            \end{split} 
+    ignore_na : bool, default False 
+        Ignore missing values when calculating weights. 
+ 
+        - When ``ignore_na=False`` (default), weights are based on absolute positions. 
+          For example, the weights of :math:`x_0` and :math:`x_2` used in calculating 
+          the final weighted average of [:math:`x_0`, None, :math:`x_2`] are 
+          :math:`(1-\alpha)^2` and :math:`1` if ``adjust=True``, and 
+          :math:`(1-\alpha)^2` and :math:`\alpha` if ``adjust=False``. 
+ 
+        - When ``ignore_na=True``, weights are based 
+          on relative positions. For example, the weights of :math:`x_0` and :math:`x_2` 
+          used in calculating the final weighted average of 
+          [:math:`x_0`, None, :math:`x_2`] are :math:`1-\alpha` and :math:`1` if 
+          ``adjust=True``, and :math:`1-\alpha` and :math:`\alpha` if ``adjust=False``. 
+ 
+    axis : {0, 1}, default 0 
+        If ``0`` or ``'index'``, calculate across the rows. 
+ 
+        If ``1`` or ``'columns'``, calculate across the columns. 
+ 
+    times : str, np.ndarray, Series, default None 
+ 
+        .. versionadded:: 1.1.0 
+ 
+        Only applicable to ``mean()``. 
+ 
+        Times corresponding to the observations. Must be monotonically increasing and 
+        ``datetime64[ns]`` dtype. 
+ 
+        If 1-D array like, a sequence with the same shape as the observations. 
+ 
+        .. deprecated:: 1.4.0 
+            If str, the name of the column in the DataFrame representing the times. 
+ 
+    method : str {'single', 'table'}, default 'single' 
+        .. versionadded:: 1.4.0 
+ 
+        Execute the rolling operation per single column or row (``'single'``) 
+        or over the entire object (``'table'``). 
+ 
+        This argument is only implemented when specifying ``engine='numba'`` 
+        in the method call. 
+ 
+        Only applicable to ``mean()`` 
+ 
+    Returns 
+    ------- 
+    ``ExponentialMovingWindow`` subclass 
+ 
+    See Also 
+    -------- 
+    rolling : Provides rolling window calculations. 
+    expanding : Provides expanding transformations. 
+ 
+    Notes 
+    ----- 
+    See :ref:`Windowing Operations &lt;window.exponentially_weighted&gt;` 
+    for further usage details and examples. 
+ 
+    Examples 
+    -------- 
+    &gt;&gt;&gt; df = pd.DataFrame({'B': [0, 1, 2, np.nan, 4]}) 
+    &gt;&gt;&gt; df 
+         B 
+    0  0.0 
+    1  1.0 
+    2  2.0 
+    3  NaN 
+    4  4.0 
+ 
+    &gt;&gt;&gt; df.ewm(com=0.5).mean() 
+              B 
+    0  0.000000 
+    1  0.750000 
+    2  1.615385 
+    3  1.615385 
+    4  3.670213 
+    &gt;&gt;&gt; df.ewm(alpha=2 / 3).mean() 
+              B 
+    0  0.000000 
+    1  0.750000 
+    2  1.615385 
+    3  1.615385 
+    4  3.670213 
+ 
+    **adjust** 
+ 
+    &gt;&gt;&gt; df.ewm(com=0.5, adjust=True).mean() 
+              B 
+    0  0.000000 
+    1  0.750000 
+    2  1.615385 
+    3  1.615385 
+    4  3.670213 
+    &gt;&gt;&gt; df.ewm(com=0.5, adjust=False).mean() 
+              B 
+    0  0.000000 
+    1  0.666667 
+    2  1.555556 
+    3  1.555556 
+    4  3.650794 
+ 
+    **ignore_na** 
+ 
+    &gt;&gt;&gt; df.ewm(com=0.5, ignore_na=True).mean() 
+              B 
+    0  0.000000 
+    1  0.750000 
+    2  1.615385 
+    3  1.615385 
+    4  3.225000 
+    &gt;&gt;&gt; df.ewm(com=0.5, ignore_na=False).mean() 
+              B 
+    0  0.000000 
+    1  0.750000 
+    2  1.615385 
+    3  1.615385 
+    4  3.670213 
+ 
+    **times** 
+ 
+    Exponentially weighted mean with weights calculated with a timedelta ``halflife`` 
+    relative to ``times``. 
+ 
+    &gt;&gt;&gt; times = ['2020-01-01', '2020-01-03', '2020-01-10', '2020-01-15', '2020-01-17'] 
+    &gt;&gt;&gt; df.ewm(halflife='4 days', times=pd.DatetimeIndex(times)).mean() 
+              B 
+    0  0.000000 
+    1  0.585786 
+    2  1.523889 
+    3  1.523889 
+    4  3.233686 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">_attributes = [</span>
+        <span class="s4">&quot;com&quot;</span><span class="s0">,</span>
+        <span class="s4">&quot;span&quot;</span><span class="s0">,</span>
+        <span class="s4">&quot;halflife&quot;</span><span class="s0">,</span>
+        <span class="s4">&quot;alpha&quot;</span><span class="s0">,</span>
+        <span class="s4">&quot;min_periods&quot;</span><span class="s0">,</span>
+        <span class="s4">&quot;adjust&quot;</span><span class="s0">,</span>
+        <span class="s4">&quot;ignore_na&quot;</span><span class="s0">,</span>
+        <span class="s4">&quot;axis&quot;</span><span class="s0">,</span>
+        <span class="s4">&quot;times&quot;</span><span class="s0">,</span>
+        <span class="s4">&quot;method&quot;</span><span class="s0">,</span>
+    <span class="s1">]</span>
+
+    <span class="s0">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">obj: NDFrame</span><span class="s0">,</span>
+        <span class="s1">com: float | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">span: float | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">halflife: float | TimedeltaConvertibleTypes | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">alpha: float | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">min_periods: int | </span><span class="s0">None </span><span class="s1">= </span><span class="s3">0</span><span class="s0">,</span>
+        <span class="s1">adjust: bool = </span><span class="s0">True,</span>
+        <span class="s1">ignore_na: bool = </span><span class="s0">False,</span>
+        <span class="s1">axis: Axis = </span><span class="s3">0</span><span class="s0">,</span>
+        <span class="s1">times: str | np.ndarray | NDFrame | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">method: str = </span><span class="s4">&quot;single&quot;</span><span class="s0">,</span>
+        <span class="s1">*</span><span class="s0">,</span>
+        <span class="s1">selection=</span><span class="s0">None,</span>
+    <span class="s1">):</span>
+        <span class="s1">super().__init__(</span>
+            <span class="s1">obj=obj</span><span class="s0">,</span>
+            <span class="s1">min_periods=</span><span class="s3">1 </span><span class="s0">if </span><span class="s1">min_periods </span><span class="s0">is None else </span><span class="s1">max(int(min_periods)</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">on=</span><span class="s0">None,</span>
+            <span class="s1">center=</span><span class="s0">False,</span>
+            <span class="s1">closed=</span><span class="s0">None,</span>
+            <span class="s1">method=method</span><span class="s0">,</span>
+            <span class="s1">axis=axis</span><span class="s0">,</span>
+            <span class="s1">selection=selection</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s1">self.com = com</span>
+        <span class="s1">self.span = span</span>
+        <span class="s1">self.halflife = halflife</span>
+        <span class="s1">self.alpha = alpha</span>
+        <span class="s1">self.adjust = adjust</span>
+        <span class="s1">self.ignore_na = ignore_na</span>
+        <span class="s1">self.times = times</span>
+        <span class="s0">if </span><span class="s1">self.times </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s0">if not </span><span class="s1">self.adjust:</span>
+                <span class="s0">raise </span><span class="s1">NotImplementedError(</span><span class="s4">&quot;times is not supported with adjust=False.&quot;</span><span class="s1">)</span>
+            <span class="s0">if </span><span class="s1">isinstance(self.times</span><span class="s0">, </span><span class="s1">str):</span>
+                <span class="s1">warnings.warn(</span>
+                    <span class="s1">(</span>
+                        <span class="s4">&quot;Specifying times as a string column label is deprecated &quot;</span>
+                        <span class="s4">&quot;and will be removed in a future version. Pass the column &quot;</span>
+                        <span class="s4">&quot;into times instead.&quot;</span>
+                    <span class="s1">)</span><span class="s0">,</span>
+                    <span class="s1">FutureWarning</span><span class="s0">,</span>
+                    <span class="s1">stacklevel=find_stack_level()</span><span class="s0">,</span>
+                <span class="s1">)</span>
+                <span class="s1">self.times = self._selected_obj[self.times]</span>
+            <span class="s0">if not </span><span class="s1">is_datetime64_ns_dtype(self.times):</span>
+                <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;times must be datetime64[ns] dtype.&quot;</span><span class="s1">)</span>
+            <span class="s2"># error: Argument 1 to &quot;len&quot; has incompatible type &quot;Union[str, ndarray,</span>
+            <span class="s2"># NDFrameT, None]&quot;; expected &quot;Sized&quot;</span>
+            <span class="s0">if </span><span class="s1">len(self.times) != len(obj):  </span><span class="s2"># type: ignore[arg-type]</span>
+                <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;times must be the same length as the object.&quot;</span><span class="s1">)</span>
+            <span class="s0">if not </span><span class="s1">isinstance(self.halflife</span><span class="s0">, </span><span class="s1">(str</span><span class="s0">, </span><span class="s1">datetime.timedelta)):</span>
+                <span class="s0">raise </span><span class="s1">ValueError(</span>
+                    <span class="s4">&quot;halflife must be a string or datetime.timedelta object&quot;</span>
+                <span class="s1">)</span>
+            <span class="s0">if </span><span class="s1">isna(self.times).any():</span>
+                <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Cannot convert NaT values to integer&quot;</span><span class="s1">)</span>
+            <span class="s1">self._deltas = _calculate_deltas(self.times</span><span class="s0">, </span><span class="s1">self.halflife)</span>
+            <span class="s2"># Halflife is no longer applicable when calculating COM</span>
+            <span class="s2"># But allow COM to still be calculated if the user passes other decay args</span>
+            <span class="s0">if </span><span class="s1">common.count_not_none(self.com</span><span class="s0">, </span><span class="s1">self.span</span><span class="s0">, </span><span class="s1">self.alpha) &gt; </span><span class="s3">0</span><span class="s1">:</span>
+                <span class="s1">self._com = get_center_of_mass(self.com</span><span class="s0">, </span><span class="s1">self.span</span><span class="s0">, None, </span><span class="s1">self.alpha)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">self._com = </span><span class="s3">1.0</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">if </span><span class="s1">self.halflife </span><span class="s0">is not None and </span><span class="s1">isinstance(</span>
+                <span class="s1">self.halflife</span><span class="s0">, </span><span class="s1">(str</span><span class="s0">, </span><span class="s1">datetime.timedelta)</span>
+            <span class="s1">):</span>
+                <span class="s0">raise </span><span class="s1">ValueError(</span>
+                    <span class="s4">&quot;halflife can only be a timedelta convertible argument if &quot;</span>
+                    <span class="s4">&quot;times is not None.&quot;</span>
+                <span class="s1">)</span>
+            <span class="s2"># Without times, points are equally spaced</span>
+            <span class="s1">self._deltas = np.ones(max(len(self.obj) - </span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)</span><span class="s0">, </span><span class="s1">dtype=np.float64)</span>
+            <span class="s1">self._com = get_center_of_mass(</span>
+                <span class="s2"># error: Argument 3 to &quot;get_center_of_mass&quot; has incompatible type</span>
+                <span class="s2"># &quot;Union[float, Any, None, timedelta64, signedinteger[_64Bit]]&quot;;</span>
+                <span class="s2"># expected &quot;Optional[float]&quot;</span>
+                <span class="s1">self.com</span><span class="s0">,</span>
+                <span class="s1">self.span</span><span class="s0">,</span>
+                <span class="s1">self.halflife</span><span class="s0">,  </span><span class="s2"># type: ignore[arg-type]</span>
+                <span class="s1">self.alpha</span><span class="s0">,</span>
+            <span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">_check_window_bounds(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">start: np.ndarray</span><span class="s0">, </span><span class="s1">end: np.ndarray</span><span class="s0">, </span><span class="s1">num_vals: int</span>
+    <span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s2"># emw algorithms are iterative with each point</span>
+        <span class="s2"># ExponentialMovingWindowIndexer &quot;bounds&quot; are the entire window</span>
+        <span class="s0">pass</span>
+
+    <span class="s0">def </span><span class="s1">_get_window_indexer(self) -&gt; BaseIndexer:</span>
+        <span class="s5">&quot;&quot;&quot; 
+        Return an indexer class that will compute the window start and end bounds 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">ExponentialMovingWindowIndexer()</span>
+
+    <span class="s0">def </span><span class="s1">online(self</span><span class="s0">, </span><span class="s1">engine=</span><span class="s4">&quot;numba&quot;</span><span class="s0">, </span><span class="s1">engine_kwargs=</span><span class="s0">None</span><span class="s1">):</span>
+        <span class="s5">&quot;&quot;&quot; 
+        Return an ``OnlineExponentialMovingWindow`` object to calculate 
+        exponentially moving window aggregations in an online method. 
+ 
+        .. versionadded:: 1.3.0 
+ 
+        Parameters 
+        ---------- 
+        engine: str, default ``'numba'`` 
+            Execution engine to calculate online aggregations. 
+            Applies to all supported aggregation methods. 
+ 
+        engine_kwargs : dict, default None 
+            Applies to all supported aggregation methods. 
+ 
+            * For ``'numba'`` engine, the engine can accept ``nopython``, ``nogil`` 
+              and ``parallel`` dictionary keys. The values must either be ``True`` or 
+              ``False``. The default ``engine_kwargs`` for the ``'numba'`` engine is 
+              ``{{'nopython': True, 'nogil': False, 'parallel': False}}`` and will be 
+              applied to the function 
+ 
+        Returns 
+        ------- 
+        OnlineExponentialMovingWindow 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">OnlineExponentialMovingWindow(</span>
+            <span class="s1">obj=self.obj</span><span class="s0">,</span>
+            <span class="s1">com=self.com</span><span class="s0">,</span>
+            <span class="s1">span=self.span</span><span class="s0">,</span>
+            <span class="s1">halflife=self.halflife</span><span class="s0">,</span>
+            <span class="s1">alpha=self.alpha</span><span class="s0">,</span>
+            <span class="s1">min_periods=self.min_periods</span><span class="s0">,</span>
+            <span class="s1">adjust=self.adjust</span><span class="s0">,</span>
+            <span class="s1">ignore_na=self.ignore_na</span><span class="s0">,</span>
+            <span class="s1">axis=self.axis</span><span class="s0">,</span>
+            <span class="s1">times=self.times</span><span class="s0">,</span>
+            <span class="s1">engine=engine</span><span class="s0">,</span>
+            <span class="s1">engine_kwargs=engine_kwargs</span><span class="s0">,</span>
+            <span class="s1">selection=self._selection</span><span class="s0">,</span>
+        <span class="s1">)</span>
+
+    <span class="s1">@doc(</span>
+        <span class="s1">_shared_docs[</span><span class="s4">&quot;aggregate&quot;</span><span class="s1">]</span><span class="s0">,</span>
+        <span class="s1">see_also=dedent(</span>
+            <span class="s4">&quot;&quot;&quot; 
+        See Also 
+        -------- 
+        pandas.DataFrame.rolling.aggregate 
+        &quot;&quot;&quot;</span>
+        <span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">examples=dedent(</span>
+            <span class="s4">&quot;&quot;&quot; 
+        Examples 
+        -------- 
+        &gt;&gt;&gt; df = pd.DataFrame({&quot;A&quot;: [1, 2, 3], &quot;B&quot;: [4, 5, 6], &quot;C&quot;: [7, 8, 9]}) 
+        &gt;&gt;&gt; df 
+           A  B  C 
+        0  1  4  7 
+        1  2  5  8 
+        2  3  6  9 
+ 
+        &gt;&gt;&gt; df.ewm(alpha=0.5).mean() 
+                  A         B         C 
+        0  1.000000  4.000000  7.000000 
+        1  1.666667  4.666667  7.666667 
+        2  2.428571  5.428571  8.428571 
+        &quot;&quot;&quot;</span>
+        <span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">klass=</span><span class="s4">&quot;Series/Dataframe&quot;</span><span class="s0">,</span>
+        <span class="s1">axis=</span><span class="s4">&quot;&quot;</span><span class="s0">,</span>
+    <span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">aggregate(self</span><span class="s0">, </span><span class="s1">func</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s0">return </span><span class="s1">super().aggregate(func</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s1">agg = aggregate</span>
+
+    <span class="s1">@doc(</span>
+        <span class="s1">template_header</span><span class="s0">,</span>
+        <span class="s1">create_section_header(</span><span class="s4">&quot;Parameters&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">args_compat</span><span class="s0">,</span>
+        <span class="s1">window_agg_numba_parameters()</span><span class="s0">,</span>
+        <span class="s1">kwargs_compat</span><span class="s0">,</span>
+        <span class="s1">create_section_header(</span><span class="s4">&quot;Returns&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">template_returns</span><span class="s0">,</span>
+        <span class="s1">create_section_header(</span><span class="s4">&quot;See Also&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">template_see_also</span><span class="s0">,</span>
+        <span class="s1">create_section_header(</span><span class="s4">&quot;Notes&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">numba_notes.replace(</span><span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s0">, </span><span class="s4">&quot;&quot;</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">window_method=</span><span class="s4">&quot;ewm&quot;</span><span class="s0">,</span>
+        <span class="s1">aggregation_description=</span><span class="s4">&quot;(exponential weighted moment) mean&quot;</span><span class="s0">,</span>
+        <span class="s1">agg_method=</span><span class="s4">&quot;mean&quot;</span><span class="s0">,</span>
+    <span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">mean(self</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">engine=</span><span class="s0">None, </span><span class="s1">engine_kwargs=</span><span class="s0">None, </span><span class="s1">**kwargs):</span>
+        <span class="s0">if </span><span class="s1">maybe_use_numba(engine):</span>
+            <span class="s0">if </span><span class="s1">self.method == </span><span class="s4">&quot;single&quot;</span><span class="s1">:</span>
+                <span class="s1">func = generate_numba_ewm_func</span>
+                <span class="s1">numba_cache_key = (</span><span class="s0">lambda </span><span class="s1">x: x</span><span class="s0">, </span><span class="s4">&quot;ewm_mean&quot;</span><span class="s1">)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">func = generate_numba_ewm_table_func</span>
+                <span class="s1">numba_cache_key = (</span><span class="s0">lambda </span><span class="s1">x: x</span><span class="s0">, </span><span class="s4">&quot;ewm_mean_table&quot;</span><span class="s1">)</span>
+            <span class="s1">ewm_func = func(</span>
+                <span class="s1">engine_kwargs=engine_kwargs</span><span class="s0">,</span>
+                <span class="s1">com=self._com</span><span class="s0">,</span>
+                <span class="s1">adjust=self.adjust</span><span class="s0">,</span>
+                <span class="s1">ignore_na=self.ignore_na</span><span class="s0">,</span>
+                <span class="s1">deltas=self._deltas</span><span class="s0">,</span>
+                <span class="s1">normalize=</span><span class="s0">True,</span>
+            <span class="s1">)</span>
+            <span class="s0">return </span><span class="s1">self._apply(</span>
+                <span class="s1">ewm_func</span><span class="s0">,</span>
+                <span class="s1">numba_cache_key=numba_cache_key</span><span class="s0">,</span>
+            <span class="s1">)</span>
+        <span class="s0">elif </span><span class="s1">engine </span><span class="s0">in </span><span class="s1">(</span><span class="s4">&quot;cython&quot;</span><span class="s0">, None</span><span class="s1">):</span>
+            <span class="s0">if </span><span class="s1">engine_kwargs </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;cython engine does not accept engine_kwargs&quot;</span><span class="s1">)</span>
+            <span class="s1">nv.validate_window_func(</span><span class="s4">&quot;mean&quot;</span><span class="s0">, </span><span class="s1">args</span><span class="s0">, </span><span class="s1">kwargs)</span>
+
+            <span class="s1">deltas = </span><span class="s0">None if </span><span class="s1">self.times </span><span class="s0">is None else </span><span class="s1">self._deltas</span>
+            <span class="s1">window_func = partial(</span>
+                <span class="s1">window_aggregations.ewm</span><span class="s0">,</span>
+                <span class="s1">com=self._com</span><span class="s0">,</span>
+                <span class="s1">adjust=self.adjust</span><span class="s0">,</span>
+                <span class="s1">ignore_na=self.ignore_na</span><span class="s0">,</span>
+                <span class="s1">deltas=deltas</span><span class="s0">,</span>
+                <span class="s1">normalize=</span><span class="s0">True,</span>
+            <span class="s1">)</span>
+            <span class="s0">return </span><span class="s1">self._apply(window_func)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;engine must be either 'numba' or 'cython'&quot;</span><span class="s1">)</span>
+
+    <span class="s1">@doc(</span>
+        <span class="s1">template_header</span><span class="s0">,</span>
+        <span class="s1">create_section_header(</span><span class="s4">&quot;Parameters&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">args_compat</span><span class="s0">,</span>
+        <span class="s1">window_agg_numba_parameters()</span><span class="s0">,</span>
+        <span class="s1">kwargs_compat</span><span class="s0">,</span>
+        <span class="s1">create_section_header(</span><span class="s4">&quot;Returns&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">template_returns</span><span class="s0">,</span>
+        <span class="s1">create_section_header(</span><span class="s4">&quot;See Also&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">template_see_also</span><span class="s0">,</span>
+        <span class="s1">create_section_header(</span><span class="s4">&quot;Notes&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">numba_notes.replace(</span><span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s0">, </span><span class="s4">&quot;&quot;</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">window_method=</span><span class="s4">&quot;ewm&quot;</span><span class="s0">,</span>
+        <span class="s1">aggregation_description=</span><span class="s4">&quot;(exponential weighted moment) sum&quot;</span><span class="s0">,</span>
+        <span class="s1">agg_method=</span><span class="s4">&quot;sum&quot;</span><span class="s0">,</span>
+    <span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">sum(self</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">engine=</span><span class="s0">None, </span><span class="s1">engine_kwargs=</span><span class="s0">None, </span><span class="s1">**kwargs):</span>
+        <span class="s0">if not </span><span class="s1">self.adjust:</span>
+            <span class="s0">raise </span><span class="s1">NotImplementedError(</span><span class="s4">&quot;sum is not implemented with adjust=False&quot;</span><span class="s1">)</span>
+        <span class="s0">if </span><span class="s1">maybe_use_numba(engine):</span>
+            <span class="s0">if </span><span class="s1">self.method == </span><span class="s4">&quot;single&quot;</span><span class="s1">:</span>
+                <span class="s1">func = generate_numba_ewm_func</span>
+                <span class="s1">numba_cache_key = (</span><span class="s0">lambda </span><span class="s1">x: x</span><span class="s0">, </span><span class="s4">&quot;ewm_sum&quot;</span><span class="s1">)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">func = generate_numba_ewm_table_func</span>
+                <span class="s1">numba_cache_key = (</span><span class="s0">lambda </span><span class="s1">x: x</span><span class="s0">, </span><span class="s4">&quot;ewm_sum_table&quot;</span><span class="s1">)</span>
+            <span class="s1">ewm_func = func(</span>
+                <span class="s1">engine_kwargs=engine_kwargs</span><span class="s0">,</span>
+                <span class="s1">com=self._com</span><span class="s0">,</span>
+                <span class="s1">adjust=self.adjust</span><span class="s0">,</span>
+                <span class="s1">ignore_na=self.ignore_na</span><span class="s0">,</span>
+                <span class="s1">deltas=self._deltas</span><span class="s0">,</span>
+                <span class="s1">normalize=</span><span class="s0">False,</span>
+            <span class="s1">)</span>
+            <span class="s0">return </span><span class="s1">self._apply(</span>
+                <span class="s1">ewm_func</span><span class="s0">,</span>
+                <span class="s1">numba_cache_key=numba_cache_key</span><span class="s0">,</span>
+            <span class="s1">)</span>
+        <span class="s0">elif </span><span class="s1">engine </span><span class="s0">in </span><span class="s1">(</span><span class="s4">&quot;cython&quot;</span><span class="s0">, None</span><span class="s1">):</span>
+            <span class="s0">if </span><span class="s1">engine_kwargs </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;cython engine does not accept engine_kwargs&quot;</span><span class="s1">)</span>
+            <span class="s1">nv.validate_window_func(</span><span class="s4">&quot;sum&quot;</span><span class="s0">, </span><span class="s1">args</span><span class="s0">, </span><span class="s1">kwargs)</span>
+
+            <span class="s1">deltas = </span><span class="s0">None if </span><span class="s1">self.times </span><span class="s0">is None else </span><span class="s1">self._deltas</span>
+            <span class="s1">window_func = partial(</span>
+                <span class="s1">window_aggregations.ewm</span><span class="s0">,</span>
+                <span class="s1">com=self._com</span><span class="s0">,</span>
+                <span class="s1">adjust=self.adjust</span><span class="s0">,</span>
+                <span class="s1">ignore_na=self.ignore_na</span><span class="s0">,</span>
+                <span class="s1">deltas=deltas</span><span class="s0">,</span>
+                <span class="s1">normalize=</span><span class="s0">False,</span>
+            <span class="s1">)</span>
+            <span class="s0">return </span><span class="s1">self._apply(window_func)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;engine must be either 'numba' or 'cython'&quot;</span><span class="s1">)</span>
+
+    <span class="s1">@doc(</span>
+        <span class="s1">template_header</span><span class="s0">,</span>
+        <span class="s1">create_section_header(</span><span class="s4">&quot;Parameters&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">dedent(</span>
+            <span class="s4">&quot;&quot;&quot; 
+        bias : bool, default False 
+            Use a standard estimation bias correction. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">).replace(</span><span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s0">, </span><span class="s4">&quot;&quot;</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">args_compat</span><span class="s0">,</span>
+        <span class="s1">kwargs_compat</span><span class="s0">,</span>
+        <span class="s1">create_section_header(</span><span class="s4">&quot;Returns&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">template_returns</span><span class="s0">,</span>
+        <span class="s1">create_section_header(</span><span class="s4">&quot;See Also&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">template_see_also[:-</span><span class="s3">1</span><span class="s1">]</span><span class="s0">,</span>
+        <span class="s1">window_method=</span><span class="s4">&quot;ewm&quot;</span><span class="s0">,</span>
+        <span class="s1">aggregation_description=</span><span class="s4">&quot;(exponential weighted moment) standard deviation&quot;</span><span class="s0">,</span>
+        <span class="s1">agg_method=</span><span class="s4">&quot;std&quot;</span><span class="s0">,</span>
+    <span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">std(self</span><span class="s0">, </span><span class="s1">bias: bool = </span><span class="s0">False, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">nv.validate_window_func(</span><span class="s4">&quot;std&quot;</span><span class="s0">, </span><span class="s1">args</span><span class="s0">, </span><span class="s1">kwargs)</span>
+        <span class="s0">return </span><span class="s1">zsqrt(self.var(bias=bias</span><span class="s0">, </span><span class="s1">**kwargs))</span>
+
+    <span class="s0">def </span><span class="s1">vol(self</span><span class="s0">, </span><span class="s1">bias: bool = </span><span class="s0">False, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">warnings.warn(</span>
+            <span class="s1">(</span>
+                <span class="s4">&quot;vol is deprecated will be removed in a future version. &quot;</span>
+                <span class="s4">&quot;Use std instead.&quot;</span>
+            <span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">FutureWarning</span><span class="s0">,</span>
+            <span class="s1">stacklevel=find_stack_level()</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s0">return </span><span class="s1">self.std(bias</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s1">@doc(</span>
+        <span class="s1">template_header</span><span class="s0">,</span>
+        <span class="s1">create_section_header(</span><span class="s4">&quot;Parameters&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">dedent(</span>
+            <span class="s4">&quot;&quot;&quot; 
+        bias : bool, default False 
+            Use a standard estimation bias correction. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">).replace(</span><span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s0">, </span><span class="s4">&quot;&quot;</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">args_compat</span><span class="s0">,</span>
+        <span class="s1">kwargs_compat</span><span class="s0">,</span>
+        <span class="s1">create_section_header(</span><span class="s4">&quot;Returns&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">template_returns</span><span class="s0">,</span>
+        <span class="s1">create_section_header(</span><span class="s4">&quot;See Also&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">template_see_also[:-</span><span class="s3">1</span><span class="s1">]</span><span class="s0">,</span>
+        <span class="s1">window_method=</span><span class="s4">&quot;ewm&quot;</span><span class="s0">,</span>
+        <span class="s1">aggregation_description=</span><span class="s4">&quot;(exponential weighted moment) variance&quot;</span><span class="s0">,</span>
+        <span class="s1">agg_method=</span><span class="s4">&quot;var&quot;</span><span class="s0">,</span>
+    <span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">var(self</span><span class="s0">, </span><span class="s1">bias: bool = </span><span class="s0">False, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">nv.validate_window_func(</span><span class="s4">&quot;var&quot;</span><span class="s0">, </span><span class="s1">args</span><span class="s0">, </span><span class="s1">kwargs)</span>
+        <span class="s1">window_func = window_aggregations.ewmcov</span>
+        <span class="s1">wfunc = partial(</span>
+            <span class="s1">window_func</span><span class="s0">,</span>
+            <span class="s1">com=self._com</span><span class="s0">,</span>
+            <span class="s1">adjust=self.adjust</span><span class="s0">,</span>
+            <span class="s1">ignore_na=self.ignore_na</span><span class="s0">,</span>
+            <span class="s1">bias=bias</span><span class="s0">,</span>
+        <span class="s1">)</span>
+
+        <span class="s0">def </span><span class="s1">var_func(values</span><span class="s0">, </span><span class="s1">begin</span><span class="s0">, </span><span class="s1">end</span><span class="s0">, </span><span class="s1">min_periods):</span>
+            <span class="s0">return </span><span class="s1">wfunc(values</span><span class="s0">, </span><span class="s1">begin</span><span class="s0">, </span><span class="s1">end</span><span class="s0">, </span><span class="s1">min_periods</span><span class="s0">, </span><span class="s1">values)</span>
+
+        <span class="s0">return </span><span class="s1">self._apply(var_func)</span>
+
+    <span class="s1">@doc(</span>
+        <span class="s1">template_header</span><span class="s0">,</span>
+        <span class="s1">create_section_header(</span><span class="s4">&quot;Parameters&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">dedent(</span>
+            <span class="s4">&quot;&quot;&quot; 
+        other : Series or DataFrame , optional 
+            If not supplied then will default to self and produce pairwise 
+            output. 
+        pairwise : bool, default None 
+            If False then only matching columns between self and other will be 
+            used and the output will be a DataFrame. 
+            If True then all pairwise combinations will be calculated and the 
+            output will be a MultiIndex DataFrame in the case of DataFrame 
+            inputs. In the case of missing elements, only complete pairwise 
+            observations will be used. 
+        bias : bool, default False 
+            Use a standard estimation bias correction. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">).replace(</span><span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s0">, </span><span class="s4">&quot;&quot;</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">kwargs_compat</span><span class="s0">,</span>
+        <span class="s1">create_section_header(</span><span class="s4">&quot;Returns&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">template_returns</span><span class="s0">,</span>
+        <span class="s1">create_section_header(</span><span class="s4">&quot;See Also&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">template_see_also[:-</span><span class="s3">1</span><span class="s1">]</span><span class="s0">,</span>
+        <span class="s1">window_method=</span><span class="s4">&quot;ewm&quot;</span><span class="s0">,</span>
+        <span class="s1">aggregation_description=</span><span class="s4">&quot;(exponential weighted moment) sample covariance&quot;</span><span class="s0">,</span>
+        <span class="s1">agg_method=</span><span class="s4">&quot;cov&quot;</span><span class="s0">,</span>
+    <span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">cov(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">other: DataFrame | Series | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">pairwise: bool | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">bias: bool = </span><span class="s0">False,</span>
+        <span class="s1">**kwargs</span><span class="s0">,</span>
+    <span class="s1">):</span>
+        <span class="s0">from </span><span class="s1">pandas </span><span class="s0">import </span><span class="s1">Series</span>
+
+        <span class="s0">def </span><span class="s1">cov_func(x</span><span class="s0">, </span><span class="s1">y):</span>
+            <span class="s1">x_array = self._prep_values(x)</span>
+            <span class="s1">y_array = self._prep_values(y)</span>
+            <span class="s1">window_indexer = self._get_window_indexer()</span>
+            <span class="s1">min_periods = (</span>
+                <span class="s1">self.min_periods</span>
+                <span class="s0">if </span><span class="s1">self.min_periods </span><span class="s0">is not None</span>
+                <span class="s0">else </span><span class="s1">window_indexer.window_size</span>
+            <span class="s1">)</span>
+            <span class="s1">start</span><span class="s0">, </span><span class="s1">end = window_indexer.get_window_bounds(</span>
+                <span class="s1">num_values=len(x_array)</span><span class="s0">,</span>
+                <span class="s1">min_periods=min_periods</span><span class="s0">,</span>
+                <span class="s1">center=self.center</span><span class="s0">,</span>
+                <span class="s1">closed=self.closed</span><span class="s0">,</span>
+            <span class="s1">)</span>
+            <span class="s1">result = window_aggregations.ewmcov(</span>
+                <span class="s1">x_array</span><span class="s0">,</span>
+                <span class="s1">start</span><span class="s0">,</span>
+                <span class="s1">end</span><span class="s0">,</span>
+                <span class="s2"># error: Argument 4 to &quot;ewmcov&quot; has incompatible type</span>
+                <span class="s2"># &quot;Optional[int]&quot;; expected &quot;int&quot;</span>
+                <span class="s1">self.min_periods</span><span class="s0">,  </span><span class="s2"># type: ignore[arg-type]</span>
+                <span class="s1">y_array</span><span class="s0">,</span>
+                <span class="s1">self._com</span><span class="s0">,</span>
+                <span class="s1">self.adjust</span><span class="s0">,</span>
+                <span class="s1">self.ignore_na</span><span class="s0">,</span>
+                <span class="s1">bias</span><span class="s0">,</span>
+            <span class="s1">)</span>
+            <span class="s0">return </span><span class="s1">Series(result</span><span class="s0">, </span><span class="s1">index=x.index</span><span class="s0">, </span><span class="s1">name=x.name)</span>
+
+        <span class="s0">return </span><span class="s1">self._apply_pairwise(self._selected_obj</span><span class="s0">, </span><span class="s1">other</span><span class="s0">, </span><span class="s1">pairwise</span><span class="s0">, </span><span class="s1">cov_func)</span>
+
+    <span class="s1">@doc(</span>
+        <span class="s1">template_header</span><span class="s0">,</span>
+        <span class="s1">create_section_header(</span><span class="s4">&quot;Parameters&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">dedent(</span>
+            <span class="s4">&quot;&quot;&quot; 
+        other : Series or DataFrame, optional 
+            If not supplied then will default to self and produce pairwise 
+            output. 
+        pairwise : bool, default None 
+            If False then only matching columns between self and other will be 
+            used and the output will be a DataFrame. 
+            If True then all pairwise combinations will be calculated and the 
+            output will be a MultiIndex DataFrame in the case of DataFrame 
+            inputs. In the case of missing elements, only complete pairwise 
+            observations will be used. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">).replace(</span><span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s0">, </span><span class="s4">&quot;&quot;</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">kwargs_compat</span><span class="s0">,</span>
+        <span class="s1">create_section_header(</span><span class="s4">&quot;Returns&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">template_returns</span><span class="s0">,</span>
+        <span class="s1">create_section_header(</span><span class="s4">&quot;See Also&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">template_see_also[:-</span><span class="s3">1</span><span class="s1">]</span><span class="s0">,</span>
+        <span class="s1">window_method=</span><span class="s4">&quot;ewm&quot;</span><span class="s0">,</span>
+        <span class="s1">aggregation_description=</span><span class="s4">&quot;(exponential weighted moment) sample correlation&quot;</span><span class="s0">,</span>
+        <span class="s1">agg_method=</span><span class="s4">&quot;corr&quot;</span><span class="s0">,</span>
+    <span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">corr(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">other: DataFrame | Series | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">pairwise: bool | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">**kwargs</span><span class="s0">,</span>
+    <span class="s1">):</span>
+        <span class="s0">from </span><span class="s1">pandas </span><span class="s0">import </span><span class="s1">Series</span>
+
+        <span class="s0">def </span><span class="s1">cov_func(x</span><span class="s0">, </span><span class="s1">y):</span>
+            <span class="s1">x_array = self._prep_values(x)</span>
+            <span class="s1">y_array = self._prep_values(y)</span>
+            <span class="s1">window_indexer = self._get_window_indexer()</span>
+            <span class="s1">min_periods = (</span>
+                <span class="s1">self.min_periods</span>
+                <span class="s0">if </span><span class="s1">self.min_periods </span><span class="s0">is not None</span>
+                <span class="s0">else </span><span class="s1">window_indexer.window_size</span>
+            <span class="s1">)</span>
+            <span class="s1">start</span><span class="s0">, </span><span class="s1">end = window_indexer.get_window_bounds(</span>
+                <span class="s1">num_values=len(x_array)</span><span class="s0">,</span>
+                <span class="s1">min_periods=min_periods</span><span class="s0">,</span>
+                <span class="s1">center=self.center</span><span class="s0">,</span>
+                <span class="s1">closed=self.closed</span><span class="s0">,</span>
+            <span class="s1">)</span>
+
+            <span class="s0">def </span><span class="s1">_cov(X</span><span class="s0">, </span><span class="s1">Y):</span>
+                <span class="s0">return </span><span class="s1">window_aggregations.ewmcov(</span>
+                    <span class="s1">X</span><span class="s0">,</span>
+                    <span class="s1">start</span><span class="s0">,</span>
+                    <span class="s1">end</span><span class="s0">,</span>
+                    <span class="s1">min_periods</span><span class="s0">,</span>
+                    <span class="s1">Y</span><span class="s0">,</span>
+                    <span class="s1">self._com</span><span class="s0">,</span>
+                    <span class="s1">self.adjust</span><span class="s0">,</span>
+                    <span class="s1">self.ignore_na</span><span class="s0">,</span>
+                    <span class="s0">True,</span>
+                <span class="s1">)</span>
+
+            <span class="s0">with </span><span class="s1">np.errstate(all=</span><span class="s4">&quot;ignore&quot;</span><span class="s1">):</span>
+                <span class="s1">cov = _cov(x_array</span><span class="s0">, </span><span class="s1">y_array)</span>
+                <span class="s1">x_var = _cov(x_array</span><span class="s0">, </span><span class="s1">x_array)</span>
+                <span class="s1">y_var = _cov(y_array</span><span class="s0">, </span><span class="s1">y_array)</span>
+                <span class="s1">result = cov / zsqrt(x_var * y_var)</span>
+            <span class="s0">return </span><span class="s1">Series(result</span><span class="s0">, </span><span class="s1">index=x.index</span><span class="s0">, </span><span class="s1">name=x.name)</span>
+
+        <span class="s0">return </span><span class="s1">self._apply_pairwise(self._selected_obj</span><span class="s0">, </span><span class="s1">other</span><span class="s0">, </span><span class="s1">pairwise</span><span class="s0">, </span><span class="s1">cov_func)</span>
+
+
+<span class="s0">class </span><span class="s1">ExponentialMovingWindowGroupby(BaseWindowGroupby</span><span class="s0">, </span><span class="s1">ExponentialMovingWindow):</span>
+    <span class="s5">&quot;&quot;&quot; 
+    Provide an exponential moving window groupby implementation. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">_attributes = ExponentialMovingWindow._attributes + BaseWindowGroupby._attributes</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">obj</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">_grouper=</span><span class="s0">None, </span><span class="s1">**kwargs):</span>
+        <span class="s1">super().__init__(obj</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">_grouper=_grouper</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+        <span class="s0">if not </span><span class="s1">obj.empty </span><span class="s0">and </span><span class="s1">self.times </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s2"># sort the times and recalculate the deltas according to the groups</span>
+            <span class="s1">groupby_order = np.concatenate(list(self._grouper.indices.values()))</span>
+            <span class="s1">self._deltas = _calculate_deltas(</span>
+                <span class="s1">self.times.take(groupby_order)</span><span class="s0">,  </span><span class="s2"># type: ignore[union-attr]</span>
+                <span class="s1">self.halflife</span><span class="s0">,</span>
+            <span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">_get_window_indexer(self) -&gt; GroupbyIndexer:</span>
+        <span class="s5">&quot;&quot;&quot; 
+        Return an indexer class that will compute the window start and end bounds 
+ 
+        Returns 
+        ------- 
+        GroupbyIndexer 
+        &quot;&quot;&quot;</span>
+        <span class="s1">window_indexer = GroupbyIndexer(</span>
+            <span class="s1">groupby_indices=self._grouper.indices</span><span class="s0">,</span>
+            <span class="s1">window_indexer=ExponentialMovingWindowIndexer</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s0">return </span><span class="s1">window_indexer</span>
+
+
+<span class="s0">class </span><span class="s1">OnlineExponentialMovingWindow(ExponentialMovingWindow):</span>
+    <span class="s0">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">obj: NDFrame</span><span class="s0">,</span>
+        <span class="s1">com: float | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">span: float | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">halflife: float | TimedeltaConvertibleTypes | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">alpha: float | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">min_periods: int | </span><span class="s0">None </span><span class="s1">= </span><span class="s3">0</span><span class="s0">,</span>
+        <span class="s1">adjust: bool = </span><span class="s0">True,</span>
+        <span class="s1">ignore_na: bool = </span><span class="s0">False,</span>
+        <span class="s1">axis: Axis = </span><span class="s3">0</span><span class="s0">,</span>
+        <span class="s1">times: str | np.ndarray | NDFrame | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">engine: str = </span><span class="s4">&quot;numba&quot;</span><span class="s0">,</span>
+        <span class="s1">engine_kwargs: dict[str</span><span class="s0">, </span><span class="s1">bool] | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">*</span><span class="s0">,</span>
+        <span class="s1">selection=</span><span class="s0">None,</span>
+    <span class="s1">):</span>
+        <span class="s0">if </span><span class="s1">times </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">NotImplementedError(</span>
+                <span class="s4">&quot;times is not implemented with online operations.&quot;</span>
+            <span class="s1">)</span>
+        <span class="s1">super().__init__(</span>
+            <span class="s1">obj=obj</span><span class="s0">,</span>
+            <span class="s1">com=com</span><span class="s0">,</span>
+            <span class="s1">span=span</span><span class="s0">,</span>
+            <span class="s1">halflife=halflife</span><span class="s0">,</span>
+            <span class="s1">alpha=alpha</span><span class="s0">,</span>
+            <span class="s1">min_periods=min_periods</span><span class="s0">,</span>
+            <span class="s1">adjust=adjust</span><span class="s0">,</span>
+            <span class="s1">ignore_na=ignore_na</span><span class="s0">,</span>
+            <span class="s1">axis=axis</span><span class="s0">,</span>
+            <span class="s1">times=times</span><span class="s0">,</span>
+            <span class="s1">selection=selection</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s1">self._mean = EWMMeanState(</span>
+            <span class="s1">self._com</span><span class="s0">, </span><span class="s1">self.adjust</span><span class="s0">, </span><span class="s1">self.ignore_na</span><span class="s0">, </span><span class="s1">self.axis</span><span class="s0">, </span><span class="s1">obj.shape</span>
+        <span class="s1">)</span>
+        <span class="s0">if </span><span class="s1">maybe_use_numba(engine):</span>
+            <span class="s1">self.engine = engine</span>
+            <span class="s1">self.engine_kwargs = engine_kwargs</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;'numba' is the only supported engine&quot;</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">reset(self):</span>
+        <span class="s5">&quot;&quot;&quot; 
+        Reset the state captured by `update` calls. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self._mean.reset()</span>
+
+    <span class="s0">def </span><span class="s1">aggregate(self</span><span class="s0">, </span><span class="s1">func</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s0">return </span><span class="s1">NotImplementedError</span>
+
+    <span class="s0">def </span><span class="s1">std(self</span><span class="s0">, </span><span class="s1">bias: bool = </span><span class="s0">False, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s0">return </span><span class="s1">NotImplementedError</span>
+
+    <span class="s0">def </span><span class="s1">corr(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">other: DataFrame | Series | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">pairwise: bool | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">**kwargs</span><span class="s0">,</span>
+    <span class="s1">):</span>
+        <span class="s0">return </span><span class="s1">NotImplementedError</span>
+
+    <span class="s0">def </span><span class="s1">cov(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">other: DataFrame | Series | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">pairwise: bool | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">bias: bool = </span><span class="s0">False,</span>
+        <span class="s1">**kwargs</span><span class="s0">,</span>
+    <span class="s1">):</span>
+        <span class="s0">return </span><span class="s1">NotImplementedError</span>
+
+    <span class="s0">def </span><span class="s1">var(self</span><span class="s0">, </span><span class="s1">bias: bool = </span><span class="s0">False, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s0">return </span><span class="s1">NotImplementedError</span>
+
+    <span class="s0">def </span><span class="s1">mean(self</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">update=</span><span class="s0">None, </span><span class="s1">update_times=</span><span class="s0">None, </span><span class="s1">**kwargs):</span>
+        <span class="s5">&quot;&quot;&quot; 
+        Calculate an online exponentially weighted mean. 
+ 
+        Parameters 
+        ---------- 
+        update: DataFrame or Series, default None 
+            New values to continue calculating the 
+            exponentially weighted mean from the last values and weights. 
+            Values should be float64 dtype. 
+ 
+            ``update`` needs to be ``None`` the first time the 
+            exponentially weighted mean is calculated. 
+ 
+        update_times: Series or 1-D np.ndarray, default None 
+            New times to continue calculating the 
+            exponentially weighted mean from the last values and weights. 
+            If ``None``, values are assumed to be evenly spaced 
+            in time. 
+            This feature is currently unsupported. 
+ 
+        Returns 
+        ------- 
+        DataFrame or Series 
+ 
+        Examples 
+        -------- 
+        &gt;&gt;&gt; df = pd.DataFrame({&quot;a&quot;: range(5), &quot;b&quot;: range(5, 10)}) 
+        &gt;&gt;&gt; online_ewm = df.head(2).ewm(0.5).online() 
+        &gt;&gt;&gt; online_ewm.mean() 
+              a     b 
+        0  0.00  5.00 
+        1  0.75  5.75 
+        &gt;&gt;&gt; online_ewm.mean(update=df.tail(3)) 
+                  a         b 
+        2  1.615385  6.615385 
+        3  2.550000  7.550000 
+        4  3.520661  8.520661 
+        &gt;&gt;&gt; online_ewm.reset() 
+        &gt;&gt;&gt; online_ewm.mean() 
+              a     b 
+        0  0.00  5.00 
+        1  0.75  5.75 
+        &quot;&quot;&quot;</span>
+        <span class="s1">result_kwargs = {}</span>
+        <span class="s1">is_frame = </span><span class="s0">True if </span><span class="s1">self._selected_obj.ndim == </span><span class="s3">2 </span><span class="s0">else False</span>
+        <span class="s0">if </span><span class="s1">update_times </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">NotImplementedError(</span><span class="s4">&quot;update_times is not implemented.&quot;</span><span class="s1">)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">update_deltas = np.ones(</span>
+                <span class="s1">max(self._selected_obj.shape[self.axis - </span><span class="s3">1</span><span class="s1">] - </span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)</span><span class="s0">, </span><span class="s1">dtype=np.float64</span>
+            <span class="s1">)</span>
+        <span class="s0">if </span><span class="s1">update </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s0">if </span><span class="s1">self._mean.last_ewm </span><span class="s0">is None</span><span class="s1">:</span>
+                <span class="s0">raise </span><span class="s1">ValueError(</span>
+                    <span class="s4">&quot;Must call mean with update=None first before passing update&quot;</span>
+                <span class="s1">)</span>
+            <span class="s1">result_from = </span><span class="s3">1</span>
+            <span class="s1">result_kwargs[</span><span class="s4">&quot;index&quot;</span><span class="s1">] = update.index</span>
+            <span class="s0">if </span><span class="s1">is_frame:</span>
+                <span class="s1">last_value = self._mean.last_ewm[np.newaxis</span><span class="s0">, </span><span class="s1">:]</span>
+                <span class="s1">result_kwargs[</span><span class="s4">&quot;columns&quot;</span><span class="s1">] = update.columns</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">last_value = self._mean.last_ewm</span>
+                <span class="s1">result_kwargs[</span><span class="s4">&quot;name&quot;</span><span class="s1">] = update.name</span>
+            <span class="s1">np_array = np.concatenate((last_value</span><span class="s0">, </span><span class="s1">update.to_numpy()))</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">result_from = </span><span class="s3">0</span>
+            <span class="s1">result_kwargs[</span><span class="s4">&quot;index&quot;</span><span class="s1">] = self._selected_obj.index</span>
+            <span class="s0">if </span><span class="s1">is_frame:</span>
+                <span class="s1">result_kwargs[</span><span class="s4">&quot;columns&quot;</span><span class="s1">] = self._selected_obj.columns</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">result_kwargs[</span><span class="s4">&quot;name&quot;</span><span class="s1">] = self._selected_obj.name</span>
+            <span class="s1">np_array = self._selected_obj.astype(np.float64).to_numpy()</span>
+        <span class="s1">ewma_func = generate_online_numba_ewma_func(self.engine_kwargs)</span>
+        <span class="s1">result = self._mean.run_ewm(</span>
+            <span class="s1">np_array </span><span class="s0">if </span><span class="s1">is_frame </span><span class="s0">else </span><span class="s1">np_array[:</span><span class="s0">, </span><span class="s1">np.newaxis]</span><span class="s0">,</span>
+            <span class="s1">update_deltas</span><span class="s0">,</span>
+            <span class="s1">self.min_periods</span><span class="s0">,</span>
+            <span class="s1">ewma_func</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s0">if not </span><span class="s1">is_frame:</span>
+            <span class="s1">result = result.squeeze()</span>
+        <span class="s1">result = result[result_from:]</span>
+        <span class="s1">result = self._selected_obj._constructor(result</span><span class="s0">, </span><span class="s1">**result_kwargs)</span>
+        <span class="s0">return </span><span class="s1">result</span>
+</pre>
+</body>
+</html>

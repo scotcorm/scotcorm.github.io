@@ -1,0 +1,392 @@
+<html>
+<head>
+<title>win.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+win.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># -*- coding: utf-8 -*-</span>
+<span class="s2">&quot;&quot;&quot; 
+This module provides an interface to the native time zone data on Windows, 
+including :py:class:`datetime.tzinfo` implementations. 
+ 
+Attempting to import this module on a non-Windows platform will raise an 
+:py:obj:`ImportError`. 
+&quot;&quot;&quot;</span>
+<span class="s0"># This code was originally contributed by Jeffrey Harris.</span>
+<span class="s3">import </span><span class="s1">datetime</span>
+<span class="s3">import </span><span class="s1">struct</span>
+
+<span class="s3">from </span><span class="s1">six.moves </span><span class="s3">import </span><span class="s1">winreg</span>
+<span class="s3">from </span><span class="s1">six </span><span class="s3">import </span><span class="s1">text_type</span>
+
+<span class="s3">try</span><span class="s1">:</span>
+    <span class="s3">import </span><span class="s1">ctypes</span>
+    <span class="s3">from </span><span class="s1">ctypes </span><span class="s3">import </span><span class="s1">wintypes</span>
+<span class="s3">except </span><span class="s1">ValueError:</span>
+    <span class="s0"># ValueError is raised on non-Windows systems for some horrible reason.</span>
+    <span class="s3">raise </span><span class="s1">ImportError(</span><span class="s4">&quot;Running tzwin on non-Windows system&quot;</span><span class="s1">)</span>
+
+<span class="s3">from </span><span class="s1">._common </span><span class="s3">import </span><span class="s1">tzrangebase</span>
+
+<span class="s1">__all__ = [</span><span class="s4">&quot;tzwin&quot;</span><span class="s3">, </span><span class="s4">&quot;tzwinlocal&quot;</span><span class="s3">, </span><span class="s4">&quot;tzres&quot;</span><span class="s1">]</span>
+
+<span class="s1">ONEWEEK = datetime.timedelta(</span><span class="s5">7</span><span class="s1">)</span>
+
+<span class="s1">TZKEYNAMENT = </span><span class="s4">r&quot;SOFTWARE\Microsoft\Windows NT\CurrentVersion\Time Zones&quot;</span>
+<span class="s1">TZKEYNAME9X = </span><span class="s4">r&quot;SOFTWARE\Microsoft\Windows\CurrentVersion\Time Zones&quot;</span>
+<span class="s1">TZLOCALKEYNAME = </span><span class="s4">r&quot;SYSTEM\CurrentControlSet\Control\TimeZoneInformation&quot;</span>
+
+
+<span class="s3">def </span><span class="s1">_settzkeyname():</span>
+    <span class="s1">handle = winreg.ConnectRegistry(</span><span class="s3">None, </span><span class="s1">winreg.HKEY_LOCAL_MACHINE)</span>
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s1">winreg.OpenKey(handle</span><span class="s3">, </span><span class="s1">TZKEYNAMENT).Close()</span>
+        <span class="s1">TZKEYNAME = TZKEYNAMENT</span>
+    <span class="s3">except </span><span class="s1">WindowsError:</span>
+        <span class="s1">TZKEYNAME = TZKEYNAME9X</span>
+    <span class="s1">handle.Close()</span>
+    <span class="s3">return </span><span class="s1">TZKEYNAME</span>
+
+
+<span class="s1">TZKEYNAME = _settzkeyname()</span>
+
+
+<span class="s3">class </span><span class="s1">tzres(object):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Class for accessing ``tzres.dll``, which contains timezone name related 
+    resources. 
+ 
+    .. versionadded:: 2.5.0 
+    &quot;&quot;&quot;</span>
+    <span class="s1">p_wchar = ctypes.POINTER(wintypes.WCHAR)        </span><span class="s0"># Pointer to a wide char</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">tzres_loc=</span><span class="s4">'tzres.dll'</span><span class="s1">):</span>
+        <span class="s0"># Load the user32 DLL so we can load strings from tzres</span>
+        <span class="s1">user32 = ctypes.WinDLL(</span><span class="s4">'user32'</span><span class="s1">)</span>
+
+        <span class="s0"># Specify the LoadStringW function</span>
+        <span class="s1">user32.LoadStringW.argtypes = (wintypes.HINSTANCE</span><span class="s3">,</span>
+                                       <span class="s1">wintypes.UINT</span><span class="s3">,</span>
+                                       <span class="s1">wintypes.LPWSTR</span><span class="s3">,</span>
+                                       <span class="s1">ctypes.c_int)</span>
+
+        <span class="s1">self.LoadStringW = user32.LoadStringW</span>
+        <span class="s1">self._tzres = ctypes.WinDLL(tzres_loc)</span>
+        <span class="s1">self.tzres_loc = tzres_loc</span>
+
+    <span class="s3">def </span><span class="s1">load_name(self</span><span class="s3">, </span><span class="s1">offset):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Load a timezone name from a DLL offset (integer). 
+ 
+        &gt;&gt;&gt; from dateutil.tzwin import tzres 
+        &gt;&gt;&gt; tzr = tzres() 
+        &gt;&gt;&gt; print(tzr.load_name(112)) 
+        'Eastern Standard Time' 
+ 
+        :param offset: 
+            A positive integer value referring to a string from the tzres dll. 
+ 
+        .. note:: 
+ 
+            Offsets found in the registry are generally of the form 
+            ``@tzres.dll,-114``. The offset in this case is 114, not -114. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s1">resource = self.p_wchar()</span>
+        <span class="s1">lpBuffer = ctypes.cast(ctypes.byref(resource)</span><span class="s3">, </span><span class="s1">wintypes.LPWSTR)</span>
+        <span class="s1">nchar = self.LoadStringW(self._tzres._handle</span><span class="s3">, </span><span class="s1">offset</span><span class="s3">, </span><span class="s1">lpBuffer</span><span class="s3">, </span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s3">return </span><span class="s1">resource[:nchar]</span>
+
+    <span class="s3">def </span><span class="s1">name_from_string(self</span><span class="s3">, </span><span class="s1">tzname_str):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Parse strings as returned from the Windows registry into the time zone 
+        name as defined in the registry. 
+ 
+        &gt;&gt;&gt; from dateutil.tzwin import tzres 
+        &gt;&gt;&gt; tzr = tzres() 
+        &gt;&gt;&gt; print(tzr.name_from_string('@tzres.dll,-251')) 
+        'Dateline Daylight Time' 
+        &gt;&gt;&gt; print(tzr.name_from_string('Eastern Standard Time')) 
+        'Eastern Standard Time' 
+ 
+        :param tzname_str: 
+            A timezone name string as returned from a Windows registry key. 
+ 
+        :return: 
+            Returns the localized timezone string from tzres.dll if the string 
+            is of the form `@tzres.dll,-offset`, else returns the input string. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if not </span><span class="s1">tzname_str.startswith(</span><span class="s4">'@'</span><span class="s1">):</span>
+            <span class="s3">return </span><span class="s1">tzname_str</span>
+
+        <span class="s1">name_splt = tzname_str.split(</span><span class="s4">',-'</span><span class="s1">)</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">offset = int(name_splt[</span><span class="s5">1</span><span class="s1">])</span>
+        <span class="s3">except</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Malformed timezone string.&quot;</span><span class="s1">)</span>
+
+        <span class="s3">return </span><span class="s1">self.load_name(offset)</span>
+
+
+<span class="s3">class </span><span class="s1">tzwinbase(tzrangebase):</span>
+    <span class="s2">&quot;&quot;&quot;tzinfo class based on win32's timezones available in the registry.&quot;&quot;&quot;</span>
+    <span class="s3">def </span><span class="s1">__init__(self):</span>
+        <span class="s3">raise </span><span class="s1">NotImplementedError(</span><span class="s4">'tzwinbase is an abstract base class'</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">__eq__(self</span><span class="s3">, </span><span class="s1">other):</span>
+        <span class="s0"># Compare on all relevant dimensions, including name.</span>
+        <span class="s3">if not </span><span class="s1">isinstance(other</span><span class="s3">, </span><span class="s1">tzwinbase):</span>
+            <span class="s3">return </span><span class="s1">NotImplemented</span>
+
+        <span class="s3">return  </span><span class="s1">(self._std_offset == other._std_offset </span><span class="s3">and</span>
+                 <span class="s1">self._dst_offset == other._dst_offset </span><span class="s3">and</span>
+                 <span class="s1">self._stddayofweek == other._stddayofweek </span><span class="s3">and</span>
+                 <span class="s1">self._dstdayofweek == other._dstdayofweek </span><span class="s3">and</span>
+                 <span class="s1">self._stdweeknumber == other._stdweeknumber </span><span class="s3">and</span>
+                 <span class="s1">self._dstweeknumber == other._dstweeknumber </span><span class="s3">and</span>
+                 <span class="s1">self._stdhour == other._stdhour </span><span class="s3">and</span>
+                 <span class="s1">self._dsthour == other._dsthour </span><span class="s3">and</span>
+                 <span class="s1">self._stdminute == other._stdminute </span><span class="s3">and</span>
+                 <span class="s1">self._dstminute == other._dstminute </span><span class="s3">and</span>
+                 <span class="s1">self._std_abbr == other._std_abbr </span><span class="s3">and</span>
+                 <span class="s1">self._dst_abbr == other._dst_abbr)</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s3">def </span><span class="s1">list():</span>
+        <span class="s2">&quot;&quot;&quot;Return a list of all time zones known to the system.&quot;&quot;&quot;</span>
+        <span class="s3">with </span><span class="s1">winreg.ConnectRegistry(</span><span class="s3">None, </span><span class="s1">winreg.HKEY_LOCAL_MACHINE) </span><span class="s3">as </span><span class="s1">handle:</span>
+            <span class="s3">with </span><span class="s1">winreg.OpenKey(handle</span><span class="s3">, </span><span class="s1">TZKEYNAME) </span><span class="s3">as </span><span class="s1">tzkey:</span>
+                <span class="s1">result = [winreg.EnumKey(tzkey</span><span class="s3">, </span><span class="s1">i)</span>
+                          <span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">range(winreg.QueryInfoKey(tzkey)[</span><span class="s5">0</span><span class="s1">])]</span>
+        <span class="s3">return </span><span class="s1">result</span>
+
+    <span class="s3">def </span><span class="s1">display(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return the display name of the time zone. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">self._display</span>
+
+    <span class="s3">def </span><span class="s1">transitions(self</span><span class="s3">, </span><span class="s1">year):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        For a given year, get the DST on and off transition times, expressed 
+        always on the standard time side. For zones with no transitions, this 
+        function returns ``None``. 
+ 
+        :param year: 
+            The year whose transitions you would like to query. 
+ 
+        :return: 
+            Returns a :class:`tuple` of :class:`datetime.datetime` objects, 
+            ``(dston, dstoff)`` for zones with an annual DST transition, or 
+            ``None`` for fixed offset zones. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s3">if not </span><span class="s1">self.hasdst:</span>
+            <span class="s3">return None</span>
+
+        <span class="s1">dston = picknthweekday(year</span><span class="s3">, </span><span class="s1">self._dstmonth</span><span class="s3">, </span><span class="s1">self._dstdayofweek</span><span class="s3">,</span>
+                               <span class="s1">self._dsthour</span><span class="s3">, </span><span class="s1">self._dstminute</span><span class="s3">,</span>
+                               <span class="s1">self._dstweeknumber)</span>
+
+        <span class="s1">dstoff = picknthweekday(year</span><span class="s3">, </span><span class="s1">self._stdmonth</span><span class="s3">, </span><span class="s1">self._stddayofweek</span><span class="s3">,</span>
+                                <span class="s1">self._stdhour</span><span class="s3">, </span><span class="s1">self._stdminute</span><span class="s3">,</span>
+                                <span class="s1">self._stdweeknumber)</span>
+
+        <span class="s0"># Ambiguous dates default to the STD side</span>
+        <span class="s1">dstoff -= self._dst_base_offset</span>
+
+        <span class="s3">return </span><span class="s1">dston</span><span class="s3">, </span><span class="s1">dstoff</span>
+
+    <span class="s3">def </span><span class="s1">_get_hasdst(self):</span>
+        <span class="s3">return </span><span class="s1">self._dstmonth != </span><span class="s5">0</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">_dst_base_offset(self):</span>
+        <span class="s3">return </span><span class="s1">self._dst_base_offset_</span>
+
+
+<span class="s3">class </span><span class="s1">tzwin(tzwinbase):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Time zone object created from the zone info in the Windows registry 
+ 
+    These are similar to :py:class:`dateutil.tz.tzrange` objects in that 
+    the time zone data is provided in the format of a single offset rule 
+    for either 0 or 2 time zone transitions per year. 
+ 
+    :param: name 
+        The name of a Windows time zone key, e.g. &quot;Eastern Standard Time&quot;. 
+        The full list of keys can be retrieved with :func:`tzwin.list`. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">name):</span>
+        <span class="s1">self._name = name</span>
+
+        <span class="s3">with </span><span class="s1">winreg.ConnectRegistry(</span><span class="s3">None, </span><span class="s1">winreg.HKEY_LOCAL_MACHINE) </span><span class="s3">as </span><span class="s1">handle:</span>
+            <span class="s1">tzkeyname = text_type(</span><span class="s4">&quot;{kn}</span><span class="s3">\\</span><span class="s4">{name}&quot;</span><span class="s1">).format(kn=TZKEYNAME</span><span class="s3">, </span><span class="s1">name=name)</span>
+            <span class="s3">with </span><span class="s1">winreg.OpenKey(handle</span><span class="s3">, </span><span class="s1">tzkeyname) </span><span class="s3">as </span><span class="s1">tzkey:</span>
+                <span class="s1">keydict = valuestodict(tzkey)</span>
+
+        <span class="s1">self._std_abbr = keydict[</span><span class="s4">&quot;Std&quot;</span><span class="s1">]</span>
+        <span class="s1">self._dst_abbr = keydict[</span><span class="s4">&quot;Dlt&quot;</span><span class="s1">]</span>
+
+        <span class="s1">self._display = keydict[</span><span class="s4">&quot;Display&quot;</span><span class="s1">]</span>
+
+        <span class="s0"># See http://ww_winreg.jsiinc.com/SUBA/tip0300/rh0398.htm</span>
+        <span class="s1">tup = struct.unpack(</span><span class="s4">&quot;=3l16h&quot;</span><span class="s3">, </span><span class="s1">keydict[</span><span class="s4">&quot;TZI&quot;</span><span class="s1">])</span>
+        <span class="s1">stdoffset = -tup[</span><span class="s5">0</span><span class="s1">]-tup[</span><span class="s5">1</span><span class="s1">]          </span><span class="s0"># Bias + StandardBias * -1</span>
+        <span class="s1">dstoffset = stdoffset-tup[</span><span class="s5">2</span><span class="s1">]        </span><span class="s0"># + DaylightBias * -1</span>
+        <span class="s1">self._std_offset = datetime.timedelta(minutes=stdoffset)</span>
+        <span class="s1">self._dst_offset = datetime.timedelta(minutes=dstoffset)</span>
+
+        <span class="s0"># for the meaning see the win32 TIME_ZONE_INFORMATION structure docs</span>
+        <span class="s0"># http://msdn.microsoft.com/en-us/library/windows/desktop/ms725481(v=vs.85).aspx</span>
+        <span class="s1">(self._stdmonth</span><span class="s3">,</span>
+         <span class="s1">self._stddayofweek</span><span class="s3">,   </span><span class="s0"># Sunday = 0</span>
+         <span class="s1">self._stdweeknumber</span><span class="s3">,  </span><span class="s0"># Last = 5</span>
+         <span class="s1">self._stdhour</span><span class="s3">,</span>
+         <span class="s1">self._stdminute) = tup[</span><span class="s5">4</span><span class="s1">:</span><span class="s5">9</span><span class="s1">]</span>
+
+        <span class="s1">(self._dstmonth</span><span class="s3">,</span>
+         <span class="s1">self._dstdayofweek</span><span class="s3">,   </span><span class="s0"># Sunday = 0</span>
+         <span class="s1">self._dstweeknumber</span><span class="s3">,  </span><span class="s0"># Last = 5</span>
+         <span class="s1">self._dsthour</span><span class="s3">,</span>
+         <span class="s1">self._dstminute) = tup[</span><span class="s5">12</span><span class="s1">:</span><span class="s5">17</span><span class="s1">]</span>
+
+        <span class="s1">self._dst_base_offset_ = self._dst_offset - self._std_offset</span>
+        <span class="s1">self.hasdst = self._get_hasdst()</span>
+
+    <span class="s3">def </span><span class="s1">__repr__(self):</span>
+        <span class="s3">return </span><span class="s4">&quot;tzwin(%s)&quot; </span><span class="s1">% repr(self._name)</span>
+
+    <span class="s3">def </span><span class="s1">__reduce__(self):</span>
+        <span class="s3">return </span><span class="s1">(self.__class__</span><span class="s3">, </span><span class="s1">(self._name</span><span class="s3">,</span><span class="s1">))</span>
+
+
+<span class="s3">class </span><span class="s1">tzwinlocal(tzwinbase):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Class representing the local time zone information in the Windows registry 
+ 
+    While :class:`dateutil.tz.tzlocal` makes system calls (via the :mod:`time` 
+    module) to retrieve time zone information, ``tzwinlocal`` retrieves the 
+    rules directly from the Windows registry and creates an object like 
+    :class:`dateutil.tz.tzwin`. 
+ 
+    Because Windows does not have an equivalent of :func:`time.tzset`, on 
+    Windows, :class:`dateutil.tz.tzlocal` instances will always reflect the 
+    time zone settings *at the time that the process was started*, meaning 
+    changes to the machine's time zone settings during the run of a program 
+    on Windows will **not** be reflected by :class:`dateutil.tz.tzlocal`. 
+    Because ``tzwinlocal`` reads the registry directly, it is unaffected by 
+    this issue. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">def </span><span class="s1">__init__(self):</span>
+        <span class="s3">with </span><span class="s1">winreg.ConnectRegistry(</span><span class="s3">None, </span><span class="s1">winreg.HKEY_LOCAL_MACHINE) </span><span class="s3">as </span><span class="s1">handle:</span>
+            <span class="s3">with </span><span class="s1">winreg.OpenKey(handle</span><span class="s3">, </span><span class="s1">TZLOCALKEYNAME) </span><span class="s3">as </span><span class="s1">tzlocalkey:</span>
+                <span class="s1">keydict = valuestodict(tzlocalkey)</span>
+
+            <span class="s1">self._std_abbr = keydict[</span><span class="s4">&quot;StandardName&quot;</span><span class="s1">]</span>
+            <span class="s1">self._dst_abbr = keydict[</span><span class="s4">&quot;DaylightName&quot;</span><span class="s1">]</span>
+
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">tzkeyname = text_type(</span><span class="s4">'{kn}</span><span class="s3">\\</span><span class="s4">{sn}'</span><span class="s1">).format(kn=TZKEYNAME</span><span class="s3">,</span>
+                                                          <span class="s1">sn=self._std_abbr)</span>
+                <span class="s3">with </span><span class="s1">winreg.OpenKey(handle</span><span class="s3">, </span><span class="s1">tzkeyname) </span><span class="s3">as </span><span class="s1">tzkey:</span>
+                    <span class="s1">_keydict = valuestodict(tzkey)</span>
+                    <span class="s1">self._display = _keydict[</span><span class="s4">&quot;Display&quot;</span><span class="s1">]</span>
+            <span class="s3">except </span><span class="s1">OSError:</span>
+                <span class="s1">self._display = </span><span class="s3">None</span>
+
+        <span class="s1">stdoffset = -keydict[</span><span class="s4">&quot;Bias&quot;</span><span class="s1">]-keydict[</span><span class="s4">&quot;StandardBias&quot;</span><span class="s1">]</span>
+        <span class="s1">dstoffset = stdoffset-keydict[</span><span class="s4">&quot;DaylightBias&quot;</span><span class="s1">]</span>
+
+        <span class="s1">self._std_offset = datetime.timedelta(minutes=stdoffset)</span>
+        <span class="s1">self._dst_offset = datetime.timedelta(minutes=dstoffset)</span>
+
+        <span class="s0"># For reasons unclear, in this particular key, the day of week has been</span>
+        <span class="s0"># moved to the END of the SYSTEMTIME structure.</span>
+        <span class="s1">tup = struct.unpack(</span><span class="s4">&quot;=8h&quot;</span><span class="s3">, </span><span class="s1">keydict[</span><span class="s4">&quot;StandardStart&quot;</span><span class="s1">])</span>
+
+        <span class="s1">(self._stdmonth</span><span class="s3">,</span>
+         <span class="s1">self._stdweeknumber</span><span class="s3">,  </span><span class="s0"># Last = 5</span>
+         <span class="s1">self._stdhour</span><span class="s3">,</span>
+         <span class="s1">self._stdminute) = tup[</span><span class="s5">1</span><span class="s1">:</span><span class="s5">5</span><span class="s1">]</span>
+
+        <span class="s1">self._stddayofweek = tup[</span><span class="s5">7</span><span class="s1">]</span>
+
+        <span class="s1">tup = struct.unpack(</span><span class="s4">&quot;=8h&quot;</span><span class="s3">, </span><span class="s1">keydict[</span><span class="s4">&quot;DaylightStart&quot;</span><span class="s1">])</span>
+
+        <span class="s1">(self._dstmonth</span><span class="s3">,</span>
+         <span class="s1">self._dstweeknumber</span><span class="s3">,  </span><span class="s0"># Last = 5</span>
+         <span class="s1">self._dsthour</span><span class="s3">,</span>
+         <span class="s1">self._dstminute) = tup[</span><span class="s5">1</span><span class="s1">:</span><span class="s5">5</span><span class="s1">]</span>
+
+        <span class="s1">self._dstdayofweek = tup[</span><span class="s5">7</span><span class="s1">]</span>
+
+        <span class="s1">self._dst_base_offset_ = self._dst_offset - self._std_offset</span>
+        <span class="s1">self.hasdst = self._get_hasdst()</span>
+
+    <span class="s3">def </span><span class="s1">__repr__(self):</span>
+        <span class="s3">return </span><span class="s4">&quot;tzwinlocal()&quot;</span>
+
+    <span class="s3">def </span><span class="s1">__str__(self):</span>
+        <span class="s0"># str will return the standard name, not the daylight name.</span>
+        <span class="s3">return </span><span class="s4">&quot;tzwinlocal(%s)&quot; </span><span class="s1">% repr(self._std_abbr)</span>
+
+    <span class="s3">def </span><span class="s1">__reduce__(self):</span>
+        <span class="s3">return </span><span class="s1">(self.__class__</span><span class="s3">, </span><span class="s1">())</span>
+
+
+<span class="s3">def </span><span class="s1">picknthweekday(year</span><span class="s3">, </span><span class="s1">month</span><span class="s3">, </span><span class="s1">dayofweek</span><span class="s3">, </span><span class="s1">hour</span><span class="s3">, </span><span class="s1">minute</span><span class="s3">, </span><span class="s1">whichweek):</span>
+    <span class="s2">&quot;&quot;&quot; dayofweek == 0 means Sunday, whichweek 5 means last instance &quot;&quot;&quot;</span>
+    <span class="s1">first = datetime.datetime(year</span><span class="s3">, </span><span class="s1">month</span><span class="s3">, </span><span class="s5">1</span><span class="s3">, </span><span class="s1">hour</span><span class="s3">, </span><span class="s1">minute)</span>
+
+    <span class="s0"># This will work if dayofweek is ISO weekday (1-7) or Microsoft-style (0-6),</span>
+    <span class="s0"># Because 7 % 7 = 0</span>
+    <span class="s1">weekdayone = first.replace(day=((dayofweek - first.isoweekday()) % </span><span class="s5">7</span><span class="s1">) + </span><span class="s5">1</span><span class="s1">)</span>
+    <span class="s1">wd = weekdayone + ((whichweek - </span><span class="s5">1</span><span class="s1">) * ONEWEEK)</span>
+    <span class="s3">if </span><span class="s1">(wd.month != month):</span>
+        <span class="s1">wd -= ONEWEEK</span>
+
+    <span class="s3">return </span><span class="s1">wd</span>
+
+
+<span class="s3">def </span><span class="s1">valuestodict(key):</span>
+    <span class="s2">&quot;&quot;&quot;Convert a registry key's values to a dictionary.&quot;&quot;&quot;</span>
+    <span class="s1">dout = {}</span>
+    <span class="s1">size = winreg.QueryInfoKey(key)[</span><span class="s5">1</span><span class="s1">]</span>
+    <span class="s1">tz_res = </span><span class="s3">None</span>
+
+    <span class="s3">for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">range(size):</span>
+        <span class="s1">key_name</span><span class="s3">, </span><span class="s1">value</span><span class="s3">, </span><span class="s1">dtype = winreg.EnumValue(key</span><span class="s3">, </span><span class="s1">i)</span>
+        <span class="s3">if </span><span class="s1">dtype == winreg.REG_DWORD </span><span class="s3">or </span><span class="s1">dtype == winreg.REG_DWORD_LITTLE_ENDIAN:</span>
+            <span class="s0"># If it's a DWORD (32-bit integer), it's stored as unsigned - convert</span>
+            <span class="s0"># that to a proper signed integer</span>
+            <span class="s3">if </span><span class="s1">value &amp; (</span><span class="s5">1 </span><span class="s1">&lt;&lt; </span><span class="s5">31</span><span class="s1">):</span>
+                <span class="s1">value = value - (</span><span class="s5">1 </span><span class="s1">&lt;&lt; </span><span class="s5">32</span><span class="s1">)</span>
+        <span class="s3">elif </span><span class="s1">dtype == winreg.REG_SZ:</span>
+            <span class="s0"># If it's a reference to the tzres DLL, load the actual string</span>
+            <span class="s3">if </span><span class="s1">value.startswith(</span><span class="s4">'@tzres'</span><span class="s1">):</span>
+                <span class="s1">tz_res = tz_res </span><span class="s3">or </span><span class="s1">tzres()</span>
+                <span class="s1">value = tz_res.name_from_string(value)</span>
+
+            <span class="s1">value = value.rstrip(</span><span class="s4">'</span><span class="s3">\x00</span><span class="s4">'</span><span class="s1">)    </span><span class="s0"># Remove trailing nulls</span>
+
+        <span class="s1">dout[key_name] = value</span>
+
+    <span class="s3">return </span><span class="s1">dout</span>
+</pre>
+</body>
+</html>

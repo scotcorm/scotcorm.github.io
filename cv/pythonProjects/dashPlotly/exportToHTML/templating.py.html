@@ -1,0 +1,186 @@
+<html>
+<head>
+<title>templating.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #6a8759;}
+.s4 { color: #808080;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+templating.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">typing </span><span class="s0">as </span><span class="s1">t</span>
+
+<span class="s0">from </span><span class="s1">jinja2 </span><span class="s0">import </span><span class="s1">BaseLoader</span>
+<span class="s0">from </span><span class="s1">jinja2 </span><span class="s0">import </span><span class="s1">Environment </span><span class="s0">as </span><span class="s1">BaseEnvironment</span>
+<span class="s0">from </span><span class="s1">jinja2 </span><span class="s0">import </span><span class="s1">Template</span>
+<span class="s0">from </span><span class="s1">jinja2 </span><span class="s0">import </span><span class="s1">TemplateNotFound</span>
+
+<span class="s0">from </span><span class="s1">.globals </span><span class="s0">import </span><span class="s1">_app_ctx_stack</span>
+<span class="s0">from </span><span class="s1">.globals </span><span class="s0">import </span><span class="s1">_request_ctx_stack</span>
+<span class="s0">from </span><span class="s1">.signals </span><span class="s0">import </span><span class="s1">before_render_template</span>
+<span class="s0">from </span><span class="s1">.signals </span><span class="s0">import </span><span class="s1">template_rendered</span>
+
+<span class="s0">if </span><span class="s1">t.TYPE_CHECKING:</span>
+    <span class="s0">from </span><span class="s1">.app </span><span class="s0">import </span><span class="s1">Flask</span>
+    <span class="s0">from </span><span class="s1">.scaffold </span><span class="s0">import </span><span class="s1">Scaffold</span>
+
+
+<span class="s0">def </span><span class="s1">_default_template_ctx_processor() -&gt; t.Dict[str</span><span class="s0">, </span><span class="s1">t.Any]:</span>
+    <span class="s2">&quot;&quot;&quot;Default template context processor.  Injects `request`, 
+    `session` and `g`. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">reqctx = _request_ctx_stack.top</span>
+    <span class="s1">appctx = _app_ctx_stack.top</span>
+    <span class="s1">rv = {}</span>
+    <span class="s0">if </span><span class="s1">appctx </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s1">rv[</span><span class="s3">&quot;g&quot;</span><span class="s1">] = appctx.g</span>
+    <span class="s0">if </span><span class="s1">reqctx </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s1">rv[</span><span class="s3">&quot;request&quot;</span><span class="s1">] = reqctx.request</span>
+        <span class="s1">rv[</span><span class="s3">&quot;session&quot;</span><span class="s1">] = reqctx.session</span>
+    <span class="s0">return </span><span class="s1">rv</span>
+
+
+<span class="s0">class </span><span class="s1">Environment(BaseEnvironment):</span>
+    <span class="s2">&quot;&quot;&quot;Works like a regular Jinja2 environment but has some additional 
+    knowledge of how Flask's blueprint works so that it can prepend the 
+    name of the blueprint to referenced templates if necessary. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">app: </span><span class="s3">&quot;Flask&quot;</span><span class="s0">, </span><span class="s1">**options: t.Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s0">if </span><span class="s3">&quot;loader&quot; </span><span class="s0">not in </span><span class="s1">options:</span>
+            <span class="s1">options[</span><span class="s3">&quot;loader&quot;</span><span class="s1">] = app.create_global_jinja_loader()</span>
+        <span class="s1">BaseEnvironment.__init__(self</span><span class="s0">, </span><span class="s1">**options)</span>
+        <span class="s1">self.app = app</span>
+
+
+<span class="s0">class </span><span class="s1">DispatchingJinjaLoader(BaseLoader):</span>
+    <span class="s2">&quot;&quot;&quot;A loader that looks for templates in the application and all 
+    the blueprint folders. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">app: </span><span class="s3">&quot;Flask&quot;</span><span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self.app = app</span>
+
+    <span class="s0">def </span><span class="s1">get_source(  </span><span class="s4"># type: ignore</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">environment: Environment</span><span class="s0">, </span><span class="s1">template: str</span>
+    <span class="s1">) -&gt; t.Tuple[str</span><span class="s0">, </span><span class="s1">t.Optional[str]</span><span class="s0">, </span><span class="s1">t.Optional[t.Callable]]:</span>
+        <span class="s0">if </span><span class="s1">self.app.config[</span><span class="s3">&quot;EXPLAIN_TEMPLATE_LOADING&quot;</span><span class="s1">]:</span>
+            <span class="s0">return </span><span class="s1">self._get_source_explained(environment</span><span class="s0">, </span><span class="s1">template)</span>
+        <span class="s0">return </span><span class="s1">self._get_source_fast(environment</span><span class="s0">, </span><span class="s1">template)</span>
+
+    <span class="s0">def </span><span class="s1">_get_source_explained(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">environment: Environment</span><span class="s0">, </span><span class="s1">template: str</span>
+    <span class="s1">) -&gt; t.Tuple[str</span><span class="s0">, </span><span class="s1">t.Optional[str]</span><span class="s0">, </span><span class="s1">t.Optional[t.Callable]]:</span>
+        <span class="s1">attempts = []</span>
+        <span class="s1">rv: t.Optional[t.Tuple[str</span><span class="s0">, </span><span class="s1">t.Optional[str]</span><span class="s0">, </span><span class="s1">t.Optional[t.Callable[[]</span><span class="s0">, </span><span class="s1">bool]]]]</span>
+        <span class="s1">trv: t.Optional[</span>
+            <span class="s1">t.Tuple[str</span><span class="s0">, </span><span class="s1">t.Optional[str]</span><span class="s0">, </span><span class="s1">t.Optional[t.Callable[[]</span><span class="s0">, </span><span class="s1">bool]]]</span>
+        <span class="s1">] = </span><span class="s0">None</span>
+
+        <span class="s0">for </span><span class="s1">srcobj</span><span class="s0">, </span><span class="s1">loader </span><span class="s0">in </span><span class="s1">self._iter_loaders(template):</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">rv = loader.get_source(environment</span><span class="s0">, </span><span class="s1">template)</span>
+                <span class="s0">if </span><span class="s1">trv </span><span class="s0">is None</span><span class="s1">:</span>
+                    <span class="s1">trv = rv</span>
+            <span class="s0">except </span><span class="s1">TemplateNotFound:</span>
+                <span class="s1">rv = </span><span class="s0">None</span>
+            <span class="s1">attempts.append((loader</span><span class="s0">, </span><span class="s1">srcobj</span><span class="s0">, </span><span class="s1">rv))</span>
+
+        <span class="s0">from </span><span class="s1">.debughelpers </span><span class="s0">import </span><span class="s1">explain_template_loading_attempts</span>
+
+        <span class="s1">explain_template_loading_attempts(self.app</span><span class="s0">, </span><span class="s1">template</span><span class="s0">, </span><span class="s1">attempts)</span>
+
+        <span class="s0">if </span><span class="s1">trv </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">trv</span>
+        <span class="s0">raise </span><span class="s1">TemplateNotFound(template)</span>
+
+    <span class="s0">def </span><span class="s1">_get_source_fast(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">environment: Environment</span><span class="s0">, </span><span class="s1">template: str</span>
+    <span class="s1">) -&gt; t.Tuple[str</span><span class="s0">, </span><span class="s1">t.Optional[str]</span><span class="s0">, </span><span class="s1">t.Optional[t.Callable]]:</span>
+        <span class="s0">for </span><span class="s1">_srcobj</span><span class="s0">, </span><span class="s1">loader </span><span class="s0">in </span><span class="s1">self._iter_loaders(template):</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s0">return </span><span class="s1">loader.get_source(environment</span><span class="s0">, </span><span class="s1">template)</span>
+            <span class="s0">except </span><span class="s1">TemplateNotFound:</span>
+                <span class="s0">continue</span>
+        <span class="s0">raise </span><span class="s1">TemplateNotFound(template)</span>
+
+    <span class="s0">def </span><span class="s1">_iter_loaders(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">template: str</span>
+    <span class="s1">) -&gt; t.Generator[t.Tuple[</span><span class="s3">&quot;Scaffold&quot;</span><span class="s0">, </span><span class="s1">BaseLoader]</span><span class="s0">, None, None</span><span class="s1">]:</span>
+        <span class="s1">loader = self.app.jinja_loader</span>
+        <span class="s0">if </span><span class="s1">loader </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s0">yield </span><span class="s1">self.app</span><span class="s0">, </span><span class="s1">loader</span>
+
+        <span class="s0">for </span><span class="s1">blueprint </span><span class="s0">in </span><span class="s1">self.app.iter_blueprints():</span>
+            <span class="s1">loader = blueprint.jinja_loader</span>
+            <span class="s0">if </span><span class="s1">loader </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s0">yield </span><span class="s1">blueprint</span><span class="s0">, </span><span class="s1">loader</span>
+
+    <span class="s0">def </span><span class="s1">list_templates(self) -&gt; t.List[str]:</span>
+        <span class="s1">result = set()</span>
+        <span class="s1">loader = self.app.jinja_loader</span>
+        <span class="s0">if </span><span class="s1">loader </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">result.update(loader.list_templates())</span>
+
+        <span class="s0">for </span><span class="s1">blueprint </span><span class="s0">in </span><span class="s1">self.app.iter_blueprints():</span>
+            <span class="s1">loader = blueprint.jinja_loader</span>
+            <span class="s0">if </span><span class="s1">loader </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s0">for </span><span class="s1">template </span><span class="s0">in </span><span class="s1">loader.list_templates():</span>
+                    <span class="s1">result.add(template)</span>
+
+        <span class="s0">return </span><span class="s1">list(result)</span>
+
+
+<span class="s0">def </span><span class="s1">_render(template: Template</span><span class="s0">, </span><span class="s1">context: dict</span><span class="s0">, </span><span class="s1">app: </span><span class="s3">&quot;Flask&quot;</span><span class="s1">) -&gt; str:</span>
+    <span class="s2">&quot;&quot;&quot;Renders the template and fires the signal&quot;&quot;&quot;</span>
+
+    <span class="s1">before_render_template.send(app</span><span class="s0">, </span><span class="s1">template=template</span><span class="s0">, </span><span class="s1">context=context)</span>
+    <span class="s1">rv = template.render(context)</span>
+    <span class="s1">template_rendered.send(app</span><span class="s0">, </span><span class="s1">template=template</span><span class="s0">, </span><span class="s1">context=context)</span>
+    <span class="s0">return </span><span class="s1">rv</span>
+
+
+<span class="s0">def </span><span class="s1">render_template(</span>
+    <span class="s1">template_name_or_list: t.Union[str</span><span class="s0">, </span><span class="s1">t.List[str]]</span><span class="s0">, </span><span class="s1">**context: t.Any</span>
+<span class="s1">) -&gt; str:</span>
+    <span class="s2">&quot;&quot;&quot;Renders a template from the template folder with the given 
+    context. 
+ 
+    :param template_name_or_list: the name of the template to be 
+                                  rendered, or an iterable with template names 
+                                  the first one existing will be rendered 
+    :param context: the variables that should be available in the 
+                    context of the template. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">ctx = _app_ctx_stack.top</span>
+    <span class="s1">ctx.app.update_template_context(context)</span>
+    <span class="s0">return </span><span class="s1">_render(</span>
+        <span class="s1">ctx.app.jinja_env.get_or_select_template(template_name_or_list)</span><span class="s0">,</span>
+        <span class="s1">context</span><span class="s0">,</span>
+        <span class="s1">ctx.app</span><span class="s0">,</span>
+    <span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">render_template_string(source: str</span><span class="s0">, </span><span class="s1">**context: t.Any) -&gt; str:</span>
+    <span class="s2">&quot;&quot;&quot;Renders a template from the given template source string 
+    with the given context. Template variables will be autoescaped. 
+ 
+    :param source: the source code of the template to be 
+                   rendered 
+    :param context: the variables that should be available in the 
+                    context of the template. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">ctx = _app_ctx_stack.top</span>
+    <span class="s1">ctx.app.update_template_context(context)</span>
+    <span class="s0">return </span><span class="s1">_render(ctx.app.jinja_env.from_string(source)</span><span class="s0">, </span><span class="s1">context</span><span class="s0">, </span><span class="s1">ctx.app)</span>
+</pre>
+</body>
+</html>

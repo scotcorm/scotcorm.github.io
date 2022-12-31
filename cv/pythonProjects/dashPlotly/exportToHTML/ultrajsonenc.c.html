@@ -1,0 +1,1223 @@
+<html>
+<head>
+<title>ultrajsonenc.c</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #4646f1;}
+.s6 { color: #0f9795;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+ultrajsonenc.c</font>
+</center></td></tr></table>
+<pre><span class="s0">/* 
+Copyright (c) 2011-2013, ESN Social Software AB and Jonas Tarnstrom 
+All rights reserved. 
+ 
+Redistribution and use in source and binary forms, with or without 
+modification, are permitted provided that the following conditions are met: 
+    * Redistributions of source code must retain the above copyright 
+      notice, this list of conditions and the following disclaimer. 
+    * Redistributions in binary form must reproduce the above copyright 
+      notice, this list of conditions and the following disclaimer in the 
+      documentation and/or other materials provided with the distribution. 
+    * Neither the name of the ESN Social Software AB nor the 
+      names of its contributors may be used to endorse or promote products 
+      derived from this software without specific prior written permission. 
+ 
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS &quot;AS IS&quot; AND 
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED 
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE 
+DISCLAIMED. IN NO EVENT SHALL ESN SOCIAL SOFTWARE AB OR JONAS TARNSTROM BE 
+LIABLE 
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL 
+DAMAGES 
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; 
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND 
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT 
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS 
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. 
+ 
+ 
+Portions of code from MODP_ASCII - Ascii transformations (upper/lower, etc) 
+https://github.com/client9/stringencoders 
+Copyright (c) 2007  Nick Galbreath -- nickg [at] modp [dot] com. All rights 
+reserved. 
+ 
+Numeric decoder derived from from TCL library 
+https://www.opensource.apple.com/source/tcl/tcl-14/tcl/license.terms 
+ * Copyright (c) 1988-1993 The Regents of the University of California. 
+ * Copyright (c) 1994 Sun Microsystems, Inc. 
+*/</span>
+
+<span class="s2">#include </span><span class="s1">&lt;assert.h&gt;</span>
+<span class="s2">#include </span><span class="s1">&lt;</span><span class="s2">float</span><span class="s1">.h&gt;</span>
+<span class="s2">#include </span><span class="s1">&lt;locale.h&gt;</span>
+<span class="s2">#include </span><span class="s1">&lt;math.h&gt;</span>
+<span class="s2">#include </span><span class="s1">&lt;stdio.h&gt;</span>
+<span class="s2">#include </span><span class="s1">&lt;stdlib.h&gt;</span>
+<span class="s2">#include </span><span class="s1">&lt;string.h&gt;</span>
+<span class="s2">#include </span><span class="s3">&quot;ultrajson.h&quot;</span>
+
+<span class="s2">#ifndef </span><span class="s1">TRUE</span>
+<span class="s2">#define </span><span class="s1">TRUE </span><span class="s4">1</span>
+<span class="s2">#endif</span>
+<span class="s2">#ifndef </span><span class="s1">FALSE</span>
+<span class="s2">#define </span><span class="s1">FALSE </span><span class="s4">0</span>
+<span class="s2">#endif</span>
+
+<span class="s0">/* 
+Worst cases being: 
+ 
+Control characters (ASCII &lt; 32) 
+0x00 (1 byte) input =&gt; \u0000 output (6 bytes) 
+1 * 6 =&gt; 6 (6 bytes required) 
+ 
+or UTF-16 surrogate pairs 
+4 bytes input in UTF-8 =&gt; \uXXXX\uYYYY (12 bytes). 
+ 
+4 * 6 =&gt; 24 bytes (12 bytes required) 
+ 
+The extra 2 bytes are for the quotes around the string 
+ 
+*/</span>
+<span class="s2">#define </span><span class="s1">RESERVE_STRING(_len) (</span><span class="s4">2 </span><span class="s1">+ ((_len)*</span><span class="s4">6</span><span class="s1">))</span>
+
+<span class="s2">static const double </span><span class="s1">g_pow10[] = {</span><span class="s4">1</span><span class="s1">,</span>
+                                 <span class="s4">10</span><span class="s1">,</span>
+                                 <span class="s4">100</span><span class="s1">,</span>
+                                 <span class="s4">1000</span><span class="s1">,</span>
+                                 <span class="s4">10000</span><span class="s1">,</span>
+                                 <span class="s4">100000</span><span class="s1">,</span>
+                                 <span class="s4">1000000</span><span class="s1">,</span>
+                                 <span class="s4">10000000</span><span class="s1">,</span>
+                                 <span class="s4">100000000</span><span class="s1">,</span>
+                                 <span class="s4">1000000000</span><span class="s1">,</span>
+                                 <span class="s4">10000000000</span><span class="s1">,</span>
+                                 <span class="s4">100000000000</span><span class="s1">,</span>
+                                 <span class="s4">1000000000000</span><span class="s1">,</span>
+                                 <span class="s4">10000000000000</span><span class="s1">,</span>
+                                 <span class="s4">100000000000000</span><span class="s1">,</span>
+                                 <span class="s4">1000000000000000</span><span class="s1">};</span>
+<span class="s2">static const char </span><span class="s1">g_hexChars[] = </span><span class="s3">&quot;0123456789abcdef&quot;</span><span class="s1">;</span>
+<span class="s2">static const char </span><span class="s1">g_escapeChars[] = </span><span class="s3">&quot;0123456789</span><span class="s5">\\</span><span class="s3">b</span><span class="s5">\\</span><span class="s3">t</span><span class="s5">\\</span><span class="s3">n</span><span class="s5">\\</span><span class="s3">f</span><span class="s5">\\</span><span class="s3">r</span><span class="s5">\\\&quot;\\\\\\</span><span class="s3">/&quot;</span><span class="s1">;</span>
+
+<span class="s0">/* 
+FIXME: While this is fine dandy and working it's a magic value mess which 
+probably only the author understands. 
+Needs a cleanup and more documentation */</span>
+
+<span class="s0">/* 
+Table for pure ascii output escaping all characters above 127 to \uXXXX */</span>
+<span class="s2">static const </span><span class="s1">JSUINT8 g_asciiOutputTable[</span><span class="s4">256</span><span class="s1">] = {</span>
+    <span class="s0">/* 0x00 */ </span><span class="s4">0</span><span class="s1">,</span>
+    <span class="s4">30</span><span class="s1">,</span>
+    <span class="s4">30</span><span class="s1">,</span>
+    <span class="s4">30</span><span class="s1">,</span>
+    <span class="s4">30</span><span class="s1">,</span>
+    <span class="s4">30</span><span class="s1">,</span>
+    <span class="s4">30</span><span class="s1">,</span>
+    <span class="s4">30</span><span class="s1">,</span>
+    <span class="s4">10</span><span class="s1">,</span>
+    <span class="s4">12</span><span class="s1">,</span>
+    <span class="s4">14</span><span class="s1">,</span>
+    <span class="s4">30</span><span class="s1">,</span>
+    <span class="s4">16</span><span class="s1">,</span>
+    <span class="s4">18</span><span class="s1">,</span>
+    <span class="s4">30</span><span class="s1">,</span>
+    <span class="s4">30</span><span class="s1">,</span>
+    <span class="s0">/* 0x10 */ </span><span class="s4">30</span><span class="s1">,</span>
+    <span class="s4">30</span><span class="s1">,</span>
+    <span class="s4">30</span><span class="s1">,</span>
+    <span class="s4">30</span><span class="s1">,</span>
+    <span class="s4">30</span><span class="s1">,</span>
+    <span class="s4">30</span><span class="s1">,</span>
+    <span class="s4">30</span><span class="s1">,</span>
+    <span class="s4">30</span><span class="s1">,</span>
+    <span class="s4">30</span><span class="s1">,</span>
+    <span class="s4">30</span><span class="s1">,</span>
+    <span class="s4">30</span><span class="s1">,</span>
+    <span class="s4">30</span><span class="s1">,</span>
+    <span class="s4">30</span><span class="s1">,</span>
+    <span class="s4">30</span><span class="s1">,</span>
+    <span class="s4">30</span><span class="s1">,</span>
+    <span class="s4">30</span><span class="s1">,</span>
+    <span class="s0">/* 0x20 */ </span><span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">20</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">29</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">24</span><span class="s1">,</span>
+    <span class="s0">/* 0x30 */ </span><span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">29</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">29</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s0">/* 0x40 */ </span><span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s0">/* 0x50 */ </span><span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">22</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s0">/* 0x60 */ </span><span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s0">/* 0x70 */ </span><span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s0">/* 0x80 */ </span><span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s0">/* 0x90 */ </span><span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s0">/* 0xa0 */ </span><span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s0">/* 0xb0 */ </span><span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s0">/* 0xc0 */ </span><span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s0">/* 0xd0 */ </span><span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s4">2</span><span class="s1">,</span>
+    <span class="s0">/* 0xe0 */ </span><span class="s4">3</span><span class="s1">,</span>
+    <span class="s4">3</span><span class="s1">,</span>
+    <span class="s4">3</span><span class="s1">,</span>
+    <span class="s4">3</span><span class="s1">,</span>
+    <span class="s4">3</span><span class="s1">,</span>
+    <span class="s4">3</span><span class="s1">,</span>
+    <span class="s4">3</span><span class="s1">,</span>
+    <span class="s4">3</span><span class="s1">,</span>
+    <span class="s4">3</span><span class="s1">,</span>
+    <span class="s4">3</span><span class="s1">,</span>
+    <span class="s4">3</span><span class="s1">,</span>
+    <span class="s4">3</span><span class="s1">,</span>
+    <span class="s4">3</span><span class="s1">,</span>
+    <span class="s4">3</span><span class="s1">,</span>
+    <span class="s4">3</span><span class="s1">,</span>
+    <span class="s4">3</span><span class="s1">,</span>
+    <span class="s0">/* 0xf0 */ </span><span class="s4">4</span><span class="s1">,</span>
+    <span class="s4">4</span><span class="s1">,</span>
+    <span class="s4">4</span><span class="s1">,</span>
+    <span class="s4">4</span><span class="s1">,</span>
+    <span class="s4">4</span><span class="s1">,</span>
+    <span class="s4">4</span><span class="s1">,</span>
+    <span class="s4">4</span><span class="s1">,</span>
+    <span class="s4">4</span><span class="s1">,</span>
+    <span class="s4">5</span><span class="s1">,</span>
+    <span class="s4">5</span><span class="s1">,</span>
+    <span class="s4">5</span><span class="s1">,</span>
+    <span class="s4">5</span><span class="s1">,</span>
+    <span class="s4">6</span><span class="s1">,</span>
+    <span class="s4">6</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">,</span>
+    <span class="s4">1</span><span class="s1">};</span>
+
+<span class="s2">static void </span><span class="s1">SetError(JSOBJ obj, JSONObjectEncoder *enc, </span><span class="s2">const char </span><span class="s1">*message) {</span>
+    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">errorMsg = message;</span>
+    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">errorObj = obj;</span>
+<span class="s1">}</span>
+
+<span class="s0">/* 
+FIXME: Keep track of how big these get across several encoder calls and try to 
+make an estimate 
+That way we won't run our head into the wall each call */</span>
+<span class="s2">void </span><span class="s1">Buffer_Realloc(JSONObjectEncoder *enc, size_t cbNeeded) {</span>
+    <span class="s1">size_t curSize = enc</span><span class="s6">-&gt;</span><span class="s1">end - enc</span><span class="s6">-&gt;</span><span class="s1">start;</span>
+    <span class="s1">size_t newSize = curSize * </span><span class="s4">2</span><span class="s1">;</span>
+    <span class="s1">size_t offset = enc</span><span class="s6">-&gt;</span><span class="s1">offset - enc</span><span class="s6">-&gt;</span><span class="s1">start;</span>
+
+    <span class="s2">while </span><span class="s1">(newSize &lt; curSize + cbNeeded) {</span>
+        <span class="s1">newSize *= </span><span class="s4">2</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(enc</span><span class="s6">-&gt;</span><span class="s1">heap) {</span>
+        <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">start = (</span><span class="s2">char </span><span class="s1">*)enc</span><span class="s6">-&gt;</span><span class="s1">realloc(enc</span><span class="s6">-&gt;</span><span class="s1">start, newSize);</span>
+        <span class="s2">if </span><span class="s1">(!enc</span><span class="s6">-&gt;</span><span class="s1">start) {</span>
+            <span class="s1">SetError(NULL, enc, </span><span class="s3">&quot;Could not reserve memory block&quot;</span><span class="s1">);</span>
+            <span class="s2">return</span><span class="s1">;</span>
+        <span class="s1">}</span>
+    <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+        <span class="s2">char </span><span class="s1">*oldStart = enc</span><span class="s6">-&gt;</span><span class="s1">start;</span>
+        <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">heap = </span><span class="s4">1</span><span class="s1">;</span>
+        <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">start = (</span><span class="s2">char </span><span class="s1">*)enc</span><span class="s6">-&gt;</span><span class="s1">malloc(newSize);</span>
+        <span class="s2">if </span><span class="s1">(!enc</span><span class="s6">-&gt;</span><span class="s1">start) {</span>
+            <span class="s1">SetError(NULL, enc, </span><span class="s3">&quot;Could not reserve memory block&quot;</span><span class="s1">);</span>
+            <span class="s2">return</span><span class="s1">;</span>
+        <span class="s1">}</span>
+        <span class="s1">memcpy(enc</span><span class="s6">-&gt;</span><span class="s1">start, oldStart, offset);</span>
+    <span class="s1">}</span>
+    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">offset = enc</span><span class="s6">-&gt;</span><span class="s1">start + offset;</span>
+    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">end = enc</span><span class="s6">-&gt;</span><span class="s1">start + newSize;</span>
+<span class="s1">}</span>
+
+<span class="s1">INLINE_PREFIX </span><span class="s2">void </span><span class="s1">FASTCALL_MSVC</span>
+<span class="s1">Buffer_AppendShortHexUnchecked(</span><span class="s2">char </span><span class="s1">*outputOffset, </span><span class="s2">unsigned short </span><span class="s1">value) {</span>
+    <span class="s1">*(outputOffset++) = g_hexChars[(value &amp; </span><span class="s4">0xf000</span><span class="s1">) &gt;&gt; </span><span class="s4">12</span><span class="s1">];</span>
+    <span class="s1">*(outputOffset++) = g_hexChars[(value &amp; </span><span class="s4">0x0f00</span><span class="s1">) &gt;&gt; </span><span class="s4">8</span><span class="s1">];</span>
+    <span class="s1">*(outputOffset++) = g_hexChars[(value &amp; </span><span class="s4">0x00f0</span><span class="s1">) &gt;&gt; </span><span class="s4">4</span><span class="s1">];</span>
+    <span class="s1">*(outputOffset++) = g_hexChars[(value &amp; </span><span class="s4">0x000f</span><span class="s1">) &gt;&gt; </span><span class="s4">0</span><span class="s1">];</span>
+<span class="s1">}</span>
+
+<span class="s2">int </span><span class="s1">Buffer_EscapeStringUnvalidated(JSONObjectEncoder *enc, </span><span class="s2">const char </span><span class="s1">*io,</span>
+                                   <span class="s2">const char </span><span class="s1">*end) {</span>
+    <span class="s2">char </span><span class="s1">*of = (</span><span class="s2">char </span><span class="s1">*)enc</span><span class="s6">-&gt;</span><span class="s1">offset;</span>
+
+    <span class="s2">for </span><span class="s1">(;;) {</span>
+        <span class="s2">switch </span><span class="s1">(*io) {</span>
+            <span class="s2">case </span><span class="s4">0x00</span><span class="s1">: {</span>
+                <span class="s2">if </span><span class="s1">(io &lt; end) {</span>
+                    <span class="s1">*(of++) = </span><span class="s3">'</span><span class="s5">\\</span><span class="s3">'</span><span class="s1">;</span>
+                    <span class="s1">*(of++) = </span><span class="s3">'u'</span><span class="s1">;</span>
+                    <span class="s1">*(of++) = </span><span class="s3">'0'</span><span class="s1">;</span>
+                    <span class="s1">*(of++) = </span><span class="s3">'0'</span><span class="s1">;</span>
+                    <span class="s1">*(of++) = </span><span class="s3">'0'</span><span class="s1">;</span>
+                    <span class="s1">*(of++) = </span><span class="s3">'0'</span><span class="s1">;</span>
+                    <span class="s2">break</span><span class="s1">;</span>
+                <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+                    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">offset += (of - enc</span><span class="s6">-&gt;</span><span class="s1">offset);</span>
+                    <span class="s2">return </span><span class="s1">TRUE;</span>
+                <span class="s1">}</span>
+            <span class="s1">}</span>
+            <span class="s2">case </span><span class="s3">'</span><span class="s5">\&quot;</span><span class="s3">'</span><span class="s1">:</span>
+                <span class="s1">(*of++) = </span><span class="s3">'</span><span class="s5">\\</span><span class="s3">'</span><span class="s1">;</span>
+                <span class="s1">(*of++) = </span><span class="s3">'</span><span class="s5">\&quot;</span><span class="s3">'</span><span class="s1">;</span>
+                <span class="s2">break</span><span class="s1">;</span>
+            <span class="s2">case </span><span class="s3">'</span><span class="s5">\\</span><span class="s3">'</span><span class="s1">:</span>
+                <span class="s1">(*of++) = </span><span class="s3">'</span><span class="s5">\\</span><span class="s3">'</span><span class="s1">;</span>
+                <span class="s1">(*of++) = </span><span class="s3">'</span><span class="s5">\\</span><span class="s3">'</span><span class="s1">;</span>
+                <span class="s2">break</span><span class="s1">;</span>
+            <span class="s2">case </span><span class="s3">'/'</span><span class="s1">:</span>
+                <span class="s1">(*of++) = </span><span class="s3">'</span><span class="s5">\\</span><span class="s3">'</span><span class="s1">;</span>
+                <span class="s1">(*of++) = </span><span class="s3">'/'</span><span class="s1">;</span>
+                <span class="s2">break</span><span class="s1">;</span>
+            <span class="s2">case </span><span class="s3">'</span><span class="s5">\b</span><span class="s3">'</span><span class="s1">:</span>
+                <span class="s1">(*of++) = </span><span class="s3">'</span><span class="s5">\\</span><span class="s3">'</span><span class="s1">;</span>
+                <span class="s1">(*of++) = </span><span class="s3">'b'</span><span class="s1">;</span>
+                <span class="s2">break</span><span class="s1">;</span>
+            <span class="s2">case </span><span class="s3">'</span><span class="s5">\f</span><span class="s3">'</span><span class="s1">:</span>
+                <span class="s1">(*of++) = </span><span class="s3">'</span><span class="s5">\\</span><span class="s3">'</span><span class="s1">;</span>
+                <span class="s1">(*of++) = </span><span class="s3">'f'</span><span class="s1">;</span>
+                <span class="s2">break</span><span class="s1">;</span>
+            <span class="s2">case </span><span class="s3">'</span><span class="s5">\n</span><span class="s3">'</span><span class="s1">:</span>
+                <span class="s1">(*of++) = </span><span class="s3">'</span><span class="s5">\\</span><span class="s3">'</span><span class="s1">;</span>
+                <span class="s1">(*of++) = </span><span class="s3">'n'</span><span class="s1">;</span>
+                <span class="s2">break</span><span class="s1">;</span>
+            <span class="s2">case </span><span class="s3">'</span><span class="s5">\r</span><span class="s3">'</span><span class="s1">:</span>
+                <span class="s1">(*of++) = </span><span class="s3">'</span><span class="s5">\\</span><span class="s3">'</span><span class="s1">;</span>
+                <span class="s1">(*of++) = </span><span class="s3">'r'</span><span class="s1">;</span>
+                <span class="s2">break</span><span class="s1">;</span>
+            <span class="s2">case </span><span class="s3">'</span><span class="s5">\t</span><span class="s3">'</span><span class="s1">:</span>
+                <span class="s1">(*of++) = </span><span class="s3">'</span><span class="s5">\\</span><span class="s3">'</span><span class="s1">;</span>
+                <span class="s1">(*of++) = </span><span class="s3">'t'</span><span class="s1">;</span>
+                <span class="s2">break</span><span class="s1">;</span>
+
+            <span class="s2">case </span><span class="s4">0x26</span><span class="s1">:  </span><span class="s0">// '/'</span>
+            <span class="s2">case </span><span class="s4">0x3c</span><span class="s1">:  </span><span class="s0">// '&lt;'</span>
+            <span class="s2">case </span><span class="s4">0x3e</span><span class="s1">:  </span><span class="s0">// '&gt;'</span>
+            <span class="s1">{</span>
+                <span class="s2">if </span><span class="s1">(enc</span><span class="s6">-&gt;</span><span class="s1">encodeHTMLChars) {</span>
+                    <span class="s0">// Fall through to \u00XX case below.</span>
+                <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+                    <span class="s0">// Same as default case below.</span>
+                    <span class="s1">(*of++) = (*io);</span>
+                    <span class="s2">break</span><span class="s1">;</span>
+                <span class="s1">}</span>
+            <span class="s1">}</span>
+            <span class="s2">case </span><span class="s4">0x01</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">0x02</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">0x03</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">0x04</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">0x05</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">0x06</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">0x07</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">0x0b</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">0x0e</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">0x0f</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">0x10</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">0x11</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">0x12</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">0x13</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">0x14</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">0x15</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">0x16</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">0x17</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">0x18</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">0x19</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">0x1a</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">0x1b</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">0x1c</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">0x1d</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">0x1e</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">0x1f</span><span class="s1">: {</span>
+                <span class="s1">*(of++) = </span><span class="s3">'</span><span class="s5">\\</span><span class="s3">'</span><span class="s1">;</span>
+                <span class="s1">*(of++) = </span><span class="s3">'u'</span><span class="s1">;</span>
+                <span class="s1">*(of++) = </span><span class="s3">'0'</span><span class="s1">;</span>
+                <span class="s1">*(of++) = </span><span class="s3">'0'</span><span class="s1">;</span>
+                <span class="s1">*(of++) = g_hexChars[(</span><span class="s2">unsigned char</span><span class="s1">)(((*io) &amp; </span><span class="s4">0xf0</span><span class="s1">) &gt;&gt; </span><span class="s4">4</span><span class="s1">)];</span>
+                <span class="s1">*(of++) = g_hexChars[(</span><span class="s2">unsigned char</span><span class="s1">)((*io) &amp; </span><span class="s4">0x0f</span><span class="s1">)];</span>
+                <span class="s2">break</span><span class="s1">;</span>
+            <span class="s1">}</span>
+            <span class="s2">default</span><span class="s1">:</span>
+                <span class="s1">(*of++) = (*io);</span>
+                <span class="s2">break</span><span class="s1">;</span>
+        <span class="s1">}</span>
+        <span class="s1">io++;</span>
+    <span class="s1">}</span>
+<span class="s1">}</span>
+
+<span class="s2">int </span><span class="s1">Buffer_EscapeStringValidated(JSOBJ obj, JSONObjectEncoder *enc,</span>
+                                 <span class="s2">const char </span><span class="s1">*io, </span><span class="s2">const char </span><span class="s1">*end) {</span>
+    <span class="s1">JSUTF32 ucs;</span>
+    <span class="s2">char </span><span class="s1">*of = (</span><span class="s2">char </span><span class="s1">*)enc</span><span class="s6">-&gt;</span><span class="s1">offset;</span>
+
+    <span class="s2">for </span><span class="s1">(;;) {</span>
+        <span class="s1">JSUINT8 utflen = g_asciiOutputTable[(</span><span class="s2">unsigned char</span><span class="s1">)*io];</span>
+
+        <span class="s2">switch </span><span class="s1">(utflen) {</span>
+            <span class="s2">case </span><span class="s4">0</span><span class="s1">: {</span>
+                <span class="s2">if </span><span class="s1">(io &lt; end) {</span>
+                    <span class="s1">*(of++) = </span><span class="s3">'</span><span class="s5">\\</span><span class="s3">'</span><span class="s1">;</span>
+                    <span class="s1">*(of++) = </span><span class="s3">'u'</span><span class="s1">;</span>
+                    <span class="s1">*(of++) = </span><span class="s3">'0'</span><span class="s1">;</span>
+                    <span class="s1">*(of++) = </span><span class="s3">'0'</span><span class="s1">;</span>
+                    <span class="s1">*(of++) = </span><span class="s3">'0'</span><span class="s1">;</span>
+                    <span class="s1">*(of++) = </span><span class="s3">'0'</span><span class="s1">;</span>
+                    <span class="s1">io++;</span>
+                    <span class="s2">continue</span><span class="s1">;</span>
+                <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+                    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">offset += (of - enc</span><span class="s6">-&gt;</span><span class="s1">offset);</span>
+                    <span class="s2">return </span><span class="s1">TRUE;</span>
+                <span class="s1">}</span>
+            <span class="s1">}</span>
+
+            <span class="s2">case </span><span class="s4">1</span><span class="s1">: {</span>
+                <span class="s1">*(of++) = (*io++);</span>
+                <span class="s2">continue</span><span class="s1">;</span>
+            <span class="s1">}</span>
+
+            <span class="s2">case </span><span class="s4">2</span><span class="s1">: {</span>
+                <span class="s1">JSUTF32 in;</span>
+                <span class="s1">JSUTF16 in16;</span>
+
+                <span class="s2">if </span><span class="s1">(end - io &lt; </span><span class="s4">1</span><span class="s1">) {</span>
+                    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">offset += (of - enc</span><span class="s6">-&gt;</span><span class="s1">offset);</span>
+                    <span class="s1">SetError(</span>
+                        <span class="s1">obj, enc,</span>
+                        <span class="s3">&quot;Unterminated UTF-8 sequence when encoding string&quot;</span><span class="s1">);</span>
+                    <span class="s2">return </span><span class="s1">FALSE;</span>
+                <span class="s1">}</span>
+
+                <span class="s1">memcpy(&amp;in16, io, </span><span class="s2">sizeof</span><span class="s1">(JSUTF16));</span>
+                <span class="s1">in = (JSUTF32)in16;</span>
+
+<span class="s2">#ifdef </span><span class="s1">__LITTLE_ENDIAN__</span>
+                <span class="s1">ucs = ((in &amp; </span><span class="s4">0x1f</span><span class="s1">) &lt;&lt; </span><span class="s4">6</span><span class="s1">) | ((in &gt;&gt; </span><span class="s4">8</span><span class="s1">) &amp; </span><span class="s4">0x3f</span><span class="s1">);</span>
+<span class="s2">#else</span>
+                <span class="s1">ucs = ((in &amp; </span><span class="s4">0x1f00</span><span class="s1">) &gt;&gt; </span><span class="s4">2</span><span class="s1">) | (in &amp; </span><span class="s4">0x3f</span><span class="s1">);</span>
+<span class="s2">#endif</span>
+
+                <span class="s2">if </span><span class="s1">(ucs &lt; </span><span class="s4">0x80</span><span class="s1">) {</span>
+                    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">offset += (of - enc</span><span class="s6">-&gt;</span><span class="s1">offset);</span>
+                    <span class="s1">SetError(obj, enc,</span>
+                             <span class="s3">&quot;Overlong 2 byte UTF-8 sequence detected when &quot;</span>
+                             <span class="s3">&quot;encoding string&quot;</span><span class="s1">);</span>
+                    <span class="s2">return </span><span class="s1">FALSE;</span>
+                <span class="s1">}</span>
+
+                <span class="s1">io += </span><span class="s4">2</span><span class="s1">;</span>
+                <span class="s2">break</span><span class="s1">;</span>
+            <span class="s1">}</span>
+
+            <span class="s2">case </span><span class="s4">3</span><span class="s1">: {</span>
+                <span class="s1">JSUTF32 in;</span>
+                <span class="s1">JSUTF16 in16;</span>
+                <span class="s1">JSUINT8 in8;</span>
+
+                <span class="s2">if </span><span class="s1">(end - io &lt; </span><span class="s4">2</span><span class="s1">) {</span>
+                    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">offset += (of - enc</span><span class="s6">-&gt;</span><span class="s1">offset);</span>
+                    <span class="s1">SetError(</span>
+                        <span class="s1">obj, enc,</span>
+                        <span class="s3">&quot;Unterminated UTF-8 sequence when encoding string&quot;</span><span class="s1">);</span>
+                    <span class="s2">return </span><span class="s1">FALSE;</span>
+                <span class="s1">}</span>
+
+                <span class="s1">memcpy(&amp;in16, io, </span><span class="s2">sizeof</span><span class="s1">(JSUTF16));</span>
+                <span class="s1">memcpy(&amp;in8, io + </span><span class="s4">2</span><span class="s1">, </span><span class="s2">sizeof</span><span class="s1">(JSUINT8));</span>
+<span class="s2">#ifdef </span><span class="s1">__LITTLE_ENDIAN__</span>
+                <span class="s1">in = (JSUTF32)in16;</span>
+                <span class="s1">in |= in8 &lt;&lt; </span><span class="s4">16</span><span class="s1">;</span>
+                <span class="s1">ucs = ((in &amp; </span><span class="s4">0x0f</span><span class="s1">) &lt;&lt; </span><span class="s4">12</span><span class="s1">) | ((in &amp; </span><span class="s4">0x3f00</span><span class="s1">) &gt;&gt; </span><span class="s4">2</span><span class="s1">) |</span>
+                      <span class="s1">((in &amp; </span><span class="s4">0x3f0000</span><span class="s1">) &gt;&gt; </span><span class="s4">16</span><span class="s1">);</span>
+<span class="s2">#else</span>
+                <span class="s1">in = in16 &lt;&lt; </span><span class="s4">8</span><span class="s1">;</span>
+                <span class="s1">in |= in8;</span>
+                <span class="s1">ucs =</span>
+                    <span class="s1">((in &amp; </span><span class="s4">0x0f0000</span><span class="s1">) &gt;&gt; </span><span class="s4">4</span><span class="s1">) | ((in &amp; </span><span class="s4">0x3f00</span><span class="s1">) &gt;&gt; </span><span class="s4">2</span><span class="s1">) | (in &amp; </span><span class="s4">0x3f</span><span class="s1">);</span>
+<span class="s2">#endif</span>
+
+                <span class="s2">if </span><span class="s1">(ucs &lt; </span><span class="s4">0x800</span><span class="s1">) {</span>
+                    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">offset += (of - enc</span><span class="s6">-&gt;</span><span class="s1">offset);</span>
+                    <span class="s1">SetError(obj, enc,</span>
+                             <span class="s3">&quot;Overlong 3 byte UTF-8 sequence detected when &quot;</span>
+                             <span class="s3">&quot;encoding string&quot;</span><span class="s1">);</span>
+                    <span class="s2">return </span><span class="s1">FALSE;</span>
+                <span class="s1">}</span>
+
+                <span class="s1">io += </span><span class="s4">3</span><span class="s1">;</span>
+                <span class="s2">break</span><span class="s1">;</span>
+            <span class="s1">}</span>
+            <span class="s2">case </span><span class="s4">4</span><span class="s1">: {</span>
+                <span class="s1">JSUTF32 in;</span>
+
+                <span class="s2">if </span><span class="s1">(end - io &lt; </span><span class="s4">3</span><span class="s1">) {</span>
+                    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">offset += (of - enc</span><span class="s6">-&gt;</span><span class="s1">offset);</span>
+                    <span class="s1">SetError(</span>
+                        <span class="s1">obj, enc,</span>
+                        <span class="s3">&quot;Unterminated UTF-8 sequence when encoding string&quot;</span><span class="s1">);</span>
+                    <span class="s2">return </span><span class="s1">FALSE;</span>
+                <span class="s1">}</span>
+
+                <span class="s1">memcpy(&amp;in, io, </span><span class="s2">sizeof</span><span class="s1">(JSUTF32));</span>
+<span class="s2">#ifdef </span><span class="s1">__LITTLE_ENDIAN__</span>
+                <span class="s1">ucs = ((in &amp; </span><span class="s4">0x07</span><span class="s1">) &lt;&lt; </span><span class="s4">18</span><span class="s1">) | ((in &amp; </span><span class="s4">0x3f00</span><span class="s1">) &lt;&lt; </span><span class="s4">4</span><span class="s1">) |</span>
+                      <span class="s1">((in &amp; </span><span class="s4">0x3f0000</span><span class="s1">) &gt;&gt; </span><span class="s4">10</span><span class="s1">) | ((in &amp; </span><span class="s4">0x3f000000</span><span class="s1">) &gt;&gt; </span><span class="s4">24</span><span class="s1">);</span>
+<span class="s2">#else</span>
+                <span class="s1">ucs = ((in &amp; </span><span class="s4">0x07000000</span><span class="s1">) &gt;&gt; </span><span class="s4">6</span><span class="s1">) | ((in &amp; </span><span class="s4">0x3f0000</span><span class="s1">) &gt;&gt; </span><span class="s4">4</span><span class="s1">) |</span>
+                      <span class="s1">((in &amp; </span><span class="s4">0x3f00</span><span class="s1">) &gt;&gt; </span><span class="s4">2</span><span class="s1">) | (in &amp; </span><span class="s4">0x3f</span><span class="s1">);</span>
+<span class="s2">#endif</span>
+                <span class="s2">if </span><span class="s1">(ucs &lt; </span><span class="s4">0x10000</span><span class="s1">) {</span>
+                    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">offset += (of - enc</span><span class="s6">-&gt;</span><span class="s1">offset);</span>
+                    <span class="s1">SetError(obj, enc,</span>
+                             <span class="s3">&quot;Overlong 4 byte UTF-8 sequence detected when &quot;</span>
+                             <span class="s3">&quot;encoding string&quot;</span><span class="s1">);</span>
+                    <span class="s2">return </span><span class="s1">FALSE;</span>
+                <span class="s1">}</span>
+
+                <span class="s1">io += </span><span class="s4">4</span><span class="s1">;</span>
+                <span class="s2">break</span><span class="s1">;</span>
+            <span class="s1">}</span>
+
+            <span class="s2">case </span><span class="s4">5</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">6</span><span class="s1">: {</span>
+                <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">offset += (of - enc</span><span class="s6">-&gt;</span><span class="s1">offset);</span>
+                <span class="s1">SetError(</span>
+                    <span class="s1">obj, enc,</span>
+                    <span class="s3">&quot;Unsupported UTF-8 sequence length when encoding string&quot;</span><span class="s1">);</span>
+                <span class="s2">return </span><span class="s1">FALSE;</span>
+            <span class="s1">}</span>
+
+            <span class="s2">case </span><span class="s4">29</span><span class="s1">: {</span>
+                <span class="s2">if </span><span class="s1">(enc</span><span class="s6">-&gt;</span><span class="s1">encodeHTMLChars) {</span>
+                    <span class="s0">// Fall through to \u00XX case 30 below.</span>
+                <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+                    <span class="s0">// Same as case 1 above.</span>
+                    <span class="s1">*(of++) = (*io++);</span>
+                    <span class="s2">continue</span><span class="s1">;</span>
+                <span class="s1">}</span>
+            <span class="s1">}</span>
+
+            <span class="s2">case </span><span class="s4">30</span><span class="s1">: {</span>
+                <span class="s0">// \uXXXX encode</span>
+                <span class="s1">*(of++) = </span><span class="s3">'</span><span class="s5">\\</span><span class="s3">'</span><span class="s1">;</span>
+                <span class="s1">*(of++) = </span><span class="s3">'u'</span><span class="s1">;</span>
+                <span class="s1">*(of++) = </span><span class="s3">'0'</span><span class="s1">;</span>
+                <span class="s1">*(of++) = </span><span class="s3">'0'</span><span class="s1">;</span>
+                <span class="s1">*(of++) = g_hexChars[(</span><span class="s2">unsigned char</span><span class="s1">)(((*io) &amp; </span><span class="s4">0xf0</span><span class="s1">) &gt;&gt; </span><span class="s4">4</span><span class="s1">)];</span>
+                <span class="s1">*(of++) = g_hexChars[(</span><span class="s2">unsigned char</span><span class="s1">)((*io) &amp; </span><span class="s4">0x0f</span><span class="s1">)];</span>
+                <span class="s1">io++;</span>
+                <span class="s2">continue</span><span class="s1">;</span>
+            <span class="s1">}</span>
+            <span class="s2">case </span><span class="s4">10</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">12</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">14</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">16</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">18</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">20</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">22</span><span class="s1">:</span>
+            <span class="s2">case </span><span class="s4">24</span><span class="s1">: {</span>
+                <span class="s1">*(of++) = *((</span><span class="s2">char </span><span class="s1">*)(g_escapeChars + utflen + </span><span class="s4">0</span><span class="s1">));</span>
+                <span class="s1">*(of++) = *((</span><span class="s2">char </span><span class="s1">*)(g_escapeChars + utflen + </span><span class="s4">1</span><span class="s1">));</span>
+                <span class="s1">io++;</span>
+                <span class="s2">continue</span><span class="s1">;</span>
+            <span class="s1">}</span>
+            <span class="s0">// This can never happen, it's here to make L4 VC++ happy</span>
+            <span class="s2">default</span><span class="s1">: {</span>
+                <span class="s1">ucs = </span><span class="s4">0</span><span class="s1">;</span>
+                <span class="s2">break</span><span class="s1">;</span>
+            <span class="s1">}</span>
+        <span class="s1">}</span>
+
+        <span class="s0">/* 
+        If the character is a UTF8 sequence of length &gt; 1 we end up here */</span>
+        <span class="s2">if </span><span class="s1">(ucs &gt;= </span><span class="s4">0x10000</span><span class="s1">) {</span>
+            <span class="s1">ucs -= </span><span class="s4">0x10000</span><span class="s1">;</span>
+            <span class="s1">*(of++) = </span><span class="s3">'</span><span class="s5">\\</span><span class="s3">'</span><span class="s1">;</span>
+            <span class="s1">*(of++) = </span><span class="s3">'u'</span><span class="s1">;</span>
+            <span class="s1">Buffer_AppendShortHexUnchecked(</span>
+                <span class="s1">of, (</span><span class="s2">unsigned short</span><span class="s1">)(ucs &gt;&gt; </span><span class="s4">10</span><span class="s1">) + </span><span class="s4">0xd800</span><span class="s1">);</span>
+            <span class="s1">of += </span><span class="s4">4</span><span class="s1">;</span>
+
+            <span class="s1">*(of++) = </span><span class="s3">'</span><span class="s5">\\</span><span class="s3">'</span><span class="s1">;</span>
+            <span class="s1">*(of++) = </span><span class="s3">'u'</span><span class="s1">;</span>
+            <span class="s1">Buffer_AppendShortHexUnchecked(</span>
+                <span class="s1">of, (</span><span class="s2">unsigned short</span><span class="s1">)(ucs &amp; </span><span class="s4">0x3ff</span><span class="s1">) + </span><span class="s4">0xdc00</span><span class="s1">);</span>
+            <span class="s1">of += </span><span class="s4">4</span><span class="s1">;</span>
+        <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+            <span class="s1">*(of++) = </span><span class="s3">'</span><span class="s5">\\</span><span class="s3">'</span><span class="s1">;</span>
+            <span class="s1">*(of++) = </span><span class="s3">'u'</span><span class="s1">;</span>
+            <span class="s1">Buffer_AppendShortHexUnchecked(of, (</span><span class="s2">unsigned short</span><span class="s1">)ucs);</span>
+            <span class="s1">of += </span><span class="s4">4</span><span class="s1">;</span>
+        <span class="s1">}</span>
+    <span class="s1">}</span>
+<span class="s1">}</span>
+
+<span class="s2">#define </span><span class="s1">Buffer_Reserve(__enc, __len) \</span>
+    <span class="s2">if </span><span class="s1">( (size_t) ((__enc)</span><span class="s6">-&gt;</span><span class="s1">end - (__enc)</span><span class="s6">-&gt;</span><span class="s1">offset) &lt; (size_t) (__len))  \</span>
+    <span class="s1">{   \</span>
+      <span class="s1">Buffer_Realloc((__enc), (__len));\</span>
+    <span class="s1">}   \</span>
+
+<span class="s2">#define </span><span class="s1">Buffer_AppendCharUnchecked(__enc, __chr) *((__enc)</span><span class="s6">-&gt;</span><span class="s1">offset++) = __chr;</span>
+
+<span class="s1">INLINE_PREFIX </span><span class="s2">void </span><span class="s1">FASTCALL_MSVC strreverse(</span><span class="s2">char </span><span class="s1">*begin,</span>
+                                                          <span class="s2">char </span><span class="s1">*end) {</span>
+    <span class="s2">char </span><span class="s1">aux;</span>
+    <span class="s2">while </span><span class="s1">(end &gt; begin) aux = *end, *end-- = *begin, *begin++ = aux;</span>
+<span class="s1">}</span>
+
+<span class="s2">void </span><span class="s1">Buffer_AppendIndentNewlineUnchecked(JSONObjectEncoder *enc) {</span>
+  <span class="s2">if </span><span class="s1">(enc</span><span class="s6">-&gt;</span><span class="s1">indent &gt; </span><span class="s4">0</span><span class="s1">) Buffer_AppendCharUnchecked(enc, </span><span class="s3">'</span><span class="s5">\n</span><span class="s3">'</span><span class="s1">);</span>
+<span class="s1">}</span>
+
+<span class="s0">// This function could be refactored to only accept enc as an argument,</span>
+<span class="s0">// but this is a straight vendor from ujson source</span>
+<span class="s2">void </span><span class="s1">Buffer_AppendIndentUnchecked(JSONObjectEncoder *enc, JSINT32 value) {</span>
+  <span class="s2">int </span><span class="s1">i;</span>
+  <span class="s2">if </span><span class="s1">(enc</span><span class="s6">-&gt;</span><span class="s1">indent &gt; </span><span class="s4">0</span><span class="s1">) {</span>
+    <span class="s2">while </span><span class="s1">(value-- &gt; </span><span class="s4">0</span><span class="s1">)</span>
+      <span class="s2">for </span><span class="s1">(i = </span><span class="s4">0</span><span class="s1">; i &lt; enc</span><span class="s6">-&gt;</span><span class="s1">indent; i++)</span>
+        <span class="s1">Buffer_AppendCharUnchecked(enc, </span><span class="s3">' '</span><span class="s1">);</span>
+  <span class="s1">}</span>
+<span class="s1">}</span>
+
+<span class="s2">void </span><span class="s1">Buffer_AppendIntUnchecked(JSONObjectEncoder *enc, JSINT32 value) {</span>
+    <span class="s2">char </span><span class="s1">*wstr;</span>
+    <span class="s1">JSUINT32 uvalue = (value &lt; </span><span class="s4">0</span><span class="s1">) ? -value : value;</span>
+    <span class="s1">wstr = enc</span><span class="s6">-&gt;</span><span class="s1">offset;</span>
+
+    <span class="s0">// Conversion. Number is reversed.</span>
+    <span class="s2">do </span><span class="s1">{</span>
+        <span class="s1">*wstr++ = (</span><span class="s2">char</span><span class="s1">)(</span><span class="s4">48 </span><span class="s1">+ (uvalue % </span><span class="s4">10</span><span class="s1">));</span>
+    <span class="s1">} </span><span class="s2">while </span><span class="s1">(uvalue /= </span><span class="s4">10</span><span class="s1">);</span>
+    <span class="s2">if </span><span class="s1">(value &lt; </span><span class="s4">0</span><span class="s1">) *wstr++ = </span><span class="s3">'-'</span><span class="s1">;</span>
+
+    <span class="s0">// Reverse string</span>
+    <span class="s1">strreverse(enc</span><span class="s6">-&gt;</span><span class="s1">offset, wstr - </span><span class="s4">1</span><span class="s1">);</span>
+    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">offset += (wstr - (enc</span><span class="s6">-&gt;</span><span class="s1">offset));</span>
+<span class="s1">}</span>
+
+<span class="s2">void </span><span class="s1">Buffer_AppendLongUnchecked(JSONObjectEncoder *enc, JSINT64 value) {</span>
+    <span class="s2">char </span><span class="s1">*wstr;</span>
+    <span class="s1">JSUINT64 uvalue = (value &lt; </span><span class="s4">0</span><span class="s1">) ? -value : value;</span>
+
+    <span class="s1">wstr = enc</span><span class="s6">-&gt;</span><span class="s1">offset;</span>
+    <span class="s0">// Conversion. Number is reversed.</span>
+
+    <span class="s2">do </span><span class="s1">{</span>
+        <span class="s1">*wstr++ = (</span><span class="s2">char</span><span class="s1">)(</span><span class="s4">48 </span><span class="s1">+ (uvalue % </span><span class="s4">10</span><span class="s1">ULL));</span>
+    <span class="s1">} </span><span class="s2">while </span><span class="s1">(uvalue /= </span><span class="s4">10</span><span class="s1">ULL);</span>
+    <span class="s2">if </span><span class="s1">(value &lt; </span><span class="s4">0</span><span class="s1">) *wstr++ = </span><span class="s3">'-'</span><span class="s1">;</span>
+
+    <span class="s0">// Reverse string</span>
+    <span class="s1">strreverse(enc</span><span class="s6">-&gt;</span><span class="s1">offset, wstr - </span><span class="s4">1</span><span class="s1">);</span>
+    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">offset += (wstr - (enc</span><span class="s6">-&gt;</span><span class="s1">offset));</span>
+<span class="s1">}</span>
+
+<span class="s2">int </span><span class="s1">Buffer_AppendDoubleUnchecked(JSOBJ obj, JSONObjectEncoder *enc,</span>
+                                 <span class="s2">double </span><span class="s1">value) {</span>
+    <span class="s0">/* if input is beyond the thresholds, revert to exponential */</span>
+    <span class="s2">const double </span><span class="s1">thres_max = (</span><span class="s2">double</span><span class="s1">)</span><span class="s4">1</span><span class="s1">e16 - </span><span class="s4">1</span><span class="s1">;</span>
+    <span class="s2">const double </span><span class="s1">thres_min = (</span><span class="s2">double</span><span class="s1">)</span><span class="s4">1</span><span class="s1">e-15;</span>
+    <span class="s2">char </span><span class="s1">precision_str[</span><span class="s4">20</span><span class="s1">];</span>
+    <span class="s2">int </span><span class="s1">count;</span>
+    <span class="s2">double </span><span class="s1">diff = </span><span class="s4">0.0</span><span class="s1">;</span>
+    <span class="s2">char </span><span class="s1">*str = enc</span><span class="s6">-&gt;</span><span class="s1">offset;</span>
+    <span class="s2">char </span><span class="s1">*wstr = str;</span>
+    <span class="s2">unsigned long long </span><span class="s1">whole;</span>
+    <span class="s2">double </span><span class="s1">tmp;</span>
+    <span class="s2">unsigned long long </span><span class="s1">frac;</span>
+    <span class="s2">int </span><span class="s1">neg;</span>
+    <span class="s2">double </span><span class="s1">pow10;</span>
+
+    <span class="s2">if </span><span class="s1">(value == HUGE_VAL || value == -HUGE_VAL) {</span>
+        <span class="s1">SetError(obj, enc, </span><span class="s3">&quot;Invalid Inf value when encoding double&quot;</span><span class="s1">);</span>
+        <span class="s2">return </span><span class="s1">FALSE;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(!(value == value)) {</span>
+        <span class="s1">SetError(obj, enc, </span><span class="s3">&quot;Invalid Nan value when encoding double&quot;</span><span class="s1">);</span>
+        <span class="s2">return </span><span class="s1">FALSE;</span>
+    <span class="s1">}</span>
+
+    <span class="s0">/* we'll work in positive values and deal with the 
+    negative sign issue later */</span>
+    <span class="s1">neg = </span><span class="s4">0</span><span class="s1">;</span>
+    <span class="s2">if </span><span class="s1">(value &lt; </span><span class="s4">0</span><span class="s1">) {</span>
+        <span class="s1">neg = </span><span class="s4">1</span><span class="s1">;</span>
+        <span class="s1">value = -value;</span>
+    <span class="s1">}</span>
+
+    <span class="s0">/* 
+    for very large or small numbers switch back to native sprintf for 
+    exponentials.  anyone want to write code to replace this? */</span>
+    <span class="s2">if </span><span class="s1">(value &gt; thres_max || (value != </span><span class="s4">0.0 </span><span class="s1">&amp;&amp; fabs(value) &lt; thres_min)) {</span>
+        <span class="s1">precision_str[</span><span class="s4">0</span><span class="s1">] = </span><span class="s3">'%'</span><span class="s1">;</span>
+        <span class="s1">precision_str[</span><span class="s4">1</span><span class="s1">] = </span><span class="s3">'.'</span><span class="s1">;</span>
+<span class="s2">#if </span><span class="s1">defined(_WIN32) &amp;&amp; defined(_MSC_VER)</span>
+        <span class="s1">sprintf_s(precision_str + </span><span class="s4">2</span><span class="s1">, </span><span class="s2">sizeof</span><span class="s1">(precision_str) - </span><span class="s4">2</span><span class="s1">, </span><span class="s3">&quot;%ug&quot;</span><span class="s1">,</span>
+                  <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">doublePrecision);</span>
+        <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">offset += sprintf_s(str, enc</span><span class="s6">-&gt;</span><span class="s1">end - enc</span><span class="s6">-&gt;</span><span class="s1">offset, precision_str,</span>
+                                 <span class="s1">neg ? -value : value);</span>
+<span class="s2">#else</span>
+        <span class="s1">snprintf(precision_str + </span><span class="s4">2</span><span class="s1">, </span><span class="s2">sizeof</span><span class="s1">(precision_str) - </span><span class="s4">2</span><span class="s1">, </span><span class="s3">&quot;%ug&quot;</span><span class="s1">,</span>
+                 <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">doublePrecision);</span>
+        <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">offset += snprintf(str, enc</span><span class="s6">-&gt;</span><span class="s1">end - enc</span><span class="s6">-&gt;</span><span class="s1">offset, precision_str,</span>
+                                <span class="s1">neg ? -value : value);</span>
+<span class="s2">#endif</span>
+        <span class="s2">return </span><span class="s1">TRUE;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">pow10 = g_pow10[enc</span><span class="s6">-&gt;</span><span class="s1">doublePrecision];</span>
+
+    <span class="s1">whole = (</span><span class="s2">unsigned long long</span><span class="s1">)value;</span>
+    <span class="s1">tmp = (value - whole) * pow10;</span>
+    <span class="s1">frac = (</span><span class="s2">unsigned long long</span><span class="s1">)(tmp);</span>
+    <span class="s1">diff = tmp - frac;</span>
+
+    <span class="s2">if </span><span class="s1">(diff &gt; </span><span class="s4">0.5</span><span class="s1">) {</span>
+        <span class="s1">++frac;</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(diff == </span><span class="s4">0.5 </span><span class="s1">&amp;&amp; ((frac == </span><span class="s4">0</span><span class="s1">) || (frac &amp; </span><span class="s4">1</span><span class="s1">))) {</span>
+        <span class="s0">/* if halfway, round up if odd, OR 
+        if last digit is 0.  That last part is strange */</span>
+        <span class="s1">++frac;</span>
+    <span class="s1">}</span>
+
+    <span class="s0">// handle rollover, e.g.</span>
+    <span class="s0">// case 0.99 with prec 1 is 1.0 and case 0.95 with prec is 1.0 as well</span>
+    <span class="s2">if </span><span class="s1">(frac &gt;= pow10) {</span>
+        <span class="s1">frac = </span><span class="s4">0</span><span class="s1">;</span>
+        <span class="s1">++whole;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(enc</span><span class="s6">-&gt;</span><span class="s1">doublePrecision == </span><span class="s4">0</span><span class="s1">) {</span>
+        <span class="s1">diff = value - whole;</span>
+
+        <span class="s2">if </span><span class="s1">(diff &gt; </span><span class="s4">0.5</span><span class="s1">) {</span>
+            <span class="s0">/* greater than 0.5, round up, e.g. 1.6 -&gt; 2 */</span>
+            <span class="s1">++whole;</span>
+        <span class="s1">} </span><span class="s2">else if </span><span class="s1">(diff == </span><span class="s4">0.5 </span><span class="s1">&amp;&amp; (whole &amp; </span><span class="s4">1</span><span class="s1">)) {</span>
+            <span class="s0">/* exactly 0.5 and ODD, then round up */</span>
+            <span class="s0">/* 1.5 -&gt; 2, but 2.5 -&gt; 2 */</span>
+            <span class="s1">++whole;</span>
+        <span class="s1">}</span>
+
+        <span class="s0">// vvvvvvvvvvvvvvvvvvv  Diff from modp_dto2</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(frac) {</span>
+        <span class="s1">count = enc</span><span class="s6">-&gt;</span><span class="s1">doublePrecision;</span>
+        <span class="s0">// now do fractional part, as an unsigned number</span>
+        <span class="s0">// we know it is not 0 but we can have leading zeros, these</span>
+        <span class="s0">// should be removed</span>
+        <span class="s2">while </span><span class="s1">(!(frac % </span><span class="s4">10</span><span class="s1">)) {</span>
+            <span class="s1">--count;</span>
+            <span class="s1">frac /= </span><span class="s4">10</span><span class="s1">;</span>
+        <span class="s1">}</span>
+        <span class="s0">//^^^^^^^^^^^^^^^^^^^  Diff from modp_dto2</span>
+
+        <span class="s0">// now do fractional part, as an unsigned number</span>
+        <span class="s2">do </span><span class="s1">{</span>
+            <span class="s1">--count;</span>
+            <span class="s1">*wstr++ = (</span><span class="s2">char</span><span class="s1">)(</span><span class="s4">48 </span><span class="s1">+ (frac % </span><span class="s4">10</span><span class="s1">));</span>
+        <span class="s1">} </span><span class="s2">while </span><span class="s1">(frac /= </span><span class="s4">10</span><span class="s1">);</span>
+        <span class="s0">// add extra 0s</span>
+        <span class="s2">while </span><span class="s1">(count-- &gt; </span><span class="s4">0</span><span class="s1">) {</span>
+            <span class="s1">*wstr++ = </span><span class="s3">'0'</span><span class="s1">;</span>
+        <span class="s1">}</span>
+        <span class="s0">// add decimal</span>
+        <span class="s1">*wstr++ = </span><span class="s3">'.'</span><span class="s1">;</span>
+    <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+        <span class="s1">*wstr++ = </span><span class="s3">'0'</span><span class="s1">;</span>
+        <span class="s1">*wstr++ = </span><span class="s3">'.'</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s0">// Do whole part. Take care of sign</span>
+    <span class="s0">// conversion. Number is reversed.</span>
+    <span class="s2">do </span><span class="s1">{</span>
+        <span class="s1">*wstr++ = (</span><span class="s2">char</span><span class="s1">)(</span><span class="s4">48 </span><span class="s1">+ (whole % </span><span class="s4">10</span><span class="s1">));</span>
+    <span class="s1">} </span><span class="s2">while </span><span class="s1">(whole /= </span><span class="s4">10</span><span class="s1">);</span>
+
+    <span class="s2">if </span><span class="s1">(neg) {</span>
+        <span class="s1">*wstr++ = </span><span class="s3">'-'</span><span class="s1">;</span>
+    <span class="s1">}</span>
+    <span class="s1">strreverse(str, wstr - </span><span class="s4">1</span><span class="s1">);</span>
+    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">offset += (wstr - (enc</span><span class="s6">-&gt;</span><span class="s1">offset));</span>
+
+    <span class="s2">return </span><span class="s1">TRUE;</span>
+<span class="s1">}</span>
+
+<span class="s0">/* 
+FIXME: 
+Handle integration functions returning NULL here */</span>
+
+<span class="s0">/* 
+FIXME: 
+Perhaps implement recursion detection */</span>
+
+<span class="s2">void </span><span class="s1">encode(JSOBJ obj, JSONObjectEncoder *enc, </span><span class="s2">const char </span><span class="s1">*name,</span>
+            <span class="s1">size_t cbName) {</span>
+    <span class="s2">const char </span><span class="s1">*value;</span>
+    <span class="s2">char </span><span class="s1">*objName;</span>
+    <span class="s2">int </span><span class="s1">count;</span>
+    <span class="s1">JSOBJ iterObj;</span>
+    <span class="s1">size_t szlen;</span>
+    <span class="s1">JSONTypeContext tc;</span>
+    <span class="s1">tc.encoder = enc;</span>
+
+    <span class="s2">if </span><span class="s1">(enc</span><span class="s6">-&gt;</span><span class="s1">level &gt; enc</span><span class="s6">-&gt;</span><span class="s1">recursionMax) {</span>
+        <span class="s1">SetError(obj, enc, </span><span class="s3">&quot;Maximum recursion level reached&quot;</span><span class="s1">);</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s0">/* 
+    This reservation must hold 
+ 
+    length of _name as encoded worst case + 
+    maxLength of double to string OR maxLength of JSLONG to string 
+    */</span>
+
+    <span class="s1">Buffer_Reserve(enc, </span><span class="s4">256 </span><span class="s1">+ RESERVE_STRING(cbName));</span>
+    <span class="s2">if </span><span class="s1">(enc</span><span class="s6">-&gt;</span><span class="s1">errorMsg) {</span>
+        <span class="s2">return</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(name) {</span>
+        <span class="s1">Buffer_AppendCharUnchecked(enc, </span><span class="s3">'</span><span class="s5">\&quot;</span><span class="s3">'</span><span class="s1">);</span>
+
+        <span class="s2">if </span><span class="s1">(enc</span><span class="s6">-&gt;</span><span class="s1">forceASCII) {</span>
+            <span class="s2">if </span><span class="s1">(!Buffer_EscapeStringValidated(obj, enc, name, name + cbName)) {</span>
+                <span class="s2">return</span><span class="s1">;</span>
+            <span class="s1">}</span>
+        <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+            <span class="s2">if </span><span class="s1">(!Buffer_EscapeStringUnvalidated(enc, name, name + cbName)) {</span>
+                <span class="s2">return</span><span class="s1">;</span>
+            <span class="s1">}</span>
+        <span class="s1">}</span>
+
+        <span class="s1">Buffer_AppendCharUnchecked(enc, </span><span class="s3">'</span><span class="s5">\&quot;</span><span class="s3">'</span><span class="s1">);</span>
+
+        <span class="s1">Buffer_AppendCharUnchecked(enc, </span><span class="s3">':'</span><span class="s1">);</span>
+<span class="s2">#ifndef </span><span class="s1">JSON_NO_EXTRA_WHITESPACE</span>
+        <span class="s1">Buffer_AppendCharUnchecked(enc, </span><span class="s3">' '</span><span class="s1">);</span>
+<span class="s2">#endif</span>
+    <span class="s1">}</span>
+
+    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">beginTypeContext(obj, &amp;tc);</span>
+
+    <span class="s2">switch </span><span class="s1">(tc.type) {</span>
+        <span class="s2">case </span><span class="s1">JT_INVALID: {</span>
+            <span class="s2">return</span><span class="s1">;</span>
+        <span class="s1">}</span>
+
+        <span class="s2">case </span><span class="s1">JT_ARRAY: {</span>
+            <span class="s1">count = </span><span class="s4">0</span><span class="s1">;</span>
+            <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">iterBegin(obj, &amp;tc);</span>
+
+            <span class="s1">Buffer_AppendCharUnchecked(enc, </span><span class="s3">'['</span><span class="s1">);</span>
+            <span class="s1">Buffer_AppendIndentNewlineUnchecked(enc);</span>
+
+            <span class="s2">while </span><span class="s1">(enc</span><span class="s6">-&gt;</span><span class="s1">iterNext(obj, &amp;tc)) {</span>
+                <span class="s2">if </span><span class="s1">(count &gt; </span><span class="s4">0</span><span class="s1">) {</span>
+                    <span class="s1">Buffer_AppendCharUnchecked(enc, </span><span class="s3">','</span><span class="s1">);</span>
+<span class="s2">#ifndef </span><span class="s1">JSON_NO_EXTRA_WHITESPACE</span>
+                    <span class="s1">Buffer_AppendCharUnchecked(buffer, </span><span class="s3">' '</span><span class="s1">);</span>
+<span class="s2">#endif</span>
+                    <span class="s1">Buffer_AppendIndentNewlineUnchecked(enc);</span>
+                <span class="s1">}</span>
+
+                <span class="s1">iterObj = enc</span><span class="s6">-&gt;</span><span class="s1">iterGetValue(obj, &amp;tc);</span>
+
+                <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">level++;</span>
+                <span class="s1">Buffer_AppendIndentUnchecked(enc, enc</span><span class="s6">-&gt;</span><span class="s1">level);</span>
+                <span class="s1">encode(iterObj, enc, NULL, </span><span class="s4">0</span><span class="s1">);</span>
+                <span class="s1">count++;</span>
+            <span class="s1">}</span>
+
+            <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">iterEnd(obj, &amp;tc);</span>
+            <span class="s1">Buffer_AppendIndentNewlineUnchecked(enc);</span>
+            <span class="s1">Buffer_AppendIndentUnchecked(enc, enc</span><span class="s6">-&gt;</span><span class="s1">level);</span>
+            <span class="s1">Buffer_AppendCharUnchecked(enc, </span><span class="s3">']'</span><span class="s1">);</span>
+            <span class="s2">break</span><span class="s1">;</span>
+        <span class="s1">}</span>
+
+        <span class="s2">case </span><span class="s1">JT_OBJECT: {</span>
+            <span class="s1">count = </span><span class="s4">0</span><span class="s1">;</span>
+            <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">iterBegin(obj, &amp;tc);</span>
+
+            <span class="s1">Buffer_AppendCharUnchecked(enc, </span><span class="s3">'{'</span><span class="s1">);</span>
+            <span class="s1">Buffer_AppendIndentNewlineUnchecked(enc);</span>
+
+            <span class="s2">while </span><span class="s1">(enc</span><span class="s6">-&gt;</span><span class="s1">iterNext(obj, &amp;tc)) {</span>
+                <span class="s2">if </span><span class="s1">(count &gt; </span><span class="s4">0</span><span class="s1">) {</span>
+                    <span class="s1">Buffer_AppendCharUnchecked(enc, </span><span class="s3">','</span><span class="s1">);</span>
+<span class="s2">#ifndef </span><span class="s1">JSON_NO_EXTRA_WHITESPACE</span>
+                    <span class="s1">Buffer_AppendCharUnchecked(enc, </span><span class="s3">' '</span><span class="s1">);</span>
+<span class="s2">#endif</span>
+                    <span class="s1">Buffer_AppendIndentNewlineUnchecked(enc);</span>
+                <span class="s1">}</span>
+
+                <span class="s1">iterObj = enc</span><span class="s6">-&gt;</span><span class="s1">iterGetValue(obj, &amp;tc);</span>
+                <span class="s1">objName = enc</span><span class="s6">-&gt;</span><span class="s1">iterGetName(obj, &amp;tc, &amp;szlen);</span>
+
+                <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">level++;</span>
+                <span class="s1">Buffer_AppendIndentUnchecked(enc, enc</span><span class="s6">-&gt;</span><span class="s1">level);</span>
+                <span class="s1">encode(iterObj, enc, objName, szlen);</span>
+                <span class="s1">count++;</span>
+            <span class="s1">}</span>
+
+            <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">iterEnd(obj, &amp;tc);</span>
+            <span class="s1">Buffer_AppendIndentNewlineUnchecked(enc);</span>
+            <span class="s1">Buffer_AppendIndentUnchecked(enc, enc</span><span class="s6">-&gt;</span><span class="s1">level);</span>
+            <span class="s1">Buffer_AppendCharUnchecked(enc, </span><span class="s3">'}'</span><span class="s1">);</span>
+            <span class="s2">break</span><span class="s1">;</span>
+        <span class="s1">}</span>
+
+        <span class="s2">case </span><span class="s1">JT_LONG: {</span>
+            <span class="s1">Buffer_AppendLongUnchecked(enc, enc</span><span class="s6">-&gt;</span><span class="s1">getLongValue(obj, &amp;tc));</span>
+            <span class="s2">break</span><span class="s1">;</span>
+        <span class="s1">}</span>
+
+        <span class="s2">case </span><span class="s1">JT_INT: {</span>
+            <span class="s1">Buffer_AppendIntUnchecked(enc, enc</span><span class="s6">-&gt;</span><span class="s1">getIntValue(obj, &amp;tc));</span>
+            <span class="s2">break</span><span class="s1">;</span>
+        <span class="s1">}</span>
+
+        <span class="s2">case </span><span class="s1">JT_TRUE: {</span>
+            <span class="s1">Buffer_AppendCharUnchecked(enc, </span><span class="s3">'t'</span><span class="s1">);</span>
+            <span class="s1">Buffer_AppendCharUnchecked(enc, </span><span class="s3">'r'</span><span class="s1">);</span>
+            <span class="s1">Buffer_AppendCharUnchecked(enc, </span><span class="s3">'u'</span><span class="s1">);</span>
+            <span class="s1">Buffer_AppendCharUnchecked(enc, </span><span class="s3">'e'</span><span class="s1">);</span>
+            <span class="s2">break</span><span class="s1">;</span>
+        <span class="s1">}</span>
+
+        <span class="s2">case </span><span class="s1">JT_FALSE: {</span>
+            <span class="s1">Buffer_AppendCharUnchecked(enc, </span><span class="s3">'f'</span><span class="s1">);</span>
+            <span class="s1">Buffer_AppendCharUnchecked(enc, </span><span class="s3">'a'</span><span class="s1">);</span>
+            <span class="s1">Buffer_AppendCharUnchecked(enc, </span><span class="s3">'l'</span><span class="s1">);</span>
+            <span class="s1">Buffer_AppendCharUnchecked(enc, </span><span class="s3">'s'</span><span class="s1">);</span>
+            <span class="s1">Buffer_AppendCharUnchecked(enc, </span><span class="s3">'e'</span><span class="s1">);</span>
+            <span class="s2">break</span><span class="s1">;</span>
+        <span class="s1">}</span>
+
+        <span class="s2">case </span><span class="s1">JT_NULL: {</span>
+            <span class="s1">Buffer_AppendCharUnchecked(enc, </span><span class="s3">'n'</span><span class="s1">);</span>
+            <span class="s1">Buffer_AppendCharUnchecked(enc, </span><span class="s3">'u'</span><span class="s1">);</span>
+            <span class="s1">Buffer_AppendCharUnchecked(enc, </span><span class="s3">'l'</span><span class="s1">);</span>
+            <span class="s1">Buffer_AppendCharUnchecked(enc, </span><span class="s3">'l'</span><span class="s1">);</span>
+            <span class="s2">break</span><span class="s1">;</span>
+        <span class="s1">}</span>
+
+        <span class="s2">case </span><span class="s1">JT_DOUBLE: {</span>
+            <span class="s2">if </span><span class="s1">(!Buffer_AppendDoubleUnchecked(obj, enc,</span>
+                                              <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">getDoubleValue(obj, &amp;tc))) {</span>
+                <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">endTypeContext(obj, &amp;tc);</span>
+                <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">level--;</span>
+                <span class="s2">return</span><span class="s1">;</span>
+            <span class="s1">}</span>
+            <span class="s2">break</span><span class="s1">;</span>
+        <span class="s1">}</span>
+
+        <span class="s2">case </span><span class="s1">JT_UTF8: {</span>
+            <span class="s1">value = enc</span><span class="s6">-&gt;</span><span class="s1">getStringValue(obj, &amp;tc, &amp;szlen);</span>
+            <span class="s1">Buffer_Reserve(enc, RESERVE_STRING(szlen));</span>
+            <span class="s2">if </span><span class="s1">(enc</span><span class="s6">-&gt;</span><span class="s1">errorMsg) {</span>
+                <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">endTypeContext(obj, &amp;tc);</span>
+                <span class="s2">return</span><span class="s1">;</span>
+            <span class="s1">}</span>
+            <span class="s1">Buffer_AppendCharUnchecked(enc, </span><span class="s3">'</span><span class="s5">\&quot;</span><span class="s3">'</span><span class="s1">);</span>
+
+            <span class="s2">if </span><span class="s1">(enc</span><span class="s6">-&gt;</span><span class="s1">forceASCII) {</span>
+                <span class="s2">if </span><span class="s1">(!Buffer_EscapeStringValidated(obj, enc, value,</span>
+                                                  <span class="s1">value + szlen)) {</span>
+                    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">endTypeContext(obj, &amp;tc);</span>
+                    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">level--;</span>
+                    <span class="s2">return</span><span class="s1">;</span>
+                <span class="s1">}</span>
+            <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+                <span class="s2">if </span><span class="s1">(!Buffer_EscapeStringUnvalidated(enc, value,</span>
+                                                    <span class="s1">value + szlen)) {</span>
+                    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">endTypeContext(obj, &amp;tc);</span>
+                    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">level--;</span>
+                    <span class="s2">return</span><span class="s1">;</span>
+                <span class="s1">}</span>
+            <span class="s1">}</span>
+
+            <span class="s1">Buffer_AppendCharUnchecked(enc, </span><span class="s3">'</span><span class="s5">\&quot;</span><span class="s3">'</span><span class="s1">);</span>
+            <span class="s2">break</span><span class="s1">;</span>
+        <span class="s1">}</span>
+
+        <span class="s2">case </span><span class="s1">JT_BIGNUM: {</span>
+            <span class="s1">value = enc</span><span class="s6">-&gt;</span><span class="s1">getBigNumStringValue(obj, &amp;tc, &amp;szlen);</span>
+
+            <span class="s1">Buffer_Reserve(enc, RESERVE_STRING(szlen));</span>
+            <span class="s2">if </span><span class="s1">(enc</span><span class="s6">-&gt;</span><span class="s1">errorMsg) {</span>
+                <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">endTypeContext(obj, &amp;tc);</span>
+                <span class="s2">return</span><span class="s1">;</span>
+            <span class="s1">}</span>
+
+            <span class="s2">if </span><span class="s1">(enc</span><span class="s6">-&gt;</span><span class="s1">forceASCII) {</span>
+                <span class="s2">if </span><span class="s1">(!Buffer_EscapeStringValidated(obj, enc, value,</span>
+                                                  <span class="s1">value + szlen)) {</span>
+                    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">endTypeContext(obj, &amp;tc);</span>
+                    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">level--;</span>
+                    <span class="s2">return</span><span class="s1">;</span>
+                <span class="s1">}</span>
+            <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+                <span class="s2">if </span><span class="s1">(!Buffer_EscapeStringUnvalidated(enc, value,</span>
+                                                    <span class="s1">value + szlen)) {</span>
+                    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">endTypeContext(obj, &amp;tc);</span>
+                    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">level--;</span>
+                    <span class="s2">return</span><span class="s1">;</span>
+                <span class="s1">}</span>
+            <span class="s1">}</span>
+
+            <span class="s2">break</span><span class="s1">;</span>
+        <span class="s1">}</span>
+    <span class="s1">}</span>
+
+    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">endTypeContext(obj, &amp;tc);</span>
+    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">level--;</span>
+<span class="s1">}</span>
+
+<span class="s2">char </span><span class="s1">*JSON_EncodeObject(JSOBJ obj, JSONObjectEncoder *enc, </span><span class="s2">char </span><span class="s1">*_buffer,</span>
+                        <span class="s1">size_t _cbBuffer) {</span>
+    <span class="s2">char </span><span class="s1">*locale;</span>
+    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">malloc = enc</span><span class="s6">-&gt;</span><span class="s1">malloc ? enc</span><span class="s6">-&gt;</span><span class="s1">malloc : malloc;</span>
+    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">free = enc</span><span class="s6">-&gt;</span><span class="s1">free ? enc</span><span class="s6">-&gt;</span><span class="s1">free : free;</span>
+    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">realloc = enc</span><span class="s6">-&gt;</span><span class="s1">realloc ? enc</span><span class="s6">-&gt;</span><span class="s1">realloc : realloc;</span>
+    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">errorMsg = NULL;</span>
+    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">errorObj = NULL;</span>
+    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">level = </span><span class="s4">0</span><span class="s1">;</span>
+
+    <span class="s2">if </span><span class="s1">(enc</span><span class="s6">-&gt;</span><span class="s1">recursionMax &lt; </span><span class="s4">1</span><span class="s1">) {</span>
+        <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">recursionMax = JSON_MAX_RECURSION_DEPTH;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(enc</span><span class="s6">-&gt;</span><span class="s1">doublePrecision &lt; </span><span class="s4">0 </span><span class="s1">||</span>
+        <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">doublePrecision &gt; JSON_DOUBLE_MAX_DECIMALS) {</span>
+        <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">doublePrecision = JSON_DOUBLE_MAX_DECIMALS;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(_buffer == NULL) {</span>
+        <span class="s1">_cbBuffer = </span><span class="s4">32768</span><span class="s1">;</span>
+        <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">start = (</span><span class="s2">char </span><span class="s1">*)enc</span><span class="s6">-&gt;</span><span class="s1">malloc(_cbBuffer);</span>
+        <span class="s2">if </span><span class="s1">(!enc</span><span class="s6">-&gt;</span><span class="s1">start) {</span>
+            <span class="s1">SetError(obj, enc, </span><span class="s3">&quot;Could not reserve memory block&quot;</span><span class="s1">);</span>
+            <span class="s2">return </span><span class="s1">NULL;</span>
+        <span class="s1">}</span>
+        <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">heap = </span><span class="s4">1</span><span class="s1">;</span>
+    <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+        <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">start = _buffer;</span>
+        <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">heap = </span><span class="s4">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">end = enc</span><span class="s6">-&gt;</span><span class="s1">start + _cbBuffer;</span>
+    <span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">offset = enc</span><span class="s6">-&gt;</span><span class="s1">start;</span>
+
+    <span class="s1">locale = setlocale(LC_NUMERIC, NULL);</span>
+    <span class="s2">if </span><span class="s1">(strcmp(locale, </span><span class="s3">&quot;C&quot;</span><span class="s1">)) {</span>
+        <span class="s1">locale = strdup(locale);</span>
+        <span class="s2">if </span><span class="s1">(!locale) {</span>
+            <span class="s1">SetError(NULL, enc, </span><span class="s3">&quot;Could not reserve memory block&quot;</span><span class="s1">);</span>
+            <span class="s2">return </span><span class="s1">NULL;</span>
+        <span class="s1">}</span>
+        <span class="s1">setlocale(LC_NUMERIC, </span><span class="s3">&quot;C&quot;</span><span class="s1">);</span>
+        <span class="s1">encode(obj, enc, NULL, </span><span class="s4">0</span><span class="s1">);</span>
+        <span class="s1">setlocale(LC_NUMERIC, locale);</span>
+        <span class="s1">free(locale);</span>
+    <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+        <span class="s1">encode(obj, enc, NULL, </span><span class="s4">0</span><span class="s1">);</span>
+    <span class="s1">}</span>
+
+    <span class="s1">Buffer_Reserve(enc, </span><span class="s4">1</span><span class="s1">);</span>
+    <span class="s2">if </span><span class="s1">(enc</span><span class="s6">-&gt;</span><span class="s1">errorMsg) {</span>
+        <span class="s2">return </span><span class="s1">NULL;</span>
+    <span class="s1">}</span>
+    <span class="s1">Buffer_AppendCharUnchecked(enc, </span><span class="s3">'</span><span class="s5">\0</span><span class="s3">'</span><span class="s1">);</span>
+
+    <span class="s2">return </span><span class="s1">enc</span><span class="s6">-&gt;</span><span class="s1">start;</span>
+<span class="s1">}</span>
+</pre>
+</body>
+</html>

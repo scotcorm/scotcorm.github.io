@@ -1,0 +1,624 @@
+<html>
+<head>
+<title>JSONtoObj.c</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6897bb;}
+.s4 { color: #0f9795;}
+.s5 { color: #6a8759;}
+.s6 { color: #ab51ba;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+JSONtoObj.c</font>
+</center></td></tr></table>
+<pre><span class="s0">/* 
+Copyright (c) 2011-2013, ESN Social Software AB and Jonas Tarnstrom 
+All rights reserved. 
+ 
+Redistribution and use in source and binary forms, with or without 
+modification, are permitted provided that the following conditions are met: 
+    * Redistributions of source code must retain the above copyright 
+      notice, this list of conditions and the following disclaimer. 
+    * Redistributions in binary form must reproduce the above copyright 
+      notice, this list of conditions and the following disclaimer in the 
+      documentation and/or other materials provided with the distribution. 
+    * Neither the name of the ESN Social Software AB nor the 
+      names of its contributors may be used to endorse or promote products 
+      derived from this software without specific prior written permission. 
+ 
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS &quot;AS IS&quot; AND 
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED 
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE 
+DISCLAIMED. IN NO EVENT SHALL ESN SOCIAL SOFTWARE AB OR JONAS TARNSTROM BE LIABLE 
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES 
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; 
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND 
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT 
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS 
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. 
+ 
+ 
+Portions of code from MODP_ASCII - Ascii transformations (upper/lower, etc) 
+https://github.com/client9/stringencoders 
+Copyright (c) 2007  Nick Galbreath -- nickg [at] modp [dot] com. All rights reserved. 
+ 
+Numeric decoder derived from from TCL library 
+https://www.opensource.apple.com/source/tcl/tcl-14/tcl/license.terms 
+ * Copyright (c) 1988-1993 The Regents of the University of California. 
+ * Copyright (c) 1994 Sun Microsystems, Inc. 
+*/</span>
+
+<span class="s2">#define </span><span class="s1">PY_ARRAY_UNIQUE_SYMBOL UJSON_NUMPY</span>
+<span class="s2">#define </span><span class="s1">NO_IMPORT_ARRAY</span>
+<span class="s2">#define </span><span class="s1">PY_SSIZE_T_CLEAN</span>
+<span class="s2">#include </span><span class="s1">&lt;Python.h&gt;</span>
+<span class="s2">#include </span><span class="s1">&lt;numpy/arrayobject.h&gt;</span>
+<span class="s2">#include </span><span class="s1">&lt;ultrajson.h&gt;</span>
+
+<span class="s2">#define </span><span class="s1">PRINTMARK()</span>
+
+<span class="s2">typedef struct </span><span class="s1">__PyObjectDecoder {</span>
+    <span class="s1">JSONObjectDecoder dec;</span>
+
+    <span class="s2">void </span><span class="s1">*npyarr;       </span><span class="s0">// Numpy context buffer</span>
+    <span class="s2">void </span><span class="s1">*npyarr_addr;  </span><span class="s0">// Ref to npyarr ptr to track DECREF calls</span>
+    <span class="s1">npy_intp curdim;    </span><span class="s0">// Current array dimension</span>
+
+    <span class="s1">PyArray_Descr *dtype;</span>
+<span class="s1">} PyObjectDecoder;</span>
+
+<span class="s2">typedef struct </span><span class="s1">__NpyArrContext {</span>
+    <span class="s1">PyObject *ret;</span>
+    <span class="s1">PyObject *labels[</span><span class="s3">2</span><span class="s1">];</span>
+    <span class="s1">PyArray_Dims shape;</span>
+
+    <span class="s1">PyObjectDecoder *dec;</span>
+
+    <span class="s1">npy_intp i;</span>
+    <span class="s1">npy_intp elsize;</span>
+    <span class="s1">npy_intp elcount;</span>
+<span class="s1">} NpyArrContext;</span>
+
+<span class="s0">// Numpy handling based on numpy internal code, specifically the function</span>
+<span class="s0">// PyArray_FromIter.</span>
+
+<span class="s0">// numpy related functions are inter-dependent so declare them all here,</span>
+<span class="s0">// to ensure the compiler catches any errors</span>
+
+<span class="s0">// standard numpy array handling</span>
+<span class="s1">JSOBJ Object_npyNewArray(</span><span class="s2">void </span><span class="s1">*prv, </span><span class="s2">void </span><span class="s1">*decoder);</span>
+<span class="s1">JSOBJ Object_npyEndArray(</span><span class="s2">void </span><span class="s1">*prv, JSOBJ obj);</span>
+<span class="s2">int </span><span class="s1">Object_npyArrayAddItem(</span><span class="s2">void </span><span class="s1">*prv, JSOBJ obj, JSOBJ value);</span>
+
+<span class="s0">// for more complex dtypes (object and string) fill a standard Python list</span>
+<span class="s0">// and convert to a numpy array when done.</span>
+<span class="s1">JSOBJ Object_npyNewArrayList(</span><span class="s2">void </span><span class="s1">*prv, </span><span class="s2">void </span><span class="s1">*decoder);</span>
+<span class="s1">JSOBJ Object_npyEndArrayList(</span><span class="s2">void </span><span class="s1">*prv, JSOBJ obj);</span>
+<span class="s2">int </span><span class="s1">Object_npyArrayListAddItem(</span><span class="s2">void </span><span class="s1">*prv, JSOBJ obj, JSOBJ value);</span>
+
+<span class="s0">// labelled support, encode keys and values of JS object into separate numpy</span>
+<span class="s0">// arrays</span>
+<span class="s1">JSOBJ Object_npyNewObject(</span><span class="s2">void </span><span class="s1">*prv, </span><span class="s2">void </span><span class="s1">*decoder);</span>
+<span class="s1">JSOBJ Object_npyEndObject(</span><span class="s2">void </span><span class="s1">*prv, JSOBJ obj);</span>
+<span class="s2">int </span><span class="s1">Object_npyObjectAddKey(</span><span class="s2">void </span><span class="s1">*prv, JSOBJ obj, JSOBJ name, JSOBJ value);</span>
+
+<span class="s0">// free the numpy context buffer</span>
+<span class="s2">void </span><span class="s1">Npy_releaseContext(NpyArrContext *npyarr) {</span>
+    <span class="s1">PRINTMARK();</span>
+    <span class="s2">if </span><span class="s1">(npyarr) {</span>
+        <span class="s2">if </span><span class="s1">(npyarr</span><span class="s4">-&gt;</span><span class="s1">shape.ptr) {</span>
+            <span class="s1">PyObject_Free(npyarr</span><span class="s4">-&gt;</span><span class="s1">shape.ptr);</span>
+        <span class="s1">}</span>
+        <span class="s2">if </span><span class="s1">(npyarr</span><span class="s4">-&gt;</span><span class="s1">dec) {</span>
+            <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">dec</span><span class="s4">-&gt;</span><span class="s1">npyarr = NULL;</span>
+            <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">dec</span><span class="s4">-&gt;</span><span class="s1">curdim = </span><span class="s3">0</span><span class="s1">;</span>
+        <span class="s1">}</span>
+        <span class="s1">Py_XDECREF(npyarr</span><span class="s4">-&gt;</span><span class="s1">labels[</span><span class="s3">0</span><span class="s1">]);</span>
+        <span class="s1">Py_XDECREF(npyarr</span><span class="s4">-&gt;</span><span class="s1">labels[</span><span class="s3">1</span><span class="s1">]);</span>
+        <span class="s1">Py_XDECREF(npyarr</span><span class="s4">-&gt;</span><span class="s1">ret);</span>
+        <span class="s1">PyObject_Free(npyarr);</span>
+    <span class="s1">}</span>
+<span class="s1">}</span>
+
+<span class="s1">JSOBJ Object_npyNewArray(</span><span class="s2">void </span><span class="s1">*prv, </span><span class="s2">void </span><span class="s1">*_decoder) {</span>
+    <span class="s1">NpyArrContext *npyarr;</span>
+    <span class="s1">PyObjectDecoder *decoder = (PyObjectDecoder *)_decoder;</span>
+    <span class="s1">PRINTMARK();</span>
+    <span class="s2">if </span><span class="s1">(decoder</span><span class="s4">-&gt;</span><span class="s1">curdim &lt;= </span><span class="s3">0</span><span class="s1">) {</span>
+        <span class="s0">// start of array - initialise the context buffer</span>
+        <span class="s1">npyarr = decoder</span><span class="s4">-&gt;</span><span class="s1">npyarr = PyObject_Malloc(</span><span class="s2">sizeof</span><span class="s1">(NpyArrContext));</span>
+        <span class="s1">decoder</span><span class="s4">-&gt;</span><span class="s1">npyarr_addr = npyarr;</span>
+
+        <span class="s2">if </span><span class="s1">(!npyarr) {</span>
+            <span class="s1">PyErr_NoMemory();</span>
+            <span class="s2">return </span><span class="s1">NULL;</span>
+        <span class="s1">}</span>
+
+        <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">dec = decoder;</span>
+        <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">labels[</span><span class="s3">0</span><span class="s1">] = npyarr</span><span class="s4">-&gt;</span><span class="s1">labels[</span><span class="s3">1</span><span class="s1">] = NULL;</span>
+
+        <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">shape.ptr = PyObject_Malloc(</span><span class="s2">sizeof</span><span class="s1">(npy_intp) * NPY_MAXDIMS);</span>
+        <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">shape.len = </span><span class="s3">1</span><span class="s1">;</span>
+        <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">ret = NULL;</span>
+
+        <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">elsize = </span><span class="s3">0</span><span class="s1">;</span>
+        <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">elcount = </span><span class="s3">4</span><span class="s1">;</span>
+        <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">i = </span><span class="s3">0</span><span class="s1">;</span>
+    <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+        <span class="s0">// starting a new dimension continue the current array (and reshape</span>
+        <span class="s0">// after)</span>
+        <span class="s1">npyarr = (NpyArrContext *)decoder</span><span class="s4">-&gt;</span><span class="s1">npyarr;</span>
+        <span class="s2">if </span><span class="s1">(decoder</span><span class="s4">-&gt;</span><span class="s1">curdim &gt;= npyarr</span><span class="s4">-&gt;</span><span class="s1">shape.len) {</span>
+            <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">shape.len++;</span>
+        <span class="s1">}</span>
+    <span class="s1">}</span>
+
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">shape.ptr[decoder</span><span class="s4">-&gt;</span><span class="s1">curdim] = </span><span class="s3">0</span><span class="s1">;</span>
+    <span class="s1">decoder</span><span class="s4">-&gt;</span><span class="s1">curdim++;</span>
+    <span class="s2">return </span><span class="s1">npyarr;</span>
+<span class="s1">}</span>
+
+<span class="s1">PyObject *Npy_returnLabelled(NpyArrContext *npyarr) {</span>
+    <span class="s1">PyObject *ret = npyarr</span><span class="s4">-&gt;</span><span class="s1">ret;</span>
+    <span class="s1">npy_intp i;</span>
+
+    <span class="s2">if </span><span class="s1">(npyarr</span><span class="s4">-&gt;</span><span class="s1">labels[</span><span class="s3">0</span><span class="s1">] || npyarr</span><span class="s4">-&gt;</span><span class="s1">labels[</span><span class="s3">1</span><span class="s1">]) {</span>
+        <span class="s0">// finished decoding, build tuple with values and labels</span>
+        <span class="s1">ret = PyTuple_New(npyarr</span><span class="s4">-&gt;</span><span class="s1">shape.len + </span><span class="s3">1</span><span class="s1">);</span>
+        <span class="s2">for </span><span class="s1">(i = </span><span class="s3">0</span><span class="s1">; i &lt; npyarr</span><span class="s4">-&gt;</span><span class="s1">shape.len; i++) {</span>
+            <span class="s2">if </span><span class="s1">(npyarr</span><span class="s4">-&gt;</span><span class="s1">labels[i]) {</span>
+                <span class="s1">PyTuple_SET_ITEM(ret, i + </span><span class="s3">1</span><span class="s1">, npyarr</span><span class="s4">-&gt;</span><span class="s1">labels[i]);</span>
+                <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">labels[i] = NULL;</span>
+            <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+                <span class="s1">Py_INCREF(Py_None);</span>
+                <span class="s1">PyTuple_SET_ITEM(ret, i + </span><span class="s3">1</span><span class="s1">, Py_None);</span>
+            <span class="s1">}</span>
+        <span class="s1">}</span>
+        <span class="s1">PyTuple_SET_ITEM(ret, </span><span class="s3">0</span><span class="s1">, npyarr</span><span class="s4">-&gt;</span><span class="s1">ret);</span>
+    <span class="s1">}</span>
+
+    <span class="s2">return </span><span class="s1">ret;</span>
+<span class="s1">}</span>
+
+<span class="s1">JSOBJ Object_npyEndArray(</span><span class="s2">void </span><span class="s1">*prv, JSOBJ obj) {</span>
+    <span class="s1">PyObject *ret;</span>
+    <span class="s2">char </span><span class="s1">*new_data;</span>
+    <span class="s1">NpyArrContext *npyarr = (NpyArrContext *)obj;</span>
+    <span class="s2">int </span><span class="s1">emptyType = NPY_DEFAULT_TYPE;</span>
+    <span class="s1">npy_intp i;</span>
+    <span class="s1">PRINTMARK();</span>
+    <span class="s2">if </span><span class="s1">(!npyarr) {</span>
+        <span class="s2">return </span><span class="s1">NULL;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">ret = npyarr</span><span class="s4">-&gt;</span><span class="s1">ret;</span>
+    <span class="s1">i = npyarr</span><span class="s4">-&gt;</span><span class="s1">i;</span>
+
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">dec</span><span class="s4">-&gt;</span><span class="s1">curdim--;</span>
+
+    <span class="s2">if </span><span class="s1">(i == </span><span class="s3">0 </span><span class="s1">|| !npyarr</span><span class="s4">-&gt;</span><span class="s1">ret) {</span>
+        <span class="s0">// empty array would not have been initialised so do it now.</span>
+        <span class="s2">if </span><span class="s1">(npyarr</span><span class="s4">-&gt;</span><span class="s1">dec</span><span class="s4">-&gt;</span><span class="s1">dtype) {</span>
+            <span class="s1">emptyType = npyarr</span><span class="s4">-&gt;</span><span class="s1">dec</span><span class="s4">-&gt;</span><span class="s1">dtype</span><span class="s4">-&gt;</span><span class="s1">type_num;</span>
+        <span class="s1">}</span>
+        <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">ret = ret =</span>
+            <span class="s1">PyArray_EMPTY(npyarr</span><span class="s4">-&gt;</span><span class="s1">shape.len, npyarr</span><span class="s4">-&gt;</span><span class="s1">shape.ptr, emptyType, </span><span class="s3">0</span><span class="s1">);</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(npyarr</span><span class="s4">-&gt;</span><span class="s1">dec</span><span class="s4">-&gt;</span><span class="s1">curdim &lt;= </span><span class="s3">0</span><span class="s1">) {</span>
+        <span class="s0">// realloc to final size</span>
+        <span class="s1">new_data = PyDataMem_RENEW(PyArray_DATA(ret), i * npyarr</span><span class="s4">-&gt;</span><span class="s1">elsize);</span>
+        <span class="s2">if </span><span class="s1">(new_data == NULL) {</span>
+            <span class="s1">PyErr_NoMemory();</span>
+            <span class="s1">Npy_releaseContext(npyarr);</span>
+            <span class="s2">return </span><span class="s1">NULL;</span>
+        <span class="s1">}</span>
+        <span class="s1">((PyArrayObject *)ret)</span><span class="s4">-&gt;</span><span class="s1">data = (</span><span class="s2">void </span><span class="s1">*)new_data;</span>
+        <span class="s0">// PyArray_BYTES(ret) = new_data;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(npyarr</span><span class="s4">-&gt;</span><span class="s1">dec</span><span class="s4">-&gt;</span><span class="s1">curdim &lt;= </span><span class="s3">0</span><span class="s1">) {</span>
+        <span class="s0">// finished decoding array, reshape if necessary</span>
+        <span class="s2">if </span><span class="s1">(npyarr</span><span class="s4">-&gt;</span><span class="s1">shape.len &gt; </span><span class="s3">1</span><span class="s1">) {</span>
+            <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">ret = PyArray_Newshape((PyArrayObject *)ret, &amp;npyarr</span><span class="s4">-&gt;</span><span class="s1">shape,</span>
+                                           <span class="s1">NPY_ANYORDER);</span>
+            <span class="s1">Py_DECREF(ret);</span>
+        <span class="s1">}</span>
+
+        <span class="s1">ret = Npy_returnLabelled(npyarr);</span>
+
+        <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">ret = NULL;</span>
+        <span class="s1">Npy_releaseContext(npyarr);</span>
+    <span class="s1">}</span>
+
+    <span class="s2">return </span><span class="s1">ret;</span>
+<span class="s1">}</span>
+
+<span class="s2">int </span><span class="s1">Object_npyArrayAddItem(</span><span class="s2">void </span><span class="s1">*prv, JSOBJ obj, JSOBJ value) {</span>
+    <span class="s1">PyObject *type;</span>
+    <span class="s1">PyArray_Descr *dtype;</span>
+    <span class="s1">npy_intp i;</span>
+    <span class="s2">char </span><span class="s1">*new_data, *item;</span>
+    <span class="s1">NpyArrContext *npyarr = (NpyArrContext *)obj;</span>
+    <span class="s1">PRINTMARK();</span>
+    <span class="s2">if </span><span class="s1">(!npyarr) {</span>
+        <span class="s2">return </span><span class="s3">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">i = npyarr</span><span class="s4">-&gt;</span><span class="s1">i;</span>
+
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">shape.ptr[npyarr</span><span class="s4">-&gt;</span><span class="s1">dec</span><span class="s4">-&gt;</span><span class="s1">curdim - </span><span class="s3">1</span><span class="s1">]++;</span>
+
+    <span class="s2">if </span><span class="s1">(PyArray_Check((PyObject *)value)) {</span>
+        <span class="s0">// multidimensional array, keep decoding values.</span>
+        <span class="s2">return </span><span class="s3">1</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(!npyarr</span><span class="s4">-&gt;</span><span class="s1">ret) {</span>
+        <span class="s0">// Array not initialised yet.</span>
+        <span class="s0">// We do it here so we can 'sniff' the data type if none was provided</span>
+        <span class="s2">if </span><span class="s1">(!npyarr</span><span class="s4">-&gt;</span><span class="s1">dec</span><span class="s4">-&gt;</span><span class="s1">dtype) {</span>
+            <span class="s1">type = PyObject_Type(value);</span>
+            <span class="s2">if </span><span class="s1">(!PyArray_DescrConverter(type, &amp;dtype)) {</span>
+                <span class="s1">Py_DECREF(type);</span>
+                <span class="s2">goto </span><span class="s1">fail;</span>
+            <span class="s1">}</span>
+            <span class="s1">Py_INCREF(dtype);</span>
+            <span class="s1">Py_DECREF(type);</span>
+        <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+            <span class="s1">dtype = PyArray_DescrNew(npyarr</span><span class="s4">-&gt;</span><span class="s1">dec</span><span class="s4">-&gt;</span><span class="s1">dtype);</span>
+        <span class="s1">}</span>
+
+        <span class="s0">// If it's an object or string then fill a Python list and subsequently</span>
+        <span class="s0">// convert. Otherwise we would need to somehow mess about with</span>
+        <span class="s0">// reference counts when renewing memory.</span>
+        <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">elsize = dtype</span><span class="s4">-&gt;</span><span class="s1">elsize;</span>
+        <span class="s2">if </span><span class="s1">(PyDataType_REFCHK(dtype) || npyarr</span><span class="s4">-&gt;</span><span class="s1">elsize == </span><span class="s3">0</span><span class="s1">) {</span>
+            <span class="s1">Py_XDECREF(dtype);</span>
+
+            <span class="s2">if </span><span class="s1">(npyarr</span><span class="s4">-&gt;</span><span class="s1">dec</span><span class="s4">-&gt;</span><span class="s1">curdim &gt; </span><span class="s3">1</span><span class="s1">) {</span>
+                <span class="s1">PyErr_SetString(PyExc_ValueError,</span>
+                                <span class="s5">&quot;Cannot decode multidimensional arrays with &quot;</span>
+                                <span class="s5">&quot;variable length elements to numpy&quot;</span><span class="s1">);</span>
+                <span class="s2">goto </span><span class="s1">fail;</span>
+            <span class="s1">}</span>
+            <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">elcount = </span><span class="s3">0</span><span class="s1">;</span>
+            <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">ret = PyList_New(</span><span class="s3">0</span><span class="s1">);</span>
+            <span class="s2">if </span><span class="s1">(!npyarr</span><span class="s4">-&gt;</span><span class="s1">ret) {</span>
+                <span class="s2">goto </span><span class="s1">fail;</span>
+            <span class="s1">}</span>
+            <span class="s1">((JSONObjectDecoder *)npyarr</span><span class="s4">-&gt;</span><span class="s1">dec)</span><span class="s4">-&gt;</span><span class="s1">newArray =</span>
+                <span class="s1">Object_npyNewArrayList;</span>
+            <span class="s1">((JSONObjectDecoder *)npyarr</span><span class="s4">-&gt;</span><span class="s1">dec)</span><span class="s4">-&gt;</span><span class="s1">arrayAddItem =</span>
+                <span class="s1">Object_npyArrayListAddItem;</span>
+            <span class="s1">((JSONObjectDecoder *)npyarr</span><span class="s4">-&gt;</span><span class="s1">dec)</span><span class="s4">-&gt;</span><span class="s1">endArray =</span>
+                <span class="s1">Object_npyEndArrayList;</span>
+            <span class="s2">return </span><span class="s1">Object_npyArrayListAddItem(prv, obj, value);</span>
+        <span class="s1">}</span>
+
+        <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">ret = PyArray_NewFromDescr(</span>
+            <span class="s1">&amp;PyArray_Type, dtype, </span><span class="s3">1</span><span class="s1">, &amp;npyarr</span><span class="s4">-&gt;</span><span class="s1">elcount, NULL, NULL, </span><span class="s3">0</span><span class="s1">, NULL);</span>
+
+        <span class="s2">if </span><span class="s1">(!npyarr</span><span class="s4">-&gt;</span><span class="s1">ret) {</span>
+            <span class="s2">goto </span><span class="s1">fail;</span>
+        <span class="s1">}</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(i &gt;= npyarr</span><span class="s4">-&gt;</span><span class="s1">elcount) {</span>
+        <span class="s0">// Grow PyArray_DATA(ret):</span>
+        <span class="s0">// this is similar for the strategy for PyListObject, but we use</span>
+        <span class="s0">// 50% overallocation =&gt; 0, 4, 8, 14, 23, 36, 56, 86 ...</span>
+        <span class="s2">if </span><span class="s1">(npyarr</span><span class="s4">-&gt;</span><span class="s1">elsize == </span><span class="s3">0</span><span class="s1">) {</span>
+            <span class="s1">PyErr_SetString(PyExc_ValueError,</span>
+                            <span class="s5">&quot;Cannot decode multidimensional arrays with &quot;</span>
+                            <span class="s5">&quot;variable length elements to numpy&quot;</span><span class="s1">);</span>
+            <span class="s2">goto </span><span class="s1">fail;</span>
+        <span class="s1">}</span>
+
+        <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">elcount = (i &gt;&gt; </span><span class="s3">1</span><span class="s1">) + (i &lt; </span><span class="s3">4 </span><span class="s1">? </span><span class="s3">4 </span><span class="s1">: </span><span class="s3">2</span><span class="s1">) + i;</span>
+        <span class="s2">if </span><span class="s1">(npyarr</span><span class="s4">-&gt;</span><span class="s1">elcount &lt;= NPY_MAX_INTP / npyarr</span><span class="s4">-&gt;</span><span class="s1">elsize) {</span>
+            <span class="s1">new_data = PyDataMem_RENEW(PyArray_DATA(npyarr</span><span class="s4">-&gt;</span><span class="s1">ret),</span>
+                                       <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">elcount * npyarr</span><span class="s4">-&gt;</span><span class="s1">elsize);</span>
+        <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+            <span class="s1">PyErr_NoMemory();</span>
+            <span class="s2">goto </span><span class="s1">fail;</span>
+        <span class="s1">}</span>
+        <span class="s1">((PyArrayObject *)npyarr</span><span class="s4">-&gt;</span><span class="s1">ret)</span><span class="s4">-&gt;</span><span class="s1">data = (</span><span class="s2">void </span><span class="s1">*)new_data;</span>
+
+        <span class="s0">// PyArray_BYTES(npyarr-&gt;ret) = new_data;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">PyArray_DIMS(npyarr</span><span class="s4">-&gt;</span><span class="s1">ret)[</span><span class="s3">0</span><span class="s1">] = i + </span><span class="s3">1</span><span class="s1">;</span>
+
+    <span class="s2">if </span><span class="s1">((item = PyArray_GETPTR1(npyarr</span><span class="s4">-&gt;</span><span class="s1">ret, i)) == NULL ||</span>
+        <span class="s1">PyArray_SETITEM(npyarr</span><span class="s4">-&gt;</span><span class="s1">ret, item, value) == -</span><span class="s3">1</span><span class="s1">) {</span>
+        <span class="s2">goto </span><span class="s1">fail;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">Py_DECREF((PyObject *)value);</span>
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">i++;</span>
+    <span class="s2">return </span><span class="s3">1</span><span class="s1">;</span>
+
+<span class="s1">fail:</span>
+
+    <span class="s1">Npy_releaseContext(npyarr);</span>
+    <span class="s2">return </span><span class="s3">0</span><span class="s1">;</span>
+<span class="s1">}</span>
+
+<span class="s1">JSOBJ Object_npyNewArrayList(</span><span class="s2">void </span><span class="s1">*prv, </span><span class="s2">void </span><span class="s1">*_decoder) {</span>
+    <span class="s1">PyObjectDecoder *decoder = (PyObjectDecoder *)_decoder;</span>
+    <span class="s1">PRINTMARK();</span>
+    <span class="s1">PyErr_SetString(</span>
+        <span class="s1">PyExc_ValueError,</span>
+        <span class="s5">&quot;nesting not supported for object or variable length dtypes&quot;</span><span class="s1">);</span>
+    <span class="s1">Npy_releaseContext(decoder</span><span class="s4">-&gt;</span><span class="s1">npyarr);</span>
+    <span class="s2">return </span><span class="s1">NULL;</span>
+<span class="s1">}</span>
+
+<span class="s1">JSOBJ Object_npyEndArrayList(</span><span class="s2">void </span><span class="s1">*prv, JSOBJ obj) {</span>
+    <span class="s1">PyObject *list, *ret;</span>
+    <span class="s1">NpyArrContext *npyarr = (NpyArrContext *)obj;</span>
+    <span class="s1">PRINTMARK();</span>
+    <span class="s2">if </span><span class="s1">(!npyarr) {</span>
+        <span class="s2">return </span><span class="s1">NULL;</span>
+    <span class="s1">}</span>
+
+    <span class="s0">// convert decoded list to numpy array</span>
+    <span class="s1">list = (PyObject *)npyarr</span><span class="s4">-&gt;</span><span class="s1">ret;</span>
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">ret = PyArray_FROM_O(list);</span>
+
+    <span class="s1">ret = Npy_returnLabelled(npyarr);</span>
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">ret = list;</span>
+
+    <span class="s1">((JSONObjectDecoder *)npyarr</span><span class="s4">-&gt;</span><span class="s1">dec)</span><span class="s4">-&gt;</span><span class="s1">newArray = Object_npyNewArray;</span>
+    <span class="s1">((JSONObjectDecoder *)npyarr</span><span class="s4">-&gt;</span><span class="s1">dec)</span><span class="s4">-&gt;</span><span class="s1">arrayAddItem = Object_npyArrayAddItem;</span>
+    <span class="s1">((JSONObjectDecoder *)npyarr</span><span class="s4">-&gt;</span><span class="s1">dec)</span><span class="s4">-&gt;</span><span class="s1">endArray = Object_npyEndArray;</span>
+    <span class="s1">Npy_releaseContext(npyarr);</span>
+    <span class="s2">return </span><span class="s1">ret;</span>
+<span class="s1">}</span>
+
+<span class="s2">int </span><span class="s1">Object_npyArrayListAddItem(</span><span class="s2">void </span><span class="s1">*prv, JSOBJ obj, JSOBJ value) {</span>
+    <span class="s1">NpyArrContext *npyarr = (NpyArrContext *)obj;</span>
+    <span class="s1">PRINTMARK();</span>
+    <span class="s2">if </span><span class="s1">(!npyarr) {</span>
+        <span class="s2">return </span><span class="s3">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+    <span class="s1">PyList_Append((PyObject *)npyarr</span><span class="s4">-&gt;</span><span class="s1">ret, value);</span>
+    <span class="s1">Py_DECREF((PyObject *)value);</span>
+    <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">elcount++;</span>
+    <span class="s2">return </span><span class="s3">1</span><span class="s1">;</span>
+<span class="s1">}</span>
+
+<span class="s1">JSOBJ Object_npyNewObject(</span><span class="s2">void </span><span class="s1">*prv, </span><span class="s2">void </span><span class="s1">*_decoder) {</span>
+    <span class="s1">PyObjectDecoder *decoder = (PyObjectDecoder *)_decoder;</span>
+    <span class="s1">PRINTMARK();</span>
+    <span class="s2">if </span><span class="s1">(decoder</span><span class="s4">-&gt;</span><span class="s1">curdim &gt; </span><span class="s3">1</span><span class="s1">) {</span>
+        <span class="s1">PyErr_SetString(PyExc_ValueError,</span>
+                        <span class="s5">&quot;labels only supported up to 2 dimensions&quot;</span><span class="s1">);</span>
+        <span class="s2">return </span><span class="s1">NULL;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">return </span><span class="s1">((JSONObjectDecoder *)decoder)</span><span class="s4">-&gt;</span><span class="s1">newArray(prv, decoder);</span>
+<span class="s1">}</span>
+
+<span class="s1">JSOBJ Object_npyEndObject(</span><span class="s2">void </span><span class="s1">*prv, JSOBJ obj) {</span>
+    <span class="s1">PyObject *list;</span>
+    <span class="s1">npy_intp labelidx;</span>
+    <span class="s1">NpyArrContext *npyarr = (NpyArrContext *)obj;</span>
+    <span class="s1">PRINTMARK();</span>
+    <span class="s2">if </span><span class="s1">(!npyarr) {</span>
+        <span class="s2">return </span><span class="s1">NULL;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">labelidx = npyarr</span><span class="s4">-&gt;</span><span class="s1">dec</span><span class="s4">-&gt;</span><span class="s1">curdim - </span><span class="s3">1</span><span class="s1">;</span>
+
+    <span class="s1">list = npyarr</span><span class="s4">-&gt;</span><span class="s1">labels[labelidx];</span>
+    <span class="s2">if </span><span class="s1">(list) {</span>
+        <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">labels[labelidx] = PyArray_FROM_O(list);</span>
+        <span class="s1">Py_DECREF(list);</span>
+    <span class="s1">}</span>
+
+    <span class="s2">return </span><span class="s1">(PyObject *)((JSONObjectDecoder *)npyarr</span><span class="s4">-&gt;</span><span class="s1">dec)</span><span class="s4">-&gt;</span><span class="s1">endArray(prv, obj);</span>
+<span class="s1">}</span>
+
+<span class="s2">int </span><span class="s1">Object_npyObjectAddKey(</span><span class="s2">void </span><span class="s1">*prv, JSOBJ obj, JSOBJ name, JSOBJ value) {</span>
+    <span class="s1">PyObject *label, *labels;</span>
+    <span class="s1">npy_intp labelidx;</span>
+    <span class="s0">// add key to label array, value to values array</span>
+    <span class="s1">NpyArrContext *npyarr = (NpyArrContext *)obj;</span>
+    <span class="s1">PRINTMARK();</span>
+    <span class="s2">if </span><span class="s1">(!npyarr) {</span>
+        <span class="s2">return </span><span class="s3">0</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">label = (PyObject *)name;</span>
+    <span class="s1">labelidx = npyarr</span><span class="s4">-&gt;</span><span class="s1">dec</span><span class="s4">-&gt;</span><span class="s1">curdim - </span><span class="s3">1</span><span class="s1">;</span>
+
+    <span class="s2">if </span><span class="s1">(!npyarr</span><span class="s4">-&gt;</span><span class="s1">labels[labelidx]) {</span>
+        <span class="s1">npyarr</span><span class="s4">-&gt;</span><span class="s1">labels[labelidx] = PyList_New(</span><span class="s3">0</span><span class="s1">);</span>
+    <span class="s1">}</span>
+    <span class="s1">labels = npyarr</span><span class="s4">-&gt;</span><span class="s1">labels[labelidx];</span>
+    <span class="s0">// only fill label array once, assumes all column labels are the same</span>
+    <span class="s0">// for 2-dimensional arrays.</span>
+    <span class="s2">if </span><span class="s1">(PyList_Check(labels) &amp;&amp; PyList_GET_SIZE(labels) &lt;= npyarr</span><span class="s4">-&gt;</span><span class="s1">elcount) {</span>
+        <span class="s1">PyList_Append(labels, label);</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(((JSONObjectDecoder *)npyarr</span><span class="s4">-&gt;</span><span class="s1">dec)</span><span class="s4">-&gt;</span><span class="s1">arrayAddItem(prv, obj, value)) {</span>
+        <span class="s1">Py_DECREF(label);</span>
+        <span class="s2">return </span><span class="s3">1</span><span class="s1">;</span>
+    <span class="s1">}</span>
+    <span class="s2">return </span><span class="s3">0</span><span class="s1">;</span>
+<span class="s1">}</span>
+
+<span class="s2">int </span><span class="s1">Object_objectAddKey(</span><span class="s2">void </span><span class="s1">*prv, JSOBJ obj, JSOBJ name, JSOBJ value) {</span>
+    <span class="s2">int </span><span class="s1">ret = PyDict_SetItem(obj, name, value);</span>
+    <span class="s1">Py_DECREF((PyObject *)name);</span>
+    <span class="s1">Py_DECREF((PyObject *)value);</span>
+    <span class="s2">return </span><span class="s1">ret == </span><span class="s3">0 </span><span class="s1">? </span><span class="s3">1 </span><span class="s1">: </span><span class="s3">0</span><span class="s1">;</span>
+<span class="s1">}</span>
+
+<span class="s2">int </span><span class="s1">Object_arrayAddItem(</span><span class="s2">void </span><span class="s1">*prv, JSOBJ obj, JSOBJ value) {</span>
+    <span class="s2">int </span><span class="s1">ret = PyList_Append(obj, value);</span>
+    <span class="s1">Py_DECREF((PyObject *)value);</span>
+    <span class="s2">return </span><span class="s1">ret == </span><span class="s3">0 </span><span class="s1">? </span><span class="s3">1 </span><span class="s1">: </span><span class="s3">0</span><span class="s1">;</span>
+<span class="s1">}</span>
+
+<span class="s1">JSOBJ Object_newString(</span><span class="s2">void </span><span class="s1">*prv, </span><span class="s6">wchar_t </span><span class="s1">*start, </span><span class="s6">wchar_t </span><span class="s1">*end) {</span>
+    <span class="s2">return </span><span class="s1">PyUnicode_FromWideChar(start, (end - start));</span>
+<span class="s1">}</span>
+
+<span class="s1">JSOBJ Object_newTrue(</span><span class="s2">void </span><span class="s1">*prv) { Py_RETURN_TRUE; }</span>
+
+<span class="s1">JSOBJ Object_newFalse(</span><span class="s2">void </span><span class="s1">*prv) { Py_RETURN_FALSE; }</span>
+
+<span class="s1">JSOBJ Object_newNull(</span><span class="s2">void </span><span class="s1">*prv) { Py_RETURN_NONE; }</span>
+
+<span class="s1">JSOBJ Object_newPosInf(</span><span class="s2">void </span><span class="s1">*prv) { </span><span class="s2">return </span><span class="s1">PyFloat_FromDouble(Py_HUGE_VAL); }</span>
+
+<span class="s1">JSOBJ Object_newNegInf(</span><span class="s2">void </span><span class="s1">*prv) { </span><span class="s2">return </span><span class="s1">PyFloat_FromDouble(-Py_HUGE_VAL); }</span>
+
+<span class="s1">JSOBJ Object_newObject(</span><span class="s2">void </span><span class="s1">*prv, </span><span class="s2">void </span><span class="s1">*decoder) { </span><span class="s2">return </span><span class="s1">PyDict_New(); }</span>
+
+<span class="s1">JSOBJ Object_endObject(</span><span class="s2">void </span><span class="s1">*prv, JSOBJ obj) { </span><span class="s2">return </span><span class="s1">obj; }</span>
+
+<span class="s1">JSOBJ Object_newArray(</span><span class="s2">void </span><span class="s1">*prv, </span><span class="s2">void </span><span class="s1">*decoder) { </span><span class="s2">return </span><span class="s1">PyList_New(</span><span class="s3">0</span><span class="s1">); }</span>
+
+<span class="s1">JSOBJ Object_endArray(</span><span class="s2">void </span><span class="s1">*prv, JSOBJ obj) { </span><span class="s2">return </span><span class="s1">obj; }</span>
+
+<span class="s1">JSOBJ Object_newInteger(</span><span class="s2">void </span><span class="s1">*prv, JSINT32 value) {</span>
+    <span class="s2">return </span><span class="s1">PyLong_FromLong((</span><span class="s2">long</span><span class="s1">)value);</span>
+<span class="s1">}</span>
+
+<span class="s1">JSOBJ Object_newLong(</span><span class="s2">void </span><span class="s1">*prv, JSINT64 value) {</span>
+    <span class="s2">return </span><span class="s1">PyLong_FromLongLong(value);</span>
+<span class="s1">}</span>
+
+<span class="s1">JSOBJ Object_newUnsignedLong(</span><span class="s2">void </span><span class="s1">*prv, JSUINT64 value) {</span>
+    <span class="s2">return </span><span class="s1">PyLong_FromUnsignedLongLong(value);</span>
+<span class="s1">}</span>
+
+<span class="s1">JSOBJ Object_newDouble(</span><span class="s2">void </span><span class="s1">*prv, </span><span class="s2">double </span><span class="s1">value) {</span>
+    <span class="s2">return </span><span class="s1">PyFloat_FromDouble(value);</span>
+<span class="s1">}</span>
+
+<span class="s2">static void </span><span class="s1">Object_releaseObject(</span><span class="s2">void </span><span class="s1">*prv, JSOBJ obj, </span><span class="s2">void </span><span class="s1">*_decoder) {</span>
+    <span class="s1">PyObjectDecoder *decoder = (PyObjectDecoder *)_decoder;</span>
+    <span class="s2">if </span><span class="s1">(obj != decoder</span><span class="s4">-&gt;</span><span class="s1">npyarr_addr) {</span>
+        <span class="s1">Py_XDECREF(((PyObject *)obj));</span>
+    <span class="s1">}</span>
+<span class="s1">}</span>
+
+<span class="s2">static char </span><span class="s1">*g_kwlist[] = {</span><span class="s5">&quot;obj&quot;</span><span class="s1">,      </span><span class="s5">&quot;precise_float&quot;</span><span class="s1">, </span><span class="s5">&quot;numpy&quot;</span><span class="s1">,</span>
+                           <span class="s5">&quot;labelled&quot;</span><span class="s1">, </span><span class="s5">&quot;dtype&quot;</span><span class="s1">,         NULL};</span>
+
+<span class="s1">PyObject *JSONToObj(PyObject *self, PyObject *args, PyObject *kwargs) {</span>
+    <span class="s1">PyObject *ret;</span>
+    <span class="s1">PyObject *sarg;</span>
+    <span class="s1">PyObject *arg;</span>
+    <span class="s1">PyObject *opreciseFloat = NULL;</span>
+    <span class="s1">JSONObjectDecoder *decoder;</span>
+    <span class="s1">PyObjectDecoder pyDecoder;</span>
+    <span class="s1">PyArray_Descr *dtype = NULL;</span>
+    <span class="s2">int </span><span class="s1">numpy = </span><span class="s3">0</span><span class="s1">, labelled = </span><span class="s3">0</span><span class="s1">;</span>
+
+    <span class="s1">JSONObjectDecoder dec = {</span>
+        <span class="s1">Object_newString, Object_objectAddKey,  Object_arrayAddItem,</span>
+        <span class="s1">Object_newTrue,   Object_newFalse,      Object_newNull,</span>
+        <span class="s1">Object_newPosInf, Object_newNegInf,     Object_newObject,</span>
+        <span class="s1">Object_endObject,     Object_newArray,  Object_endArray,</span>
+        <span class="s1">Object_newInteger,    Object_newLong,   Object_newUnsignedLong,</span>
+        <span class="s1">Object_newDouble,</span>
+        <span class="s1">Object_releaseObject, PyObject_Malloc, PyObject_Free,</span>
+        <span class="s1">PyObject_Realloc};</span>
+
+    <span class="s1">dec.preciseFloat = </span><span class="s3">0</span><span class="s1">;</span>
+    <span class="s1">dec.prv = NULL;</span>
+
+    <span class="s1">pyDecoder.dec = dec;</span>
+    <span class="s1">pyDecoder.curdim = </span><span class="s3">0</span><span class="s1">;</span>
+    <span class="s1">pyDecoder.npyarr = NULL;</span>
+    <span class="s1">pyDecoder.npyarr_addr = NULL;</span>
+
+    <span class="s1">decoder = (JSONObjectDecoder *)&amp;pyDecoder;</span>
+
+    <span class="s2">if </span><span class="s1">(!PyArg_ParseTupleAndKeywords(args, kwargs, </span><span class="s5">&quot;O|OiiO&amp;&quot;</span><span class="s1">, g_kwlist, &amp;arg,</span>
+                                     <span class="s1">&amp;opreciseFloat, &amp;numpy, &amp;labelled,</span>
+                                     <span class="s1">PyArray_DescrConverter2, &amp;dtype)) {</span>
+        <span class="s1">Npy_releaseContext(pyDecoder.npyarr);</span>
+        <span class="s2">return </span><span class="s1">NULL;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(opreciseFloat &amp;&amp; PyObject_IsTrue(opreciseFloat)) {</span>
+        <span class="s1">decoder</span><span class="s4">-&gt;</span><span class="s1">preciseFloat = </span><span class="s3">1</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(PyBytes_Check(arg)) {</span>
+        <span class="s1">sarg = arg;</span>
+    <span class="s1">} </span><span class="s2">else if </span><span class="s1">(PyUnicode_Check(arg)) {</span>
+        <span class="s1">sarg = PyUnicode_AsUTF8String(arg);</span>
+        <span class="s2">if </span><span class="s1">(sarg == NULL) {</span>
+            <span class="s0">// Exception raised above us by codec according to docs</span>
+            <span class="s2">return </span><span class="s1">NULL;</span>
+        <span class="s1">}</span>
+    <span class="s1">} </span><span class="s2">else </span><span class="s1">{</span>
+        <span class="s1">PyErr_Format(PyExc_TypeError, </span><span class="s5">&quot;Expected 'str' or 'bytes'&quot;</span><span class="s1">);</span>
+        <span class="s2">return </span><span class="s1">NULL;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">decoder</span><span class="s4">-&gt;</span><span class="s1">errorStr = NULL;</span>
+    <span class="s1">decoder</span><span class="s4">-&gt;</span><span class="s1">errorOffset = NULL;</span>
+
+    <span class="s2">if </span><span class="s1">(numpy) {</span>
+        <span class="s1">pyDecoder.dtype = dtype;</span>
+        <span class="s1">decoder</span><span class="s4">-&gt;</span><span class="s1">newArray = Object_npyNewArray;</span>
+        <span class="s1">decoder</span><span class="s4">-&gt;</span><span class="s1">endArray = Object_npyEndArray;</span>
+        <span class="s1">decoder</span><span class="s4">-&gt;</span><span class="s1">arrayAddItem = Object_npyArrayAddItem;</span>
+
+        <span class="s2">if </span><span class="s1">(labelled) {</span>
+            <span class="s1">decoder</span><span class="s4">-&gt;</span><span class="s1">newObject = Object_npyNewObject;</span>
+            <span class="s1">decoder</span><span class="s4">-&gt;</span><span class="s1">endObject = Object_npyEndObject;</span>
+            <span class="s1">decoder</span><span class="s4">-&gt;</span><span class="s1">objectAddKey = Object_npyObjectAddKey;</span>
+        <span class="s1">}</span>
+    <span class="s1">}</span>
+
+    <span class="s1">ret = JSON_DecodeObject(decoder, PyBytes_AS_STRING(sarg),</span>
+                            <span class="s1">PyBytes_GET_SIZE(sarg));</span>
+
+    <span class="s2">if </span><span class="s1">(sarg != arg) {</span>
+        <span class="s1">Py_DECREF(sarg);</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(PyErr_Occurred()) {</span>
+        <span class="s2">if </span><span class="s1">(ret) {</span>
+            <span class="s1">Py_DECREF((PyObject *)ret);</span>
+        <span class="s1">}</span>
+        <span class="s1">Npy_releaseContext(pyDecoder.npyarr);</span>
+        <span class="s2">return </span><span class="s1">NULL;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">if </span><span class="s1">(decoder</span><span class="s4">-&gt;</span><span class="s1">errorStr) {</span>
+        <span class="s0">/* 
+        FIXME: It's possible to give a much nicer error message here with actual 
+        failing element in input etc*/</span>
+
+        <span class="s1">PyErr_Format(PyExc_ValueError, </span><span class="s5">&quot;%s&quot;</span><span class="s1">, decoder</span><span class="s4">-&gt;</span><span class="s1">errorStr);</span>
+
+        <span class="s2">if </span><span class="s1">(ret) {</span>
+            <span class="s1">Py_DECREF((PyObject *)ret);</span>
+        <span class="s1">}</span>
+        <span class="s1">Npy_releaseContext(pyDecoder.npyarr);</span>
+
+        <span class="s2">return </span><span class="s1">NULL;</span>
+    <span class="s1">}</span>
+
+    <span class="s2">return </span><span class="s1">ret;</span>
+<span class="s1">}</span>
+</pre>
+</body>
+</html>

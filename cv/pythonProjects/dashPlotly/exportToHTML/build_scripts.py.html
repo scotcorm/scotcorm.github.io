@@ -1,0 +1,183 @@
+<html>
+<head>
+<title>build_scripts.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #808080;}
+.s4 { color: #a5c261;}
+.s5 { color: #6a8759;}
+.s6 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+build_scripts.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;distutils.command.build_scripts 
+ 
+Implements the Distutils 'build_scripts' command.&quot;&quot;&quot;</span>
+
+<span class="s2">import </span><span class="s1">os</span><span class="s2">, </span><span class="s1">re</span>
+<span class="s2">from </span><span class="s1">stat </span><span class="s2">import </span><span class="s1">ST_MODE</span>
+<span class="s2">from </span><span class="s1">distutils </span><span class="s2">import </span><span class="s1">sysconfig</span>
+<span class="s2">from </span><span class="s1">distutils.core </span><span class="s2">import </span><span class="s1">Command</span>
+<span class="s2">from </span><span class="s1">distutils.dep_util </span><span class="s2">import </span><span class="s1">newer</span>
+<span class="s2">from </span><span class="s1">distutils.util </span><span class="s2">import </span><span class="s1">convert_path</span><span class="s2">, </span><span class="s1">Mixin2to3</span>
+<span class="s2">from </span><span class="s1">distutils </span><span class="s2">import </span><span class="s1">log</span>
+<span class="s2">import </span><span class="s1">tokenize</span>
+
+<span class="s3"># check if Python is called on the first line with this expression</span>
+<span class="s1">first_line_re = re.compile(</span><span class="s4">b'^#!.*python[0-9.]*([ </span><span class="s2">\t</span><span class="s4">].*)?$'</span><span class="s1">)</span>
+
+<span class="s2">class </span><span class="s1">build_scripts(Command):</span>
+
+    <span class="s1">description = </span><span class="s5">&quot;</span><span class="s2">\&quot;</span><span class="s5">build</span><span class="s2">\&quot; </span><span class="s5">scripts (copy and fixup #! line)&quot;</span>
+
+    <span class="s1">user_options = [</span>
+        <span class="s1">(</span><span class="s5">'build-dir='</span><span class="s2">, </span><span class="s5">'d'</span><span class="s2">, </span><span class="s5">&quot;directory to </span><span class="s2">\&quot;</span><span class="s5">build</span><span class="s2">\&quot; </span><span class="s5">(copy) to&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s5">'force'</span><span class="s2">, </span><span class="s5">'f'</span><span class="s2">, </span><span class="s5">&quot;forcibly build everything (ignore file timestamps&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s5">'executable='</span><span class="s2">, </span><span class="s5">'e'</span><span class="s2">, </span><span class="s5">&quot;specify final destination interpreter path&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">]</span>
+
+    <span class="s1">boolean_options = [</span><span class="s5">'force'</span><span class="s1">]</span>
+
+
+    <span class="s2">def </span><span class="s1">initialize_options(self):</span>
+        <span class="s1">self.build_dir = </span><span class="s2">None</span>
+        <span class="s1">self.scripts = </span><span class="s2">None</span>
+        <span class="s1">self.force = </span><span class="s2">None</span>
+        <span class="s1">self.executable = </span><span class="s2">None</span>
+        <span class="s1">self.outfiles = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">finalize_options(self):</span>
+        <span class="s1">self.set_undefined_options(</span><span class="s5">'build'</span><span class="s2">,</span>
+                                   <span class="s1">(</span><span class="s5">'build_scripts'</span><span class="s2">, </span><span class="s5">'build_dir'</span><span class="s1">)</span><span class="s2">,</span>
+                                   <span class="s1">(</span><span class="s5">'force'</span><span class="s2">, </span><span class="s5">'force'</span><span class="s1">)</span><span class="s2">,</span>
+                                   <span class="s1">(</span><span class="s5">'executable'</span><span class="s2">, </span><span class="s5">'executable'</span><span class="s1">))</span>
+        <span class="s1">self.scripts = self.distribution.scripts</span>
+
+    <span class="s2">def </span><span class="s1">get_source_files(self):</span>
+        <span class="s2">return </span><span class="s1">self.scripts</span>
+
+    <span class="s2">def </span><span class="s1">run(self):</span>
+        <span class="s2">if not </span><span class="s1">self.scripts:</span>
+            <span class="s2">return</span>
+        <span class="s1">self.copy_scripts()</span>
+
+
+    <span class="s2">def </span><span class="s1">copy_scripts(self):</span>
+        <span class="s0">r&quot;&quot;&quot;Copy each script listed in 'self.scripts'; if it's marked as a 
+        Python script in the Unix way (first line matches 'first_line_re', 
+        ie. starts with &quot;\#!&quot; and contains &quot;python&quot;), then adjust the first 
+        line to refer to the current Python interpreter as we copy. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.mkpath(self.build_dir)</span>
+        <span class="s1">outfiles = []</span>
+        <span class="s1">updated_files = []</span>
+        <span class="s2">for </span><span class="s1">script </span><span class="s2">in </span><span class="s1">self.scripts:</span>
+            <span class="s1">adjust = </span><span class="s2">False</span>
+            <span class="s1">script = convert_path(script)</span>
+            <span class="s1">outfile = os.path.join(self.build_dir</span><span class="s2">, </span><span class="s1">os.path.basename(script))</span>
+            <span class="s1">outfiles.append(outfile)</span>
+
+            <span class="s2">if not </span><span class="s1">self.force </span><span class="s2">and not </span><span class="s1">newer(script</span><span class="s2">, </span><span class="s1">outfile):</span>
+                <span class="s1">log.debug(</span><span class="s5">&quot;not copying %s (up-to-date)&quot;</span><span class="s2">, </span><span class="s1">script)</span>
+                <span class="s2">continue</span>
+
+            <span class="s3"># Always open the file, but ignore failures in dry-run mode --</span>
+            <span class="s3"># that way, we'll get accurate feedback if we can read the</span>
+            <span class="s3"># script.</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">f = open(script</span><span class="s2">, </span><span class="s5">&quot;rb&quot;</span><span class="s1">)</span>
+            <span class="s2">except </span><span class="s1">OSError:</span>
+                <span class="s2">if not </span><span class="s1">self.dry_run:</span>
+                    <span class="s2">raise</span>
+                <span class="s1">f = </span><span class="s2">None</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">encoding</span><span class="s2">, </span><span class="s1">lines = tokenize.detect_encoding(f.readline)</span>
+                <span class="s1">f.seek(</span><span class="s6">0</span><span class="s1">)</span>
+                <span class="s1">first_line = f.readline()</span>
+                <span class="s2">if not </span><span class="s1">first_line:</span>
+                    <span class="s1">self.warn(</span><span class="s5">&quot;%s is an empty file (skipping)&quot; </span><span class="s1">% script)</span>
+                    <span class="s2">continue</span>
+
+                <span class="s1">match = first_line_re.match(first_line)</span>
+                <span class="s2">if </span><span class="s1">match:</span>
+                    <span class="s1">adjust = </span><span class="s2">True</span>
+                    <span class="s1">post_interp = match.group(</span><span class="s6">1</span><span class="s1">) </span><span class="s2">or </span><span class="s4">b''</span>
+
+            <span class="s2">if </span><span class="s1">adjust:</span>
+                <span class="s1">log.info(</span><span class="s5">&quot;copying and adjusting %s -&gt; %s&quot;</span><span class="s2">, </span><span class="s1">script</span><span class="s2">,</span>
+                         <span class="s1">self.build_dir)</span>
+                <span class="s1">updated_files.append(outfile)</span>
+                <span class="s2">if not </span><span class="s1">self.dry_run:</span>
+                    <span class="s2">if not </span><span class="s1">sysconfig.python_build:</span>
+                        <span class="s1">executable = self.executable</span>
+                    <span class="s2">else</span><span class="s1">:</span>
+                        <span class="s1">executable = os.path.join(</span>
+                            <span class="s1">sysconfig.get_config_var(</span><span class="s5">&quot;BINDIR&quot;</span><span class="s1">)</span><span class="s2">,</span>
+                           <span class="s5">&quot;python%s%s&quot; </span><span class="s1">% (sysconfig.get_config_var(</span><span class="s5">&quot;VERSION&quot;</span><span class="s1">)</span><span class="s2">,</span>
+                                           <span class="s1">sysconfig.get_config_var(</span><span class="s5">&quot;EXE&quot;</span><span class="s1">)))</span>
+                    <span class="s1">executable = os.fsencode(executable)</span>
+                    <span class="s1">shebang = </span><span class="s4">b&quot;#!&quot; </span><span class="s1">+ executable + post_interp + </span><span class="s4">b&quot;</span><span class="s2">\n</span><span class="s4">&quot;</span>
+                    <span class="s3"># Python parser starts to read a script using UTF-8 until</span>
+                    <span class="s3"># it gets a #coding:xxx cookie. The shebang has to be the</span>
+                    <span class="s3"># first line of a file, the #coding:xxx cookie cannot be</span>
+                    <span class="s3"># written before. So the shebang has to be decodable from</span>
+                    <span class="s3"># UTF-8.</span>
+                    <span class="s2">try</span><span class="s1">:</span>
+                        <span class="s1">shebang.decode(</span><span class="s5">'utf-8'</span><span class="s1">)</span>
+                    <span class="s2">except </span><span class="s1">UnicodeDecodeError:</span>
+                        <span class="s2">raise </span><span class="s1">ValueError(</span>
+                            <span class="s5">&quot;The shebang ({!r}) is not decodable &quot;</span>
+                            <span class="s5">&quot;from utf-8&quot;</span><span class="s1">.format(shebang))</span>
+                    <span class="s3"># If the script is encoded to a custom encoding (use a</span>
+                    <span class="s3"># #coding:xxx cookie), the shebang has to be decodable from</span>
+                    <span class="s3"># the script encoding too.</span>
+                    <span class="s2">try</span><span class="s1">:</span>
+                        <span class="s1">shebang.decode(encoding)</span>
+                    <span class="s2">except </span><span class="s1">UnicodeDecodeError:</span>
+                        <span class="s2">raise </span><span class="s1">ValueError(</span>
+                            <span class="s5">&quot;The shebang ({!r}) is not decodable &quot;</span>
+                            <span class="s5">&quot;from the script encoding ({})&quot;</span>
+                            <span class="s1">.format(shebang</span><span class="s2">, </span><span class="s1">encoding))</span>
+                    <span class="s2">with </span><span class="s1">open(outfile</span><span class="s2">, </span><span class="s5">&quot;wb&quot;</span><span class="s1">) </span><span class="s2">as </span><span class="s1">outf:</span>
+                        <span class="s1">outf.write(shebang)</span>
+                        <span class="s1">outf.writelines(f.readlines())</span>
+                <span class="s2">if </span><span class="s1">f:</span>
+                    <span class="s1">f.close()</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">if </span><span class="s1">f:</span>
+                    <span class="s1">f.close()</span>
+                <span class="s1">updated_files.append(outfile)</span>
+                <span class="s1">self.copy_file(script</span><span class="s2">, </span><span class="s1">outfile)</span>
+
+        <span class="s2">if </span><span class="s1">os.name == </span><span class="s5">'posix'</span><span class="s1">:</span>
+            <span class="s2">for </span><span class="s1">file </span><span class="s2">in </span><span class="s1">outfiles:</span>
+                <span class="s2">if </span><span class="s1">self.dry_run:</span>
+                    <span class="s1">log.info(</span><span class="s5">&quot;changing mode of %s&quot;</span><span class="s2">, </span><span class="s1">file)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">oldmode = os.stat(file)[ST_MODE] &amp; </span><span class="s6">0o7777</span>
+                    <span class="s1">newmode = (oldmode | </span><span class="s6">0o555</span><span class="s1">) &amp; </span><span class="s6">0o7777</span>
+                    <span class="s2">if </span><span class="s1">newmode != oldmode:</span>
+                        <span class="s1">log.info(</span><span class="s5">&quot;changing mode of %s from %o to %o&quot;</span><span class="s2">,</span>
+                                 <span class="s1">file</span><span class="s2">, </span><span class="s1">oldmode</span><span class="s2">, </span><span class="s1">newmode)</span>
+                        <span class="s1">os.chmod(file</span><span class="s2">, </span><span class="s1">newmode)</span>
+        <span class="s3"># XXX should we modify self.outfiles?</span>
+        <span class="s2">return </span><span class="s1">outfiles</span><span class="s2">, </span><span class="s1">updated_files</span>
+
+<span class="s2">class </span><span class="s1">build_scripts_2to3(build_scripts</span><span class="s2">, </span><span class="s1">Mixin2to3):</span>
+
+    <span class="s2">def </span><span class="s1">copy_scripts(self):</span>
+        <span class="s1">outfiles</span><span class="s2">, </span><span class="s1">updated_files = build_scripts.copy_scripts(self)</span>
+        <span class="s2">if not </span><span class="s1">self.dry_run:</span>
+            <span class="s1">self.run_2to3(updated_files)</span>
+        <span class="s2">return </span><span class="s1">outfiles</span><span class="s2">, </span><span class="s1">updated_files</span>
+</pre>
+</body>
+</html>

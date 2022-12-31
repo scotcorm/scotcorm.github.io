@@ -1,0 +1,266 @@
+<html>
+<head>
+<title>markup.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6a8759;}
+.s3 { color: #629755; font-style: italic;}
+.s4 { color: #808080;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+markup.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">ast </span><span class="s0">import </span><span class="s1">literal_eval</span>
+<span class="s0">from </span><span class="s1">operator </span><span class="s0">import </span><span class="s1">attrgetter</span>
+<span class="s0">import </span><span class="s1">re</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">Callable</span><span class="s0">, </span><span class="s1">Iterable</span><span class="s0">, </span><span class="s1">List</span><span class="s0">, </span><span class="s1">Match</span><span class="s0">, </span><span class="s1">NamedTuple</span><span class="s0">, </span><span class="s1">Optional</span><span class="s0">, </span><span class="s1">Tuple</span><span class="s0">, </span><span class="s1">Union</span>
+
+<span class="s0">from </span><span class="s1">.errors </span><span class="s0">import </span><span class="s1">MarkupError</span>
+<span class="s0">from </span><span class="s1">.style </span><span class="s0">import </span><span class="s1">Style</span>
+<span class="s0">from </span><span class="s1">.text </span><span class="s0">import </span><span class="s1">Span</span><span class="s0">, </span><span class="s1">Text</span>
+<span class="s0">from </span><span class="s1">.emoji </span><span class="s0">import </span><span class="s1">EmojiVariant</span>
+<span class="s0">from </span><span class="s1">._emoji_replace </span><span class="s0">import </span><span class="s1">_emoji_replace</span>
+
+
+<span class="s1">RE_TAGS = re.compile(</span>
+    <span class="s2">r&quot;&quot;&quot;((\\*)\[([a-z#\/@].*?)\])&quot;&quot;&quot;</span><span class="s0">,</span>
+    <span class="s1">re.VERBOSE</span><span class="s0">,</span>
+<span class="s1">)</span>
+
+<span class="s1">RE_HANDLER = re.compile(</span><span class="s2">r&quot;^([\w\.]*?)(\(.*?\))?$&quot;</span><span class="s1">)</span>
+
+
+<span class="s0">class </span><span class="s1">Tag(NamedTuple):</span>
+    <span class="s3">&quot;&quot;&quot;A tag in console markup.&quot;&quot;&quot;</span>
+
+    <span class="s1">name: str</span>
+    <span class="s2">&quot;&quot;&quot;The tag name. e.g. 'bold'.&quot;&quot;&quot;</span>
+    <span class="s1">parameters: Optional[str]</span>
+    <span class="s2">&quot;&quot;&quot;Any additional parameters after the name.&quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__str__(self) -&gt; str:</span>
+        <span class="s0">return </span><span class="s1">(</span>
+            <span class="s1">self.name </span><span class="s0">if </span><span class="s1">self.parameters </span><span class="s0">is None else </span><span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.name</span><span class="s0">} {</span><span class="s1">self.parameters</span><span class="s0">}</span><span class="s2">&quot;</span>
+        <span class="s1">)</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">markup(self) -&gt; str:</span>
+        <span class="s3">&quot;&quot;&quot;Get the string representation of this tag.&quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">(</span>
+            <span class="s2">f&quot;[</span><span class="s0">{</span><span class="s1">self.name</span><span class="s0">}</span><span class="s2">]&quot;</span>
+            <span class="s0">if </span><span class="s1">self.parameters </span><span class="s0">is None</span>
+            <span class="s0">else </span><span class="s2">f&quot;[</span><span class="s0">{</span><span class="s1">self.name</span><span class="s0">}</span><span class="s2">=</span><span class="s0">{</span><span class="s1">self.parameters</span><span class="s0">}</span><span class="s2">]&quot;</span>
+        <span class="s1">)</span>
+
+
+<span class="s1">_ReStringMatch = Match[str]  </span><span class="s4"># regex match object</span>
+<span class="s1">_ReSubCallable = Callable[[_ReStringMatch]</span><span class="s0">, </span><span class="s1">str]  </span><span class="s4"># Callable invoked by re.sub</span>
+<span class="s1">_EscapeSubMethod = Callable[[_ReSubCallable</span><span class="s0">, </span><span class="s1">str]</span><span class="s0">, </span><span class="s1">str]  </span><span class="s4"># Sub method of a compiled re</span>
+
+
+<span class="s0">def </span><span class="s1">escape(</span>
+    <span class="s1">markup: str</span><span class="s0">, </span><span class="s1">_escape: _EscapeSubMethod = re.compile(</span><span class="s2">r&quot;(\\*)(\[[a-z#\/@].*?\])&quot;</span><span class="s1">).sub</span>
+<span class="s1">) -&gt; str:</span>
+    <span class="s3">&quot;&quot;&quot;Escapes text so that it won't be interpreted as markup. 
+ 
+    Args: 
+        markup (str): Content to be inserted in to markup. 
+ 
+    Returns: 
+        str: Markup with square brackets escaped. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">escape_backslashes(match: Match[str]) -&gt; str:</span>
+        <span class="s3">&quot;&quot;&quot;Called by re.sub replace matches.&quot;&quot;&quot;</span>
+        <span class="s1">backslashes</span><span class="s0">, </span><span class="s1">text = match.groups()</span>
+        <span class="s0">return </span><span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">backslashes</span><span class="s0">}{</span><span class="s1">backslashes</span><span class="s0">}\\{</span><span class="s1">text</span><span class="s0">}</span><span class="s2">&quot;</span>
+
+    <span class="s1">markup = _escape(escape_backslashes</span><span class="s0">, </span><span class="s1">markup)</span>
+    <span class="s0">return </span><span class="s1">markup</span>
+
+
+<span class="s0">def </span><span class="s1">_parse(markup: str) -&gt; Iterable[Tuple[int</span><span class="s0">, </span><span class="s1">Optional[str]</span><span class="s0">, </span><span class="s1">Optional[Tag]]]:</span>
+    <span class="s3">&quot;&quot;&quot;Parse markup in to an iterable of tuples of (position, text, tag). 
+ 
+    Args: 
+        markup (str): A string containing console markup 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s1">position = </span><span class="s5">0</span>
+    <span class="s1">_divmod = divmod</span>
+    <span class="s1">_Tag = Tag</span>
+    <span class="s0">for </span><span class="s1">match </span><span class="s0">in </span><span class="s1">RE_TAGS.finditer(markup):</span>
+        <span class="s1">full_text</span><span class="s0">, </span><span class="s1">escapes</span><span class="s0">, </span><span class="s1">tag_text = match.groups()</span>
+        <span class="s1">start</span><span class="s0">, </span><span class="s1">end = match.span()</span>
+        <span class="s0">if </span><span class="s1">start &gt; position:</span>
+            <span class="s0">yield </span><span class="s1">start</span><span class="s0">, </span><span class="s1">markup[position:start]</span><span class="s0">, None</span>
+        <span class="s0">if </span><span class="s1">escapes:</span>
+            <span class="s1">backslashes</span><span class="s0">, </span><span class="s1">escaped = _divmod(len(escapes)</span><span class="s0">, </span><span class="s5">2</span><span class="s1">)</span>
+            <span class="s0">if </span><span class="s1">backslashes:</span>
+                <span class="s4"># Literal backslashes</span>
+                <span class="s0">yield </span><span class="s1">start</span><span class="s0">, </span><span class="s2">&quot;</span><span class="s0">\\</span><span class="s2">&quot; </span><span class="s1">* backslashes</span><span class="s0">, None</span>
+                <span class="s1">start += backslashes * </span><span class="s5">2</span>
+            <span class="s0">if </span><span class="s1">escaped:</span>
+                <span class="s4"># Escape of tag</span>
+                <span class="s0">yield </span><span class="s1">start</span><span class="s0">, </span><span class="s1">full_text[len(escapes) :]</span><span class="s0">, None</span>
+                <span class="s1">position = end</span>
+                <span class="s0">continue</span>
+        <span class="s1">text</span><span class="s0">, </span><span class="s1">equals</span><span class="s0">, </span><span class="s1">parameters = tag_text.partition(</span><span class="s2">&quot;=&quot;</span><span class="s1">)</span>
+        <span class="s0">yield </span><span class="s1">start</span><span class="s0">, None, </span><span class="s1">_Tag(text</span><span class="s0">, </span><span class="s1">parameters </span><span class="s0">if </span><span class="s1">equals </span><span class="s0">else None</span><span class="s1">)</span>
+        <span class="s1">position = end</span>
+    <span class="s0">if </span><span class="s1">position &lt; len(markup):</span>
+        <span class="s0">yield </span><span class="s1">position</span><span class="s0">, </span><span class="s1">markup[position:]</span><span class="s0">, None</span>
+
+
+<span class="s0">def </span><span class="s1">render(</span>
+    <span class="s1">markup: str</span><span class="s0">,</span>
+    <span class="s1">style: Union[str</span><span class="s0">, </span><span class="s1">Style] = </span><span class="s2">&quot;&quot;</span><span class="s0">,</span>
+    <span class="s1">emoji: bool = </span><span class="s0">True,</span>
+    <span class="s1">emoji_variant: Optional[EmojiVariant] = </span><span class="s0">None,</span>
+<span class="s1">) -&gt; Text:</span>
+    <span class="s3">&quot;&quot;&quot;Render console markup in to a Text instance. 
+ 
+    Args: 
+        markup (str): A string containing console markup. 
+        emoji (bool, optional): Also render emoji code. Defaults to True. 
+ 
+    Raises: 
+        MarkupError: If there is a syntax error in the markup. 
+ 
+    Returns: 
+        Text: A test instance. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">emoji_replace = _emoji_replace</span>
+    <span class="s0">if </span><span class="s2">&quot;[&quot; </span><span class="s0">not in </span><span class="s1">markup:</span>
+        <span class="s0">return </span><span class="s1">Text(</span>
+            <span class="s1">emoji_replace(markup</span><span class="s0">, </span><span class="s1">default_variant=emoji_variant) </span><span class="s0">if </span><span class="s1">emoji </span><span class="s0">else </span><span class="s1">markup</span><span class="s0">,</span>
+            <span class="s1">style=style</span><span class="s0">,</span>
+        <span class="s1">)</span>
+    <span class="s1">text = Text(style=style)</span>
+    <span class="s1">append = text.append</span>
+    <span class="s1">normalize = Style.normalize</span>
+
+    <span class="s1">style_stack: List[Tuple[int</span><span class="s0">, </span><span class="s1">Tag]] = []</span>
+    <span class="s1">pop = style_stack.pop</span>
+
+    <span class="s1">spans: List[Span] = []</span>
+    <span class="s1">append_span = spans.append</span>
+
+    <span class="s1">_Span = Span</span>
+    <span class="s1">_Tag = Tag</span>
+
+    <span class="s0">def </span><span class="s1">pop_style(style_name: str) -&gt; Tuple[int</span><span class="s0">, </span><span class="s1">Tag]:</span>
+        <span class="s3">&quot;&quot;&quot;Pop tag matching given style name.&quot;&quot;&quot;</span>
+        <span class="s0">for </span><span class="s1">index</span><span class="s0">, </span><span class="s1">(_</span><span class="s0">, </span><span class="s1">tag) </span><span class="s0">in </span><span class="s1">enumerate(reversed(style_stack)</span><span class="s0">, </span><span class="s5">1</span><span class="s1">):</span>
+            <span class="s0">if </span><span class="s1">tag.name == style_name:</span>
+                <span class="s0">return </span><span class="s1">pop(-index)</span>
+        <span class="s0">raise </span><span class="s1">KeyError(style_name)</span>
+
+    <span class="s0">for </span><span class="s1">position</span><span class="s0">, </span><span class="s1">plain_text</span><span class="s0">, </span><span class="s1">tag </span><span class="s0">in </span><span class="s1">_parse(markup):</span>
+        <span class="s0">if </span><span class="s1">plain_text </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">append(emoji_replace(plain_text) </span><span class="s0">if </span><span class="s1">emoji </span><span class="s0">else </span><span class="s1">plain_text)</span>
+        <span class="s0">elif </span><span class="s1">tag </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s0">if </span><span class="s1">tag.name.startswith(</span><span class="s2">&quot;/&quot;</span><span class="s1">):  </span><span class="s4"># Closing tag</span>
+                <span class="s1">style_name = tag.name[</span><span class="s5">1</span><span class="s1">:].strip()</span>
+
+                <span class="s0">if </span><span class="s1">style_name:  </span><span class="s4"># explicit close</span>
+                    <span class="s1">style_name = normalize(style_name)</span>
+                    <span class="s0">try</span><span class="s1">:</span>
+                        <span class="s1">start</span><span class="s0">, </span><span class="s1">open_tag = pop_style(style_name)</span>
+                    <span class="s0">except </span><span class="s1">KeyError:</span>
+                        <span class="s0">raise </span><span class="s1">MarkupError(</span>
+                            <span class="s2">f&quot;closing tag '</span><span class="s0">{</span><span class="s1">tag.markup</span><span class="s0">}</span><span class="s2">' at position </span><span class="s0">{</span><span class="s1">position</span><span class="s0">} </span><span class="s2">doesn't match any open tag&quot;</span>
+                        <span class="s1">) </span><span class="s0">from None</span>
+                <span class="s0">else</span><span class="s1">:  </span><span class="s4"># implicit close</span>
+                    <span class="s0">try</span><span class="s1">:</span>
+                        <span class="s1">start</span><span class="s0">, </span><span class="s1">open_tag = pop()</span>
+                    <span class="s0">except </span><span class="s1">IndexError:</span>
+                        <span class="s0">raise </span><span class="s1">MarkupError(</span>
+                            <span class="s2">f&quot;closing tag '[/]' at position </span><span class="s0">{</span><span class="s1">position</span><span class="s0">} </span><span class="s2">has nothing to close&quot;</span>
+                        <span class="s1">) </span><span class="s0">from None</span>
+
+                <span class="s0">if </span><span class="s1">open_tag.name.startswith(</span><span class="s2">&quot;@&quot;</span><span class="s1">):</span>
+                    <span class="s0">if </span><span class="s1">open_tag.parameters:</span>
+                        <span class="s1">handler_name = </span><span class="s2">&quot;&quot;</span>
+                        <span class="s1">parameters = open_tag.parameters.strip()</span>
+                        <span class="s1">handler_match = RE_HANDLER.match(parameters)</span>
+                        <span class="s0">if </span><span class="s1">handler_match </span><span class="s0">is not None</span><span class="s1">:</span>
+                            <span class="s1">handler_name</span><span class="s0">, </span><span class="s1">match_parameters = handler_match.groups()</span>
+                            <span class="s1">parameters = (</span>
+                                <span class="s2">&quot;()&quot; </span><span class="s0">if </span><span class="s1">match_parameters </span><span class="s0">is None else </span><span class="s1">match_parameters</span>
+                            <span class="s1">)</span>
+
+                        <span class="s0">try</span><span class="s1">:</span>
+                            <span class="s1">meta_params = literal_eval(parameters)</span>
+                        <span class="s0">except </span><span class="s1">SyntaxError </span><span class="s0">as </span><span class="s1">error:</span>
+                            <span class="s0">raise </span><span class="s1">MarkupError(</span>
+                                <span class="s2">f&quot;error parsing </span><span class="s0">{</span><span class="s1">parameters</span><span class="s0">!r} </span><span class="s2">in </span><span class="s0">{</span><span class="s1">open_tag.parameters</span><span class="s0">!r}</span><span class="s2">; </span><span class="s0">{</span><span class="s1">error.msg</span><span class="s0">}</span><span class="s2">&quot;</span>
+                            <span class="s1">)</span>
+                        <span class="s0">except </span><span class="s1">Exception </span><span class="s0">as </span><span class="s1">error:</span>
+                            <span class="s0">raise </span><span class="s1">MarkupError(</span>
+                                <span class="s2">f&quot;error parsing </span><span class="s0">{</span><span class="s1">open_tag.parameters</span><span class="s0">!r}</span><span class="s2">; </span><span class="s0">{</span><span class="s1">error</span><span class="s0">}</span><span class="s2">&quot;</span>
+                            <span class="s1">) </span><span class="s0">from None</span>
+
+                        <span class="s0">if </span><span class="s1">handler_name:</span>
+                            <span class="s1">meta_params = (</span>
+                                <span class="s1">handler_name</span><span class="s0">,</span>
+                                <span class="s1">meta_params</span>
+                                <span class="s0">if </span><span class="s1">isinstance(meta_params</span><span class="s0">, </span><span class="s1">tuple)</span>
+                                <span class="s0">else </span><span class="s1">(meta_params</span><span class="s0">,</span><span class="s1">)</span><span class="s0">,</span>
+                            <span class="s1">)</span>
+
+                    <span class="s0">else</span><span class="s1">:</span>
+                        <span class="s1">meta_params = ()</span>
+
+                    <span class="s1">append_span(</span>
+                        <span class="s1">_Span(</span>
+                            <span class="s1">start</span><span class="s0">, </span><span class="s1">len(text)</span><span class="s0">, </span><span class="s1">Style(meta={open_tag.name: meta_params})</span>
+                        <span class="s1">)</span>
+                    <span class="s1">)</span>
+                <span class="s0">else</span><span class="s1">:</span>
+                    <span class="s1">append_span(_Span(start</span><span class="s0">, </span><span class="s1">len(text)</span><span class="s0">, </span><span class="s1">str(open_tag)))</span>
+
+            <span class="s0">else</span><span class="s1">:  </span><span class="s4"># Opening tag</span>
+                <span class="s1">normalized_tag = _Tag(normalize(tag.name)</span><span class="s0">, </span><span class="s1">tag.parameters)</span>
+                <span class="s1">style_stack.append((len(text)</span><span class="s0">, </span><span class="s1">normalized_tag))</span>
+
+    <span class="s1">text_length = len(text)</span>
+    <span class="s0">while </span><span class="s1">style_stack:</span>
+        <span class="s1">start</span><span class="s0">, </span><span class="s1">tag = style_stack.pop()</span>
+        <span class="s1">style = str(tag)</span>
+        <span class="s0">if </span><span class="s1">style:</span>
+            <span class="s1">append_span(_Span(start</span><span class="s0">, </span><span class="s1">text_length</span><span class="s0">, </span><span class="s1">style))</span>
+
+    <span class="s1">text.spans = sorted(spans[::-</span><span class="s5">1</span><span class="s1">]</span><span class="s0">, </span><span class="s1">key=attrgetter(</span><span class="s2">&quot;start&quot;</span><span class="s1">))</span>
+    <span class="s0">return </span><span class="s1">text</span>
+
+
+<span class="s0">if </span><span class="s1">__name__ == </span><span class="s2">&quot;__main__&quot;</span><span class="s1">:  </span><span class="s4"># pragma: no cover</span>
+
+    <span class="s1">MARKUP = [</span>
+        <span class="s2">&quot;[red]Hello World[/red]&quot;</span><span class="s0">,</span>
+        <span class="s2">&quot;[magenta]Hello [b]World[/b]&quot;</span><span class="s0">,</span>
+        <span class="s2">&quot;[bold]Bold[italic] bold and italic [/bold]italic[/italic]&quot;</span><span class="s0">,</span>
+        <span class="s2">&quot;Click [link=https://www.willmcgugan.com]here[/link] to visit my Blog&quot;</span><span class="s0">,</span>
+        <span class="s2">&quot;:warning-emoji: [bold red blink] DANGER![/]&quot;</span><span class="s0">,</span>
+    <span class="s1">]</span>
+
+    <span class="s0">from </span><span class="s1">pip._vendor.rich.table </span><span class="s0">import </span><span class="s1">Table</span>
+    <span class="s0">from </span><span class="s1">pip._vendor.rich </span><span class="s0">import </span><span class="s1">print</span>
+
+    <span class="s1">grid = Table(</span><span class="s2">&quot;Markup&quot;</span><span class="s0">, </span><span class="s2">&quot;Result&quot;</span><span class="s0">, </span><span class="s1">padding=(</span><span class="s5">0</span><span class="s0">, </span><span class="s5">1</span><span class="s1">))</span>
+
+    <span class="s0">for </span><span class="s1">markup </span><span class="s0">in </span><span class="s1">MARKUP:</span>
+        <span class="s1">grid.add_row(Text(markup)</span><span class="s0">, </span><span class="s1">markup)</span>
+
+    <span class="s1">print(grid)</span>
+</pre>
+</body>
+</html>

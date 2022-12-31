@@ -1,0 +1,510 @@
+<html>
+<head>
+<title>ordered_set.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #808080;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+ordered_set.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+An OrderedSet is a custom MutableSet that remembers its order, so that every 
+entry has an index that can be looked up. 
+ 
+Based on a recipe originally posted to ActiveState Recipes by Raymond Hettiger, 
+and released under the MIT license. 
+&quot;&quot;&quot;</span>
+<span class="s2">import </span><span class="s1">itertools </span><span class="s2">as </span><span class="s1">it</span>
+<span class="s2">from </span><span class="s1">collections </span><span class="s2">import </span><span class="s1">deque</span>
+
+<span class="s2">try</span><span class="s1">:</span>
+    <span class="s3"># Python 3</span>
+    <span class="s2">from </span><span class="s1">collections.abc </span><span class="s2">import </span><span class="s1">MutableSet</span><span class="s2">, </span><span class="s1">Sequence</span>
+<span class="s2">except </span><span class="s1">ImportError:</span>
+    <span class="s3"># Python 2.7</span>
+    <span class="s2">from </span><span class="s1">collections </span><span class="s2">import </span><span class="s1">MutableSet</span><span class="s2">, </span><span class="s1">Sequence</span>
+
+<span class="s1">SLICE_ALL = slice(</span><span class="s2">None</span><span class="s1">)</span>
+<span class="s1">__version__ = </span><span class="s4">&quot;3.1&quot;</span>
+
+
+<span class="s2">def </span><span class="s1">is_iterable(obj):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Are we being asked to look up a list of things, instead of a single thing? 
+    We check for the `__iter__` attribute so that this can cover types that 
+    don't have to be known by this module, such as NumPy arrays. 
+ 
+    Strings, however, should be considered as atomic values to look up, not 
+    iterables. The same goes for tuples, since they are immutable and therefore 
+    valid entries. 
+ 
+    We don't need to check for the Python 2 `unicode` type, because it doesn't 
+    have an `__iter__` attribute anyway. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">return </span><span class="s1">(</span>
+        <span class="s1">hasattr(obj</span><span class="s2">, </span><span class="s4">&quot;__iter__&quot;</span><span class="s1">)</span>
+        <span class="s2">and not </span><span class="s1">isinstance(obj</span><span class="s2">, </span><span class="s1">str)</span>
+        <span class="s2">and not </span><span class="s1">isinstance(obj</span><span class="s2">, </span><span class="s1">tuple)</span>
+    <span class="s1">)</span>
+
+
+<span class="s2">class </span><span class="s1">OrderedSet(MutableSet</span><span class="s2">, </span><span class="s1">Sequence):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    An OrderedSet is a custom MutableSet that remembers its order, so that 
+    every entry has an index that can be looked up. 
+ 
+    Example: 
+        &gt;&gt;&gt; OrderedSet([1, 1, 2, 3, 2]) 
+        OrderedSet([1, 2, 3]) 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">iterable=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s1">self.items = []</span>
+        <span class="s1">self.map = {}</span>
+        <span class="s2">if </span><span class="s1">iterable </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self |= iterable</span>
+
+    <span class="s2">def </span><span class="s1">__len__(self):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Returns the number of unique elements in the ordered set 
+ 
+        Example: 
+            &gt;&gt;&gt; len(OrderedSet([])) 
+            0 
+            &gt;&gt;&gt; len(OrderedSet([1, 2])) 
+            2 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">len(self.items)</span>
+
+    <span class="s2">def </span><span class="s1">__getitem__(self</span><span class="s2">, </span><span class="s1">index):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Get the item at a given index. 
+ 
+        If `index` is a slice, you will get back that slice of items, as a 
+        new OrderedSet. 
+ 
+        If `index` is a list or a similar iterable, you'll get a list of 
+        items corresponding to those indices. This is similar to NumPy's 
+        &quot;fancy indexing&quot;. The result is not an OrderedSet because you may ask 
+        for duplicate indices, and the number of elements returned should be 
+        the number of elements asked for. 
+ 
+        Example: 
+            &gt;&gt;&gt; oset = OrderedSet([1, 2, 3]) 
+            &gt;&gt;&gt; oset[1] 
+            2 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">isinstance(index</span><span class="s2">, </span><span class="s1">slice) </span><span class="s2">and </span><span class="s1">index == SLICE_ALL:</span>
+            <span class="s2">return </span><span class="s1">self.copy()</span>
+        <span class="s2">elif </span><span class="s1">is_iterable(index):</span>
+            <span class="s2">return </span><span class="s1">[self.items[i] </span><span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">index]</span>
+        <span class="s2">elif </span><span class="s1">hasattr(index</span><span class="s2">, </span><span class="s4">&quot;__index__&quot;</span><span class="s1">) </span><span class="s2">or </span><span class="s1">isinstance(index</span><span class="s2">, </span><span class="s1">slice):</span>
+            <span class="s1">result = self.items[index]</span>
+            <span class="s2">if </span><span class="s1">isinstance(result</span><span class="s2">, </span><span class="s1">list):</span>
+                <span class="s2">return </span><span class="s1">self.__class__(result)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">result</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;Don't know how to index an OrderedSet by %r&quot; </span><span class="s1">% index)</span>
+
+    <span class="s2">def </span><span class="s1">copy(self):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Return a shallow copy of this object. 
+ 
+        Example: 
+            &gt;&gt;&gt; this = OrderedSet([1, 2, 3]) 
+            &gt;&gt;&gt; other = this.copy() 
+            &gt;&gt;&gt; this == other 
+            True 
+            &gt;&gt;&gt; this is other 
+            False 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self.__class__(self)</span>
+
+    <span class="s2">def </span><span class="s1">__getstate__(self):</span>
+        <span class="s2">if </span><span class="s1">len(self) == </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s3"># The state can't be an empty list.</span>
+            <span class="s3"># We need to return a truthy value, or else __setstate__ won't be run.</span>
+            <span class="s3">#</span>
+            <span class="s3"># This could have been done more gracefully by always putting the state</span>
+            <span class="s3"># in a tuple, but this way is backwards- and forwards- compatible with</span>
+            <span class="s3"># previous versions of OrderedSet.</span>
+            <span class="s2">return </span><span class="s1">(</span><span class="s2">None,</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">list(self)</span>
+
+    <span class="s2">def </span><span class="s1">__setstate__(self</span><span class="s2">, </span><span class="s1">state):</span>
+        <span class="s2">if </span><span class="s1">state == (</span><span class="s2">None,</span><span class="s1">):</span>
+            <span class="s1">self.__init__([])</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.__init__(state)</span>
+
+    <span class="s2">def </span><span class="s1">__contains__(self</span><span class="s2">, </span><span class="s1">key):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Test if the item is in this ordered set 
+ 
+        Example: 
+            &gt;&gt;&gt; 1 in OrderedSet([1, 3, 2]) 
+            True 
+            &gt;&gt;&gt; 5 in OrderedSet([1, 3, 2]) 
+            False 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">key </span><span class="s2">in </span><span class="s1">self.map</span>
+
+    <span class="s2">def </span><span class="s1">add(self</span><span class="s2">, </span><span class="s1">key):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Add `key` as an item to this OrderedSet, then return its index. 
+ 
+        If `key` is already in the OrderedSet, return the index it already 
+        had. 
+ 
+        Example: 
+            &gt;&gt;&gt; oset = OrderedSet() 
+            &gt;&gt;&gt; oset.append(3) 
+            0 
+            &gt;&gt;&gt; print(oset) 
+            OrderedSet([3]) 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">key </span><span class="s2">not in </span><span class="s1">self.map:</span>
+            <span class="s1">self.map[key] = len(self.items)</span>
+            <span class="s1">self.items.append(key)</span>
+        <span class="s2">return </span><span class="s1">self.map[key]</span>
+
+    <span class="s1">append = add</span>
+
+    <span class="s2">def </span><span class="s1">update(self</span><span class="s2">, </span><span class="s1">sequence):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Update the set with the given iterable sequence, then return the index 
+        of the last element inserted. 
+ 
+        Example: 
+            &gt;&gt;&gt; oset = OrderedSet([1, 2, 3]) 
+            &gt;&gt;&gt; oset.update([3, 1, 5, 1, 4]) 
+            4 
+            &gt;&gt;&gt; print(oset) 
+            OrderedSet([1, 2, 3, 5, 4]) 
+        &quot;&quot;&quot;</span>
+        <span class="s1">item_index = </span><span class="s2">None</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">for </span><span class="s1">item </span><span class="s2">in </span><span class="s1">sequence:</span>
+                <span class="s1">item_index = self.add(item)</span>
+        <span class="s2">except </span><span class="s1">TypeError:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span>
+                <span class="s4">&quot;Argument needs to be an iterable, got %s&quot; </span><span class="s1">% type(sequence)</span>
+            <span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">item_index</span>
+
+    <span class="s2">def </span><span class="s1">index(self</span><span class="s2">, </span><span class="s1">key):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Get the index of a given entry, raising an IndexError if it's not 
+        present. 
+ 
+        `key` can be an iterable of entries that is not a string, in which case 
+        this returns a list of indices. 
+ 
+        Example: 
+            &gt;&gt;&gt; oset = OrderedSet([1, 2, 3]) 
+            &gt;&gt;&gt; oset.index(2) 
+            1 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">is_iterable(key):</span>
+            <span class="s2">return </span><span class="s1">[self.index(subkey) </span><span class="s2">for </span><span class="s1">subkey </span><span class="s2">in </span><span class="s1">key]</span>
+        <span class="s2">return </span><span class="s1">self.map[key]</span>
+
+    <span class="s3"># Provide some compatibility with pd.Index</span>
+    <span class="s1">get_loc = index</span>
+    <span class="s1">get_indexer = index</span>
+
+    <span class="s2">def </span><span class="s1">pop(self):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Remove and return the last element from the set. 
+ 
+        Raises KeyError if the set is empty. 
+ 
+        Example: 
+            &gt;&gt;&gt; oset = OrderedSet([1, 2, 3]) 
+            &gt;&gt;&gt; oset.pop() 
+            3 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if not </span><span class="s1">self.items:</span>
+            <span class="s2">raise </span><span class="s1">KeyError(</span><span class="s4">&quot;Set is empty&quot;</span><span class="s1">)</span>
+
+        <span class="s1">elem = self.items[-</span><span class="s5">1</span><span class="s1">]</span>
+        <span class="s2">del </span><span class="s1">self.items[-</span><span class="s5">1</span><span class="s1">]</span>
+        <span class="s2">del </span><span class="s1">self.map[elem]</span>
+        <span class="s2">return </span><span class="s1">elem</span>
+
+    <span class="s2">def </span><span class="s1">discard(self</span><span class="s2">, </span><span class="s1">key):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Remove an element.  Do not raise an exception if absent. 
+ 
+        The MutableSet mixin uses this to implement the .remove() method, which 
+        *does* raise an error when asked to remove a non-existent item. 
+ 
+        Example: 
+            &gt;&gt;&gt; oset = OrderedSet([1, 2, 3]) 
+            &gt;&gt;&gt; oset.discard(2) 
+            &gt;&gt;&gt; print(oset) 
+            OrderedSet([1, 3]) 
+            &gt;&gt;&gt; oset.discard(2) 
+            &gt;&gt;&gt; print(oset) 
+            OrderedSet([1, 3]) 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">key </span><span class="s2">in </span><span class="s1">self:</span>
+            <span class="s1">i = self.map[key]</span>
+            <span class="s2">del </span><span class="s1">self.items[i]</span>
+            <span class="s2">del </span><span class="s1">self.map[key]</span>
+            <span class="s2">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">self.map.items():</span>
+                <span class="s2">if </span><span class="s1">v &gt;= i:</span>
+                    <span class="s1">self.map[k] = v - </span><span class="s5">1</span>
+
+    <span class="s2">def </span><span class="s1">clear(self):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Remove all items from this OrderedSet. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">del </span><span class="s1">self.items[:]</span>
+        <span class="s1">self.map.clear()</span>
+
+    <span class="s2">def </span><span class="s1">__iter__(self):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Example: 
+            &gt;&gt;&gt; list(iter(OrderedSet([1, 2, 3]))) 
+            [1, 2, 3] 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">iter(self.items)</span>
+
+    <span class="s2">def </span><span class="s1">__reversed__(self):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Example: 
+            &gt;&gt;&gt; list(reversed(OrderedSet([1, 2, 3]))) 
+            [3, 2, 1] 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">reversed(self.items)</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s2">if not </span><span class="s1">self:</span>
+            <span class="s2">return </span><span class="s4">&quot;%s()&quot; </span><span class="s1">% (self.__class__.__name__</span><span class="s2">,</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s4">&quot;%s(%r)&quot; </span><span class="s1">% (self.__class__.__name__</span><span class="s2">, </span><span class="s1">list(self))</span>
+
+    <span class="s2">def </span><span class="s1">__eq__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Returns true if the containers have the same items. If `other` is a 
+        Sequence, then order is checked, otherwise it is ignored. 
+ 
+        Example: 
+            &gt;&gt;&gt; oset = OrderedSet([1, 3, 2]) 
+            &gt;&gt;&gt; oset == [1, 3, 2] 
+            True 
+            &gt;&gt;&gt; oset == [1, 2, 3] 
+            False 
+            &gt;&gt;&gt; oset == [2, 3] 
+            False 
+            &gt;&gt;&gt; oset == OrderedSet([3, 2, 1]) 
+            False 
+        &quot;&quot;&quot;</span>
+        <span class="s3"># In Python 2 deque is not a Sequence, so treat it as one for</span>
+        <span class="s3"># consistent behavior with Python 3.</span>
+        <span class="s2">if </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">(Sequence</span><span class="s2">, </span><span class="s1">deque)):</span>
+            <span class="s3"># Check that this OrderedSet contains the same elements, in the</span>
+            <span class="s3"># same order, as the other object.</span>
+            <span class="s2">return </span><span class="s1">list(self) == list(other)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">other_as_set = set(other)</span>
+        <span class="s2">except </span><span class="s1">TypeError:</span>
+            <span class="s3"># If `other` can't be converted into a set, it's not equal.</span>
+            <span class="s2">return False</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">set(self) == other_as_set</span>
+
+    <span class="s2">def </span><span class="s1">union(self</span><span class="s2">, </span><span class="s1">*sets):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Combines all unique items. 
+        Each items order is defined by its first appearance. 
+ 
+        Example: 
+            &gt;&gt;&gt; oset = OrderedSet.union(OrderedSet([3, 1, 4, 1, 5]), [1, 3], [2, 0]) 
+            &gt;&gt;&gt; print(oset) 
+            OrderedSet([3, 1, 4, 5, 2, 0]) 
+            &gt;&gt;&gt; oset.union([8, 9]) 
+            OrderedSet([3, 1, 4, 5, 2, 0, 8, 9]) 
+            &gt;&gt;&gt; oset | {10} 
+            OrderedSet([3, 1, 4, 5, 2, 0, 10]) 
+        &quot;&quot;&quot;</span>
+        <span class="s1">cls = self.__class__ </span><span class="s2">if </span><span class="s1">isinstance(self</span><span class="s2">, </span><span class="s1">OrderedSet) </span><span class="s2">else </span><span class="s1">OrderedSet</span>
+        <span class="s1">containers = map(list</span><span class="s2">, </span><span class="s1">it.chain([self]</span><span class="s2">, </span><span class="s1">sets))</span>
+        <span class="s1">items = it.chain.from_iterable(containers)</span>
+        <span class="s2">return </span><span class="s1">cls(items)</span>
+
+    <span class="s2">def </span><span class="s1">__and__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s3"># the parent implementation of this is backwards</span>
+        <span class="s2">return </span><span class="s1">self.intersection(other)</span>
+
+    <span class="s2">def </span><span class="s1">intersection(self</span><span class="s2">, </span><span class="s1">*sets):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Returns elements in common between all sets. Order is defined only 
+        by the first set. 
+ 
+        Example: 
+            &gt;&gt;&gt; oset = OrderedSet.intersection(OrderedSet([0, 1, 2, 3]), [1, 2, 3]) 
+            &gt;&gt;&gt; print(oset) 
+            OrderedSet([1, 2, 3]) 
+            &gt;&gt;&gt; oset.intersection([2, 4, 5], [1, 2, 3, 4]) 
+            OrderedSet([2]) 
+            &gt;&gt;&gt; oset.intersection() 
+            OrderedSet([1, 2, 3]) 
+        &quot;&quot;&quot;</span>
+        <span class="s1">cls = self.__class__ </span><span class="s2">if </span><span class="s1">isinstance(self</span><span class="s2">, </span><span class="s1">OrderedSet) </span><span class="s2">else </span><span class="s1">OrderedSet</span>
+        <span class="s2">if </span><span class="s1">sets:</span>
+            <span class="s1">common = set.intersection(*map(set</span><span class="s2">, </span><span class="s1">sets))</span>
+            <span class="s1">items = (item </span><span class="s2">for </span><span class="s1">item </span><span class="s2">in </span><span class="s1">self </span><span class="s2">if </span><span class="s1">item </span><span class="s2">in </span><span class="s1">common)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">items = self</span>
+        <span class="s2">return </span><span class="s1">cls(items)</span>
+
+    <span class="s2">def </span><span class="s1">difference(self</span><span class="s2">, </span><span class="s1">*sets):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Returns all elements that are in this set but not the others. 
+ 
+        Example: 
+            &gt;&gt;&gt; OrderedSet([1, 2, 3]).difference(OrderedSet([2])) 
+            OrderedSet([1, 3]) 
+            &gt;&gt;&gt; OrderedSet([1, 2, 3]).difference(OrderedSet([2]), OrderedSet([3])) 
+            OrderedSet([1]) 
+            &gt;&gt;&gt; OrderedSet([1, 2, 3]) - OrderedSet([2]) 
+            OrderedSet([1, 3]) 
+            &gt;&gt;&gt; OrderedSet([1, 2, 3]).difference() 
+            OrderedSet([1, 2, 3]) 
+        &quot;&quot;&quot;</span>
+        <span class="s1">cls = self.__class__</span>
+        <span class="s2">if </span><span class="s1">sets:</span>
+            <span class="s1">other = set.union(*map(set</span><span class="s2">, </span><span class="s1">sets))</span>
+            <span class="s1">items = (item </span><span class="s2">for </span><span class="s1">item </span><span class="s2">in </span><span class="s1">self </span><span class="s2">if </span><span class="s1">item </span><span class="s2">not in </span><span class="s1">other)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">items = self</span>
+        <span class="s2">return </span><span class="s1">cls(items)</span>
+
+    <span class="s2">def </span><span class="s1">issubset(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Report whether another set contains this set. 
+ 
+        Example: 
+            &gt;&gt;&gt; OrderedSet([1, 2, 3]).issubset({1, 2}) 
+            False 
+            &gt;&gt;&gt; OrderedSet([1, 2, 3]).issubset({1, 2, 3, 4}) 
+            True 
+            &gt;&gt;&gt; OrderedSet([1, 2, 3]).issubset({1, 4, 3, 5}) 
+            False 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">len(self) &gt; len(other):  </span><span class="s3"># Fast check for obvious cases</span>
+            <span class="s2">return False</span>
+        <span class="s2">return </span><span class="s1">all(item </span><span class="s2">in </span><span class="s1">other </span><span class="s2">for </span><span class="s1">item </span><span class="s2">in </span><span class="s1">self)</span>
+
+    <span class="s2">def </span><span class="s1">issuperset(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Report whether this set contains another set. 
+ 
+        Example: 
+            &gt;&gt;&gt; OrderedSet([1, 2]).issuperset([1, 2, 3]) 
+            False 
+            &gt;&gt;&gt; OrderedSet([1, 2, 3, 4]).issuperset({1, 2, 3}) 
+            True 
+            &gt;&gt;&gt; OrderedSet([1, 4, 3, 5]).issuperset({1, 2, 3}) 
+            False 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">len(self) &lt; len(other):  </span><span class="s3"># Fast check for obvious cases</span>
+            <span class="s2">return False</span>
+        <span class="s2">return </span><span class="s1">all(item </span><span class="s2">in </span><span class="s1">self </span><span class="s2">for </span><span class="s1">item </span><span class="s2">in </span><span class="s1">other)</span>
+
+    <span class="s2">def </span><span class="s1">symmetric_difference(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Return the symmetric difference of two OrderedSets as a new set. 
+        That is, the new set will contain all elements that are in exactly 
+        one of the sets. 
+ 
+        Their order will be preserved, with elements from `self` preceding 
+        elements from `other`. 
+ 
+        Example: 
+            &gt;&gt;&gt; this = OrderedSet([1, 4, 3, 5, 7]) 
+            &gt;&gt;&gt; other = OrderedSet([9, 7, 1, 3, 2]) 
+            &gt;&gt;&gt; this.symmetric_difference(other) 
+            OrderedSet([4, 5, 9, 2]) 
+        &quot;&quot;&quot;</span>
+        <span class="s1">cls = self.__class__ </span><span class="s2">if </span><span class="s1">isinstance(self</span><span class="s2">, </span><span class="s1">OrderedSet) </span><span class="s2">else </span><span class="s1">OrderedSet</span>
+        <span class="s1">diff1 = cls(self).difference(other)</span>
+        <span class="s1">diff2 = cls(other).difference(self)</span>
+        <span class="s2">return </span><span class="s1">diff1.union(diff2)</span>
+
+    <span class="s2">def </span><span class="s1">_update_items(self</span><span class="s2">, </span><span class="s1">items):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Replace the 'items' list of this OrderedSet with a new one, updating 
+        self.map accordingly. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.items = items</span>
+        <span class="s1">self.map = {item: idx </span><span class="s2">for </span><span class="s1">(idx</span><span class="s2">, </span><span class="s1">item) </span><span class="s2">in </span><span class="s1">enumerate(items)}</span>
+
+    <span class="s2">def </span><span class="s1">difference_update(self</span><span class="s2">, </span><span class="s1">*sets):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Update this OrderedSet to remove items from one or more other sets. 
+ 
+        Example: 
+            &gt;&gt;&gt; this = OrderedSet([1, 2, 3]) 
+            &gt;&gt;&gt; this.difference_update(OrderedSet([2, 4])) 
+            &gt;&gt;&gt; print(this) 
+            OrderedSet([1, 3]) 
+ 
+            &gt;&gt;&gt; this = OrderedSet([1, 2, 3, 4, 5]) 
+            &gt;&gt;&gt; this.difference_update(OrderedSet([2, 4]), OrderedSet([1, 4, 6])) 
+            &gt;&gt;&gt; print(this) 
+            OrderedSet([3, 5]) 
+        &quot;&quot;&quot;</span>
+        <span class="s1">items_to_remove = set()</span>
+        <span class="s2">for </span><span class="s1">other </span><span class="s2">in </span><span class="s1">sets:</span>
+            <span class="s1">items_to_remove |= set(other)</span>
+        <span class="s1">self._update_items([item </span><span class="s2">for </span><span class="s1">item </span><span class="s2">in </span><span class="s1">self.items </span><span class="s2">if </span><span class="s1">item </span><span class="s2">not in </span><span class="s1">items_to_remove])</span>
+
+    <span class="s2">def </span><span class="s1">intersection_update(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Update this OrderedSet to keep only items in another set, preserving 
+        their order in this set. 
+ 
+        Example: 
+            &gt;&gt;&gt; this = OrderedSet([1, 4, 3, 5, 7]) 
+            &gt;&gt;&gt; other = OrderedSet([9, 7, 1, 3, 2]) 
+            &gt;&gt;&gt; this.intersection_update(other) 
+            &gt;&gt;&gt; print(this) 
+            OrderedSet([1, 3, 7]) 
+        &quot;&quot;&quot;</span>
+        <span class="s1">other = set(other)</span>
+        <span class="s1">self._update_items([item </span><span class="s2">for </span><span class="s1">item </span><span class="s2">in </span><span class="s1">self.items </span><span class="s2">if </span><span class="s1">item </span><span class="s2">in </span><span class="s1">other])</span>
+
+    <span class="s2">def </span><span class="s1">symmetric_difference_update(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Update this OrderedSet to remove items from another set, then 
+        add items from the other set that were not present in this set. 
+ 
+        Example: 
+            &gt;&gt;&gt; this = OrderedSet([1, 4, 3, 5, 7]) 
+            &gt;&gt;&gt; other = OrderedSet([9, 7, 1, 3, 2]) 
+            &gt;&gt;&gt; this.symmetric_difference_update(other) 
+            &gt;&gt;&gt; print(this) 
+            OrderedSet([4, 5, 9, 2]) 
+        &quot;&quot;&quot;</span>
+        <span class="s1">items_to_add = [item </span><span class="s2">for </span><span class="s1">item </span><span class="s2">in </span><span class="s1">other </span><span class="s2">if </span><span class="s1">item </span><span class="s2">not in </span><span class="s1">self]</span>
+        <span class="s1">items_to_remove = set(other)</span>
+        <span class="s1">self._update_items(</span>
+            <span class="s1">[item </span><span class="s2">for </span><span class="s1">item </span><span class="s2">in </span><span class="s1">self.items </span><span class="s2">if </span><span class="s1">item </span><span class="s2">not in </span><span class="s1">items_to_remove] + items_to_add</span>
+        <span class="s1">)</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,452 @@
+<html>
+<head>
+<title>_reloader.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #6a8759;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_reloader.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">fnmatch</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">subprocess</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">import </span><span class="s1">threading</span>
+<span class="s0">import </span><span class="s1">time</span>
+<span class="s0">import </span><span class="s1">typing </span><span class="s0">as </span><span class="s1">t</span>
+<span class="s0">from </span><span class="s1">itertools </span><span class="s0">import </span><span class="s1">chain</span>
+<span class="s0">from </span><span class="s1">pathlib </span><span class="s0">import </span><span class="s1">PurePath</span>
+
+<span class="s0">from </span><span class="s1">._internal </span><span class="s0">import </span><span class="s1">_log</span>
+
+<span class="s2"># The various system prefixes where imports are found. Base values are</span>
+<span class="s2"># different when running in a virtualenv. The stat reloader won't scan</span>
+<span class="s2"># these directories, it would be too inefficient.</span>
+<span class="s1">prefix = {sys.prefix</span><span class="s0">, </span><span class="s1">sys.base_prefix</span><span class="s0">, </span><span class="s1">sys.exec_prefix</span><span class="s0">, </span><span class="s1">sys.base_exec_prefix}</span>
+
+<span class="s0">if </span><span class="s1">hasattr(sys</span><span class="s0">, </span><span class="s3">&quot;real_prefix&quot;</span><span class="s1">):</span>
+    <span class="s2"># virtualenv &lt; 20</span>
+    <span class="s1">prefix.add(sys.real_prefix)  </span><span class="s2"># type: ignore</span>
+
+<span class="s1">_ignore_prefixes = tuple(prefix)</span>
+<span class="s0">del </span><span class="s1">prefix</span>
+
+
+<span class="s0">def </span><span class="s1">_iter_module_paths() -&gt; t.Iterator[str]:</span>
+    <span class="s4">&quot;&quot;&quot;Find the filesystem paths associated with imported modules.&quot;&quot;&quot;</span>
+    <span class="s2"># List is in case the value is modified by the app while updating.</span>
+    <span class="s0">for </span><span class="s1">module </span><span class="s0">in </span><span class="s1">list(sys.modules.values()):</span>
+        <span class="s1">name = getattr(module</span><span class="s0">, </span><span class="s3">&quot;__file__&quot;</span><span class="s0">, None</span><span class="s1">)</span>
+
+        <span class="s0">if </span><span class="s1">name </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s0">continue</span>
+
+        <span class="s0">while not </span><span class="s1">os.path.isfile(name):</span>
+            <span class="s2"># Zip file, find the base file without the module path.</span>
+            <span class="s1">old = name</span>
+            <span class="s1">name = os.path.dirname(name)</span>
+
+            <span class="s0">if </span><span class="s1">name == old:  </span><span class="s2"># skip if it was all directories somehow</span>
+                <span class="s0">break</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">yield </span><span class="s1">name</span>
+
+
+<span class="s0">def </span><span class="s1">_remove_by_pattern(paths: t.Set[str]</span><span class="s0">, </span><span class="s1">exclude_patterns: t.Set[str]) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+    <span class="s0">for </span><span class="s1">pattern </span><span class="s0">in </span><span class="s1">exclude_patterns:</span>
+        <span class="s1">paths.difference_update(fnmatch.filter(paths</span><span class="s0">, </span><span class="s1">pattern))</span>
+
+
+<span class="s0">def </span><span class="s1">_find_stat_paths(</span>
+    <span class="s1">extra_files: t.Set[str]</span><span class="s0">, </span><span class="s1">exclude_patterns: t.Set[str]</span>
+<span class="s1">) -&gt; t.Iterable[str]:</span>
+    <span class="s4">&quot;&quot;&quot;Find paths for the stat reloader to watch. Returns imported 
+    module files, Python files under non-system paths. Extra files and 
+    Python files under extra directories can also be scanned. 
+ 
+    System paths have to be excluded for efficiency. Non-system paths, 
+    such as a project root or ``sys.path.insert``, should be the paths 
+    of interest to the user anyway. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">paths = set()</span>
+
+    <span class="s0">for </span><span class="s1">path </span><span class="s0">in </span><span class="s1">chain(list(sys.path)</span><span class="s0">, </span><span class="s1">extra_files):</span>
+        <span class="s1">path = os.path.abspath(path)</span>
+
+        <span class="s0">if </span><span class="s1">os.path.isfile(path):</span>
+            <span class="s2"># zip file on sys.path, or extra file</span>
+            <span class="s1">paths.add(path)</span>
+
+        <span class="s0">for </span><span class="s1">root</span><span class="s0">, </span><span class="s1">dirs</span><span class="s0">, </span><span class="s1">files </span><span class="s0">in </span><span class="s1">os.walk(path):</span>
+            <span class="s2"># Ignore system prefixes for efficience. Don't scan</span>
+            <span class="s2"># __pycache__, it will have a py or pyc module at the import</span>
+            <span class="s2"># path. As an optimization, ignore .git and .hg since</span>
+            <span class="s2"># nothing interesting will be there.</span>
+            <span class="s0">if </span><span class="s1">root.startswith(_ignore_prefixes) </span><span class="s0">or </span><span class="s1">os.path.basename(root) </span><span class="s0">in </span><span class="s1">{</span>
+                <span class="s3">&quot;__pycache__&quot;</span><span class="s0">,</span>
+                <span class="s3">&quot;.git&quot;</span><span class="s0">,</span>
+                <span class="s3">&quot;.hg&quot;</span><span class="s0">,</span>
+            <span class="s1">}:</span>
+                <span class="s1">dirs.clear()</span>
+                <span class="s0">continue</span>
+
+            <span class="s0">for </span><span class="s1">name </span><span class="s0">in </span><span class="s1">files:</span>
+                <span class="s0">if </span><span class="s1">name.endswith((</span><span class="s3">&quot;.py&quot;</span><span class="s0">, </span><span class="s3">&quot;.pyc&quot;</span><span class="s1">)):</span>
+                    <span class="s1">paths.add(os.path.join(root</span><span class="s0">, </span><span class="s1">name))</span>
+
+    <span class="s1">paths.update(_iter_module_paths())</span>
+    <span class="s1">_remove_by_pattern(paths</span><span class="s0">, </span><span class="s1">exclude_patterns)</span>
+    <span class="s0">return </span><span class="s1">paths</span>
+
+
+<span class="s0">def </span><span class="s1">_find_watchdog_paths(</span>
+    <span class="s1">extra_files: t.Set[str]</span><span class="s0">, </span><span class="s1">exclude_patterns: t.Set[str]</span>
+<span class="s1">) -&gt; t.Iterable[str]:</span>
+    <span class="s4">&quot;&quot;&quot;Find paths for the stat reloader to watch. Looks at the same 
+    sources as the stat reloader, but watches everything under 
+    directories instead of individual files. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">dirs = set()</span>
+
+    <span class="s0">for </span><span class="s1">name </span><span class="s0">in </span><span class="s1">chain(list(sys.path)</span><span class="s0">, </span><span class="s1">extra_files):</span>
+        <span class="s1">name = os.path.abspath(name)</span>
+
+        <span class="s0">if </span><span class="s1">os.path.isfile(name):</span>
+            <span class="s1">name = os.path.dirname(name)</span>
+
+        <span class="s1">dirs.add(name)</span>
+
+    <span class="s0">for </span><span class="s1">name </span><span class="s0">in </span><span class="s1">_iter_module_paths():</span>
+        <span class="s1">dirs.add(os.path.dirname(name))</span>
+
+    <span class="s1">_remove_by_pattern(dirs</span><span class="s0">, </span><span class="s1">exclude_patterns)</span>
+    <span class="s0">return </span><span class="s1">_find_common_roots(dirs)</span>
+
+
+<span class="s0">def </span><span class="s1">_find_common_roots(paths: t.Iterable[str]) -&gt; t.Iterable[str]:</span>
+    <span class="s1">root: t.Dict[str</span><span class="s0">, </span><span class="s1">dict] = {}</span>
+
+    <span class="s0">for </span><span class="s1">chunks </span><span class="s0">in </span><span class="s1">sorted((PurePath(x).parts </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">paths)</span><span class="s0">, </span><span class="s1">key=len</span><span class="s0">, </span><span class="s1">reverse=</span><span class="s0">True</span><span class="s1">):</span>
+        <span class="s1">node = root</span>
+
+        <span class="s0">for </span><span class="s1">chunk </span><span class="s0">in </span><span class="s1">chunks:</span>
+            <span class="s1">node = node.setdefault(chunk</span><span class="s0">, </span><span class="s1">{})</span>
+
+        <span class="s1">node.clear()</span>
+
+    <span class="s1">rv = set()</span>
+
+    <span class="s0">def </span><span class="s1">_walk(node: t.Mapping[str</span><span class="s0">, </span><span class="s1">dict]</span><span class="s0">, </span><span class="s1">path: t.Tuple[str</span><span class="s0">, </span><span class="s1">...]) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s0">for </span><span class="s1">prefix</span><span class="s0">, </span><span class="s1">child </span><span class="s0">in </span><span class="s1">node.items():</span>
+            <span class="s1">_walk(child</span><span class="s0">, </span><span class="s1">path + (prefix</span><span class="s0">,</span><span class="s1">))</span>
+
+        <span class="s0">if not </span><span class="s1">node:</span>
+            <span class="s1">rv.add(os.path.join(*path))</span>
+
+    <span class="s1">_walk(root</span><span class="s0">, </span><span class="s1">())</span>
+    <span class="s0">return </span><span class="s1">rv</span>
+
+
+<span class="s0">def </span><span class="s1">_get_args_for_reloading() -&gt; t.List[str]:</span>
+    <span class="s4">&quot;&quot;&quot;Determine how the script was executed, and return the args needed 
+    to execute it again in a new process. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">rv = [sys.executable]</span>
+    <span class="s1">py_script = sys.argv[</span><span class="s5">0</span><span class="s1">]</span>
+    <span class="s1">args = sys.argv[</span><span class="s5">1</span><span class="s1">:]</span>
+    <span class="s2"># Need to look at main module to determine how it was executed.</span>
+    <span class="s1">__main__ = sys.modules[</span><span class="s3">&quot;__main__&quot;</span><span class="s1">]</span>
+
+    <span class="s2"># The value of __package__ indicates how Python was called. It may</span>
+    <span class="s2"># not exist if a setuptools script is installed as an egg. It may be</span>
+    <span class="s2"># set incorrectly for entry points created with pip on Windows.</span>
+    <span class="s0">if </span><span class="s1">getattr(__main__</span><span class="s0">, </span><span class="s3">&quot;__package__&quot;</span><span class="s0">, None</span><span class="s1">) </span><span class="s0">is None or </span><span class="s1">(</span>
+        <span class="s1">os.name == </span><span class="s3">&quot;nt&quot;</span>
+        <span class="s0">and </span><span class="s1">__main__.__package__ == </span><span class="s3">&quot;&quot;</span>
+        <span class="s0">and not </span><span class="s1">os.path.exists(py_script)</span>
+        <span class="s0">and </span><span class="s1">os.path.exists(</span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">py_script</span><span class="s0">}</span><span class="s3">.exe&quot;</span><span class="s1">)</span>
+    <span class="s1">):</span>
+        <span class="s2"># Executed a file, like &quot;python app.py&quot;.</span>
+        <span class="s1">py_script = os.path.abspath(py_script)</span>
+
+        <span class="s0">if </span><span class="s1">os.name == </span><span class="s3">&quot;nt&quot;</span><span class="s1">:</span>
+            <span class="s2"># Windows entry points have &quot;.exe&quot; extension and should be</span>
+            <span class="s2"># called directly.</span>
+            <span class="s0">if not </span><span class="s1">os.path.exists(py_script) </span><span class="s0">and </span><span class="s1">os.path.exists(</span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">py_script</span><span class="s0">}</span><span class="s3">.exe&quot;</span><span class="s1">):</span>
+                <span class="s1">py_script += </span><span class="s3">&quot;.exe&quot;</span>
+
+            <span class="s0">if </span><span class="s1">(</span>
+                <span class="s1">os.path.splitext(sys.executable)[</span><span class="s5">1</span><span class="s1">] == </span><span class="s3">&quot;.exe&quot;</span>
+                <span class="s0">and </span><span class="s1">os.path.splitext(py_script)[</span><span class="s5">1</span><span class="s1">] == </span><span class="s3">&quot;.exe&quot;</span>
+            <span class="s1">):</span>
+                <span class="s1">rv.pop(</span><span class="s5">0</span><span class="s1">)</span>
+
+        <span class="s1">rv.append(py_script)</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s2"># Executed a module, like &quot;python -m werkzeug.serving&quot;.</span>
+        <span class="s0">if </span><span class="s1">sys.argv[</span><span class="s5">0</span><span class="s1">] == </span><span class="s3">&quot;-m&quot;</span><span class="s1">:</span>
+            <span class="s2"># Flask works around previous behavior by putting</span>
+            <span class="s2"># &quot;-m flask&quot; in sys.argv.</span>
+            <span class="s2"># TODO remove this once Flask no longer misbehaves</span>
+            <span class="s1">args = sys.argv</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">if </span><span class="s1">os.path.isfile(py_script):</span>
+                <span class="s2"># Rewritten by Python from &quot;-m script&quot; to &quot;/path/to/script.py&quot;.</span>
+                <span class="s1">py_module = t.cast(str</span><span class="s0">, </span><span class="s1">__main__.__package__)</span>
+                <span class="s1">name = os.path.splitext(os.path.basename(py_script))[</span><span class="s5">0</span><span class="s1">]</span>
+
+                <span class="s0">if </span><span class="s1">name != </span><span class="s3">&quot;__main__&quot;</span><span class="s1">:</span>
+                    <span class="s1">py_module += </span><span class="s3">f&quot;.</span><span class="s0">{</span><span class="s1">name</span><span class="s0">}</span><span class="s3">&quot;</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s2"># Incorrectly rewritten by pydevd debugger from &quot;-m script&quot; to &quot;script&quot;.</span>
+                <span class="s1">py_module = py_script</span>
+
+            <span class="s1">rv.extend((</span><span class="s3">&quot;-m&quot;</span><span class="s0">, </span><span class="s1">py_module.lstrip(</span><span class="s3">&quot;.&quot;</span><span class="s1">)))</span>
+
+    <span class="s1">rv.extend(args)</span>
+    <span class="s0">return </span><span class="s1">rv</span>
+
+
+<span class="s0">class </span><span class="s1">ReloaderLoop:</span>
+    <span class="s1">name = </span><span class="s3">&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">extra_files: t.Optional[t.Iterable[str]] = </span><span class="s0">None,</span>
+        <span class="s1">exclude_patterns: t.Optional[t.Iterable[str]] = </span><span class="s0">None,</span>
+        <span class="s1">interval: t.Union[int</span><span class="s0">, </span><span class="s1">float] = </span><span class="s5">1</span><span class="s0">,</span>
+    <span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self.extra_files: t.Set[str] = {os.path.abspath(x) </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">extra_files </span><span class="s0">or </span><span class="s1">()}</span>
+        <span class="s1">self.exclude_patterns: t.Set[str] = set(exclude_patterns </span><span class="s0">or </span><span class="s1">())</span>
+        <span class="s1">self.interval = interval</span>
+
+    <span class="s0">def </span><span class="s1">__enter__(self) -&gt; </span><span class="s3">&quot;ReloaderLoop&quot;</span><span class="s1">:</span>
+        <span class="s4">&quot;&quot;&quot;Do any setup, then run one step of the watch to populate the 
+        initial filesystem state. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.run_step()</span>
+        <span class="s0">return </span><span class="s1">self</span>
+
+    <span class="s0">def </span><span class="s1">__exit__(self</span><span class="s0">, </span><span class="s1">exc_type</span><span class="s0">, </span><span class="s1">exc_val</span><span class="s0">, </span><span class="s1">exc_tb):  </span><span class="s2"># type: ignore</span>
+        <span class="s4">&quot;&quot;&quot;Clean up any resources associated with the reloader.&quot;&quot;&quot;</span>
+        <span class="s0">pass</span>
+
+    <span class="s0">def </span><span class="s1">run(self) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s4">&quot;&quot;&quot;Continually run the watch step, sleeping for the configured 
+        interval after each step. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">while True</span><span class="s1">:</span>
+            <span class="s1">self.run_step()</span>
+            <span class="s1">time.sleep(self.interval)</span>
+
+    <span class="s0">def </span><span class="s1">run_step(self) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s4">&quot;&quot;&quot;Run one step for watching the filesystem. Called once to set 
+        up initial state, then repeatedly to update it. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">pass</span>
+
+    <span class="s0">def </span><span class="s1">restart_with_reloader(self) -&gt; int:</span>
+        <span class="s4">&quot;&quot;&quot;Spawn a new Python interpreter with the same arguments as the 
+        current one, but running the reloader thread. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">while True</span><span class="s1">:</span>
+            <span class="s1">_log(</span><span class="s3">&quot;info&quot;</span><span class="s0">, </span><span class="s3">f&quot; * Restarting with </span><span class="s0">{</span><span class="s1">self.name</span><span class="s0">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+            <span class="s1">args = _get_args_for_reloading()</span>
+            <span class="s1">new_environ = os.environ.copy()</span>
+            <span class="s1">new_environ[</span><span class="s3">&quot;WERKZEUG_RUN_MAIN&quot;</span><span class="s1">] = </span><span class="s3">&quot;true&quot;</span>
+            <span class="s1">exit_code = subprocess.call(args</span><span class="s0">, </span><span class="s1">env=new_environ</span><span class="s0">, </span><span class="s1">close_fds=</span><span class="s0">False</span><span class="s1">)</span>
+
+            <span class="s0">if </span><span class="s1">exit_code != </span><span class="s5">3</span><span class="s1">:</span>
+                <span class="s0">return </span><span class="s1">exit_code</span>
+
+    <span class="s0">def </span><span class="s1">trigger_reload(self</span><span class="s0">, </span><span class="s1">filename: str) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self.log_reload(filename)</span>
+        <span class="s1">sys.exit(</span><span class="s5">3</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">log_reload(self</span><span class="s0">, </span><span class="s1">filename: str) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">filename = os.path.abspath(filename)</span>
+        <span class="s1">_log(</span><span class="s3">&quot;info&quot;</span><span class="s0">, </span><span class="s3">f&quot; * Detected change in </span><span class="s0">{</span><span class="s1">filename</span><span class="s0">!r}</span><span class="s3">, reloading&quot;</span><span class="s1">)</span>
+
+
+<span class="s0">class </span><span class="s1">StatReloaderLoop(ReloaderLoop):</span>
+    <span class="s1">name = </span><span class="s3">&quot;stat&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__enter__(self) -&gt; ReloaderLoop:</span>
+        <span class="s1">self.mtimes: t.Dict[str</span><span class="s0">, </span><span class="s1">float] = {}</span>
+        <span class="s0">return </span><span class="s1">super().__enter__()</span>
+
+    <span class="s0">def </span><span class="s1">run_step(self) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s0">for </span><span class="s1">name </span><span class="s0">in </span><span class="s1">chain(_find_stat_paths(self.extra_files</span><span class="s0">, </span><span class="s1">self.exclude_patterns)):</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">mtime = os.stat(name).st_mtime</span>
+            <span class="s0">except </span><span class="s1">OSError:</span>
+                <span class="s0">continue</span>
+
+            <span class="s1">old_time = self.mtimes.get(name)</span>
+
+            <span class="s0">if </span><span class="s1">old_time </span><span class="s0">is None</span><span class="s1">:</span>
+                <span class="s1">self.mtimes[name] = mtime</span>
+                <span class="s0">continue</span>
+
+            <span class="s0">if </span><span class="s1">mtime &gt; old_time:</span>
+                <span class="s1">self.trigger_reload(name)</span>
+
+
+<span class="s0">class </span><span class="s1">WatchdogReloaderLoop(ReloaderLoop):</span>
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">*args: t.Any</span><span class="s0">, </span><span class="s1">**kwargs: t.Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s0">from </span><span class="s1">watchdog.observers </span><span class="s0">import </span><span class="s1">Observer</span>
+        <span class="s0">from </span><span class="s1">watchdog.events </span><span class="s0">import </span><span class="s1">PatternMatchingEventHandler</span>
+
+        <span class="s1">super().__init__(*args</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+        <span class="s1">trigger_reload = self.trigger_reload</span>
+
+        <span class="s0">class </span><span class="s1">EventHandler(PatternMatchingEventHandler):  </span><span class="s2"># type: ignore</span>
+            <span class="s0">def </span><span class="s1">on_any_event(self</span><span class="s0">, </span><span class="s1">event):  </span><span class="s2"># type: ignore</span>
+                <span class="s1">trigger_reload(event.src_path)</span>
+
+        <span class="s1">reloader_name = Observer.__name__.lower()</span>
+
+        <span class="s0">if </span><span class="s1">reloader_name.endswith(</span><span class="s3">&quot;observer&quot;</span><span class="s1">):</span>
+            <span class="s1">reloader_name = reloader_name[:-</span><span class="s5">8</span><span class="s1">]</span>
+
+        <span class="s1">self.name = </span><span class="s3">f&quot;watchdog (</span><span class="s0">{</span><span class="s1">reloader_name</span><span class="s0">}</span><span class="s3">)&quot;</span>
+        <span class="s1">self.observer = Observer()</span>
+        <span class="s2"># Extra patterns can be non-Python files, match them in addition</span>
+        <span class="s2"># to all Python files in default and extra directories. Ignore</span>
+        <span class="s2"># __pycache__ since a change there will always have a change to</span>
+        <span class="s2"># the source file (or initial pyc file) as well. Ignore Git and</span>
+        <span class="s2"># Mercurial internal changes.</span>
+        <span class="s1">extra_patterns = [p </span><span class="s0">for </span><span class="s1">p </span><span class="s0">in </span><span class="s1">self.extra_files </span><span class="s0">if not </span><span class="s1">os.path.isdir(p)]</span>
+        <span class="s1">self.event_handler = EventHandler(</span>
+            <span class="s1">patterns=[</span><span class="s3">&quot;*.py&quot;</span><span class="s0">, </span><span class="s3">&quot;*.pyc&quot;</span><span class="s0">, </span><span class="s3">&quot;*.zip&quot;</span><span class="s0">, </span><span class="s1">*extra_patterns]</span><span class="s0">,</span>
+            <span class="s1">ignore_patterns=[</span>
+                <span class="s3">&quot;*/__pycache__/*&quot;</span><span class="s0">,</span>
+                <span class="s3">&quot;*/.git/*&quot;</span><span class="s0">,</span>
+                <span class="s3">&quot;*/.hg/*&quot;</span><span class="s0">,</span>
+                <span class="s1">*self.exclude_patterns</span><span class="s0">,</span>
+            <span class="s1">]</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s1">self.should_reload = </span><span class="s0">False</span>
+
+    <span class="s0">def </span><span class="s1">trigger_reload(self</span><span class="s0">, </span><span class="s1">filename: str) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s2"># This is called inside an event handler, which means throwing</span>
+        <span class="s2"># SystemExit has no effect.</span>
+        <span class="s2"># https://github.com/gorakhargosh/watchdog/issues/294</span>
+        <span class="s1">self.should_reload = </span><span class="s0">True</span>
+        <span class="s1">self.log_reload(filename)</span>
+
+    <span class="s0">def </span><span class="s1">__enter__(self) -&gt; ReloaderLoop:</span>
+        <span class="s1">self.watches: t.Dict[str</span><span class="s0">, </span><span class="s1">t.Any] = {}</span>
+        <span class="s1">self.observer.start()</span>
+        <span class="s0">return </span><span class="s1">super().__enter__()</span>
+
+    <span class="s0">def </span><span class="s1">__exit__(self</span><span class="s0">, </span><span class="s1">exc_type</span><span class="s0">, </span><span class="s1">exc_val</span><span class="s0">, </span><span class="s1">exc_tb):  </span><span class="s2"># type: ignore</span>
+        <span class="s1">self.observer.stop()</span>
+        <span class="s1">self.observer.join()</span>
+
+    <span class="s0">def </span><span class="s1">run(self) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s0">while not </span><span class="s1">self.should_reload:</span>
+            <span class="s1">self.run_step()</span>
+            <span class="s1">time.sleep(self.interval)</span>
+
+        <span class="s1">sys.exit(</span><span class="s5">3</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">run_step(self) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">to_delete = set(self.watches)</span>
+
+        <span class="s0">for </span><span class="s1">path </span><span class="s0">in </span><span class="s1">_find_watchdog_paths(self.extra_files</span><span class="s0">, </span><span class="s1">self.exclude_patterns):</span>
+            <span class="s0">if </span><span class="s1">path </span><span class="s0">not in </span><span class="s1">self.watches:</span>
+                <span class="s0">try</span><span class="s1">:</span>
+                    <span class="s1">self.watches[path] = self.observer.schedule(</span>
+                        <span class="s1">self.event_handler</span><span class="s0">, </span><span class="s1">path</span><span class="s0">, </span><span class="s1">recursive=</span><span class="s0">True</span>
+                    <span class="s1">)</span>
+                <span class="s0">except </span><span class="s1">OSError:</span>
+                    <span class="s2"># Clear this path from list of watches We don't want</span>
+                    <span class="s2"># the same error message showing again in the next</span>
+                    <span class="s2"># iteration.</span>
+                    <span class="s1">self.watches[path] = </span><span class="s0">None</span>
+
+            <span class="s1">to_delete.discard(path)</span>
+
+        <span class="s0">for </span><span class="s1">path </span><span class="s0">in </span><span class="s1">to_delete:</span>
+            <span class="s1">watch = self.watches.pop(path</span><span class="s0">, None</span><span class="s1">)</span>
+
+            <span class="s0">if </span><span class="s1">watch </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s1">self.observer.unschedule(watch)</span>
+
+
+<span class="s1">reloader_loops: t.Dict[str</span><span class="s0">, </span><span class="s1">t.Type[ReloaderLoop]] = {</span>
+    <span class="s3">&quot;stat&quot;</span><span class="s1">: StatReloaderLoop</span><span class="s0">,</span>
+    <span class="s3">&quot;watchdog&quot;</span><span class="s1">: WatchdogReloaderLoop</span><span class="s0">,</span>
+<span class="s1">}</span>
+
+<span class="s0">try</span><span class="s1">:</span>
+    <span class="s1">__import__(</span><span class="s3">&quot;watchdog.observers&quot;</span><span class="s1">)</span>
+<span class="s0">except </span><span class="s1">ImportError:</span>
+    <span class="s1">reloader_loops[</span><span class="s3">&quot;auto&quot;</span><span class="s1">] = reloader_loops[</span><span class="s3">&quot;stat&quot;</span><span class="s1">]</span>
+<span class="s0">else</span><span class="s1">:</span>
+    <span class="s1">reloader_loops[</span><span class="s3">&quot;auto&quot;</span><span class="s1">] = reloader_loops[</span><span class="s3">&quot;watchdog&quot;</span><span class="s1">]</span>
+
+
+<span class="s0">def </span><span class="s1">ensure_echo_on() -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+    <span class="s4">&quot;&quot;&quot;Ensure that echo mode is enabled. Some tools such as PDB disable 
+    it which causes usability issues after a reload.&quot;&quot;&quot;</span>
+    <span class="s2"># tcgetattr will fail if stdin isn't a tty</span>
+    <span class="s0">if </span><span class="s1">sys.stdin </span><span class="s0">is None or not </span><span class="s1">sys.stdin.isatty():</span>
+        <span class="s0">return</span>
+
+    <span class="s0">try</span><span class="s1">:</span>
+        <span class="s0">import </span><span class="s1">termios</span>
+    <span class="s0">except </span><span class="s1">ImportError:</span>
+        <span class="s0">return</span>
+
+    <span class="s1">attributes = termios.tcgetattr(sys.stdin)</span>
+
+    <span class="s0">if not </span><span class="s1">attributes[</span><span class="s5">3</span><span class="s1">] &amp; termios.ECHO:</span>
+        <span class="s1">attributes[</span><span class="s5">3</span><span class="s1">] |= termios.ECHO</span>
+        <span class="s1">termios.tcsetattr(sys.stdin</span><span class="s0">, </span><span class="s1">termios.TCSANOW</span><span class="s0">, </span><span class="s1">attributes)</span>
+
+
+<span class="s0">def </span><span class="s1">run_with_reloader(</span>
+    <span class="s1">main_func: t.Callable[[]</span><span class="s0">, None</span><span class="s1">]</span><span class="s0">,</span>
+    <span class="s1">extra_files: t.Optional[t.Iterable[str]] = </span><span class="s0">None,</span>
+    <span class="s1">exclude_patterns: t.Optional[t.Iterable[str]] = </span><span class="s0">None,</span>
+    <span class="s1">interval: t.Union[int</span><span class="s0">, </span><span class="s1">float] = </span><span class="s5">1</span><span class="s0">,</span>
+    <span class="s1">reloader_type: str = </span><span class="s3">&quot;auto&quot;</span><span class="s0">,</span>
+<span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+    <span class="s4">&quot;&quot;&quot;Run the given function in an independent Python interpreter.&quot;&quot;&quot;</span>
+    <span class="s0">import </span><span class="s1">signal</span>
+
+    <span class="s1">signal.signal(signal.SIGTERM</span><span class="s0">, lambda </span><span class="s1">*args: sys.exit(</span><span class="s5">0</span><span class="s1">))</span>
+    <span class="s1">reloader = reloader_loops[reloader_type](</span>
+        <span class="s1">extra_files=extra_files</span><span class="s0">, </span><span class="s1">exclude_patterns=exclude_patterns</span><span class="s0">, </span><span class="s1">interval=interval</span>
+    <span class="s1">)</span>
+
+    <span class="s0">try</span><span class="s1">:</span>
+        <span class="s0">if </span><span class="s1">os.environ.get(</span><span class="s3">&quot;WERKZEUG_RUN_MAIN&quot;</span><span class="s1">) == </span><span class="s3">&quot;true&quot;</span><span class="s1">:</span>
+            <span class="s1">ensure_echo_on()</span>
+            <span class="s1">t = threading.Thread(target=main_func</span><span class="s0">, </span><span class="s1">args=())</span>
+            <span class="s1">t.daemon = </span><span class="s0">True</span>
+
+            <span class="s2"># Enter the reloader to set up initial state, then start</span>
+            <span class="s2"># the app thread and reloader update loop.</span>
+            <span class="s0">with </span><span class="s1">reloader:</span>
+                <span class="s1">t.start()</span>
+                <span class="s1">reloader.run()</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">sys.exit(reloader.restart_with_reloader())</span>
+    <span class="s0">except </span><span class="s1">KeyboardInterrupt:</span>
+        <span class="s0">pass</span>
+</pre>
+</body>
+</html>

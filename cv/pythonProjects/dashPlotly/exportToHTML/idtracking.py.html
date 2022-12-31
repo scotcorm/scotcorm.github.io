@@ -1,0 +1,340 @@
+<html>
+<head>
+<title>idtracking.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6a8759;}
+.s3 { color: #6897bb;}
+.s4 { color: #808080;}
+.s5 { color: #629755; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+idtracking.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">typing </span><span class="s0">as </span><span class="s1">t</span>
+
+<span class="s0">from </span><span class="s1">. </span><span class="s0">import </span><span class="s1">nodes</span>
+<span class="s0">from </span><span class="s1">.visitor </span><span class="s0">import </span><span class="s1">NodeVisitor</span>
+
+<span class="s1">VAR_LOAD_PARAMETER = </span><span class="s2">&quot;param&quot;</span>
+<span class="s1">VAR_LOAD_RESOLVE = </span><span class="s2">&quot;resolve&quot;</span>
+<span class="s1">VAR_LOAD_ALIAS = </span><span class="s2">&quot;alias&quot;</span>
+<span class="s1">VAR_LOAD_UNDEFINED = </span><span class="s2">&quot;undefined&quot;</span>
+
+
+<span class="s0">def </span><span class="s1">find_symbols(</span>
+    <span class="s1">nodes: t.Iterable[nodes.Node]</span><span class="s0">, </span><span class="s1">parent_symbols: t.Optional[</span><span class="s2">&quot;Symbols&quot;</span><span class="s1">] = </span><span class="s0">None</span>
+<span class="s1">) -&gt; </span><span class="s2">&quot;Symbols&quot;</span><span class="s1">:</span>
+    <span class="s1">sym = Symbols(parent=parent_symbols)</span>
+    <span class="s1">visitor = FrameSymbolVisitor(sym)</span>
+    <span class="s0">for </span><span class="s1">node </span><span class="s0">in </span><span class="s1">nodes:</span>
+        <span class="s1">visitor.visit(node)</span>
+    <span class="s0">return </span><span class="s1">sym</span>
+
+
+<span class="s0">def </span><span class="s1">symbols_for_node(</span>
+    <span class="s1">node: nodes.Node</span><span class="s0">, </span><span class="s1">parent_symbols: t.Optional[</span><span class="s2">&quot;Symbols&quot;</span><span class="s1">] = </span><span class="s0">None</span>
+<span class="s1">) -&gt; </span><span class="s2">&quot;Symbols&quot;</span><span class="s1">:</span>
+    <span class="s1">sym = Symbols(parent=parent_symbols)</span>
+    <span class="s1">sym.analyze_node(node)</span>
+    <span class="s0">return </span><span class="s1">sym</span>
+
+
+<span class="s0">class </span><span class="s1">Symbols:</span>
+    <span class="s0">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">parent: t.Optional[</span><span class="s2">&quot;Symbols&quot;</span><span class="s1">] = </span><span class="s0">None, </span><span class="s1">level: t.Optional[int] = </span><span class="s0">None</span>
+    <span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s0">if </span><span class="s1">level </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s0">if </span><span class="s1">parent </span><span class="s0">is None</span><span class="s1">:</span>
+                <span class="s1">level = </span><span class="s3">0</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">level = parent.level + </span><span class="s3">1</span>
+
+        <span class="s1">self.level: int = level</span>
+        <span class="s1">self.parent = parent</span>
+        <span class="s1">self.refs: t.Dict[str</span><span class="s0">, </span><span class="s1">str] = {}</span>
+        <span class="s1">self.loads: t.Dict[str</span><span class="s0">, </span><span class="s1">t.Any] = {}</span>
+        <span class="s1">self.stores: t.Set[str] = set()</span>
+
+    <span class="s0">def </span><span class="s1">analyze_node(self</span><span class="s0">, </span><span class="s1">node: nodes.Node</span><span class="s0">, </span><span class="s1">**kwargs: t.Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">visitor = RootVisitor(self)</span>
+        <span class="s1">visitor.visit(node</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s0">def </span><span class="s1">_define_ref(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">name: str</span><span class="s0">, </span><span class="s1">load: t.Optional[t.Tuple[str</span><span class="s0">, </span><span class="s1">t.Optional[str]]] = </span><span class="s0">None</span>
+    <span class="s1">) -&gt; str:</span>
+        <span class="s1">ident = </span><span class="s2">f&quot;l_</span><span class="s0">{</span><span class="s1">self.level</span><span class="s0">}</span><span class="s2">_</span><span class="s0">{</span><span class="s1">name</span><span class="s0">}</span><span class="s2">&quot;</span>
+        <span class="s1">self.refs[name] = ident</span>
+        <span class="s0">if </span><span class="s1">load </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">self.loads[ident] = load</span>
+        <span class="s0">return </span><span class="s1">ident</span>
+
+    <span class="s0">def </span><span class="s1">find_load(self</span><span class="s0">, </span><span class="s1">target: str) -&gt; t.Optional[t.Any]:</span>
+        <span class="s0">if </span><span class="s1">target </span><span class="s0">in </span><span class="s1">self.loads:</span>
+            <span class="s0">return </span><span class="s1">self.loads[target]</span>
+
+        <span class="s0">if </span><span class="s1">self.parent </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">self.parent.find_load(target)</span>
+
+        <span class="s0">return None</span>
+
+    <span class="s0">def </span><span class="s1">find_ref(self</span><span class="s0">, </span><span class="s1">name: str) -&gt; t.Optional[str]:</span>
+        <span class="s0">if </span><span class="s1">name </span><span class="s0">in </span><span class="s1">self.refs:</span>
+            <span class="s0">return </span><span class="s1">self.refs[name]</span>
+
+        <span class="s0">if </span><span class="s1">self.parent </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">self.parent.find_ref(name)</span>
+
+        <span class="s0">return None</span>
+
+    <span class="s0">def </span><span class="s1">ref(self</span><span class="s0">, </span><span class="s1">name: str) -&gt; str:</span>
+        <span class="s1">rv = self.find_ref(name)</span>
+        <span class="s0">if </span><span class="s1">rv </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">AssertionError(</span>
+                <span class="s2">&quot;Tried to resolve a name to a reference that was&quot;</span>
+                <span class="s2">f&quot; unknown to the frame (</span><span class="s0">{</span><span class="s1">name</span><span class="s0">!r}</span><span class="s2">)&quot;</span>
+            <span class="s1">)</span>
+        <span class="s0">return </span><span class="s1">rv</span>
+
+    <span class="s0">def </span><span class="s1">copy(self) -&gt; </span><span class="s2">&quot;Symbols&quot;</span><span class="s1">:</span>
+        <span class="s1">rv = t.cast(Symbols</span><span class="s0">, </span><span class="s1">object.__new__(self.__class__))</span>
+        <span class="s1">rv.__dict__.update(self.__dict__)</span>
+        <span class="s1">rv.refs = self.refs.copy()</span>
+        <span class="s1">rv.loads = self.loads.copy()</span>
+        <span class="s1">rv.stores = self.stores.copy()</span>
+        <span class="s0">return </span><span class="s1">rv</span>
+
+    <span class="s0">def </span><span class="s1">store(self</span><span class="s0">, </span><span class="s1">name: str) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self.stores.add(name)</span>
+
+        <span class="s4"># If we have not see the name referenced yet, we need to figure</span>
+        <span class="s4"># out what to set it to.</span>
+        <span class="s0">if </span><span class="s1">name </span><span class="s0">not in </span><span class="s1">self.refs:</span>
+            <span class="s4"># If there is a parent scope we check if the name has a</span>
+            <span class="s4"># reference there.  If it does it means we might have to alias</span>
+            <span class="s4"># to a variable there.</span>
+            <span class="s0">if </span><span class="s1">self.parent </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s1">outer_ref = self.parent.find_ref(name)</span>
+                <span class="s0">if </span><span class="s1">outer_ref </span><span class="s0">is not None</span><span class="s1">:</span>
+                    <span class="s1">self._define_ref(name</span><span class="s0">, </span><span class="s1">load=(VAR_LOAD_ALIAS</span><span class="s0">, </span><span class="s1">outer_ref))</span>
+                    <span class="s0">return</span>
+
+            <span class="s4"># Otherwise we can just set it to undefined.</span>
+            <span class="s1">self._define_ref(name</span><span class="s0">, </span><span class="s1">load=(VAR_LOAD_UNDEFINED</span><span class="s0">, None</span><span class="s1">))</span>
+
+    <span class="s0">def </span><span class="s1">declare_parameter(self</span><span class="s0">, </span><span class="s1">name: str) -&gt; str:</span>
+        <span class="s1">self.stores.add(name)</span>
+        <span class="s0">return </span><span class="s1">self._define_ref(name</span><span class="s0">, </span><span class="s1">load=(VAR_LOAD_PARAMETER</span><span class="s0">, None</span><span class="s1">))</span>
+
+    <span class="s0">def </span><span class="s1">load(self</span><span class="s0">, </span><span class="s1">name: str) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s0">if </span><span class="s1">self.find_ref(name) </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">self._define_ref(name</span><span class="s0">, </span><span class="s1">load=(VAR_LOAD_RESOLVE</span><span class="s0">, </span><span class="s1">name))</span>
+
+    <span class="s0">def </span><span class="s1">branch_update(self</span><span class="s0">, </span><span class="s1">branch_symbols: t.Sequence[</span><span class="s2">&quot;Symbols&quot;</span><span class="s1">]) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">stores: t.Dict[str</span><span class="s0">, </span><span class="s1">int] = {}</span>
+        <span class="s0">for </span><span class="s1">branch </span><span class="s0">in </span><span class="s1">branch_symbols:</span>
+            <span class="s0">for </span><span class="s1">target </span><span class="s0">in </span><span class="s1">branch.stores:</span>
+                <span class="s0">if </span><span class="s1">target </span><span class="s0">in </span><span class="s1">self.stores:</span>
+                    <span class="s0">continue</span>
+                <span class="s1">stores[target] = stores.get(target</span><span class="s0">, </span><span class="s3">0</span><span class="s1">) + </span><span class="s3">1</span>
+
+        <span class="s0">for </span><span class="s1">sym </span><span class="s0">in </span><span class="s1">branch_symbols:</span>
+            <span class="s1">self.refs.update(sym.refs)</span>
+            <span class="s1">self.loads.update(sym.loads)</span>
+            <span class="s1">self.stores.update(sym.stores)</span>
+
+        <span class="s0">for </span><span class="s1">name</span><span class="s0">, </span><span class="s1">branch_count </span><span class="s0">in </span><span class="s1">stores.items():</span>
+            <span class="s0">if </span><span class="s1">branch_count == len(branch_symbols):</span>
+                <span class="s0">continue</span>
+
+            <span class="s1">target = self.find_ref(name)  </span><span class="s4"># type: ignore</span>
+            <span class="s0">assert </span><span class="s1">target </span><span class="s0">is not None, </span><span class="s2">&quot;should not happen&quot;</span>
+
+            <span class="s0">if </span><span class="s1">self.parent </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s1">outer_target = self.parent.find_ref(name)</span>
+                <span class="s0">if </span><span class="s1">outer_target </span><span class="s0">is not None</span><span class="s1">:</span>
+                    <span class="s1">self.loads[target] = (VAR_LOAD_ALIAS</span><span class="s0">, </span><span class="s1">outer_target)</span>
+                    <span class="s0">continue</span>
+            <span class="s1">self.loads[target] = (VAR_LOAD_RESOLVE</span><span class="s0">, </span><span class="s1">name)</span>
+
+    <span class="s0">def </span><span class="s1">dump_stores(self) -&gt; t.Dict[str</span><span class="s0">, </span><span class="s1">str]:</span>
+        <span class="s1">rv: t.Dict[str</span><span class="s0">, </span><span class="s1">str] = {}</span>
+        <span class="s1">node: t.Optional[</span><span class="s2">&quot;Symbols&quot;</span><span class="s1">] = self</span>
+
+        <span class="s0">while </span><span class="s1">node </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s0">for </span><span class="s1">name </span><span class="s0">in </span><span class="s1">sorted(node.stores):</span>
+                <span class="s0">if </span><span class="s1">name </span><span class="s0">not in </span><span class="s1">rv:</span>
+                    <span class="s1">rv[name] = self.find_ref(name)  </span><span class="s4"># type: ignore</span>
+
+            <span class="s1">node = node.parent</span>
+
+        <span class="s0">return </span><span class="s1">rv</span>
+
+    <span class="s0">def </span><span class="s1">dump_param_targets(self) -&gt; t.Set[str]:</span>
+        <span class="s1">rv = set()</span>
+        <span class="s1">node: t.Optional[</span><span class="s2">&quot;Symbols&quot;</span><span class="s1">] = self</span>
+
+        <span class="s0">while </span><span class="s1">node </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s0">for </span><span class="s1">target</span><span class="s0">, </span><span class="s1">(instr</span><span class="s0">, </span><span class="s1">_) </span><span class="s0">in </span><span class="s1">self.loads.items():</span>
+                <span class="s0">if </span><span class="s1">instr == VAR_LOAD_PARAMETER:</span>
+                    <span class="s1">rv.add(target)</span>
+
+            <span class="s1">node = node.parent</span>
+
+        <span class="s0">return </span><span class="s1">rv</span>
+
+
+<span class="s0">class </span><span class="s1">RootVisitor(NodeVisitor):</span>
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">symbols: </span><span class="s2">&quot;Symbols&quot;</span><span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self.sym_visitor = FrameSymbolVisitor(symbols)</span>
+
+    <span class="s0">def </span><span class="s1">_simple_visit(self</span><span class="s0">, </span><span class="s1">node: nodes.Node</span><span class="s0">, </span><span class="s1">**kwargs: t.Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s0">for </span><span class="s1">child </span><span class="s0">in </span><span class="s1">node.iter_child_nodes():</span>
+            <span class="s1">self.sym_visitor.visit(child)</span>
+
+    <span class="s1">visit_Template = _simple_visit</span>
+    <span class="s1">visit_Block = _simple_visit</span>
+    <span class="s1">visit_Macro = _simple_visit</span>
+    <span class="s1">visit_FilterBlock = _simple_visit</span>
+    <span class="s1">visit_Scope = _simple_visit</span>
+    <span class="s1">visit_If = _simple_visit</span>
+    <span class="s1">visit_ScopedEvalContextModifier = _simple_visit</span>
+
+    <span class="s0">def </span><span class="s1">visit_AssignBlock(self</span><span class="s0">, </span><span class="s1">node: nodes.AssignBlock</span><span class="s0">, </span><span class="s1">**kwargs: t.Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s0">for </span><span class="s1">child </span><span class="s0">in </span><span class="s1">node.body:</span>
+            <span class="s1">self.sym_visitor.visit(child)</span>
+
+    <span class="s0">def </span><span class="s1">visit_CallBlock(self</span><span class="s0">, </span><span class="s1">node: nodes.CallBlock</span><span class="s0">, </span><span class="s1">**kwargs: t.Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s0">for </span><span class="s1">child </span><span class="s0">in </span><span class="s1">node.iter_child_nodes(exclude=(</span><span class="s2">&quot;call&quot;</span><span class="s0">,</span><span class="s1">)):</span>
+            <span class="s1">self.sym_visitor.visit(child)</span>
+
+    <span class="s0">def </span><span class="s1">visit_OverlayScope(self</span><span class="s0">, </span><span class="s1">node: nodes.OverlayScope</span><span class="s0">, </span><span class="s1">**kwargs: t.Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s0">for </span><span class="s1">child </span><span class="s0">in </span><span class="s1">node.body:</span>
+            <span class="s1">self.sym_visitor.visit(child)</span>
+
+    <span class="s0">def </span><span class="s1">visit_For(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">node: nodes.For</span><span class="s0">, </span><span class="s1">for_branch: str = </span><span class="s2">&quot;body&quot;</span><span class="s0">, </span><span class="s1">**kwargs: t.Any</span>
+    <span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s0">if </span><span class="s1">for_branch == </span><span class="s2">&quot;body&quot;</span><span class="s1">:</span>
+            <span class="s1">self.sym_visitor.visit(node.target</span><span class="s0">, </span><span class="s1">store_as_param=</span><span class="s0">True</span><span class="s1">)</span>
+            <span class="s1">branch = node.body</span>
+        <span class="s0">elif </span><span class="s1">for_branch == </span><span class="s2">&quot;else&quot;</span><span class="s1">:</span>
+            <span class="s1">branch = node.else_</span>
+        <span class="s0">elif </span><span class="s1">for_branch == </span><span class="s2">&quot;test&quot;</span><span class="s1">:</span>
+            <span class="s1">self.sym_visitor.visit(node.target</span><span class="s0">, </span><span class="s1">store_as_param=</span><span class="s0">True</span><span class="s1">)</span>
+            <span class="s0">if </span><span class="s1">node.test </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s1">self.sym_visitor.visit(node.test)</span>
+            <span class="s0">return</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">RuntimeError(</span><span class="s2">&quot;Unknown for branch&quot;</span><span class="s1">)</span>
+
+        <span class="s0">if </span><span class="s1">branch:</span>
+            <span class="s0">for </span><span class="s1">item </span><span class="s0">in </span><span class="s1">branch:</span>
+                <span class="s1">self.sym_visitor.visit(item)</span>
+
+    <span class="s0">def </span><span class="s1">visit_With(self</span><span class="s0">, </span><span class="s1">node: nodes.With</span><span class="s0">, </span><span class="s1">**kwargs: t.Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s0">for </span><span class="s1">target </span><span class="s0">in </span><span class="s1">node.targets:</span>
+            <span class="s1">self.sym_visitor.visit(target)</span>
+        <span class="s0">for </span><span class="s1">child </span><span class="s0">in </span><span class="s1">node.body:</span>
+            <span class="s1">self.sym_visitor.visit(child)</span>
+
+    <span class="s0">def </span><span class="s1">generic_visit(self</span><span class="s0">, </span><span class="s1">node: nodes.Node</span><span class="s0">, </span><span class="s1">*args: t.Any</span><span class="s0">, </span><span class="s1">**kwargs: t.Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s0">raise </span><span class="s1">NotImplementedError(</span><span class="s2">f&quot;Cannot find symbols for </span><span class="s0">{</span><span class="s1">type(node).__name__</span><span class="s0">!r}</span><span class="s2">&quot;</span><span class="s1">)</span>
+
+
+<span class="s0">class </span><span class="s1">FrameSymbolVisitor(NodeVisitor):</span>
+    <span class="s5">&quot;&quot;&quot;A visitor for `Frame.inspect`.&quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">symbols: </span><span class="s2">&quot;Symbols&quot;</span><span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self.symbols = symbols</span>
+
+    <span class="s0">def </span><span class="s1">visit_Name(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">node: nodes.Name</span><span class="s0">, </span><span class="s1">store_as_param: bool = </span><span class="s0">False, </span><span class="s1">**kwargs: t.Any</span>
+    <span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s5">&quot;&quot;&quot;All assignments to names go through this function.&quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">store_as_param </span><span class="s0">or </span><span class="s1">node.ctx == </span><span class="s2">&quot;param&quot;</span><span class="s1">:</span>
+            <span class="s1">self.symbols.declare_parameter(node.name)</span>
+        <span class="s0">elif </span><span class="s1">node.ctx == </span><span class="s2">&quot;store&quot;</span><span class="s1">:</span>
+            <span class="s1">self.symbols.store(node.name)</span>
+        <span class="s0">elif </span><span class="s1">node.ctx == </span><span class="s2">&quot;load&quot;</span><span class="s1">:</span>
+            <span class="s1">self.symbols.load(node.name)</span>
+
+    <span class="s0">def </span><span class="s1">visit_NSRef(self</span><span class="s0">, </span><span class="s1">node: nodes.NSRef</span><span class="s0">, </span><span class="s1">**kwargs: t.Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self.symbols.load(node.name)</span>
+
+    <span class="s0">def </span><span class="s1">visit_If(self</span><span class="s0">, </span><span class="s1">node: nodes.If</span><span class="s0">, </span><span class="s1">**kwargs: t.Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self.visit(node.test</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+        <span class="s1">original_symbols = self.symbols</span>
+
+        <span class="s0">def </span><span class="s1">inner_visit(nodes: t.Iterable[nodes.Node]) -&gt; </span><span class="s2">&quot;Symbols&quot;</span><span class="s1">:</span>
+            <span class="s1">self.symbols = rv = original_symbols.copy()</span>
+
+            <span class="s0">for </span><span class="s1">subnode </span><span class="s0">in </span><span class="s1">nodes:</span>
+                <span class="s1">self.visit(subnode</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+            <span class="s1">self.symbols = original_symbols</span>
+            <span class="s0">return </span><span class="s1">rv</span>
+
+        <span class="s1">body_symbols = inner_visit(node.body)</span>
+        <span class="s1">elif_symbols = inner_visit(node.elif_)</span>
+        <span class="s1">else_symbols = inner_visit(node.else_ </span><span class="s0">or </span><span class="s1">())</span>
+        <span class="s1">self.symbols.branch_update([body_symbols</span><span class="s0">, </span><span class="s1">elif_symbols</span><span class="s0">, </span><span class="s1">else_symbols])</span>
+
+    <span class="s0">def </span><span class="s1">visit_Macro(self</span><span class="s0">, </span><span class="s1">node: nodes.Macro</span><span class="s0">, </span><span class="s1">**kwargs: t.Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self.symbols.store(node.name)</span>
+
+    <span class="s0">def </span><span class="s1">visit_Import(self</span><span class="s0">, </span><span class="s1">node: nodes.Import</span><span class="s0">, </span><span class="s1">**kwargs: t.Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self.generic_visit(node</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+        <span class="s1">self.symbols.store(node.target)</span>
+
+    <span class="s0">def </span><span class="s1">visit_FromImport(self</span><span class="s0">, </span><span class="s1">node: nodes.FromImport</span><span class="s0">, </span><span class="s1">**kwargs: t.Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self.generic_visit(node</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+        <span class="s0">for </span><span class="s1">name </span><span class="s0">in </span><span class="s1">node.names:</span>
+            <span class="s0">if </span><span class="s1">isinstance(name</span><span class="s0">, </span><span class="s1">tuple):</span>
+                <span class="s1">self.symbols.store(name[</span><span class="s3">1</span><span class="s1">])</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">self.symbols.store(name)</span>
+
+    <span class="s0">def </span><span class="s1">visit_Assign(self</span><span class="s0">, </span><span class="s1">node: nodes.Assign</span><span class="s0">, </span><span class="s1">**kwargs: t.Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s5">&quot;&quot;&quot;Visit assignments in the correct order.&quot;&quot;&quot;</span>
+        <span class="s1">self.visit(node.node</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+        <span class="s1">self.visit(node.target</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s0">def </span><span class="s1">visit_For(self</span><span class="s0">, </span><span class="s1">node: nodes.For</span><span class="s0">, </span><span class="s1">**kwargs: t.Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s5">&quot;&quot;&quot;Visiting stops at for blocks.  However the block sequence 
+        is visited as part of the outer scope. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.visit(node.iter</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s0">def </span><span class="s1">visit_CallBlock(self</span><span class="s0">, </span><span class="s1">node: nodes.CallBlock</span><span class="s0">, </span><span class="s1">**kwargs: t.Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self.visit(node.call</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s0">def </span><span class="s1">visit_FilterBlock(self</span><span class="s0">, </span><span class="s1">node: nodes.FilterBlock</span><span class="s0">, </span><span class="s1">**kwargs: t.Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self.visit(node.filter</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s0">def </span><span class="s1">visit_With(self</span><span class="s0">, </span><span class="s1">node: nodes.With</span><span class="s0">, </span><span class="s1">**kwargs: t.Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s0">for </span><span class="s1">target </span><span class="s0">in </span><span class="s1">node.values:</span>
+            <span class="s1">self.visit(target)</span>
+
+    <span class="s0">def </span><span class="s1">visit_AssignBlock(self</span><span class="s0">, </span><span class="s1">node: nodes.AssignBlock</span><span class="s0">, </span><span class="s1">**kwargs: t.Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s5">&quot;&quot;&quot;Stop visiting at block assigns.&quot;&quot;&quot;</span>
+        <span class="s1">self.visit(node.target</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s0">def </span><span class="s1">visit_Scope(self</span><span class="s0">, </span><span class="s1">node: nodes.Scope</span><span class="s0">, </span><span class="s1">**kwargs: t.Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s5">&quot;&quot;&quot;Stop visiting at scopes.&quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">visit_Block(self</span><span class="s0">, </span><span class="s1">node: nodes.Block</span><span class="s0">, </span><span class="s1">**kwargs: t.Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s5">&quot;&quot;&quot;Stop visiting at blocks.&quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">visit_OverlayScope(self</span><span class="s0">, </span><span class="s1">node: nodes.OverlayScope</span><span class="s0">, </span><span class="s1">**kwargs: t.Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s5">&quot;&quot;&quot;Do not visit into overlay scopes.&quot;&quot;&quot;</span>
+</pre>
+</body>
+</html>

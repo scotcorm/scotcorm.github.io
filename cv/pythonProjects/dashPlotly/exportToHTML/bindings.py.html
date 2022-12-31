@@ -1,0 +1,541 @@
+<html>
+<head>
+<title>bindings.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #808080;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+bindings.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+This module uses ctypes to bind a whole bunch of functions and constants from 
+SecureTransport. The goal here is to provide the low-level API to 
+SecureTransport. These are essentially the C-level functions and constants, and 
+they're pretty gross to work with. 
+ 
+This code is a bastardised version of the code found in Will Bond's oscrypto 
+library. An enormous debt is owed to him for blazing this trail for us. For 
+that reason, this code should be considered to be covered both by urllib3's 
+license and by oscrypto's: 
+ 
+    Copyright (c) 2015-2016 Will Bond &lt;will@wbond.net&gt; 
+ 
+    Permission is hereby granted, free of charge, to any person obtaining a 
+    copy of this software and associated documentation files (the &quot;Software&quot;), 
+    to deal in the Software without restriction, including without limitation 
+    the rights to use, copy, modify, merge, publish, distribute, sublicense, 
+    and/or sell copies of the Software, and to permit persons to whom the 
+    Software is furnished to do so, subject to the following conditions: 
+ 
+    The above copyright notice and this permission notice shall be included in 
+    all copies or substantial portions of the Software. 
+ 
+    THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR 
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE 
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER 
+    DEALINGS IN THE SOFTWARE. 
+&quot;&quot;&quot;</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">absolute_import</span>
+
+<span class="s2">import </span><span class="s1">platform</span>
+<span class="s2">from </span><span class="s1">ctypes </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">CDLL</span><span class="s2">,</span>
+    <span class="s1">CFUNCTYPE</span><span class="s2">,</span>
+    <span class="s1">POINTER</span><span class="s2">,</span>
+    <span class="s1">c_bool</span><span class="s2">,</span>
+    <span class="s1">c_byte</span><span class="s2">,</span>
+    <span class="s1">c_char_p</span><span class="s2">,</span>
+    <span class="s1">c_int32</span><span class="s2">,</span>
+    <span class="s1">c_long</span><span class="s2">,</span>
+    <span class="s1">c_size_t</span><span class="s2">,</span>
+    <span class="s1">c_uint32</span><span class="s2">,</span>
+    <span class="s1">c_ulong</span><span class="s2">,</span>
+    <span class="s1">c_void_p</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">ctypes.util </span><span class="s2">import </span><span class="s1">find_library</span>
+
+<span class="s2">from </span><span class="s1">...packages.six </span><span class="s2">import </span><span class="s1">raise_from</span>
+
+<span class="s2">if </span><span class="s1">platform.system() != </span><span class="s3">&quot;Darwin&quot;</span><span class="s1">:</span>
+    <span class="s2">raise </span><span class="s1">ImportError(</span><span class="s3">&quot;Only macOS is supported&quot;</span><span class="s1">)</span>
+
+<span class="s1">version = platform.mac_ver()[</span><span class="s4">0</span><span class="s1">]</span>
+<span class="s1">version_info = tuple(map(int</span><span class="s2">, </span><span class="s1">version.split(</span><span class="s3">&quot;.&quot;</span><span class="s1">)))</span>
+<span class="s2">if </span><span class="s1">version_info &lt; (</span><span class="s4">10</span><span class="s2">, </span><span class="s4">8</span><span class="s1">):</span>
+    <span class="s2">raise </span><span class="s1">OSError(</span>
+        <span class="s3">&quot;Only OS X 10.8 and newer are supported, not %s.%s&quot;</span>
+        <span class="s1">% (version_info[</span><span class="s4">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">version_info[</span><span class="s4">1</span><span class="s1">])</span>
+    <span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">load_cdll(name</span><span class="s2">, </span><span class="s1">macos10_16_path):</span>
+    <span class="s0">&quot;&quot;&quot;Loads a CDLL by name, falling back to known path on 10.16+&quot;&quot;&quot;</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s5"># Big Sur is technically 11 but we use 10.16 due to the Big Sur</span>
+        <span class="s5"># beta being labeled as 10.16.</span>
+        <span class="s2">if </span><span class="s1">version_info &gt;= (</span><span class="s4">10</span><span class="s2">, </span><span class="s4">16</span><span class="s1">):</span>
+            <span class="s1">path = macos10_16_path</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">path = find_library(name)</span>
+        <span class="s2">if not </span><span class="s1">path:</span>
+            <span class="s2">raise </span><span class="s1">OSError  </span><span class="s5"># Caught and reraised as 'ImportError'</span>
+        <span class="s2">return </span><span class="s1">CDLL(path</span><span class="s2">, </span><span class="s1">use_errno=</span><span class="s2">True</span><span class="s1">)</span>
+    <span class="s2">except </span><span class="s1">OSError:</span>
+        <span class="s1">raise_from(ImportError(</span><span class="s3">&quot;The library %s failed to load&quot; </span><span class="s1">% name)</span><span class="s2">, None</span><span class="s1">)</span>
+
+
+<span class="s1">Security = load_cdll(</span>
+    <span class="s3">&quot;Security&quot;</span><span class="s2">, </span><span class="s3">&quot;/System/Library/Frameworks/Security.framework/Security&quot;</span>
+<span class="s1">)</span>
+<span class="s1">CoreFoundation = load_cdll(</span>
+    <span class="s3">&quot;CoreFoundation&quot;</span><span class="s2">,</span>
+    <span class="s3">&quot;/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation&quot;</span><span class="s2">,</span>
+<span class="s1">)</span>
+
+
+<span class="s1">Boolean = c_bool</span>
+<span class="s1">CFIndex = c_long</span>
+<span class="s1">CFStringEncoding = c_uint32</span>
+<span class="s1">CFData = c_void_p</span>
+<span class="s1">CFString = c_void_p</span>
+<span class="s1">CFArray = c_void_p</span>
+<span class="s1">CFMutableArray = c_void_p</span>
+<span class="s1">CFDictionary = c_void_p</span>
+<span class="s1">CFError = c_void_p</span>
+<span class="s1">CFType = c_void_p</span>
+<span class="s1">CFTypeID = c_ulong</span>
+
+<span class="s1">CFTypeRef = POINTER(CFType)</span>
+<span class="s1">CFAllocatorRef = c_void_p</span>
+
+<span class="s1">OSStatus = c_int32</span>
+
+<span class="s1">CFDataRef = POINTER(CFData)</span>
+<span class="s1">CFStringRef = POINTER(CFString)</span>
+<span class="s1">CFArrayRef = POINTER(CFArray)</span>
+<span class="s1">CFMutableArrayRef = POINTER(CFMutableArray)</span>
+<span class="s1">CFDictionaryRef = POINTER(CFDictionary)</span>
+<span class="s1">CFArrayCallBacks = c_void_p</span>
+<span class="s1">CFDictionaryKeyCallBacks = c_void_p</span>
+<span class="s1">CFDictionaryValueCallBacks = c_void_p</span>
+
+<span class="s1">SecCertificateRef = POINTER(c_void_p)</span>
+<span class="s1">SecExternalFormat = c_uint32</span>
+<span class="s1">SecExternalItemType = c_uint32</span>
+<span class="s1">SecIdentityRef = POINTER(c_void_p)</span>
+<span class="s1">SecItemImportExportFlags = c_uint32</span>
+<span class="s1">SecItemImportExportKeyParameters = c_void_p</span>
+<span class="s1">SecKeychainRef = POINTER(c_void_p)</span>
+<span class="s1">SSLProtocol = c_uint32</span>
+<span class="s1">SSLCipherSuite = c_uint32</span>
+<span class="s1">SSLContextRef = POINTER(c_void_p)</span>
+<span class="s1">SecTrustRef = POINTER(c_void_p)</span>
+<span class="s1">SSLConnectionRef = c_uint32</span>
+<span class="s1">SecTrustResultType = c_uint32</span>
+<span class="s1">SecTrustOptionFlags = c_uint32</span>
+<span class="s1">SSLProtocolSide = c_uint32</span>
+<span class="s1">SSLConnectionType = c_uint32</span>
+<span class="s1">SSLSessionOption = c_uint32</span>
+
+
+<span class="s2">try</span><span class="s1">:</span>
+    <span class="s1">Security.SecItemImport.argtypes = [</span>
+        <span class="s1">CFDataRef</span><span class="s2">,</span>
+        <span class="s1">CFStringRef</span><span class="s2">,</span>
+        <span class="s1">POINTER(SecExternalFormat)</span><span class="s2">,</span>
+        <span class="s1">POINTER(SecExternalItemType)</span><span class="s2">,</span>
+        <span class="s1">SecItemImportExportFlags</span><span class="s2">,</span>
+        <span class="s1">POINTER(SecItemImportExportKeyParameters)</span><span class="s2">,</span>
+        <span class="s1">SecKeychainRef</span><span class="s2">,</span>
+        <span class="s1">POINTER(CFArrayRef)</span><span class="s2">,</span>
+    <span class="s1">]</span>
+    <span class="s1">Security.SecItemImport.restype = OSStatus</span>
+
+    <span class="s1">Security.SecCertificateGetTypeID.argtypes = []</span>
+    <span class="s1">Security.SecCertificateGetTypeID.restype = CFTypeID</span>
+
+    <span class="s1">Security.SecIdentityGetTypeID.argtypes = []</span>
+    <span class="s1">Security.SecIdentityGetTypeID.restype = CFTypeID</span>
+
+    <span class="s1">Security.SecKeyGetTypeID.argtypes = []</span>
+    <span class="s1">Security.SecKeyGetTypeID.restype = CFTypeID</span>
+
+    <span class="s1">Security.SecCertificateCreateWithData.argtypes = [CFAllocatorRef</span><span class="s2">, </span><span class="s1">CFDataRef]</span>
+    <span class="s1">Security.SecCertificateCreateWithData.restype = SecCertificateRef</span>
+
+    <span class="s1">Security.SecCertificateCopyData.argtypes = [SecCertificateRef]</span>
+    <span class="s1">Security.SecCertificateCopyData.restype = CFDataRef</span>
+
+    <span class="s1">Security.SecCopyErrorMessageString.argtypes = [OSStatus</span><span class="s2">, </span><span class="s1">c_void_p]</span>
+    <span class="s1">Security.SecCopyErrorMessageString.restype = CFStringRef</span>
+
+    <span class="s1">Security.SecIdentityCreateWithCertificate.argtypes = [</span>
+        <span class="s1">CFTypeRef</span><span class="s2">,</span>
+        <span class="s1">SecCertificateRef</span><span class="s2">,</span>
+        <span class="s1">POINTER(SecIdentityRef)</span><span class="s2">,</span>
+    <span class="s1">]</span>
+    <span class="s1">Security.SecIdentityCreateWithCertificate.restype = OSStatus</span>
+
+    <span class="s1">Security.SecKeychainCreate.argtypes = [</span>
+        <span class="s1">c_char_p</span><span class="s2">,</span>
+        <span class="s1">c_uint32</span><span class="s2">,</span>
+        <span class="s1">c_void_p</span><span class="s2">,</span>
+        <span class="s1">Boolean</span><span class="s2">,</span>
+        <span class="s1">c_void_p</span><span class="s2">,</span>
+        <span class="s1">POINTER(SecKeychainRef)</span><span class="s2">,</span>
+    <span class="s1">]</span>
+    <span class="s1">Security.SecKeychainCreate.restype = OSStatus</span>
+
+    <span class="s1">Security.SecKeychainDelete.argtypes = [SecKeychainRef]</span>
+    <span class="s1">Security.SecKeychainDelete.restype = OSStatus</span>
+
+    <span class="s1">Security.SecPKCS12Import.argtypes = [</span>
+        <span class="s1">CFDataRef</span><span class="s2">,</span>
+        <span class="s1">CFDictionaryRef</span><span class="s2">,</span>
+        <span class="s1">POINTER(CFArrayRef)</span><span class="s2">,</span>
+    <span class="s1">]</span>
+    <span class="s1">Security.SecPKCS12Import.restype = OSStatus</span>
+
+    <span class="s1">SSLReadFunc = CFUNCTYPE(OSStatus</span><span class="s2">, </span><span class="s1">SSLConnectionRef</span><span class="s2">, </span><span class="s1">c_void_p</span><span class="s2">, </span><span class="s1">POINTER(c_size_t))</span>
+    <span class="s1">SSLWriteFunc = CFUNCTYPE(</span>
+        <span class="s1">OSStatus</span><span class="s2">, </span><span class="s1">SSLConnectionRef</span><span class="s2">, </span><span class="s1">POINTER(c_byte)</span><span class="s2">, </span><span class="s1">POINTER(c_size_t)</span>
+    <span class="s1">)</span>
+
+    <span class="s1">Security.SSLSetIOFuncs.argtypes = [SSLContextRef</span><span class="s2">, </span><span class="s1">SSLReadFunc</span><span class="s2">, </span><span class="s1">SSLWriteFunc]</span>
+    <span class="s1">Security.SSLSetIOFuncs.restype = OSStatus</span>
+
+    <span class="s1">Security.SSLSetPeerID.argtypes = [SSLContextRef</span><span class="s2">, </span><span class="s1">c_char_p</span><span class="s2">, </span><span class="s1">c_size_t]</span>
+    <span class="s1">Security.SSLSetPeerID.restype = OSStatus</span>
+
+    <span class="s1">Security.SSLSetCertificate.argtypes = [SSLContextRef</span><span class="s2">, </span><span class="s1">CFArrayRef]</span>
+    <span class="s1">Security.SSLSetCertificate.restype = OSStatus</span>
+
+    <span class="s1">Security.SSLSetCertificateAuthorities.argtypes = [SSLContextRef</span><span class="s2">, </span><span class="s1">CFTypeRef</span><span class="s2">, </span><span class="s1">Boolean]</span>
+    <span class="s1">Security.SSLSetCertificateAuthorities.restype = OSStatus</span>
+
+    <span class="s1">Security.SSLSetConnection.argtypes = [SSLContextRef</span><span class="s2">, </span><span class="s1">SSLConnectionRef]</span>
+    <span class="s1">Security.SSLSetConnection.restype = OSStatus</span>
+
+    <span class="s1">Security.SSLSetPeerDomainName.argtypes = [SSLContextRef</span><span class="s2">, </span><span class="s1">c_char_p</span><span class="s2">, </span><span class="s1">c_size_t]</span>
+    <span class="s1">Security.SSLSetPeerDomainName.restype = OSStatus</span>
+
+    <span class="s1">Security.SSLHandshake.argtypes = [SSLContextRef]</span>
+    <span class="s1">Security.SSLHandshake.restype = OSStatus</span>
+
+    <span class="s1">Security.SSLRead.argtypes = [SSLContextRef</span><span class="s2">, </span><span class="s1">c_char_p</span><span class="s2">, </span><span class="s1">c_size_t</span><span class="s2">, </span><span class="s1">POINTER(c_size_t)]</span>
+    <span class="s1">Security.SSLRead.restype = OSStatus</span>
+
+    <span class="s1">Security.SSLWrite.argtypes = [SSLContextRef</span><span class="s2">, </span><span class="s1">c_char_p</span><span class="s2">, </span><span class="s1">c_size_t</span><span class="s2">, </span><span class="s1">POINTER(c_size_t)]</span>
+    <span class="s1">Security.SSLWrite.restype = OSStatus</span>
+
+    <span class="s1">Security.SSLClose.argtypes = [SSLContextRef]</span>
+    <span class="s1">Security.SSLClose.restype = OSStatus</span>
+
+    <span class="s1">Security.SSLGetNumberSupportedCiphers.argtypes = [SSLContextRef</span><span class="s2">, </span><span class="s1">POINTER(c_size_t)]</span>
+    <span class="s1">Security.SSLGetNumberSupportedCiphers.restype = OSStatus</span>
+
+    <span class="s1">Security.SSLGetSupportedCiphers.argtypes = [</span>
+        <span class="s1">SSLContextRef</span><span class="s2">,</span>
+        <span class="s1">POINTER(SSLCipherSuite)</span><span class="s2">,</span>
+        <span class="s1">POINTER(c_size_t)</span><span class="s2">,</span>
+    <span class="s1">]</span>
+    <span class="s1">Security.SSLGetSupportedCiphers.restype = OSStatus</span>
+
+    <span class="s1">Security.SSLSetEnabledCiphers.argtypes = [</span>
+        <span class="s1">SSLContextRef</span><span class="s2">,</span>
+        <span class="s1">POINTER(SSLCipherSuite)</span><span class="s2">,</span>
+        <span class="s1">c_size_t</span><span class="s2">,</span>
+    <span class="s1">]</span>
+    <span class="s1">Security.SSLSetEnabledCiphers.restype = OSStatus</span>
+
+    <span class="s1">Security.SSLGetNumberEnabledCiphers.argtype = [SSLContextRef</span><span class="s2">, </span><span class="s1">POINTER(c_size_t)]</span>
+    <span class="s1">Security.SSLGetNumberEnabledCiphers.restype = OSStatus</span>
+
+    <span class="s1">Security.SSLGetEnabledCiphers.argtypes = [</span>
+        <span class="s1">SSLContextRef</span><span class="s2">,</span>
+        <span class="s1">POINTER(SSLCipherSuite)</span><span class="s2">,</span>
+        <span class="s1">POINTER(c_size_t)</span><span class="s2">,</span>
+    <span class="s1">]</span>
+    <span class="s1">Security.SSLGetEnabledCiphers.restype = OSStatus</span>
+
+    <span class="s1">Security.SSLGetNegotiatedCipher.argtypes = [SSLContextRef</span><span class="s2">, </span><span class="s1">POINTER(SSLCipherSuite)]</span>
+    <span class="s1">Security.SSLGetNegotiatedCipher.restype = OSStatus</span>
+
+    <span class="s1">Security.SSLGetNegotiatedProtocolVersion.argtypes = [</span>
+        <span class="s1">SSLContextRef</span><span class="s2">,</span>
+        <span class="s1">POINTER(SSLProtocol)</span><span class="s2">,</span>
+    <span class="s1">]</span>
+    <span class="s1">Security.SSLGetNegotiatedProtocolVersion.restype = OSStatus</span>
+
+    <span class="s1">Security.SSLCopyPeerTrust.argtypes = [SSLContextRef</span><span class="s2">, </span><span class="s1">POINTER(SecTrustRef)]</span>
+    <span class="s1">Security.SSLCopyPeerTrust.restype = OSStatus</span>
+
+    <span class="s1">Security.SecTrustSetAnchorCertificates.argtypes = [SecTrustRef</span><span class="s2">, </span><span class="s1">CFArrayRef]</span>
+    <span class="s1">Security.SecTrustSetAnchorCertificates.restype = OSStatus</span>
+
+    <span class="s1">Security.SecTrustSetAnchorCertificatesOnly.argstypes = [SecTrustRef</span><span class="s2">, </span><span class="s1">Boolean]</span>
+    <span class="s1">Security.SecTrustSetAnchorCertificatesOnly.restype = OSStatus</span>
+
+    <span class="s1">Security.SecTrustEvaluate.argtypes = [SecTrustRef</span><span class="s2">, </span><span class="s1">POINTER(SecTrustResultType)]</span>
+    <span class="s1">Security.SecTrustEvaluate.restype = OSStatus</span>
+
+    <span class="s1">Security.SecTrustGetCertificateCount.argtypes = [SecTrustRef]</span>
+    <span class="s1">Security.SecTrustGetCertificateCount.restype = CFIndex</span>
+
+    <span class="s1">Security.SecTrustGetCertificateAtIndex.argtypes = [SecTrustRef</span><span class="s2">, </span><span class="s1">CFIndex]</span>
+    <span class="s1">Security.SecTrustGetCertificateAtIndex.restype = SecCertificateRef</span>
+
+    <span class="s1">Security.SSLCreateContext.argtypes = [</span>
+        <span class="s1">CFAllocatorRef</span><span class="s2">,</span>
+        <span class="s1">SSLProtocolSide</span><span class="s2">,</span>
+        <span class="s1">SSLConnectionType</span><span class="s2">,</span>
+    <span class="s1">]</span>
+    <span class="s1">Security.SSLCreateContext.restype = SSLContextRef</span>
+
+    <span class="s1">Security.SSLSetSessionOption.argtypes = [SSLContextRef</span><span class="s2">, </span><span class="s1">SSLSessionOption</span><span class="s2">, </span><span class="s1">Boolean]</span>
+    <span class="s1">Security.SSLSetSessionOption.restype = OSStatus</span>
+
+    <span class="s1">Security.SSLSetProtocolVersionMin.argtypes = [SSLContextRef</span><span class="s2">, </span><span class="s1">SSLProtocol]</span>
+    <span class="s1">Security.SSLSetProtocolVersionMin.restype = OSStatus</span>
+
+    <span class="s1">Security.SSLSetProtocolVersionMax.argtypes = [SSLContextRef</span><span class="s2">, </span><span class="s1">SSLProtocol]</span>
+    <span class="s1">Security.SSLSetProtocolVersionMax.restype = OSStatus</span>
+
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">Security.SSLSetALPNProtocols.argtypes = [SSLContextRef</span><span class="s2">, </span><span class="s1">CFArrayRef]</span>
+        <span class="s1">Security.SSLSetALPNProtocols.restype = OSStatus</span>
+    <span class="s2">except </span><span class="s1">AttributeError:</span>
+        <span class="s5"># Supported only in 10.12+</span>
+        <span class="s2">pass</span>
+
+    <span class="s1">Security.SecCopyErrorMessageString.argtypes = [OSStatus</span><span class="s2">, </span><span class="s1">c_void_p]</span>
+    <span class="s1">Security.SecCopyErrorMessageString.restype = CFStringRef</span>
+
+    <span class="s1">Security.SSLReadFunc = SSLReadFunc</span>
+    <span class="s1">Security.SSLWriteFunc = SSLWriteFunc</span>
+    <span class="s1">Security.SSLContextRef = SSLContextRef</span>
+    <span class="s1">Security.SSLProtocol = SSLProtocol</span>
+    <span class="s1">Security.SSLCipherSuite = SSLCipherSuite</span>
+    <span class="s1">Security.SecIdentityRef = SecIdentityRef</span>
+    <span class="s1">Security.SecKeychainRef = SecKeychainRef</span>
+    <span class="s1">Security.SecTrustRef = SecTrustRef</span>
+    <span class="s1">Security.SecTrustResultType = SecTrustResultType</span>
+    <span class="s1">Security.SecExternalFormat = SecExternalFormat</span>
+    <span class="s1">Security.OSStatus = OSStatus</span>
+
+    <span class="s1">Security.kSecImportExportPassphrase = CFStringRef.in_dll(</span>
+        <span class="s1">Security</span><span class="s2">, </span><span class="s3">&quot;kSecImportExportPassphrase&quot;</span>
+    <span class="s1">)</span>
+    <span class="s1">Security.kSecImportItemIdentity = CFStringRef.in_dll(</span>
+        <span class="s1">Security</span><span class="s2">, </span><span class="s3">&quot;kSecImportItemIdentity&quot;</span>
+    <span class="s1">)</span>
+
+    <span class="s5"># CoreFoundation time!</span>
+    <span class="s1">CoreFoundation.CFRetain.argtypes = [CFTypeRef]</span>
+    <span class="s1">CoreFoundation.CFRetain.restype = CFTypeRef</span>
+
+    <span class="s1">CoreFoundation.CFRelease.argtypes = [CFTypeRef]</span>
+    <span class="s1">CoreFoundation.CFRelease.restype = </span><span class="s2">None</span>
+
+    <span class="s1">CoreFoundation.CFGetTypeID.argtypes = [CFTypeRef]</span>
+    <span class="s1">CoreFoundation.CFGetTypeID.restype = CFTypeID</span>
+
+    <span class="s1">CoreFoundation.CFStringCreateWithCString.argtypes = [</span>
+        <span class="s1">CFAllocatorRef</span><span class="s2">,</span>
+        <span class="s1">c_char_p</span><span class="s2">,</span>
+        <span class="s1">CFStringEncoding</span><span class="s2">,</span>
+    <span class="s1">]</span>
+    <span class="s1">CoreFoundation.CFStringCreateWithCString.restype = CFStringRef</span>
+
+    <span class="s1">CoreFoundation.CFStringGetCStringPtr.argtypes = [CFStringRef</span><span class="s2">, </span><span class="s1">CFStringEncoding]</span>
+    <span class="s1">CoreFoundation.CFStringGetCStringPtr.restype = c_char_p</span>
+
+    <span class="s1">CoreFoundation.CFStringGetCString.argtypes = [</span>
+        <span class="s1">CFStringRef</span><span class="s2">,</span>
+        <span class="s1">c_char_p</span><span class="s2">,</span>
+        <span class="s1">CFIndex</span><span class="s2">,</span>
+        <span class="s1">CFStringEncoding</span><span class="s2">,</span>
+    <span class="s1">]</span>
+    <span class="s1">CoreFoundation.CFStringGetCString.restype = c_bool</span>
+
+    <span class="s1">CoreFoundation.CFDataCreate.argtypes = [CFAllocatorRef</span><span class="s2">, </span><span class="s1">c_char_p</span><span class="s2">, </span><span class="s1">CFIndex]</span>
+    <span class="s1">CoreFoundation.CFDataCreate.restype = CFDataRef</span>
+
+    <span class="s1">CoreFoundation.CFDataGetLength.argtypes = [CFDataRef]</span>
+    <span class="s1">CoreFoundation.CFDataGetLength.restype = CFIndex</span>
+
+    <span class="s1">CoreFoundation.CFDataGetBytePtr.argtypes = [CFDataRef]</span>
+    <span class="s1">CoreFoundation.CFDataGetBytePtr.restype = c_void_p</span>
+
+    <span class="s1">CoreFoundation.CFDictionaryCreate.argtypes = [</span>
+        <span class="s1">CFAllocatorRef</span><span class="s2">,</span>
+        <span class="s1">POINTER(CFTypeRef)</span><span class="s2">,</span>
+        <span class="s1">POINTER(CFTypeRef)</span><span class="s2">,</span>
+        <span class="s1">CFIndex</span><span class="s2">,</span>
+        <span class="s1">CFDictionaryKeyCallBacks</span><span class="s2">,</span>
+        <span class="s1">CFDictionaryValueCallBacks</span><span class="s2">,</span>
+    <span class="s1">]</span>
+    <span class="s1">CoreFoundation.CFDictionaryCreate.restype = CFDictionaryRef</span>
+
+    <span class="s1">CoreFoundation.CFDictionaryGetValue.argtypes = [CFDictionaryRef</span><span class="s2">, </span><span class="s1">CFTypeRef]</span>
+    <span class="s1">CoreFoundation.CFDictionaryGetValue.restype = CFTypeRef</span>
+
+    <span class="s1">CoreFoundation.CFArrayCreate.argtypes = [</span>
+        <span class="s1">CFAllocatorRef</span><span class="s2">,</span>
+        <span class="s1">POINTER(CFTypeRef)</span><span class="s2">,</span>
+        <span class="s1">CFIndex</span><span class="s2">,</span>
+        <span class="s1">CFArrayCallBacks</span><span class="s2">,</span>
+    <span class="s1">]</span>
+    <span class="s1">CoreFoundation.CFArrayCreate.restype = CFArrayRef</span>
+
+    <span class="s1">CoreFoundation.CFArrayCreateMutable.argtypes = [</span>
+        <span class="s1">CFAllocatorRef</span><span class="s2">,</span>
+        <span class="s1">CFIndex</span><span class="s2">,</span>
+        <span class="s1">CFArrayCallBacks</span><span class="s2">,</span>
+    <span class="s1">]</span>
+    <span class="s1">CoreFoundation.CFArrayCreateMutable.restype = CFMutableArrayRef</span>
+
+    <span class="s1">CoreFoundation.CFArrayAppendValue.argtypes = [CFMutableArrayRef</span><span class="s2">, </span><span class="s1">c_void_p]</span>
+    <span class="s1">CoreFoundation.CFArrayAppendValue.restype = </span><span class="s2">None</span>
+
+    <span class="s1">CoreFoundation.CFArrayGetCount.argtypes = [CFArrayRef]</span>
+    <span class="s1">CoreFoundation.CFArrayGetCount.restype = CFIndex</span>
+
+    <span class="s1">CoreFoundation.CFArrayGetValueAtIndex.argtypes = [CFArrayRef</span><span class="s2">, </span><span class="s1">CFIndex]</span>
+    <span class="s1">CoreFoundation.CFArrayGetValueAtIndex.restype = c_void_p</span>
+
+    <span class="s1">CoreFoundation.kCFAllocatorDefault = CFAllocatorRef.in_dll(</span>
+        <span class="s1">CoreFoundation</span><span class="s2">, </span><span class="s3">&quot;kCFAllocatorDefault&quot;</span>
+    <span class="s1">)</span>
+    <span class="s1">CoreFoundation.kCFTypeArrayCallBacks = c_void_p.in_dll(</span>
+        <span class="s1">CoreFoundation</span><span class="s2">, </span><span class="s3">&quot;kCFTypeArrayCallBacks&quot;</span>
+    <span class="s1">)</span>
+    <span class="s1">CoreFoundation.kCFTypeDictionaryKeyCallBacks = c_void_p.in_dll(</span>
+        <span class="s1">CoreFoundation</span><span class="s2">, </span><span class="s3">&quot;kCFTypeDictionaryKeyCallBacks&quot;</span>
+    <span class="s1">)</span>
+    <span class="s1">CoreFoundation.kCFTypeDictionaryValueCallBacks = c_void_p.in_dll(</span>
+        <span class="s1">CoreFoundation</span><span class="s2">, </span><span class="s3">&quot;kCFTypeDictionaryValueCallBacks&quot;</span>
+    <span class="s1">)</span>
+
+    <span class="s1">CoreFoundation.CFTypeRef = CFTypeRef</span>
+    <span class="s1">CoreFoundation.CFArrayRef = CFArrayRef</span>
+    <span class="s1">CoreFoundation.CFStringRef = CFStringRef</span>
+    <span class="s1">CoreFoundation.CFDictionaryRef = CFDictionaryRef</span>
+
+<span class="s2">except </span><span class="s1">(AttributeError):</span>
+    <span class="s2">raise </span><span class="s1">ImportError(</span><span class="s3">&quot;Error initializing ctypes&quot;</span><span class="s1">)</span>
+
+
+<span class="s2">class </span><span class="s1">CFConst(object):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    A class object that acts as essentially a namespace for CoreFoundation 
+    constants. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">kCFStringEncodingUTF8 = CFStringEncoding(</span><span class="s4">0x08000100</span><span class="s1">)</span>
+
+
+<span class="s2">class </span><span class="s1">SecurityConst(object):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    A class object that acts as essentially a namespace for Security constants. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">kSSLSessionOptionBreakOnServerAuth = </span><span class="s4">0</span>
+
+    <span class="s1">kSSLProtocol2 = </span><span class="s4">1</span>
+    <span class="s1">kSSLProtocol3 = </span><span class="s4">2</span>
+    <span class="s1">kTLSProtocol1 = </span><span class="s4">4</span>
+    <span class="s1">kTLSProtocol11 = </span><span class="s4">7</span>
+    <span class="s1">kTLSProtocol12 = </span><span class="s4">8</span>
+    <span class="s5"># SecureTransport does not support TLS 1.3 even if there's a constant for it</span>
+    <span class="s1">kTLSProtocol13 = </span><span class="s4">10</span>
+    <span class="s1">kTLSProtocolMaxSupported = </span><span class="s4">999</span>
+
+    <span class="s1">kSSLClientSide = </span><span class="s4">1</span>
+    <span class="s1">kSSLStreamType = </span><span class="s4">0</span>
+
+    <span class="s1">kSecFormatPEMSequence = </span><span class="s4">10</span>
+
+    <span class="s1">kSecTrustResultInvalid = </span><span class="s4">0</span>
+    <span class="s1">kSecTrustResultProceed = </span><span class="s4">1</span>
+    <span class="s5"># This gap is present on purpose: this was kSecTrustResultConfirm, which</span>
+    <span class="s5"># is deprecated.</span>
+    <span class="s1">kSecTrustResultDeny = </span><span class="s4">3</span>
+    <span class="s1">kSecTrustResultUnspecified = </span><span class="s4">4</span>
+    <span class="s1">kSecTrustResultRecoverableTrustFailure = </span><span class="s4">5</span>
+    <span class="s1">kSecTrustResultFatalTrustFailure = </span><span class="s4">6</span>
+    <span class="s1">kSecTrustResultOtherError = </span><span class="s4">7</span>
+
+    <span class="s1">errSSLProtocol = -</span><span class="s4">9800</span>
+    <span class="s1">errSSLWouldBlock = -</span><span class="s4">9803</span>
+    <span class="s1">errSSLClosedGraceful = -</span><span class="s4">9805</span>
+    <span class="s1">errSSLClosedNoNotify = -</span><span class="s4">9816</span>
+    <span class="s1">errSSLClosedAbort = -</span><span class="s4">9806</span>
+
+    <span class="s1">errSSLXCertChainInvalid = -</span><span class="s4">9807</span>
+    <span class="s1">errSSLCrypto = -</span><span class="s4">9809</span>
+    <span class="s1">errSSLInternal = -</span><span class="s4">9810</span>
+    <span class="s1">errSSLCertExpired = -</span><span class="s4">9814</span>
+    <span class="s1">errSSLCertNotYetValid = -</span><span class="s4">9815</span>
+    <span class="s1">errSSLUnknownRootCert = -</span><span class="s4">9812</span>
+    <span class="s1">errSSLNoRootCert = -</span><span class="s4">9813</span>
+    <span class="s1">errSSLHostNameMismatch = -</span><span class="s4">9843</span>
+    <span class="s1">errSSLPeerHandshakeFail = -</span><span class="s4">9824</span>
+    <span class="s1">errSSLPeerUserCancelled = -</span><span class="s4">9839</span>
+    <span class="s1">errSSLWeakPeerEphemeralDHKey = -</span><span class="s4">9850</span>
+    <span class="s1">errSSLServerAuthCompleted = -</span><span class="s4">9841</span>
+    <span class="s1">errSSLRecordOverflow = -</span><span class="s4">9847</span>
+
+    <span class="s1">errSecVerifyFailed = -</span><span class="s4">67808</span>
+    <span class="s1">errSecNoTrustSettings = -</span><span class="s4">25263</span>
+    <span class="s1">errSecItemNotFound = -</span><span class="s4">25300</span>
+    <span class="s1">errSecInvalidTrustSettings = -</span><span class="s4">25262</span>
+
+    <span class="s5"># Cipher suites. We only pick the ones our default cipher string allows.</span>
+    <span class="s5"># Source: https://developer.apple.com/documentation/security/1550981-ssl_cipher_suite_values</span>
+    <span class="s1">TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 = </span><span class="s4">0xC02C</span>
+    <span class="s1">TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 = </span><span class="s4">0xC030</span>
+    <span class="s1">TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 = </span><span class="s4">0xC02B</span>
+    <span class="s1">TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 = </span><span class="s4">0xC02F</span>
+    <span class="s1">TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 = </span><span class="s4">0xCCA9</span>
+    <span class="s1">TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 = </span><span class="s4">0xCCA8</span>
+    <span class="s1">TLS_DHE_RSA_WITH_AES_256_GCM_SHA384 = </span><span class="s4">0x009F</span>
+    <span class="s1">TLS_DHE_RSA_WITH_AES_128_GCM_SHA256 = </span><span class="s4">0x009E</span>
+    <span class="s1">TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384 = </span><span class="s4">0xC024</span>
+    <span class="s1">TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384 = </span><span class="s4">0xC028</span>
+    <span class="s1">TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA = </span><span class="s4">0xC00A</span>
+    <span class="s1">TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA = </span><span class="s4">0xC014</span>
+    <span class="s1">TLS_DHE_RSA_WITH_AES_256_CBC_SHA256 = </span><span class="s4">0x006B</span>
+    <span class="s1">TLS_DHE_RSA_WITH_AES_256_CBC_SHA = </span><span class="s4">0x0039</span>
+    <span class="s1">TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256 = </span><span class="s4">0xC023</span>
+    <span class="s1">TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256 = </span><span class="s4">0xC027</span>
+    <span class="s1">TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA = </span><span class="s4">0xC009</span>
+    <span class="s1">TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA = </span><span class="s4">0xC013</span>
+    <span class="s1">TLS_DHE_RSA_WITH_AES_128_CBC_SHA256 = </span><span class="s4">0x0067</span>
+    <span class="s1">TLS_DHE_RSA_WITH_AES_128_CBC_SHA = </span><span class="s4">0x0033</span>
+    <span class="s1">TLS_RSA_WITH_AES_256_GCM_SHA384 = </span><span class="s4">0x009D</span>
+    <span class="s1">TLS_RSA_WITH_AES_128_GCM_SHA256 = </span><span class="s4">0x009C</span>
+    <span class="s1">TLS_RSA_WITH_AES_256_CBC_SHA256 = </span><span class="s4">0x003D</span>
+    <span class="s1">TLS_RSA_WITH_AES_128_CBC_SHA256 = </span><span class="s4">0x003C</span>
+    <span class="s1">TLS_RSA_WITH_AES_256_CBC_SHA = </span><span class="s4">0x0035</span>
+    <span class="s1">TLS_RSA_WITH_AES_128_CBC_SHA = </span><span class="s4">0x002F</span>
+    <span class="s1">TLS_AES_128_GCM_SHA256 = </span><span class="s4">0x1301</span>
+    <span class="s1">TLS_AES_256_GCM_SHA384 = </span><span class="s4">0x1302</span>
+    <span class="s1">TLS_AES_128_CCM_8_SHA256 = </span><span class="s4">0x1305</span>
+    <span class="s1">TLS_AES_128_CCM_SHA256 = </span><span class="s4">0x1304</span>
+</pre>
+</body>
+</html>

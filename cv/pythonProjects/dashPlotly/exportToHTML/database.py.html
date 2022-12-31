@@ -1,0 +1,1368 @@
+<html>
+<head>
+<title>database.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+.s6 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+database.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># -*- coding: utf-8 -*-</span>
+<span class="s0">#</span>
+<span class="s0"># Copyright (C) 2012-2017 The Python Software Foundation.</span>
+<span class="s0"># See LICENSE.txt and CONTRIBUTORS.txt.</span>
+<span class="s0">#</span>
+<span class="s2">&quot;&quot;&quot;PEP 376 implementation.&quot;&quot;&quot;</span>
+
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">unicode_literals</span>
+
+<span class="s3">import </span><span class="s1">base64</span>
+<span class="s3">import </span><span class="s1">codecs</span>
+<span class="s3">import </span><span class="s1">contextlib</span>
+<span class="s3">import </span><span class="s1">hashlib</span>
+<span class="s3">import </span><span class="s1">logging</span>
+<span class="s3">import </span><span class="s1">os</span>
+<span class="s3">import </span><span class="s1">posixpath</span>
+<span class="s3">import </span><span class="s1">sys</span>
+<span class="s3">import </span><span class="s1">zipimport</span>
+
+<span class="s3">from </span><span class="s1">. </span><span class="s3">import </span><span class="s1">DistlibException</span><span class="s3">, </span><span class="s1">resources</span>
+<span class="s3">from </span><span class="s1">.compat </span><span class="s3">import </span><span class="s1">StringIO</span>
+<span class="s3">from </span><span class="s1">.version </span><span class="s3">import </span><span class="s1">get_scheme</span><span class="s3">, </span><span class="s1">UnsupportedVersionError</span>
+<span class="s3">from </span><span class="s1">.metadata </span><span class="s3">import </span><span class="s1">(Metadata</span><span class="s3">, </span><span class="s1">METADATA_FILENAME</span><span class="s3">, </span><span class="s1">WHEEL_METADATA_FILENAME</span><span class="s3">,</span>
+                       <span class="s1">LEGACY_METADATA_FILENAME)</span>
+<span class="s3">from </span><span class="s1">.util </span><span class="s3">import </span><span class="s1">(parse_requirement</span><span class="s3">, </span><span class="s1">cached_property</span><span class="s3">, </span><span class="s1">parse_name_and_version</span><span class="s3">,</span>
+                   <span class="s1">read_exports</span><span class="s3">, </span><span class="s1">write_exports</span><span class="s3">, </span><span class="s1">CSVReader</span><span class="s3">, </span><span class="s1">CSVWriter)</span>
+
+
+<span class="s1">__all__ = [</span><span class="s4">'Distribution'</span><span class="s3">, </span><span class="s4">'BaseInstalledDistribution'</span><span class="s3">,</span>
+           <span class="s4">'InstalledDistribution'</span><span class="s3">, </span><span class="s4">'EggInfoDistribution'</span><span class="s3">,</span>
+           <span class="s4">'DistributionPath'</span><span class="s1">]</span>
+
+
+<span class="s1">logger = logging.getLogger(__name__)</span>
+
+<span class="s1">EXPORTS_FILENAME = </span><span class="s4">'pydist-exports.json'</span>
+<span class="s1">COMMANDS_FILENAME = </span><span class="s4">'pydist-commands.json'</span>
+
+<span class="s1">DIST_FILES = (</span><span class="s4">'INSTALLER'</span><span class="s3">, </span><span class="s1">METADATA_FILENAME</span><span class="s3">, </span><span class="s4">'RECORD'</span><span class="s3">, </span><span class="s4">'REQUESTED'</span><span class="s3">,</span>
+              <span class="s4">'RESOURCES'</span><span class="s3">, </span><span class="s1">EXPORTS_FILENAME</span><span class="s3">, </span><span class="s4">'SHARED'</span><span class="s1">)</span>
+
+<span class="s1">DISTINFO_EXT = </span><span class="s4">'.dist-info'</span>
+
+
+<span class="s3">class </span><span class="s1">_Cache(object):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    A simple cache mapping names and .dist-info paths to distributions 
+    &quot;&quot;&quot;</span>
+    <span class="s3">def </span><span class="s1">__init__(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Initialise an instance. There is normally one for each DistributionPath. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.name = {}</span>
+        <span class="s1">self.path = {}</span>
+        <span class="s1">self.generated = </span><span class="s3">False</span>
+
+    <span class="s3">def </span><span class="s1">clear(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Clear the cache, setting it to its initial state. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.name.clear()</span>
+        <span class="s1">self.path.clear()</span>
+        <span class="s1">self.generated = </span><span class="s3">False</span>
+
+    <span class="s3">def </span><span class="s1">add(self</span><span class="s3">, </span><span class="s1">dist):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Add a distribution to the cache. 
+        :param dist: The distribution to add. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">dist.path </span><span class="s3">not in </span><span class="s1">self.path:</span>
+            <span class="s1">self.path[dist.path] = dist</span>
+            <span class="s1">self.name.setdefault(dist.key</span><span class="s3">, </span><span class="s1">[]).append(dist)</span>
+
+
+<span class="s3">class </span><span class="s1">DistributionPath(object):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Represents a set of distributions installed on a path (typically sys.path). 
+    &quot;&quot;&quot;</span>
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">path=</span><span class="s3">None, </span><span class="s1">include_egg=</span><span class="s3">False</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Create an instance from a path, optionally including legacy (distutils/ 
+        setuptools/distribute) distributions. 
+        :param path: The path to use, as a list of directories. If not specified, 
+                     sys.path is used. 
+        :param include_egg: If True, this instance will look for and return legacy 
+                            distributions as well as those based on PEP 376. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">path </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">path = sys.path</span>
+        <span class="s1">self.path = path</span>
+        <span class="s1">self._include_dist = </span><span class="s3">True</span>
+        <span class="s1">self._include_egg = include_egg</span>
+
+        <span class="s1">self._cache = _Cache()</span>
+        <span class="s1">self._cache_egg = _Cache()</span>
+        <span class="s1">self._cache_enabled = </span><span class="s3">True</span>
+        <span class="s1">self._scheme = get_scheme(</span><span class="s4">'default'</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">_get_cache_enabled(self):</span>
+        <span class="s3">return </span><span class="s1">self._cache_enabled</span>
+
+    <span class="s3">def </span><span class="s1">_set_cache_enabled(self</span><span class="s3">, </span><span class="s1">value):</span>
+        <span class="s1">self._cache_enabled = value</span>
+
+    <span class="s1">cache_enabled = property(_get_cache_enabled</span><span class="s3">, </span><span class="s1">_set_cache_enabled)</span>
+
+    <span class="s3">def </span><span class="s1">clear_cache(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Clears the internal cache. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self._cache.clear()</span>
+        <span class="s1">self._cache_egg.clear()</span>
+
+
+    <span class="s3">def </span><span class="s1">_yield_distributions(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Yield .dist-info and/or .egg(-info) distributions. 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># We need to check if we've seen some resources already, because on</span>
+        <span class="s0"># some Linux systems (e.g. some Debian/Ubuntu variants) there are</span>
+        <span class="s0"># symlinks which alias other files in the environment.</span>
+        <span class="s1">seen = set()</span>
+        <span class="s3">for </span><span class="s1">path </span><span class="s3">in </span><span class="s1">self.path:</span>
+            <span class="s1">finder = resources.finder_for_path(path)</span>
+            <span class="s3">if </span><span class="s1">finder </span><span class="s3">is None</span><span class="s1">:</span>
+                <span class="s3">continue</span>
+            <span class="s1">r = finder.find(</span><span class="s4">''</span><span class="s1">)</span>
+            <span class="s3">if not </span><span class="s1">r </span><span class="s3">or not </span><span class="s1">r.is_container:</span>
+                <span class="s3">continue</span>
+            <span class="s1">rset = sorted(r.resources)</span>
+            <span class="s3">for </span><span class="s1">entry </span><span class="s3">in </span><span class="s1">rset:</span>
+                <span class="s1">r = finder.find(entry)</span>
+                <span class="s3">if not </span><span class="s1">r </span><span class="s3">or </span><span class="s1">r.path </span><span class="s3">in </span><span class="s1">seen:</span>
+                    <span class="s3">continue</span>
+                <span class="s3">try</span><span class="s1">:</span>
+                    <span class="s3">if </span><span class="s1">self._include_dist </span><span class="s3">and </span><span class="s1">entry.endswith(DISTINFO_EXT):</span>
+                        <span class="s1">possible_filenames = [METADATA_FILENAME</span><span class="s3">,</span>
+                                              <span class="s1">WHEEL_METADATA_FILENAME</span><span class="s3">,</span>
+                                              <span class="s1">LEGACY_METADATA_FILENAME]</span>
+                        <span class="s3">for </span><span class="s1">metadata_filename </span><span class="s3">in </span><span class="s1">possible_filenames:</span>
+                            <span class="s1">metadata_path = posixpath.join(entry</span><span class="s3">, </span><span class="s1">metadata_filename)</span>
+                            <span class="s1">pydist = finder.find(metadata_path)</span>
+                            <span class="s3">if </span><span class="s1">pydist:</span>
+                                <span class="s3">break</span>
+                        <span class="s3">else</span><span class="s1">:</span>
+                            <span class="s3">continue</span>
+
+                        <span class="s3">with </span><span class="s1">contextlib.closing(pydist.as_stream()) </span><span class="s3">as </span><span class="s1">stream:</span>
+                            <span class="s1">metadata = Metadata(fileobj=stream</span><span class="s3">, </span><span class="s1">scheme=</span><span class="s4">'legacy'</span><span class="s1">)</span>
+                        <span class="s1">logger.debug(</span><span class="s4">'Found %s'</span><span class="s3">, </span><span class="s1">r.path)</span>
+                        <span class="s1">seen.add(r.path)</span>
+                        <span class="s3">yield </span><span class="s1">new_dist_class(r.path</span><span class="s3">, </span><span class="s1">metadata=metadata</span><span class="s3">,</span>
+                                             <span class="s1">env=self)</span>
+                    <span class="s3">elif </span><span class="s1">self._include_egg </span><span class="s3">and </span><span class="s1">entry.endswith((</span><span class="s4">'.egg-info'</span><span class="s3">,</span>
+                                                              <span class="s4">'.egg'</span><span class="s1">)):</span>
+                        <span class="s1">logger.debug(</span><span class="s4">'Found %s'</span><span class="s3">, </span><span class="s1">r.path)</span>
+                        <span class="s1">seen.add(r.path)</span>
+                        <span class="s3">yield </span><span class="s1">old_dist_class(r.path</span><span class="s3">, </span><span class="s1">self)</span>
+                <span class="s3">except </span><span class="s1">Exception </span><span class="s3">as </span><span class="s1">e:</span>
+                    <span class="s1">msg = </span><span class="s4">'Unable to read distribution at %s, perhaps due to bad metadata: %s'</span>
+                    <span class="s1">logger.warning(msg</span><span class="s3">, </span><span class="s1">r.path</span><span class="s3">, </span><span class="s1">e)</span>
+                    <span class="s3">import </span><span class="s1">warnings</span>
+                    <span class="s1">warnings.warn(msg % (r.path</span><span class="s3">, </span><span class="s1">e)</span><span class="s3">, </span><span class="s1">stacklevel=</span><span class="s5">2</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">_generate_cache(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Scan the path for distributions and populate the cache with 
+        those that are found. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">gen_dist = </span><span class="s3">not </span><span class="s1">self._cache.generated</span>
+        <span class="s1">gen_egg = self._include_egg </span><span class="s3">and not </span><span class="s1">self._cache_egg.generated</span>
+        <span class="s3">if </span><span class="s1">gen_dist </span><span class="s3">or </span><span class="s1">gen_egg:</span>
+            <span class="s3">for </span><span class="s1">dist </span><span class="s3">in </span><span class="s1">self._yield_distributions():</span>
+                <span class="s3">if </span><span class="s1">isinstance(dist</span><span class="s3">, </span><span class="s1">InstalledDistribution):</span>
+                    <span class="s1">self._cache.add(dist)</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">self._cache_egg.add(dist)</span>
+
+            <span class="s3">if </span><span class="s1">gen_dist:</span>
+                <span class="s1">self._cache.generated = </span><span class="s3">True</span>
+            <span class="s3">if </span><span class="s1">gen_egg:</span>
+                <span class="s1">self._cache_egg.generated = </span><span class="s3">True</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s3">def </span><span class="s1">distinfo_dirname(cls</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">version):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        The *name* and *version* parameters are converted into their 
+        filename-escaped form, i.e. any ``'-'`` characters are replaced 
+        with ``'_'`` other than the one in ``'dist-info'`` and the one 
+        separating the name from the version number. 
+ 
+        :parameter name: is converted to a standard distribution name by replacing 
+                         any runs of non- alphanumeric characters with a single 
+                         ``'-'``. 
+        :type name: string 
+        :parameter version: is converted to a standard version string. Spaces 
+                            become dots, and all other non-alphanumeric characters 
+                            (except dots) become dashes, with runs of multiple 
+                            dashes condensed to a single dash. 
+        :type version: string 
+        :returns: directory name 
+        :rtype: string&quot;&quot;&quot;</span>
+        <span class="s1">name = name.replace(</span><span class="s4">'-'</span><span class="s3">, </span><span class="s4">'_'</span><span class="s1">)</span>
+        <span class="s3">return </span><span class="s4">'-'</span><span class="s1">.join([name</span><span class="s3">, </span><span class="s1">version]) + DISTINFO_EXT</span>
+
+    <span class="s3">def </span><span class="s1">get_distributions(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Provides an iterator that looks for distributions and returns 
+        :class:`InstalledDistribution` or 
+        :class:`EggInfoDistribution` instances for each one of them. 
+ 
+        :rtype: iterator of :class:`InstalledDistribution` and 
+                :class:`EggInfoDistribution` instances 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if not </span><span class="s1">self._cache_enabled:</span>
+            <span class="s3">for </span><span class="s1">dist </span><span class="s3">in </span><span class="s1">self._yield_distributions():</span>
+                <span class="s3">yield </span><span class="s1">dist</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">self._generate_cache()</span>
+
+            <span class="s3">for </span><span class="s1">dist </span><span class="s3">in </span><span class="s1">self._cache.path.values():</span>
+                <span class="s3">yield </span><span class="s1">dist</span>
+
+            <span class="s3">if </span><span class="s1">self._include_egg:</span>
+                <span class="s3">for </span><span class="s1">dist </span><span class="s3">in </span><span class="s1">self._cache_egg.path.values():</span>
+                    <span class="s3">yield </span><span class="s1">dist</span>
+
+    <span class="s3">def </span><span class="s1">get_distribution(self</span><span class="s3">, </span><span class="s1">name):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Looks for a named distribution on the path. 
+ 
+        This function only returns the first result found, as no more than one 
+        value is expected. If nothing is found, ``None`` is returned. 
+ 
+        :rtype: :class:`InstalledDistribution`, :class:`EggInfoDistribution` 
+                or ``None`` 
+        &quot;&quot;&quot;</span>
+        <span class="s1">result = </span><span class="s3">None</span>
+        <span class="s1">name = name.lower()</span>
+        <span class="s3">if not </span><span class="s1">self._cache_enabled:</span>
+            <span class="s3">for </span><span class="s1">dist </span><span class="s3">in </span><span class="s1">self._yield_distributions():</span>
+                <span class="s3">if </span><span class="s1">dist.key == name:</span>
+                    <span class="s1">result = dist</span>
+                    <span class="s3">break</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">self._generate_cache()</span>
+
+            <span class="s3">if </span><span class="s1">name </span><span class="s3">in </span><span class="s1">self._cache.name:</span>
+                <span class="s1">result = self._cache.name[name][</span><span class="s5">0</span><span class="s1">]</span>
+            <span class="s3">elif </span><span class="s1">self._include_egg </span><span class="s3">and </span><span class="s1">name </span><span class="s3">in </span><span class="s1">self._cache_egg.name:</span>
+                <span class="s1">result = self._cache_egg.name[name][</span><span class="s5">0</span><span class="s1">]</span>
+        <span class="s3">return </span><span class="s1">result</span>
+
+    <span class="s3">def </span><span class="s1">provides_distribution(self</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">version=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Iterates over all distributions to find which distributions provide *name*. 
+        If a *version* is provided, it will be used to filter the results. 
+ 
+        This function only returns the first result found, since no more than 
+        one values are expected. If the directory is not found, returns ``None``. 
+ 
+        :parameter version: a version specifier that indicates the version 
+                            required, conforming to the format in ``PEP-345`` 
+ 
+        :type name: string 
+        :type version: string 
+        &quot;&quot;&quot;</span>
+        <span class="s1">matcher = </span><span class="s3">None</span>
+        <span class="s3">if </span><span class="s1">version </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">matcher = self._scheme.matcher(</span><span class="s4">'%s (%s)' </span><span class="s1">% (name</span><span class="s3">, </span><span class="s1">version))</span>
+            <span class="s3">except </span><span class="s1">ValueError:</span>
+                <span class="s3">raise </span><span class="s1">DistlibException(</span><span class="s4">'invalid name or version: %r, %r' </span><span class="s1">%</span>
+                                      <span class="s1">(name</span><span class="s3">, </span><span class="s1">version))</span>
+
+        <span class="s3">for </span><span class="s1">dist </span><span class="s3">in </span><span class="s1">self.get_distributions():</span>
+            <span class="s0"># We hit a problem on Travis where enum34 was installed and doesn't</span>
+            <span class="s0"># have a provides attribute ...</span>
+            <span class="s3">if not </span><span class="s1">hasattr(dist</span><span class="s3">, </span><span class="s4">'provides'</span><span class="s1">):</span>
+                <span class="s1">logger.debug(</span><span class="s4">'No &quot;provides&quot;: %s'</span><span class="s3">, </span><span class="s1">dist)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">provided = dist.provides</span>
+
+                <span class="s3">for </span><span class="s1">p </span><span class="s3">in </span><span class="s1">provided:</span>
+                    <span class="s1">p_name</span><span class="s3">, </span><span class="s1">p_ver = parse_name_and_version(p)</span>
+                    <span class="s3">if </span><span class="s1">matcher </span><span class="s3">is None</span><span class="s1">:</span>
+                        <span class="s3">if </span><span class="s1">p_name == name:</span>
+                            <span class="s3">yield </span><span class="s1">dist</span>
+                            <span class="s3">break</span>
+                    <span class="s3">else</span><span class="s1">:</span>
+                        <span class="s3">if </span><span class="s1">p_name == name </span><span class="s3">and </span><span class="s1">matcher.match(p_ver):</span>
+                            <span class="s3">yield </span><span class="s1">dist</span>
+                            <span class="s3">break</span>
+
+    <span class="s3">def </span><span class="s1">get_file_path(self</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">relative_path):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return the path to a resource file. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">dist = self.get_distribution(name)</span>
+        <span class="s3">if </span><span class="s1">dist </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">LookupError(</span><span class="s4">'no distribution named %r found' </span><span class="s1">% name)</span>
+        <span class="s3">return </span><span class="s1">dist.get_resource_path(relative_path)</span>
+
+    <span class="s3">def </span><span class="s1">get_exported_entries(self</span><span class="s3">, </span><span class="s1">category</span><span class="s3">, </span><span class="s1">name=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return all of the exported entries in a particular category. 
+ 
+        :param category: The category to search for entries. 
+        :param name: If specified, only entries with that name are returned. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">for </span><span class="s1">dist </span><span class="s3">in </span><span class="s1">self.get_distributions():</span>
+            <span class="s1">r = dist.exports</span>
+            <span class="s3">if </span><span class="s1">category </span><span class="s3">in </span><span class="s1">r:</span>
+                <span class="s1">d = r[category]</span>
+                <span class="s3">if </span><span class="s1">name </span><span class="s3">is not None</span><span class="s1">:</span>
+                    <span class="s3">if </span><span class="s1">name </span><span class="s3">in </span><span class="s1">d:</span>
+                        <span class="s3">yield </span><span class="s1">d[name]</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s3">for </span><span class="s1">v </span><span class="s3">in </span><span class="s1">d.values():</span>
+                        <span class="s3">yield </span><span class="s1">v</span>
+
+
+<span class="s3">class </span><span class="s1">Distribution(object):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    A base class for distributions, whether installed or from indexes. 
+    Either way, it must have some metadata, so that's all that's needed 
+    for construction. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">build_time_dependency = </span><span class="s3">False</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Set to True if it's known to be only a build-time dependency (i.e. 
+    not needed after installation). 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">requested = </span><span class="s3">False</span>
+    <span class="s4">&quot;&quot;&quot;A boolean that indicates whether the ``REQUESTED`` metadata file is 
+    present (in other words, whether the package was installed by user 
+    request or it was installed as a dependency).&quot;&quot;&quot;</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">metadata):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Initialise an instance. 
+        :param metadata: The instance of :class:`Metadata` describing this 
+        distribution. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.metadata = metadata</span>
+        <span class="s1">self.name = metadata.name</span>
+        <span class="s1">self.key = self.name.lower()    </span><span class="s0"># for case-insensitive comparisons</span>
+        <span class="s1">self.version = metadata.version</span>
+        <span class="s1">self.locator = </span><span class="s3">None</span>
+        <span class="s1">self.digest = </span><span class="s3">None</span>
+        <span class="s1">self.extras = </span><span class="s3">None      </span><span class="s0"># additional features requested</span>
+        <span class="s1">self.context = </span><span class="s3">None     </span><span class="s0"># environment marker overrides</span>
+        <span class="s1">self.download_urls = set()</span>
+        <span class="s1">self.digests = {}</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">source_url(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        The source archive download URL for this distribution. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">self.metadata.source_url</span>
+
+    <span class="s1">download_url = source_url   </span><span class="s0"># Backward compatibility</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">name_and_version(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        A utility property which displays the name and version in parentheses. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s4">'%s (%s)' </span><span class="s1">% (self.name</span><span class="s3">, </span><span class="s1">self.version)</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">provides(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        A set of distribution names and versions provided by this distribution. 
+        :return: A set of &quot;name (version)&quot; strings. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">plist = self.metadata.provides</span>
+        <span class="s1">s = </span><span class="s4">'%s (%s)' </span><span class="s1">% (self.name</span><span class="s3">, </span><span class="s1">self.version)</span>
+        <span class="s3">if </span><span class="s1">s </span><span class="s3">not in </span><span class="s1">plist:</span>
+            <span class="s1">plist.append(s)</span>
+        <span class="s3">return </span><span class="s1">plist</span>
+
+    <span class="s3">def </span><span class="s1">_get_requirements(self</span><span class="s3">, </span><span class="s1">req_attr):</span>
+        <span class="s1">md = self.metadata</span>
+        <span class="s1">logger.debug(</span><span class="s4">'Getting requirements from metadata %r'</span><span class="s3">, </span><span class="s1">md.todict())</span>
+        <span class="s1">reqts = getattr(md</span><span class="s3">, </span><span class="s1">req_attr)</span>
+        <span class="s3">return </span><span class="s1">set(md.get_requirements(reqts</span><span class="s3">, </span><span class="s1">extras=self.extras</span><span class="s3">,</span>
+                                       <span class="s1">env=self.context))</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">run_requires(self):</span>
+        <span class="s3">return </span><span class="s1">self._get_requirements(</span><span class="s4">'run_requires'</span><span class="s1">)</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">meta_requires(self):</span>
+        <span class="s3">return </span><span class="s1">self._get_requirements(</span><span class="s4">'meta_requires'</span><span class="s1">)</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">build_requires(self):</span>
+        <span class="s3">return </span><span class="s1">self._get_requirements(</span><span class="s4">'build_requires'</span><span class="s1">)</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">test_requires(self):</span>
+        <span class="s3">return </span><span class="s1">self._get_requirements(</span><span class="s4">'test_requires'</span><span class="s1">)</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">dev_requires(self):</span>
+        <span class="s3">return </span><span class="s1">self._get_requirements(</span><span class="s4">'dev_requires'</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">matches_requirement(self</span><span class="s3">, </span><span class="s1">req):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Say if this instance matches (fulfills) a requirement. 
+        :param req: The requirement to match. 
+        :rtype req: str 
+        :return: True if it matches, else False. 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># Requirement may contain extras - parse to lose those</span>
+        <span class="s0"># from what's passed to the matcher</span>
+        <span class="s1">r = parse_requirement(req)</span>
+        <span class="s1">scheme = get_scheme(self.metadata.scheme)</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">matcher = scheme.matcher(r.requirement)</span>
+        <span class="s3">except </span><span class="s1">UnsupportedVersionError:</span>
+            <span class="s0"># XXX compat-mode if cannot read the version</span>
+            <span class="s1">logger.warning(</span><span class="s4">'could not read version %r - using name only'</span><span class="s3">,</span>
+                           <span class="s1">req)</span>
+            <span class="s1">name = req.split()[</span><span class="s5">0</span><span class="s1">]</span>
+            <span class="s1">matcher = scheme.matcher(name)</span>
+
+        <span class="s1">name = matcher.key   </span><span class="s0"># case-insensitive</span>
+
+        <span class="s1">result = </span><span class="s3">False</span>
+        <span class="s3">for </span><span class="s1">p </span><span class="s3">in </span><span class="s1">self.provides:</span>
+            <span class="s1">p_name</span><span class="s3">, </span><span class="s1">p_ver = parse_name_and_version(p)</span>
+            <span class="s3">if </span><span class="s1">p_name != name:</span>
+                <span class="s3">continue</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">result = matcher.match(p_ver)</span>
+                <span class="s3">break</span>
+            <span class="s3">except </span><span class="s1">UnsupportedVersionError:</span>
+                <span class="s3">pass</span>
+        <span class="s3">return </span><span class="s1">result</span>
+
+    <span class="s3">def </span><span class="s1">__repr__(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return a textual representation of this instance, 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">self.source_url:</span>
+            <span class="s1">suffix = </span><span class="s4">' [%s]' </span><span class="s1">% self.source_url</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">suffix = </span><span class="s4">''</span>
+        <span class="s3">return </span><span class="s4">'&lt;Distribution %s (%s)%s&gt;' </span><span class="s1">% (self.name</span><span class="s3">, </span><span class="s1">self.version</span><span class="s3">, </span><span class="s1">suffix)</span>
+
+    <span class="s3">def </span><span class="s1">__eq__(self</span><span class="s3">, </span><span class="s1">other):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        See if this distribution is the same as another. 
+        :param other: The distribution to compare with. To be equal to one 
+                      another. distributions must have the same type, name, 
+                      version and source_url. 
+        :return: True if it is the same, else False. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">type(other) </span><span class="s3">is not </span><span class="s1">type(self):</span>
+            <span class="s1">result = </span><span class="s3">False</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">result = (self.name == other.name </span><span class="s3">and</span>
+                      <span class="s1">self.version == other.version </span><span class="s3">and</span>
+                      <span class="s1">self.source_url == other.source_url)</span>
+        <span class="s3">return </span><span class="s1">result</span>
+
+    <span class="s3">def </span><span class="s1">__hash__(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Compute hash in a way which matches the equality test. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">hash(self.name) + hash(self.version) + hash(self.source_url)</span>
+
+
+<span class="s3">class </span><span class="s1">BaseInstalledDistribution(Distribution):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    This is the base class for installed distributions (whether PEP 376 or 
+    legacy). 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">hasher = </span><span class="s3">None</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">metadata</span><span class="s3">, </span><span class="s1">path</span><span class="s3">, </span><span class="s1">env=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Initialise an instance. 
+        :param metadata: An instance of :class:`Metadata` which describes the 
+                         distribution. This will normally have been initialised 
+                         from a metadata file in the ``path``. 
+        :param path:     The path of the ``.dist-info`` or ``.egg-info`` 
+                         directory for the distribution. 
+        :param env:      This is normally the :class:`DistributionPath` 
+                         instance where this distribution was found. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">super(BaseInstalledDistribution</span><span class="s3">, </span><span class="s1">self).__init__(metadata)</span>
+        <span class="s1">self.path = path</span>
+        <span class="s1">self.dist_path = env</span>
+
+    <span class="s3">def </span><span class="s1">get_hash(self</span><span class="s3">, </span><span class="s1">data</span><span class="s3">, </span><span class="s1">hasher=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Get the hash of some data, using a particular hash algorithm, if 
+        specified. 
+ 
+        :param data: The data to be hashed. 
+        :type data: bytes 
+        :param hasher: The name of a hash implementation, supported by hashlib, 
+                       or ``None``. Examples of valid values are ``'sha1'``, 
+                       ``'sha224'``, ``'sha384'``, '``sha256'``, ``'md5'`` and 
+                       ``'sha512'``. If no hasher is specified, the ``hasher`` 
+                       attribute of the :class:`InstalledDistribution` instance 
+                       is used. If the hasher is determined to be ``None``, MD5 
+                       is used as the hashing algorithm. 
+        :returns: The hash of the data. If a hasher was explicitly specified, 
+                  the returned hash will be prefixed with the specified hasher 
+                  followed by '='. 
+        :rtype: str 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">hasher </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">hasher = self.hasher</span>
+        <span class="s3">if </span><span class="s1">hasher </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">hasher = hashlib.md5</span>
+            <span class="s1">prefix = </span><span class="s4">''</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">hasher = getattr(hashlib</span><span class="s3">, </span><span class="s1">hasher)</span>
+            <span class="s1">prefix = </span><span class="s4">'%s=' </span><span class="s1">% self.hasher</span>
+        <span class="s1">digest = hasher(data).digest()</span>
+        <span class="s1">digest = base64.urlsafe_b64encode(digest).rstrip(</span><span class="s6">b'='</span><span class="s1">).decode(</span><span class="s4">'ascii'</span><span class="s1">)</span>
+        <span class="s3">return </span><span class="s4">'%s%s' </span><span class="s1">% (prefix</span><span class="s3">, </span><span class="s1">digest)</span>
+
+
+<span class="s3">class </span><span class="s1">InstalledDistribution(BaseInstalledDistribution):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Created with the *path* of the ``.dist-info`` directory provided to the 
+    constructor. It reads the metadata contained in ``pydist.json`` when it is 
+    instantiated., or uses a passed in Metadata instance (useful for when 
+    dry-run mode is being used). 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">hasher = </span><span class="s4">'sha256'</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">path</span><span class="s3">, </span><span class="s1">metadata=</span><span class="s3">None, </span><span class="s1">env=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s1">self.modules = []</span>
+        <span class="s1">self.finder = finder = resources.finder_for_path(path)</span>
+        <span class="s3">if </span><span class="s1">finder </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">'finder unavailable for %s' </span><span class="s1">% path)</span>
+        <span class="s3">if </span><span class="s1">env </span><span class="s3">and </span><span class="s1">env._cache_enabled </span><span class="s3">and </span><span class="s1">path </span><span class="s3">in </span><span class="s1">env._cache.path:</span>
+            <span class="s1">metadata = env._cache.path[path].metadata</span>
+        <span class="s3">elif </span><span class="s1">metadata </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">r = finder.find(METADATA_FILENAME)</span>
+            <span class="s0"># Temporary - for Wheel 0.23 support</span>
+            <span class="s3">if </span><span class="s1">r </span><span class="s3">is None</span><span class="s1">:</span>
+                <span class="s1">r = finder.find(WHEEL_METADATA_FILENAME)</span>
+            <span class="s0"># Temporary - for legacy support</span>
+            <span class="s3">if </span><span class="s1">r </span><span class="s3">is None</span><span class="s1">:</span>
+                <span class="s1">r = finder.find(LEGACY_METADATA_FILENAME)</span>
+            <span class="s3">if </span><span class="s1">r </span><span class="s3">is None</span><span class="s1">:</span>
+                <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">'no %s found in %s' </span><span class="s1">% (METADATA_FILENAME</span><span class="s3">,</span>
+                                                        <span class="s1">path))</span>
+            <span class="s3">with </span><span class="s1">contextlib.closing(r.as_stream()) </span><span class="s3">as </span><span class="s1">stream:</span>
+                <span class="s1">metadata = Metadata(fileobj=stream</span><span class="s3">, </span><span class="s1">scheme=</span><span class="s4">'legacy'</span><span class="s1">)</span>
+
+        <span class="s1">super(InstalledDistribution</span><span class="s3">, </span><span class="s1">self).__init__(metadata</span><span class="s3">, </span><span class="s1">path</span><span class="s3">, </span><span class="s1">env)</span>
+
+        <span class="s3">if </span><span class="s1">env </span><span class="s3">and </span><span class="s1">env._cache_enabled:</span>
+            <span class="s1">env._cache.add(self)</span>
+
+        <span class="s1">r = finder.find(</span><span class="s4">'REQUESTED'</span><span class="s1">)</span>
+        <span class="s1">self.requested = r </span><span class="s3">is not None</span>
+        <span class="s1">p  = os.path.join(path</span><span class="s3">, </span><span class="s4">'top_level.txt'</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">os.path.exists(p):</span>
+            <span class="s3">with </span><span class="s1">open(p</span><span class="s3">, </span><span class="s4">'rb'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">f:</span>
+                <span class="s1">data = f.read().decode(</span><span class="s4">'utf-8'</span><span class="s1">)</span>
+            <span class="s1">self.modules = data.splitlines()</span>
+
+    <span class="s3">def </span><span class="s1">__repr__(self):</span>
+        <span class="s3">return </span><span class="s4">'&lt;InstalledDistribution %r %s at %r&gt;' </span><span class="s1">% (</span>
+            <span class="s1">self.name</span><span class="s3">, </span><span class="s1">self.version</span><span class="s3">, </span><span class="s1">self.path)</span>
+
+    <span class="s3">def </span><span class="s1">__str__(self):</span>
+        <span class="s3">return </span><span class="s4">&quot;%s %s&quot; </span><span class="s1">% (self.name</span><span class="s3">, </span><span class="s1">self.version)</span>
+
+    <span class="s3">def </span><span class="s1">_get_records(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Get the list of installed files for the distribution 
+        :return: A list of tuples of path, hash and size. Note that hash and 
+                 size might be ``None`` for some entries. The path is exactly 
+                 as stored in the file (which is as in PEP 376). 
+        &quot;&quot;&quot;</span>
+        <span class="s1">results = []</span>
+        <span class="s1">r = self.get_distinfo_resource(</span><span class="s4">'RECORD'</span><span class="s1">)</span>
+        <span class="s3">with </span><span class="s1">contextlib.closing(r.as_stream()) </span><span class="s3">as </span><span class="s1">stream:</span>
+            <span class="s3">with </span><span class="s1">CSVReader(stream=stream) </span><span class="s3">as </span><span class="s1">record_reader:</span>
+                <span class="s0"># Base location is parent dir of .dist-info dir</span>
+                <span class="s0">#base_location = os.path.dirname(self.path)</span>
+                <span class="s0">#base_location = os.path.abspath(base_location)</span>
+                <span class="s3">for </span><span class="s1">row </span><span class="s3">in </span><span class="s1">record_reader:</span>
+                    <span class="s1">missing = [</span><span class="s3">None for </span><span class="s1">i </span><span class="s3">in </span><span class="s1">range(len(row)</span><span class="s3">, </span><span class="s5">3</span><span class="s1">)]</span>
+                    <span class="s1">path</span><span class="s3">, </span><span class="s1">checksum</span><span class="s3">, </span><span class="s1">size = row + missing</span>
+                    <span class="s0">#if not os.path.isabs(path):</span>
+                    <span class="s0">#    path = path.replace('/', os.sep)</span>
+                    <span class="s0">#    path = os.path.join(base_location, path)</span>
+                    <span class="s1">results.append((path</span><span class="s3">, </span><span class="s1">checksum</span><span class="s3">, </span><span class="s1">size))</span>
+        <span class="s3">return </span><span class="s1">results</span>
+
+    <span class="s1">@cached_property</span>
+    <span class="s3">def </span><span class="s1">exports(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return the information exported by this distribution. 
+        :return: A dictionary of exports, mapping an export category to a dict 
+                 of :class:`ExportEntry` instances describing the individual 
+                 export entries, and keyed by name. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">result = {}</span>
+        <span class="s1">r = self.get_distinfo_resource(EXPORTS_FILENAME)</span>
+        <span class="s3">if </span><span class="s1">r:</span>
+            <span class="s1">result = self.read_exports()</span>
+        <span class="s3">return </span><span class="s1">result</span>
+
+    <span class="s3">def </span><span class="s1">read_exports(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Read exports data from a file in .ini format. 
+ 
+        :return: A dictionary of exports, mapping an export category to a list 
+                 of :class:`ExportEntry` instances describing the individual 
+                 export entries. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">result = {}</span>
+        <span class="s1">r = self.get_distinfo_resource(EXPORTS_FILENAME)</span>
+        <span class="s3">if </span><span class="s1">r:</span>
+            <span class="s3">with </span><span class="s1">contextlib.closing(r.as_stream()) </span><span class="s3">as </span><span class="s1">stream:</span>
+                <span class="s1">result = read_exports(stream)</span>
+        <span class="s3">return </span><span class="s1">result</span>
+
+    <span class="s3">def </span><span class="s1">write_exports(self</span><span class="s3">, </span><span class="s1">exports):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Write a dictionary of exports to a file in .ini format. 
+        :param exports: A dictionary of exports, mapping an export category to 
+                        a list of :class:`ExportEntry` instances describing the 
+                        individual export entries. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">rf = self.get_distinfo_file(EXPORTS_FILENAME)</span>
+        <span class="s3">with </span><span class="s1">open(rf</span><span class="s3">, </span><span class="s4">'w'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">f:</span>
+            <span class="s1">write_exports(exports</span><span class="s3">, </span><span class="s1">f)</span>
+
+    <span class="s3">def </span><span class="s1">get_resource_path(self</span><span class="s3">, </span><span class="s1">relative_path):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        NOTE: This API may change in the future. 
+ 
+        Return the absolute path to a resource file with the given relative 
+        path. 
+ 
+        :param relative_path: The path, relative to .dist-info, of the resource 
+                              of interest. 
+        :return: The absolute path where the resource is to be found. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">r = self.get_distinfo_resource(</span><span class="s4">'RESOURCES'</span><span class="s1">)</span>
+        <span class="s3">with </span><span class="s1">contextlib.closing(r.as_stream()) </span><span class="s3">as </span><span class="s1">stream:</span>
+            <span class="s3">with </span><span class="s1">CSVReader(stream=stream) </span><span class="s3">as </span><span class="s1">resources_reader:</span>
+                <span class="s3">for </span><span class="s1">relative</span><span class="s3">, </span><span class="s1">destination </span><span class="s3">in </span><span class="s1">resources_reader:</span>
+                    <span class="s3">if </span><span class="s1">relative == relative_path:</span>
+                        <span class="s3">return </span><span class="s1">destination</span>
+        <span class="s3">raise </span><span class="s1">KeyError(</span><span class="s4">'no resource file with relative path %r '</span>
+                       <span class="s4">'is installed' </span><span class="s1">% relative_path)</span>
+
+    <span class="s3">def </span><span class="s1">list_installed_files(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Iterates over the ``RECORD`` entries and returns a tuple 
+        ``(path, hash, size)`` for each line. 
+ 
+        :returns: iterator of (path, hash, size) 
+        &quot;&quot;&quot;</span>
+        <span class="s3">for </span><span class="s1">result </span><span class="s3">in </span><span class="s1">self._get_records():</span>
+            <span class="s3">yield </span><span class="s1">result</span>
+
+    <span class="s3">def </span><span class="s1">write_installed_files(self</span><span class="s3">, </span><span class="s1">paths</span><span class="s3">, </span><span class="s1">prefix</span><span class="s3">, </span><span class="s1">dry_run=</span><span class="s3">False</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Writes the ``RECORD`` file, using the ``paths`` iterable passed in. Any 
+        existing ``RECORD`` file is silently overwritten. 
+ 
+        prefix is used to determine when to write absolute paths. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">prefix = os.path.join(prefix</span><span class="s3">, </span><span class="s4">''</span><span class="s1">)</span>
+        <span class="s1">base = os.path.dirname(self.path)</span>
+        <span class="s1">base_under_prefix = base.startswith(prefix)</span>
+        <span class="s1">base = os.path.join(base</span><span class="s3">, </span><span class="s4">''</span><span class="s1">)</span>
+        <span class="s1">record_path = self.get_distinfo_file(</span><span class="s4">'RECORD'</span><span class="s1">)</span>
+        <span class="s1">logger.info(</span><span class="s4">'creating %s'</span><span class="s3">, </span><span class="s1">record_path)</span>
+        <span class="s3">if </span><span class="s1">dry_run:</span>
+            <span class="s3">return None</span>
+        <span class="s3">with </span><span class="s1">CSVWriter(record_path) </span><span class="s3">as </span><span class="s1">writer:</span>
+            <span class="s3">for </span><span class="s1">path </span><span class="s3">in </span><span class="s1">paths:</span>
+                <span class="s3">if </span><span class="s1">os.path.isdir(path) </span><span class="s3">or </span><span class="s1">path.endswith((</span><span class="s4">'.pyc'</span><span class="s3">, </span><span class="s4">'.pyo'</span><span class="s1">)):</span>
+                    <span class="s0"># do not put size and hash, as in PEP-376</span>
+                    <span class="s1">hash_value = size = </span><span class="s4">''</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">size = </span><span class="s4">'%d' </span><span class="s1">% os.path.getsize(path)</span>
+                    <span class="s3">with </span><span class="s1">open(path</span><span class="s3">, </span><span class="s4">'rb'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">fp:</span>
+                        <span class="s1">hash_value = self.get_hash(fp.read())</span>
+                <span class="s3">if </span><span class="s1">path.startswith(base) </span><span class="s3">or </span><span class="s1">(base_under_prefix </span><span class="s3">and</span>
+                                             <span class="s1">path.startswith(prefix)):</span>
+                    <span class="s1">path = os.path.relpath(path</span><span class="s3">, </span><span class="s1">base)</span>
+                <span class="s1">writer.writerow((path</span><span class="s3">, </span><span class="s1">hash_value</span><span class="s3">, </span><span class="s1">size))</span>
+
+            <span class="s0"># add the RECORD file itself</span>
+            <span class="s3">if </span><span class="s1">record_path.startswith(base):</span>
+                <span class="s1">record_path = os.path.relpath(record_path</span><span class="s3">, </span><span class="s1">base)</span>
+            <span class="s1">writer.writerow((record_path</span><span class="s3">, </span><span class="s4">''</span><span class="s3">, </span><span class="s4">''</span><span class="s1">))</span>
+        <span class="s3">return </span><span class="s1">record_path</span>
+
+    <span class="s3">def </span><span class="s1">check_installed_files(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Checks that the hashes and sizes of the files in ``RECORD`` are 
+        matched by the files themselves. Returns a (possibly empty) list of 
+        mismatches. Each entry in the mismatch list will be a tuple consisting 
+        of the path, 'exists', 'size' or 'hash' according to what didn't match 
+        (existence is checked first, then size, then hash), the expected 
+        value and the actual value. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">mismatches = []</span>
+        <span class="s1">base = os.path.dirname(self.path)</span>
+        <span class="s1">record_path = self.get_distinfo_file(</span><span class="s4">'RECORD'</span><span class="s1">)</span>
+        <span class="s3">for </span><span class="s1">path</span><span class="s3">, </span><span class="s1">hash_value</span><span class="s3">, </span><span class="s1">size </span><span class="s3">in </span><span class="s1">self.list_installed_files():</span>
+            <span class="s3">if not </span><span class="s1">os.path.isabs(path):</span>
+                <span class="s1">path = os.path.join(base</span><span class="s3">, </span><span class="s1">path)</span>
+            <span class="s3">if </span><span class="s1">path == record_path:</span>
+                <span class="s3">continue</span>
+            <span class="s3">if not </span><span class="s1">os.path.exists(path):</span>
+                <span class="s1">mismatches.append((path</span><span class="s3">, </span><span class="s4">'exists'</span><span class="s3">, True, False</span><span class="s1">))</span>
+            <span class="s3">elif </span><span class="s1">os.path.isfile(path):</span>
+                <span class="s1">actual_size = str(os.path.getsize(path))</span>
+                <span class="s3">if </span><span class="s1">size </span><span class="s3">and </span><span class="s1">actual_size != size:</span>
+                    <span class="s1">mismatches.append((path</span><span class="s3">, </span><span class="s4">'size'</span><span class="s3">, </span><span class="s1">size</span><span class="s3">, </span><span class="s1">actual_size))</span>
+                <span class="s3">elif </span><span class="s1">hash_value:</span>
+                    <span class="s3">if </span><span class="s4">'=' </span><span class="s3">in </span><span class="s1">hash_value:</span>
+                        <span class="s1">hasher = hash_value.split(</span><span class="s4">'='</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)[</span><span class="s5">0</span><span class="s1">]</span>
+                    <span class="s3">else</span><span class="s1">:</span>
+                        <span class="s1">hasher = </span><span class="s3">None</span>
+
+                    <span class="s3">with </span><span class="s1">open(path</span><span class="s3">, </span><span class="s4">'rb'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">f:</span>
+                        <span class="s1">actual_hash = self.get_hash(f.read()</span><span class="s3">, </span><span class="s1">hasher)</span>
+                        <span class="s3">if </span><span class="s1">actual_hash != hash_value:</span>
+                            <span class="s1">mismatches.append((path</span><span class="s3">, </span><span class="s4">'hash'</span><span class="s3">, </span><span class="s1">hash_value</span><span class="s3">, </span><span class="s1">actual_hash))</span>
+        <span class="s3">return </span><span class="s1">mismatches</span>
+
+    <span class="s1">@cached_property</span>
+    <span class="s3">def </span><span class="s1">shared_locations(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        A dictionary of shared locations whose keys are in the set 'prefix', 
+        'purelib', 'platlib', 'scripts', 'headers', 'data' and 'namespace'. 
+        The corresponding value is the absolute path of that category for 
+        this distribution, and takes into account any paths selected by the 
+        user at installation time (e.g. via command-line arguments). In the 
+        case of the 'namespace' key, this would be a list of absolute paths 
+        for the roots of namespace packages in this distribution. 
+ 
+        The first time this property is accessed, the relevant information is 
+        read from the SHARED file in the .dist-info directory. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">result = {}</span>
+        <span class="s1">shared_path = os.path.join(self.path</span><span class="s3">, </span><span class="s4">'SHARED'</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">os.path.isfile(shared_path):</span>
+            <span class="s3">with </span><span class="s1">codecs.open(shared_path</span><span class="s3">, </span><span class="s4">'r'</span><span class="s3">, </span><span class="s1">encoding=</span><span class="s4">'utf-8'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">f:</span>
+                <span class="s1">lines = f.read().splitlines()</span>
+            <span class="s3">for </span><span class="s1">line </span><span class="s3">in </span><span class="s1">lines:</span>
+                <span class="s1">key</span><span class="s3">, </span><span class="s1">value = line.split(</span><span class="s4">'='</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)</span>
+                <span class="s3">if </span><span class="s1">key == </span><span class="s4">'namespace'</span><span class="s1">:</span>
+                    <span class="s1">result.setdefault(key</span><span class="s3">, </span><span class="s1">[]).append(value)</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">result[key] = value</span>
+        <span class="s3">return </span><span class="s1">result</span>
+
+    <span class="s3">def </span><span class="s1">write_shared_locations(self</span><span class="s3">, </span><span class="s1">paths</span><span class="s3">, </span><span class="s1">dry_run=</span><span class="s3">False</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Write shared location information to the SHARED file in .dist-info. 
+        :param paths: A dictionary as described in the documentation for 
+        :meth:`shared_locations`. 
+        :param dry_run: If True, the action is logged but no file is actually 
+                        written. 
+        :return: The path of the file written to. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">shared_path = os.path.join(self.path</span><span class="s3">, </span><span class="s4">'SHARED'</span><span class="s1">)</span>
+        <span class="s1">logger.info(</span><span class="s4">'creating %s'</span><span class="s3">, </span><span class="s1">shared_path)</span>
+        <span class="s3">if </span><span class="s1">dry_run:</span>
+            <span class="s3">return None</span>
+        <span class="s1">lines = []</span>
+        <span class="s3">for </span><span class="s1">key </span><span class="s3">in </span><span class="s1">(</span><span class="s4">'prefix'</span><span class="s3">, </span><span class="s4">'lib'</span><span class="s3">, </span><span class="s4">'headers'</span><span class="s3">, </span><span class="s4">'scripts'</span><span class="s3">, </span><span class="s4">'data'</span><span class="s1">):</span>
+            <span class="s1">path = paths[key]</span>
+            <span class="s3">if </span><span class="s1">os.path.isdir(paths[key]):</span>
+                <span class="s1">lines.append(</span><span class="s4">'%s=%s' </span><span class="s1">% (key</span><span class="s3">,  </span><span class="s1">path))</span>
+        <span class="s3">for </span><span class="s1">ns </span><span class="s3">in </span><span class="s1">paths.get(</span><span class="s4">'namespace'</span><span class="s3">, </span><span class="s1">()):</span>
+            <span class="s1">lines.append(</span><span class="s4">'namespace=%s' </span><span class="s1">% ns)</span>
+
+        <span class="s3">with </span><span class="s1">codecs.open(shared_path</span><span class="s3">, </span><span class="s4">'w'</span><span class="s3">, </span><span class="s1">encoding=</span><span class="s4">'utf-8'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">f:</span>
+            <span class="s1">f.write(</span><span class="s4">'</span><span class="s3">\n</span><span class="s4">'</span><span class="s1">.join(lines))</span>
+        <span class="s3">return </span><span class="s1">shared_path</span>
+
+    <span class="s3">def </span><span class="s1">get_distinfo_resource(self</span><span class="s3">, </span><span class="s1">path):</span>
+        <span class="s3">if </span><span class="s1">path </span><span class="s3">not in </span><span class="s1">DIST_FILES:</span>
+            <span class="s3">raise </span><span class="s1">DistlibException(</span><span class="s4">'invalid path for a dist-info file: '</span>
+                                   <span class="s4">'%r at %r' </span><span class="s1">% (path</span><span class="s3">, </span><span class="s1">self.path))</span>
+        <span class="s1">finder = resources.finder_for_path(self.path)</span>
+        <span class="s3">if </span><span class="s1">finder </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">DistlibException(</span><span class="s4">'Unable to get a finder for %s' </span><span class="s1">% self.path)</span>
+        <span class="s3">return </span><span class="s1">finder.find(path)</span>
+
+    <span class="s3">def </span><span class="s1">get_distinfo_file(self</span><span class="s3">, </span><span class="s1">path):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Returns a path located under the ``.dist-info`` directory. Returns a 
+        string representing the path. 
+ 
+        :parameter path: a ``'/'``-separated path relative to the 
+                         ``.dist-info`` directory or an absolute path; 
+                         If *path* is an absolute path and doesn't start 
+                         with the ``.dist-info`` directory path, 
+                         a :class:`DistlibException` is raised 
+        :type path: str 
+        :rtype: str 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># Check if it is an absolute path  # XXX use relpath, add tests</span>
+        <span class="s3">if </span><span class="s1">path.find(os.sep) &gt;= </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s0"># it's an absolute path?</span>
+            <span class="s1">distinfo_dirname</span><span class="s3">, </span><span class="s1">path = path.split(os.sep)[-</span><span class="s5">2</span><span class="s1">:]</span>
+            <span class="s3">if </span><span class="s1">distinfo_dirname != self.path.split(os.sep)[-</span><span class="s5">1</span><span class="s1">]:</span>
+                <span class="s3">raise </span><span class="s1">DistlibException(</span>
+                    <span class="s4">'dist-info file %r does not belong to the %r %s '</span>
+                    <span class="s4">'distribution' </span><span class="s1">% (path</span><span class="s3">, </span><span class="s1">self.name</span><span class="s3">, </span><span class="s1">self.version))</span>
+
+        <span class="s0"># The file must be relative</span>
+        <span class="s3">if </span><span class="s1">path </span><span class="s3">not in </span><span class="s1">DIST_FILES:</span>
+            <span class="s3">raise </span><span class="s1">DistlibException(</span><span class="s4">'invalid path for a dist-info file: '</span>
+                                   <span class="s4">'%r at %r' </span><span class="s1">% (path</span><span class="s3">, </span><span class="s1">self.path))</span>
+
+        <span class="s3">return </span><span class="s1">os.path.join(self.path</span><span class="s3">, </span><span class="s1">path)</span>
+
+    <span class="s3">def </span><span class="s1">list_distinfo_files(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Iterates over the ``RECORD`` entries and returns paths for each line if 
+        the path is pointing to a file located in the ``.dist-info`` directory 
+        or one of its subdirectories. 
+ 
+        :returns: iterator of paths 
+        &quot;&quot;&quot;</span>
+        <span class="s1">base = os.path.dirname(self.path)</span>
+        <span class="s3">for </span><span class="s1">path</span><span class="s3">, </span><span class="s1">checksum</span><span class="s3">, </span><span class="s1">size </span><span class="s3">in </span><span class="s1">self._get_records():</span>
+            <span class="s0"># XXX add separator or use real relpath algo</span>
+            <span class="s3">if not </span><span class="s1">os.path.isabs(path):</span>
+                <span class="s1">path = os.path.join(base</span><span class="s3">, </span><span class="s1">path)</span>
+            <span class="s3">if </span><span class="s1">path.startswith(self.path):</span>
+                <span class="s3">yield </span><span class="s1">path</span>
+
+    <span class="s3">def </span><span class="s1">__eq__(self</span><span class="s3">, </span><span class="s1">other):</span>
+        <span class="s3">return </span><span class="s1">(isinstance(other</span><span class="s3">, </span><span class="s1">InstalledDistribution) </span><span class="s3">and</span>
+                <span class="s1">self.path == other.path)</span>
+
+    <span class="s0"># See http://docs.python.org/reference/datamodel#object.__hash__</span>
+    <span class="s1">__hash__ = object.__hash__</span>
+
+
+<span class="s3">class </span><span class="s1">EggInfoDistribution(BaseInstalledDistribution):</span>
+    <span class="s2">&quot;&quot;&quot;Created with the *path* of the ``.egg-info`` directory or file provided 
+    to the constructor. It reads the metadata contained in the file itself, or 
+    if the given path happens to be a directory, the metadata is read from the 
+    file ``PKG-INFO`` under that directory.&quot;&quot;&quot;</span>
+
+    <span class="s1">requested = </span><span class="s3">True    </span><span class="s0"># as we have no way of knowing, assume it was</span>
+    <span class="s1">shared_locations = {}</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">path</span><span class="s3">, </span><span class="s1">env=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s3">def </span><span class="s1">set_name_and_version(s</span><span class="s3">, </span><span class="s1">n</span><span class="s3">, </span><span class="s1">v):</span>
+            <span class="s1">s.name = n</span>
+            <span class="s1">s.key = n.lower()   </span><span class="s0"># for case-insensitive comparisons</span>
+            <span class="s1">s.version = v</span>
+
+        <span class="s1">self.path = path</span>
+        <span class="s1">self.dist_path = env</span>
+        <span class="s3">if </span><span class="s1">env </span><span class="s3">and </span><span class="s1">env._cache_enabled </span><span class="s3">and </span><span class="s1">path </span><span class="s3">in </span><span class="s1">env._cache_egg.path:</span>
+            <span class="s1">metadata = env._cache_egg.path[path].metadata</span>
+            <span class="s1">set_name_and_version(self</span><span class="s3">, </span><span class="s1">metadata.name</span><span class="s3">, </span><span class="s1">metadata.version)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">metadata = self._get_metadata(path)</span>
+
+            <span class="s0"># Need to be set before caching</span>
+            <span class="s1">set_name_and_version(self</span><span class="s3">, </span><span class="s1">metadata.name</span><span class="s3">, </span><span class="s1">metadata.version)</span>
+
+            <span class="s3">if </span><span class="s1">env </span><span class="s3">and </span><span class="s1">env._cache_enabled:</span>
+                <span class="s1">env._cache_egg.add(self)</span>
+        <span class="s1">super(EggInfoDistribution</span><span class="s3">, </span><span class="s1">self).__init__(metadata</span><span class="s3">, </span><span class="s1">path</span><span class="s3">, </span><span class="s1">env)</span>
+
+    <span class="s3">def </span><span class="s1">_get_metadata(self</span><span class="s3">, </span><span class="s1">path):</span>
+        <span class="s1">requires = </span><span class="s3">None</span>
+
+        <span class="s3">def </span><span class="s1">parse_requires_data(data):</span>
+            <span class="s2">&quot;&quot;&quot;Create a list of dependencies from a requires.txt file. 
+ 
+            *data*: the contents of a setuptools-produced requires.txt file. 
+            &quot;&quot;&quot;</span>
+            <span class="s1">reqs = []</span>
+            <span class="s1">lines = data.splitlines()</span>
+            <span class="s3">for </span><span class="s1">line </span><span class="s3">in </span><span class="s1">lines:</span>
+                <span class="s1">line = line.strip()</span>
+                <span class="s3">if </span><span class="s1">line.startswith(</span><span class="s4">'['</span><span class="s1">):</span>
+                    <span class="s1">logger.warning(</span><span class="s4">'Unexpected line: quitting requirement scan: %r'</span><span class="s3">,</span>
+                                   <span class="s1">line)</span>
+                    <span class="s3">break</span>
+                <span class="s1">r = parse_requirement(line)</span>
+                <span class="s3">if not </span><span class="s1">r:</span>
+                    <span class="s1">logger.warning(</span><span class="s4">'Not recognised as a requirement: %r'</span><span class="s3">, </span><span class="s1">line)</span>
+                    <span class="s3">continue</span>
+                <span class="s3">if </span><span class="s1">r.extras:</span>
+                    <span class="s1">logger.warning(</span><span class="s4">'extra requirements in requires.txt are '</span>
+                                   <span class="s4">'not supported'</span><span class="s1">)</span>
+                <span class="s3">if not </span><span class="s1">r.constraints:</span>
+                    <span class="s1">reqs.append(r.name)</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">cons = </span><span class="s4">', '</span><span class="s1">.join(</span><span class="s4">'%s%s' </span><span class="s1">% c </span><span class="s3">for </span><span class="s1">c </span><span class="s3">in </span><span class="s1">r.constraints)</span>
+                    <span class="s1">reqs.append(</span><span class="s4">'%s (%s)' </span><span class="s1">% (r.name</span><span class="s3">, </span><span class="s1">cons))</span>
+            <span class="s3">return </span><span class="s1">reqs</span>
+
+        <span class="s3">def </span><span class="s1">parse_requires_path(req_path):</span>
+            <span class="s2">&quot;&quot;&quot;Create a list of dependencies from a requires.txt file. 
+ 
+            *req_path*: the path to a setuptools-produced requires.txt file. 
+            &quot;&quot;&quot;</span>
+
+            <span class="s1">reqs = []</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s3">with </span><span class="s1">codecs.open(req_path</span><span class="s3">, </span><span class="s4">'r'</span><span class="s3">, </span><span class="s4">'utf-8'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">fp:</span>
+                    <span class="s1">reqs = parse_requires_data(fp.read())</span>
+            <span class="s3">except </span><span class="s1">IOError:</span>
+                <span class="s3">pass</span>
+            <span class="s3">return </span><span class="s1">reqs</span>
+
+        <span class="s1">tl_path = tl_data = </span><span class="s3">None</span>
+        <span class="s3">if </span><span class="s1">path.endswith(</span><span class="s4">'.egg'</span><span class="s1">):</span>
+            <span class="s3">if </span><span class="s1">os.path.isdir(path):</span>
+                <span class="s1">p = os.path.join(path</span><span class="s3">, </span><span class="s4">'EGG-INFO'</span><span class="s1">)</span>
+                <span class="s1">meta_path = os.path.join(p</span><span class="s3">, </span><span class="s4">'PKG-INFO'</span><span class="s1">)</span>
+                <span class="s1">metadata = Metadata(path=meta_path</span><span class="s3">, </span><span class="s1">scheme=</span><span class="s4">'legacy'</span><span class="s1">)</span>
+                <span class="s1">req_path = os.path.join(p</span><span class="s3">, </span><span class="s4">'requires.txt'</span><span class="s1">)</span>
+                <span class="s1">tl_path = os.path.join(p</span><span class="s3">, </span><span class="s4">'top_level.txt'</span><span class="s1">)</span>
+                <span class="s1">requires = parse_requires_path(req_path)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s0"># FIXME handle the case where zipfile is not available</span>
+                <span class="s1">zipf = zipimport.zipimporter(path)</span>
+                <span class="s1">fileobj = StringIO(</span>
+                    <span class="s1">zipf.get_data(</span><span class="s4">'EGG-INFO/PKG-INFO'</span><span class="s1">).decode(</span><span class="s4">'utf8'</span><span class="s1">))</span>
+                <span class="s1">metadata = Metadata(fileobj=fileobj</span><span class="s3">, </span><span class="s1">scheme=</span><span class="s4">'legacy'</span><span class="s1">)</span>
+                <span class="s3">try</span><span class="s1">:</span>
+                    <span class="s1">data = zipf.get_data(</span><span class="s4">'EGG-INFO/requires.txt'</span><span class="s1">)</span>
+                    <span class="s1">tl_data = zipf.get_data(</span><span class="s4">'EGG-INFO/top_level.txt'</span><span class="s1">).decode(</span><span class="s4">'utf-8'</span><span class="s1">)</span>
+                    <span class="s1">requires = parse_requires_data(data.decode(</span><span class="s4">'utf-8'</span><span class="s1">))</span>
+                <span class="s3">except </span><span class="s1">IOError:</span>
+                    <span class="s1">requires = </span><span class="s3">None</span>
+        <span class="s3">elif </span><span class="s1">path.endswith(</span><span class="s4">'.egg-info'</span><span class="s1">):</span>
+            <span class="s3">if </span><span class="s1">os.path.isdir(path):</span>
+                <span class="s1">req_path = os.path.join(path</span><span class="s3">, </span><span class="s4">'requires.txt'</span><span class="s1">)</span>
+                <span class="s1">requires = parse_requires_path(req_path)</span>
+                <span class="s1">path = os.path.join(path</span><span class="s3">, </span><span class="s4">'PKG-INFO'</span><span class="s1">)</span>
+                <span class="s1">tl_path = os.path.join(path</span><span class="s3">, </span><span class="s4">'top_level.txt'</span><span class="s1">)</span>
+            <span class="s1">metadata = Metadata(path=path</span><span class="s3">, </span><span class="s1">scheme=</span><span class="s4">'legacy'</span><span class="s1">)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">DistlibException(</span><span class="s4">'path must end with .egg-info or .egg, '</span>
+                                   <span class="s4">'got %r' </span><span class="s1">% path)</span>
+
+        <span class="s3">if </span><span class="s1">requires:</span>
+            <span class="s1">metadata.add_requirements(requires)</span>
+        <span class="s0"># look for top-level modules in top_level.txt, if present</span>
+        <span class="s3">if </span><span class="s1">tl_data </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">tl_path </span><span class="s3">is not None and </span><span class="s1">os.path.exists(tl_path):</span>
+                <span class="s3">with </span><span class="s1">open(tl_path</span><span class="s3">, </span><span class="s4">'rb'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">f:</span>
+                    <span class="s1">tl_data = f.read().decode(</span><span class="s4">'utf-8'</span><span class="s1">)</span>
+        <span class="s3">if not </span><span class="s1">tl_data:</span>
+            <span class="s1">tl_data = []</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">tl_data = tl_data.splitlines()</span>
+        <span class="s1">self.modules = tl_data</span>
+        <span class="s3">return </span><span class="s1">metadata</span>
+
+    <span class="s3">def </span><span class="s1">__repr__(self):</span>
+        <span class="s3">return </span><span class="s4">'&lt;EggInfoDistribution %r %s at %r&gt;' </span><span class="s1">% (</span>
+            <span class="s1">self.name</span><span class="s3">, </span><span class="s1">self.version</span><span class="s3">, </span><span class="s1">self.path)</span>
+
+    <span class="s3">def </span><span class="s1">__str__(self):</span>
+        <span class="s3">return </span><span class="s4">&quot;%s %s&quot; </span><span class="s1">% (self.name</span><span class="s3">, </span><span class="s1">self.version)</span>
+
+    <span class="s3">def </span><span class="s1">check_installed_files(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Checks that the hashes and sizes of the files in ``RECORD`` are 
+        matched by the files themselves. Returns a (possibly empty) list of 
+        mismatches. Each entry in the mismatch list will be a tuple consisting 
+        of the path, 'exists', 'size' or 'hash' according to what didn't match 
+        (existence is checked first, then size, then hash), the expected 
+        value and the actual value. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">mismatches = []</span>
+        <span class="s1">record_path = os.path.join(self.path</span><span class="s3">, </span><span class="s4">'installed-files.txt'</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">os.path.exists(record_path):</span>
+            <span class="s3">for </span><span class="s1">path</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">_ </span><span class="s3">in </span><span class="s1">self.list_installed_files():</span>
+                <span class="s3">if </span><span class="s1">path == record_path:</span>
+                    <span class="s3">continue</span>
+                <span class="s3">if not </span><span class="s1">os.path.exists(path):</span>
+                    <span class="s1">mismatches.append((path</span><span class="s3">, </span><span class="s4">'exists'</span><span class="s3">, True, False</span><span class="s1">))</span>
+        <span class="s3">return </span><span class="s1">mismatches</span>
+
+    <span class="s3">def </span><span class="s1">list_installed_files(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Iterates over the ``installed-files.txt`` entries and returns a tuple 
+        ``(path, hash, size)`` for each line. 
+ 
+        :returns: a list of (path, hash, size) 
+        &quot;&quot;&quot;</span>
+
+        <span class="s3">def </span><span class="s1">_md5(path):</span>
+            <span class="s1">f = open(path</span><span class="s3">, </span><span class="s4">'rb'</span><span class="s1">)</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">content = f.read()</span>
+            <span class="s3">finally</span><span class="s1">:</span>
+                <span class="s1">f.close()</span>
+            <span class="s3">return </span><span class="s1">hashlib.md5(content).hexdigest()</span>
+
+        <span class="s3">def </span><span class="s1">_size(path):</span>
+            <span class="s3">return </span><span class="s1">os.stat(path).st_size</span>
+
+        <span class="s1">record_path = os.path.join(self.path</span><span class="s3">, </span><span class="s4">'installed-files.txt'</span><span class="s1">)</span>
+        <span class="s1">result = []</span>
+        <span class="s3">if </span><span class="s1">os.path.exists(record_path):</span>
+            <span class="s3">with </span><span class="s1">codecs.open(record_path</span><span class="s3">, </span><span class="s4">'r'</span><span class="s3">, </span><span class="s1">encoding=</span><span class="s4">'utf-8'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">f:</span>
+                <span class="s3">for </span><span class="s1">line </span><span class="s3">in </span><span class="s1">f:</span>
+                    <span class="s1">line = line.strip()</span>
+                    <span class="s1">p = os.path.normpath(os.path.join(self.path</span><span class="s3">, </span><span class="s1">line))</span>
+                    <span class="s0"># &quot;./&quot; is present as a marker between installed files</span>
+                    <span class="s0"># and installation metadata files</span>
+                    <span class="s3">if not </span><span class="s1">os.path.exists(p):</span>
+                        <span class="s1">logger.warning(</span><span class="s4">'Non-existent file: %s'</span><span class="s3">, </span><span class="s1">p)</span>
+                        <span class="s3">if </span><span class="s1">p.endswith((</span><span class="s4">'.pyc'</span><span class="s3">, </span><span class="s4">'.pyo'</span><span class="s1">)):</span>
+                            <span class="s3">continue</span>
+                        <span class="s0">#otherwise fall through and fail</span>
+                    <span class="s3">if not </span><span class="s1">os.path.isdir(p):</span>
+                        <span class="s1">result.append((p</span><span class="s3">, </span><span class="s1">_md5(p)</span><span class="s3">, </span><span class="s1">_size(p)))</span>
+            <span class="s1">result.append((record_path</span><span class="s3">, None, None</span><span class="s1">))</span>
+        <span class="s3">return </span><span class="s1">result</span>
+
+    <span class="s3">def </span><span class="s1">list_distinfo_files(self</span><span class="s3">, </span><span class="s1">absolute=</span><span class="s3">False</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Iterates over the ``installed-files.txt`` entries and returns paths for 
+        each line if the path is pointing to a file located in the 
+        ``.egg-info`` directory or one of its subdirectories. 
+ 
+        :parameter absolute: If *absolute* is ``True``, each returned path is 
+                          transformed into a local absolute path. Otherwise the 
+                          raw value from ``installed-files.txt`` is returned. 
+        :type absolute: boolean 
+        :returns: iterator of paths 
+        &quot;&quot;&quot;</span>
+        <span class="s1">record_path = os.path.join(self.path</span><span class="s3">, </span><span class="s4">'installed-files.txt'</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">os.path.exists(record_path):</span>
+            <span class="s1">skip = </span><span class="s3">True</span>
+            <span class="s3">with </span><span class="s1">codecs.open(record_path</span><span class="s3">, </span><span class="s4">'r'</span><span class="s3">, </span><span class="s1">encoding=</span><span class="s4">'utf-8'</span><span class="s1">) </span><span class="s3">as </span><span class="s1">f:</span>
+                <span class="s3">for </span><span class="s1">line </span><span class="s3">in </span><span class="s1">f:</span>
+                    <span class="s1">line = line.strip()</span>
+                    <span class="s3">if </span><span class="s1">line == </span><span class="s4">'./'</span><span class="s1">:</span>
+                        <span class="s1">skip = </span><span class="s3">False</span>
+                        <span class="s3">continue</span>
+                    <span class="s3">if not </span><span class="s1">skip:</span>
+                        <span class="s1">p = os.path.normpath(os.path.join(self.path</span><span class="s3">, </span><span class="s1">line))</span>
+                        <span class="s3">if </span><span class="s1">p.startswith(self.path):</span>
+                            <span class="s3">if </span><span class="s1">absolute:</span>
+                                <span class="s3">yield </span><span class="s1">p</span>
+                            <span class="s3">else</span><span class="s1">:</span>
+                                <span class="s3">yield </span><span class="s1">line</span>
+
+    <span class="s3">def </span><span class="s1">__eq__(self</span><span class="s3">, </span><span class="s1">other):</span>
+        <span class="s3">return </span><span class="s1">(isinstance(other</span><span class="s3">, </span><span class="s1">EggInfoDistribution) </span><span class="s3">and</span>
+                <span class="s1">self.path == other.path)</span>
+
+    <span class="s0"># See http://docs.python.org/reference/datamodel#object.__hash__</span>
+    <span class="s1">__hash__ = object.__hash__</span>
+
+<span class="s1">new_dist_class = InstalledDistribution</span>
+<span class="s1">old_dist_class = EggInfoDistribution</span>
+
+
+<span class="s3">class </span><span class="s1">DependencyGraph(object):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Represents a dependency graph between distributions. 
+ 
+    The dependency relationships are stored in an ``adjacency_list`` that maps 
+    distributions to a list of ``(other, label)`` tuples where  ``other`` 
+    is a distribution and the edge is labeled with ``label`` (i.e. the version 
+    specifier, if such was provided). Also, for more efficient traversal, for 
+    every distribution ``x``, a list of predecessors is kept in 
+    ``reverse_list[x]``. An edge from distribution ``a`` to 
+    distribution ``b`` means that ``a`` depends on ``b``. If any missing 
+    dependencies are found, they are stored in ``missing``, which is a 
+    dictionary that maps distributions to a list of requirements that were not 
+    provided by any other distributions. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">self.adjacency_list = {}</span>
+        <span class="s1">self.reverse_list = {}</span>
+        <span class="s1">self.missing = {}</span>
+
+    <span class="s3">def </span><span class="s1">add_distribution(self</span><span class="s3">, </span><span class="s1">distribution):</span>
+        <span class="s2">&quot;&quot;&quot;Add the *distribution* to the graph. 
+ 
+        :type distribution: :class:`distutils2.database.InstalledDistribution` 
+                            or :class:`distutils2.database.EggInfoDistribution` 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.adjacency_list[distribution] = []</span>
+        <span class="s1">self.reverse_list[distribution] = []</span>
+        <span class="s0">#self.missing[distribution] = []</span>
+
+    <span class="s3">def </span><span class="s1">add_edge(self</span><span class="s3">, </span><span class="s1">x</span><span class="s3">, </span><span class="s1">y</span><span class="s3">, </span><span class="s1">label=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot;Add an edge from distribution *x* to distribution *y* with the given 
+        *label*. 
+ 
+        :type x: :class:`distutils2.database.InstalledDistribution` or 
+                 :class:`distutils2.database.EggInfoDistribution` 
+        :type y: :class:`distutils2.database.InstalledDistribution` or 
+                 :class:`distutils2.database.EggInfoDistribution` 
+        :type label: ``str`` or ``None`` 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.adjacency_list[x].append((y</span><span class="s3">, </span><span class="s1">label))</span>
+        <span class="s0"># multiple edges are allowed, so be careful</span>
+        <span class="s3">if </span><span class="s1">x </span><span class="s3">not in </span><span class="s1">self.reverse_list[y]:</span>
+            <span class="s1">self.reverse_list[y].append(x)</span>
+
+    <span class="s3">def </span><span class="s1">add_missing(self</span><span class="s3">, </span><span class="s1">distribution</span><span class="s3">, </span><span class="s1">requirement):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Add a missing *requirement* for the given *distribution*. 
+ 
+        :type distribution: :class:`distutils2.database.InstalledDistribution` 
+                            or :class:`distutils2.database.EggInfoDistribution` 
+        :type requirement: ``str`` 
+        &quot;&quot;&quot;</span>
+        <span class="s1">logger.debug(</span><span class="s4">'%s missing %r'</span><span class="s3">, </span><span class="s1">distribution</span><span class="s3">, </span><span class="s1">requirement)</span>
+        <span class="s1">self.missing.setdefault(distribution</span><span class="s3">, </span><span class="s1">[]).append(requirement)</span>
+
+    <span class="s3">def </span><span class="s1">_repr_dist(self</span><span class="s3">, </span><span class="s1">dist):</span>
+        <span class="s3">return </span><span class="s4">'%s %s' </span><span class="s1">% (dist.name</span><span class="s3">, </span><span class="s1">dist.version)</span>
+
+    <span class="s3">def </span><span class="s1">repr_node(self</span><span class="s3">, </span><span class="s1">dist</span><span class="s3">, </span><span class="s1">level=</span><span class="s5">1</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot;Prints only a subgraph&quot;&quot;&quot;</span>
+        <span class="s1">output = [self._repr_dist(dist)]</span>
+        <span class="s3">for </span><span class="s1">other</span><span class="s3">, </span><span class="s1">label </span><span class="s3">in </span><span class="s1">self.adjacency_list[dist]:</span>
+            <span class="s1">dist = self._repr_dist(other)</span>
+            <span class="s3">if </span><span class="s1">label </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s1">dist = </span><span class="s4">'%s [%s]' </span><span class="s1">% (dist</span><span class="s3">, </span><span class="s1">label)</span>
+            <span class="s1">output.append(</span><span class="s4">'    ' </span><span class="s1">* level + str(dist))</span>
+            <span class="s1">suboutput = self.repr_node(other</span><span class="s3">, </span><span class="s1">level + </span><span class="s5">1</span><span class="s1">)</span>
+            <span class="s1">subs = suboutput.split(</span><span class="s4">'</span><span class="s3">\n</span><span class="s4">'</span><span class="s1">)</span>
+            <span class="s1">output.extend(subs[</span><span class="s5">1</span><span class="s1">:])</span>
+        <span class="s3">return </span><span class="s4">'</span><span class="s3">\n</span><span class="s4">'</span><span class="s1">.join(output)</span>
+
+    <span class="s3">def </span><span class="s1">to_dot(self</span><span class="s3">, </span><span class="s1">f</span><span class="s3">, </span><span class="s1">skip_disconnected=</span><span class="s3">True</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot;Writes a DOT output for the graph to the provided file *f*. 
+ 
+        If *skip_disconnected* is set to ``True``, then all distributions 
+        that are not dependent on any other distribution are skipped. 
+ 
+        :type f: has to support ``file``-like operations 
+        :type skip_disconnected: ``bool`` 
+        &quot;&quot;&quot;</span>
+        <span class="s1">disconnected = []</span>
+
+        <span class="s1">f.write(</span><span class="s4">&quot;digraph dependencies {</span><span class="s3">\n</span><span class="s4">&quot;</span><span class="s1">)</span>
+        <span class="s3">for </span><span class="s1">dist</span><span class="s3">, </span><span class="s1">adjs </span><span class="s3">in </span><span class="s1">self.adjacency_list.items():</span>
+            <span class="s3">if </span><span class="s1">len(adjs) == </span><span class="s5">0 </span><span class="s3">and not </span><span class="s1">skip_disconnected:</span>
+                <span class="s1">disconnected.append(dist)</span>
+            <span class="s3">for </span><span class="s1">other</span><span class="s3">, </span><span class="s1">label </span><span class="s3">in </span><span class="s1">adjs:</span>
+                <span class="s3">if not </span><span class="s1">label </span><span class="s3">is None</span><span class="s1">:</span>
+                    <span class="s1">f.write(</span><span class="s4">'&quot;%s&quot; -&gt; &quot;%s&quot; [label=&quot;%s&quot;]</span><span class="s3">\n</span><span class="s4">' </span><span class="s1">%</span>
+                            <span class="s1">(dist.name</span><span class="s3">, </span><span class="s1">other.name</span><span class="s3">, </span><span class="s1">label))</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">f.write(</span><span class="s4">'&quot;%s&quot; -&gt; &quot;%s&quot;</span><span class="s3">\n</span><span class="s4">' </span><span class="s1">% (dist.name</span><span class="s3">, </span><span class="s1">other.name))</span>
+        <span class="s3">if not </span><span class="s1">skip_disconnected </span><span class="s3">and </span><span class="s1">len(disconnected) &gt; </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s1">f.write(</span><span class="s4">'subgraph disconnected {</span><span class="s3">\n</span><span class="s4">'</span><span class="s1">)</span>
+            <span class="s1">f.write(</span><span class="s4">'label = &quot;Disconnected&quot;</span><span class="s3">\n</span><span class="s4">'</span><span class="s1">)</span>
+            <span class="s1">f.write(</span><span class="s4">'bgcolor = red</span><span class="s3">\n</span><span class="s4">'</span><span class="s1">)</span>
+
+            <span class="s3">for </span><span class="s1">dist </span><span class="s3">in </span><span class="s1">disconnected:</span>
+                <span class="s1">f.write(</span><span class="s4">'&quot;%s&quot;' </span><span class="s1">% dist.name)</span>
+                <span class="s1">f.write(</span><span class="s4">'</span><span class="s3">\n</span><span class="s4">'</span><span class="s1">)</span>
+            <span class="s1">f.write(</span><span class="s4">'}</span><span class="s3">\n</span><span class="s4">'</span><span class="s1">)</span>
+        <span class="s1">f.write(</span><span class="s4">'}</span><span class="s3">\n</span><span class="s4">'</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">topological_sort(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Perform a topological sort of the graph. 
+        :return: A tuple, the first element of which is a topologically sorted 
+                 list of distributions, and the second element of which is a 
+                 list of distributions that cannot be sorted because they have 
+                 circular dependencies and so form a cycle. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">result = []</span>
+        <span class="s0"># Make a shallow copy of the adjacency list</span>
+        <span class="s1">alist = {}</span>
+        <span class="s3">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v </span><span class="s3">in </span><span class="s1">self.adjacency_list.items():</span>
+            <span class="s1">alist[k] = v[:]</span>
+        <span class="s3">while True</span><span class="s1">:</span>
+            <span class="s0"># See what we can remove in this run</span>
+            <span class="s1">to_remove = []</span>
+            <span class="s3">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v </span><span class="s3">in </span><span class="s1">list(alist.items())[:]:</span>
+                <span class="s3">if not </span><span class="s1">v:</span>
+                    <span class="s1">to_remove.append(k)</span>
+                    <span class="s3">del </span><span class="s1">alist[k]</span>
+            <span class="s3">if not </span><span class="s1">to_remove:</span>
+                <span class="s0"># What's left in alist (if anything) is a cycle.</span>
+                <span class="s3">break</span>
+            <span class="s0"># Remove from the adjacency list of others</span>
+            <span class="s3">for </span><span class="s1">k</span><span class="s3">, </span><span class="s1">v </span><span class="s3">in </span><span class="s1">alist.items():</span>
+                <span class="s1">alist[k] = [(d</span><span class="s3">, </span><span class="s1">r) </span><span class="s3">for </span><span class="s1">d</span><span class="s3">, </span><span class="s1">r </span><span class="s3">in </span><span class="s1">v </span><span class="s3">if </span><span class="s1">d </span><span class="s3">not in </span><span class="s1">to_remove]</span>
+            <span class="s1">logger.debug(</span><span class="s4">'Moving to result: %s'</span><span class="s3">,</span>
+                         <span class="s1">[</span><span class="s4">'%s (%s)' </span><span class="s1">% (d.name</span><span class="s3">, </span><span class="s1">d.version) </span><span class="s3">for </span><span class="s1">d </span><span class="s3">in </span><span class="s1">to_remove])</span>
+            <span class="s1">result.extend(to_remove)</span>
+        <span class="s3">return </span><span class="s1">result</span><span class="s3">, </span><span class="s1">list(alist.keys())</span>
+
+    <span class="s3">def </span><span class="s1">__repr__(self):</span>
+        <span class="s2">&quot;&quot;&quot;Representation of the graph&quot;&quot;&quot;</span>
+        <span class="s1">output = []</span>
+        <span class="s3">for </span><span class="s1">dist</span><span class="s3">, </span><span class="s1">adjs </span><span class="s3">in </span><span class="s1">self.adjacency_list.items():</span>
+            <span class="s1">output.append(self.repr_node(dist))</span>
+        <span class="s3">return </span><span class="s4">'</span><span class="s3">\n</span><span class="s4">'</span><span class="s1">.join(output)</span>
+
+
+<span class="s3">def </span><span class="s1">make_graph(dists</span><span class="s3">, </span><span class="s1">scheme=</span><span class="s4">'default'</span><span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot;Makes a dependency graph from the given distributions. 
+ 
+    :parameter dists: a list of distributions 
+    :type dists: list of :class:`distutils2.database.InstalledDistribution` and 
+                 :class:`distutils2.database.EggInfoDistribution` instances 
+    :rtype: a :class:`DependencyGraph` instance 
+    &quot;&quot;&quot;</span>
+    <span class="s1">scheme = get_scheme(scheme)</span>
+    <span class="s1">graph = DependencyGraph()</span>
+    <span class="s1">provided = {}  </span><span class="s0"># maps names to lists of (version, dist) tuples</span>
+
+    <span class="s0"># first, build the graph and find out what's provided</span>
+    <span class="s3">for </span><span class="s1">dist </span><span class="s3">in </span><span class="s1">dists:</span>
+        <span class="s1">graph.add_distribution(dist)</span>
+
+        <span class="s3">for </span><span class="s1">p </span><span class="s3">in </span><span class="s1">dist.provides:</span>
+            <span class="s1">name</span><span class="s3">, </span><span class="s1">version = parse_name_and_version(p)</span>
+            <span class="s1">logger.debug(</span><span class="s4">'Add to provided: %s, %s, %s'</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">version</span><span class="s3">, </span><span class="s1">dist)</span>
+            <span class="s1">provided.setdefault(name</span><span class="s3">, </span><span class="s1">[]).append((version</span><span class="s3">, </span><span class="s1">dist))</span>
+
+    <span class="s0"># now make the edges</span>
+    <span class="s3">for </span><span class="s1">dist </span><span class="s3">in </span><span class="s1">dists:</span>
+        <span class="s1">requires = (dist.run_requires | dist.meta_requires |</span>
+                    <span class="s1">dist.build_requires | dist.dev_requires)</span>
+        <span class="s3">for </span><span class="s1">req </span><span class="s3">in </span><span class="s1">requires:</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">matcher = scheme.matcher(req)</span>
+            <span class="s3">except </span><span class="s1">UnsupportedVersionError:</span>
+                <span class="s0"># XXX compat-mode if cannot read the version</span>
+                <span class="s1">logger.warning(</span><span class="s4">'could not read version %r - using name only'</span><span class="s3">,</span>
+                               <span class="s1">req)</span>
+                <span class="s1">name = req.split()[</span><span class="s5">0</span><span class="s1">]</span>
+                <span class="s1">matcher = scheme.matcher(name)</span>
+
+            <span class="s1">name = matcher.key   </span><span class="s0"># case-insensitive</span>
+
+            <span class="s1">matched = </span><span class="s3">False</span>
+            <span class="s3">if </span><span class="s1">name </span><span class="s3">in </span><span class="s1">provided:</span>
+                <span class="s3">for </span><span class="s1">version</span><span class="s3">, </span><span class="s1">provider </span><span class="s3">in </span><span class="s1">provided[name]:</span>
+                    <span class="s3">try</span><span class="s1">:</span>
+                        <span class="s1">match = matcher.match(version)</span>
+                    <span class="s3">except </span><span class="s1">UnsupportedVersionError:</span>
+                        <span class="s1">match = </span><span class="s3">False</span>
+
+                    <span class="s3">if </span><span class="s1">match:</span>
+                        <span class="s1">graph.add_edge(dist</span><span class="s3">, </span><span class="s1">provider</span><span class="s3">, </span><span class="s1">req)</span>
+                        <span class="s1">matched = </span><span class="s3">True</span>
+                        <span class="s3">break</span>
+            <span class="s3">if not </span><span class="s1">matched:</span>
+                <span class="s1">graph.add_missing(dist</span><span class="s3">, </span><span class="s1">req)</span>
+    <span class="s3">return </span><span class="s1">graph</span>
+
+
+<span class="s3">def </span><span class="s1">get_dependent_dists(dists</span><span class="s3">, </span><span class="s1">dist):</span>
+    <span class="s2">&quot;&quot;&quot;Recursively generate a list of distributions from *dists* that are 
+    dependent on *dist*. 
+ 
+    :param dists: a list of distributions 
+    :param dist: a distribution, member of *dists* for which we are interested 
+    &quot;&quot;&quot;</span>
+    <span class="s3">if </span><span class="s1">dist </span><span class="s3">not in </span><span class="s1">dists:</span>
+        <span class="s3">raise </span><span class="s1">DistlibException(</span><span class="s4">'given distribution %r is not a member '</span>
+                               <span class="s4">'of the list' </span><span class="s1">% dist.name)</span>
+    <span class="s1">graph = make_graph(dists)</span>
+
+    <span class="s1">dep = [dist]  </span><span class="s0"># dependent distributions</span>
+    <span class="s1">todo = graph.reverse_list[dist]  </span><span class="s0"># list of nodes we should inspect</span>
+
+    <span class="s3">while </span><span class="s1">todo:</span>
+        <span class="s1">d = todo.pop()</span>
+        <span class="s1">dep.append(d)</span>
+        <span class="s3">for </span><span class="s1">succ </span><span class="s3">in </span><span class="s1">graph.reverse_list[d]:</span>
+            <span class="s3">if </span><span class="s1">succ </span><span class="s3">not in </span><span class="s1">dep:</span>
+                <span class="s1">todo.append(succ)</span>
+
+    <span class="s1">dep.pop(</span><span class="s5">0</span><span class="s1">)  </span><span class="s0"># remove dist from dep, was there to prevent infinite loops</span>
+    <span class="s3">return </span><span class="s1">dep</span>
+
+
+<span class="s3">def </span><span class="s1">get_required_dists(dists</span><span class="s3">, </span><span class="s1">dist):</span>
+    <span class="s2">&quot;&quot;&quot;Recursively generate a list of distributions from *dists* that are 
+    required by *dist*. 
+ 
+    :param dists: a list of distributions 
+    :param dist: a distribution, member of *dists* for which we are interested 
+    &quot;&quot;&quot;</span>
+    <span class="s3">if </span><span class="s1">dist </span><span class="s3">not in </span><span class="s1">dists:</span>
+        <span class="s3">raise </span><span class="s1">DistlibException(</span><span class="s4">'given distribution %r is not a member '</span>
+                               <span class="s4">'of the list' </span><span class="s1">% dist.name)</span>
+    <span class="s1">graph = make_graph(dists)</span>
+
+    <span class="s1">req = []  </span><span class="s0"># required distributions</span>
+    <span class="s1">todo = graph.adjacency_list[dist]  </span><span class="s0"># list of nodes we should inspect</span>
+
+    <span class="s3">while </span><span class="s1">todo:</span>
+        <span class="s1">d = todo.pop()[</span><span class="s5">0</span><span class="s1">]</span>
+        <span class="s1">req.append(d)</span>
+        <span class="s3">for </span><span class="s1">pred </span><span class="s3">in </span><span class="s1">graph.adjacency_list[d]:</span>
+            <span class="s3">if </span><span class="s1">pred </span><span class="s3">not in </span><span class="s1">req:</span>
+                <span class="s1">todo.append(pred)</span>
+
+    <span class="s3">return </span><span class="s1">req</span>
+
+
+<span class="s3">def </span><span class="s1">make_dist(name</span><span class="s3">, </span><span class="s1">version</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    A convenience method for making a dist given just a name and version. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">summary = kwargs.pop(</span><span class="s4">'summary'</span><span class="s3">, </span><span class="s4">'Placeholder for summary'</span><span class="s1">)</span>
+    <span class="s1">md = Metadata(**kwargs)</span>
+    <span class="s1">md.name = name</span>
+    <span class="s1">md.version = version</span>
+    <span class="s1">md.summary = summary </span><span class="s3">or </span><span class="s4">'Placeholder for summary'</span>
+    <span class="s3">return </span><span class="s1">Distribution(md)</span>
+</pre>
+</body>
+</html>

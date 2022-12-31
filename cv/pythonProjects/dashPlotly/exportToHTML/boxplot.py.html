@@ -1,0 +1,527 @@
+<html>
+<head>
+<title>boxplot.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6a8759;}
+.s3 { color: #808080;}
+.s4 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+boxplot.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">TYPE_CHECKING</span><span class="s0">,</span>
+    <span class="s1">NamedTuple</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">import </span><span class="s1">warnings</span>
+
+<span class="s0">from </span><span class="s1">matplotlib.artist </span><span class="s0">import </span><span class="s1">setp</span>
+<span class="s0">import </span><span class="s1">numpy </span><span class="s0">as </span><span class="s1">np</span>
+
+<span class="s0">from </span><span class="s1">pandas.core.dtypes.common </span><span class="s0">import </span><span class="s1">is_dict_like</span>
+<span class="s0">from </span><span class="s1">pandas.core.dtypes.missing </span><span class="s0">import </span><span class="s1">remove_na_arraylike</span>
+
+<span class="s0">import </span><span class="s1">pandas </span><span class="s0">as </span><span class="s1">pd</span>
+<span class="s0">import </span><span class="s1">pandas.core.common </span><span class="s0">as </span><span class="s1">com</span>
+
+<span class="s0">from </span><span class="s1">pandas.io.formats.printing </span><span class="s0">import </span><span class="s1">pprint_thing</span>
+<span class="s0">from </span><span class="s1">pandas.plotting._matplotlib.core </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">LinePlot</span><span class="s0">,</span>
+    <span class="s1">MPLPlot</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.plotting._matplotlib.groupby </span><span class="s0">import </span><span class="s1">create_iter_data_given_by</span>
+<span class="s0">from </span><span class="s1">pandas.plotting._matplotlib.style </span><span class="s0">import </span><span class="s1">get_standard_colors</span>
+<span class="s0">from </span><span class="s1">pandas.plotting._matplotlib.tools </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">create_subplots</span><span class="s0">,</span>
+    <span class="s1">flatten_axes</span><span class="s0">,</span>
+    <span class="s1">maybe_adjust_figure</span><span class="s0">,</span>
+<span class="s1">)</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING:</span>
+    <span class="s0">from </span><span class="s1">matplotlib.axes </span><span class="s0">import </span><span class="s1">Axes</span>
+    <span class="s0">from </span><span class="s1">matplotlib.lines </span><span class="s0">import </span><span class="s1">Line2D</span>
+
+
+<span class="s0">class </span><span class="s1">BoxPlot(LinePlot):</span>
+    <span class="s1">_kind = </span><span class="s2">&quot;box&quot;</span>
+    <span class="s1">_layout_type = </span><span class="s2">&quot;horizontal&quot;</span>
+
+    <span class="s1">_valid_return_types = (</span><span class="s0">None, </span><span class="s2">&quot;axes&quot;</span><span class="s0">, </span><span class="s2">&quot;dict&quot;</span><span class="s0">, </span><span class="s2">&quot;both&quot;</span><span class="s1">)</span>
+
+    <span class="s0">class </span><span class="s1">BP(NamedTuple):</span>
+        <span class="s3"># namedtuple to hold results</span>
+        <span class="s1">ax: Axes</span>
+        <span class="s1">lines: dict[str</span><span class="s0">, </span><span class="s1">list[Line2D]]</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">data</span><span class="s0">, </span><span class="s1">return_type=</span><span class="s2">&quot;axes&quot;</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s3"># Do not call LinePlot.__init__ which may fill nan</span>
+        <span class="s0">if </span><span class="s1">return_type </span><span class="s0">not in </span><span class="s1">self._valid_return_types:</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s2">&quot;return_type must be {None, 'axes', 'dict', 'both'}&quot;</span><span class="s1">)</span>
+
+        <span class="s1">self.return_type = return_type</span>
+        <span class="s1">MPLPlot.__init__(self</span><span class="s0">, </span><span class="s1">data</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s0">def </span><span class="s1">_args_adjust(self):</span>
+        <span class="s0">if </span><span class="s1">self.subplots:</span>
+            <span class="s3"># Disable label ax sharing. Otherwise, all subplots shows last</span>
+            <span class="s3"># column label</span>
+            <span class="s0">if </span><span class="s1">self.orientation == </span><span class="s2">&quot;vertical&quot;</span><span class="s1">:</span>
+                <span class="s1">self.sharex = </span><span class="s0">False</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">self.sharey = </span><span class="s0">False</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s0">def </span><span class="s1">_plot(cls</span><span class="s0">, </span><span class="s1">ax</span><span class="s0">, </span><span class="s1">y</span><span class="s0">, </span><span class="s1">column_num=</span><span class="s0">None, </span><span class="s1">return_type=</span><span class="s2">&quot;axes&quot;</span><span class="s0">, </span><span class="s1">**kwds):</span>
+        <span class="s0">if </span><span class="s1">y.ndim == </span><span class="s4">2</span><span class="s1">:</span>
+            <span class="s1">y = [remove_na_arraylike(v) </span><span class="s0">for </span><span class="s1">v </span><span class="s0">in </span><span class="s1">y]</span>
+            <span class="s3"># Boxplot fails with empty arrays, so need to add a NaN</span>
+            <span class="s3">#   if any cols are empty</span>
+            <span class="s3"># GH 8181</span>
+            <span class="s1">y = [v </span><span class="s0">if </span><span class="s1">v.size &gt; </span><span class="s4">0 </span><span class="s0">else </span><span class="s1">np.array([np.nan]) </span><span class="s0">for </span><span class="s1">v </span><span class="s0">in </span><span class="s1">y]</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">y = remove_na_arraylike(y)</span>
+        <span class="s1">bp = ax.boxplot(y</span><span class="s0">, </span><span class="s1">**kwds)</span>
+
+        <span class="s0">if </span><span class="s1">return_type == </span><span class="s2">&quot;dict&quot;</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">bp</span><span class="s0">, </span><span class="s1">bp</span>
+        <span class="s0">elif </span><span class="s1">return_type == </span><span class="s2">&quot;both&quot;</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">cls.BP(ax=ax</span><span class="s0">, </span><span class="s1">lines=bp)</span><span class="s0">, </span><span class="s1">bp</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">ax</span><span class="s0">, </span><span class="s1">bp</span>
+
+    <span class="s0">def </span><span class="s1">_validate_color_args(self):</span>
+        <span class="s0">if </span><span class="s2">&quot;color&quot; </span><span class="s0">in </span><span class="s1">self.kwds:</span>
+            <span class="s0">if </span><span class="s1">self.colormap </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s1">warnings.warn(</span>
+                    <span class="s2">&quot;'color' and 'colormap' cannot be used &quot;</span>
+                    <span class="s2">&quot;simultaneously. Using 'color'&quot;</span>
+                <span class="s1">)</span>
+            <span class="s1">self.color = self.kwds.pop(</span><span class="s2">&quot;color&quot;</span><span class="s1">)</span>
+
+            <span class="s0">if </span><span class="s1">isinstance(self.color</span><span class="s0">, </span><span class="s1">dict):</span>
+                <span class="s1">valid_keys = [</span><span class="s2">&quot;boxes&quot;</span><span class="s0">, </span><span class="s2">&quot;whiskers&quot;</span><span class="s0">, </span><span class="s2">&quot;medians&quot;</span><span class="s0">, </span><span class="s2">&quot;caps&quot;</span><span class="s1">]</span>
+                <span class="s0">for </span><span class="s1">key </span><span class="s0">in </span><span class="s1">self.color:</span>
+                    <span class="s0">if </span><span class="s1">key </span><span class="s0">not in </span><span class="s1">valid_keys:</span>
+                        <span class="s0">raise </span><span class="s1">ValueError(</span>
+                            <span class="s2">f&quot;color dict contains invalid key '</span><span class="s0">{</span><span class="s1">key</span><span class="s0">}</span><span class="s2">'. &quot;</span>
+                            <span class="s2">f&quot;The key must be either </span><span class="s0">{</span><span class="s1">valid_keys</span><span class="s0">}</span><span class="s2">&quot;</span>
+                        <span class="s1">)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">self.color = </span><span class="s0">None</span>
+
+        <span class="s3"># get standard colors for default</span>
+        <span class="s1">colors = get_standard_colors(num_colors=</span><span class="s4">3</span><span class="s0">, </span><span class="s1">colormap=self.colormap</span><span class="s0">, </span><span class="s1">color=</span><span class="s0">None</span><span class="s1">)</span>
+        <span class="s3"># use 2 colors by default, for box/whisker and median</span>
+        <span class="s3"># flier colors isn't needed here</span>
+        <span class="s3"># because it can be specified by ``sym`` kw</span>
+        <span class="s1">self._boxes_c = colors[</span><span class="s4">0</span><span class="s1">]</span>
+        <span class="s1">self._whiskers_c = colors[</span><span class="s4">0</span><span class="s1">]</span>
+        <span class="s1">self._medians_c = colors[</span><span class="s4">2</span><span class="s1">]</span>
+        <span class="s1">self._caps_c = colors[</span><span class="s4">0</span><span class="s1">]</span>
+
+    <span class="s0">def </span><span class="s1">_get_colors(self</span><span class="s0">, </span><span class="s1">num_colors=</span><span class="s0">None, </span><span class="s1">color_kwds=</span><span class="s2">&quot;color&quot;</span><span class="s1">):</span>
+        <span class="s0">pass</span>
+
+    <span class="s0">def </span><span class="s1">maybe_color_bp(self</span><span class="s0">, </span><span class="s1">bp):</span>
+        <span class="s0">if </span><span class="s1">isinstance(self.color</span><span class="s0">, </span><span class="s1">dict):</span>
+            <span class="s1">boxes = self.color.get(</span><span class="s2">&quot;boxes&quot;</span><span class="s0">, </span><span class="s1">self._boxes_c)</span>
+            <span class="s1">whiskers = self.color.get(</span><span class="s2">&quot;whiskers&quot;</span><span class="s0">, </span><span class="s1">self._whiskers_c)</span>
+            <span class="s1">medians = self.color.get(</span><span class="s2">&quot;medians&quot;</span><span class="s0">, </span><span class="s1">self._medians_c)</span>
+            <span class="s1">caps = self.color.get(</span><span class="s2">&quot;caps&quot;</span><span class="s0">, </span><span class="s1">self._caps_c)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s3"># Other types are forwarded to matplotlib</span>
+            <span class="s3"># If None, use default colors</span>
+            <span class="s1">boxes = self.color </span><span class="s0">or </span><span class="s1">self._boxes_c</span>
+            <span class="s1">whiskers = self.color </span><span class="s0">or </span><span class="s1">self._whiskers_c</span>
+            <span class="s1">medians = self.color </span><span class="s0">or </span><span class="s1">self._medians_c</span>
+            <span class="s1">caps = self.color </span><span class="s0">or </span><span class="s1">self._caps_c</span>
+
+        <span class="s3"># GH 30346, when users specifying those arguments explicitly, our defaults</span>
+        <span class="s3"># for these four kwargs should be overridden; if not, use Pandas settings</span>
+        <span class="s0">if not </span><span class="s1">self.kwds.get(</span><span class="s2">&quot;boxprops&quot;</span><span class="s1">):</span>
+            <span class="s1">setp(bp[</span><span class="s2">&quot;boxes&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">color=boxes</span><span class="s0">, </span><span class="s1">alpha=</span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s0">if not </span><span class="s1">self.kwds.get(</span><span class="s2">&quot;whiskerprops&quot;</span><span class="s1">):</span>
+            <span class="s1">setp(bp[</span><span class="s2">&quot;whiskers&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">color=whiskers</span><span class="s0">, </span><span class="s1">alpha=</span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s0">if not </span><span class="s1">self.kwds.get(</span><span class="s2">&quot;medianprops&quot;</span><span class="s1">):</span>
+            <span class="s1">setp(bp[</span><span class="s2">&quot;medians&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">color=medians</span><span class="s0">, </span><span class="s1">alpha=</span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s0">if not </span><span class="s1">self.kwds.get(</span><span class="s2">&quot;capprops&quot;</span><span class="s1">):</span>
+            <span class="s1">setp(bp[</span><span class="s2">&quot;caps&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">color=caps</span><span class="s0">, </span><span class="s1">alpha=</span><span class="s4">1</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">_make_plot(self):</span>
+        <span class="s0">if </span><span class="s1">self.subplots:</span>
+            <span class="s1">self._return_obj = pd.Series(dtype=object)</span>
+
+            <span class="s3"># Re-create iterated data if `by` is assigned by users</span>
+            <span class="s1">data = (</span>
+                <span class="s1">create_iter_data_given_by(self.data</span><span class="s0">, </span><span class="s1">self._kind)</span>
+                <span class="s0">if </span><span class="s1">self.by </span><span class="s0">is not None</span>
+                <span class="s0">else </span><span class="s1">self.data</span>
+            <span class="s1">)</span>
+
+            <span class="s0">for </span><span class="s1">i</span><span class="s0">, </span><span class="s1">(label</span><span class="s0">, </span><span class="s1">y) </span><span class="s0">in </span><span class="s1">enumerate(self._iter_data(data=data)):</span>
+                <span class="s1">ax = self._get_ax(i)</span>
+                <span class="s1">kwds = self.kwds.copy()</span>
+
+                <span class="s3"># When by is applied, show title for subplots to know which group it is</span>
+                <span class="s3"># just like df.boxplot, and need to apply T on y to provide right input</span>
+                <span class="s0">if </span><span class="s1">self.by </span><span class="s0">is not None</span><span class="s1">:</span>
+                    <span class="s1">y = y.T</span>
+                    <span class="s1">ax.set_title(pprint_thing(label))</span>
+
+                    <span class="s3"># When `by` is assigned, the ticklabels will become unique grouped</span>
+                    <span class="s3"># values, instead of label which is used as subtitle in this case.</span>
+                    <span class="s1">ticklabels = [</span>
+                        <span class="s1">pprint_thing(col) </span><span class="s0">for </span><span class="s1">col </span><span class="s0">in </span><span class="s1">self.data.columns.levels[</span><span class="s4">0</span><span class="s1">]</span>
+                    <span class="s1">]</span>
+                <span class="s0">else</span><span class="s1">:</span>
+                    <span class="s1">ticklabels = [pprint_thing(label)]</span>
+
+                <span class="s1">ret</span><span class="s0">, </span><span class="s1">bp = self._plot(</span>
+                    <span class="s1">ax</span><span class="s0">, </span><span class="s1">y</span><span class="s0">, </span><span class="s1">column_num=i</span><span class="s0">, </span><span class="s1">return_type=self.return_type</span><span class="s0">, </span><span class="s1">**kwds</span>
+                <span class="s1">)</span>
+                <span class="s1">self.maybe_color_bp(bp)</span>
+                <span class="s1">self._return_obj[label] = ret</span>
+                <span class="s1">self._set_ticklabels(ax</span><span class="s0">, </span><span class="s1">ticklabels)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">y = self.data.values.T</span>
+            <span class="s1">ax = self._get_ax(</span><span class="s4">0</span><span class="s1">)</span>
+            <span class="s1">kwds = self.kwds.copy()</span>
+
+            <span class="s1">ret</span><span class="s0">, </span><span class="s1">bp = self._plot(</span>
+                <span class="s1">ax</span><span class="s0">, </span><span class="s1">y</span><span class="s0">, </span><span class="s1">column_num=</span><span class="s4">0</span><span class="s0">, </span><span class="s1">return_type=self.return_type</span><span class="s0">, </span><span class="s1">**kwds</span>
+            <span class="s1">)</span>
+            <span class="s1">self.maybe_color_bp(bp)</span>
+            <span class="s1">self._return_obj = ret</span>
+
+            <span class="s1">labels = [left </span><span class="s0">for </span><span class="s1">left</span><span class="s0">, </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">self._iter_data()]</span>
+            <span class="s1">labels = [pprint_thing(left) </span><span class="s0">for </span><span class="s1">left </span><span class="s0">in </span><span class="s1">labels]</span>
+            <span class="s0">if not </span><span class="s1">self.use_index:</span>
+                <span class="s1">labels = [pprint_thing(key) </span><span class="s0">for </span><span class="s1">key </span><span class="s0">in </span><span class="s1">range(len(labels))]</span>
+            <span class="s1">self._set_ticklabels(ax</span><span class="s0">, </span><span class="s1">labels)</span>
+
+    <span class="s0">def </span><span class="s1">_set_ticklabels(self</span><span class="s0">, </span><span class="s1">ax: Axes</span><span class="s0">, </span><span class="s1">labels):</span>
+        <span class="s0">if </span><span class="s1">self.orientation == </span><span class="s2">&quot;vertical&quot;</span><span class="s1">:</span>
+            <span class="s1">ax.set_xticklabels(labels)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">ax.set_yticklabels(labels)</span>
+
+    <span class="s0">def </span><span class="s1">_make_legend(self):</span>
+        <span class="s0">pass</span>
+
+    <span class="s0">def </span><span class="s1">_post_plot_logic(self</span><span class="s0">, </span><span class="s1">ax</span><span class="s0">, </span><span class="s1">data):</span>
+        <span class="s0">pass</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">orientation(self):</span>
+        <span class="s0">if </span><span class="s1">self.kwds.get(</span><span class="s2">&quot;vert&quot;</span><span class="s0">, True</span><span class="s1">):</span>
+            <span class="s0">return </span><span class="s2">&quot;vertical&quot;</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s2">&quot;horizontal&quot;</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">result(self):</span>
+        <span class="s0">if </span><span class="s1">self.return_type </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">super().result</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">self._return_obj</span>
+
+
+<span class="s0">def </span><span class="s1">_grouped_plot_by_column(</span>
+    <span class="s1">plotf</span><span class="s0">,</span>
+    <span class="s1">data</span><span class="s0">,</span>
+    <span class="s1">columns=</span><span class="s0">None,</span>
+    <span class="s1">by=</span><span class="s0">None,</span>
+    <span class="s1">numeric_only=</span><span class="s0">True,</span>
+    <span class="s1">grid=</span><span class="s0">False,</span>
+    <span class="s1">figsize=</span><span class="s0">None,</span>
+    <span class="s1">ax=</span><span class="s0">None,</span>
+    <span class="s1">layout=</span><span class="s0">None,</span>
+    <span class="s1">return_type=</span><span class="s0">None,</span>
+    <span class="s1">**kwargs</span><span class="s0">,</span>
+<span class="s1">):</span>
+    <span class="s1">grouped = data.groupby(by)</span>
+    <span class="s0">if </span><span class="s1">columns </span><span class="s0">is None</span><span class="s1">:</span>
+        <span class="s0">if not </span><span class="s1">isinstance(by</span><span class="s0">, </span><span class="s1">(list</span><span class="s0">, </span><span class="s1">tuple)):</span>
+            <span class="s1">by = [by]</span>
+        <span class="s1">columns = data._get_numeric_data().columns.difference(by)</span>
+    <span class="s1">naxes = len(columns)</span>
+    <span class="s1">fig</span><span class="s0">, </span><span class="s1">axes = create_subplots(</span>
+        <span class="s1">naxes=naxes</span><span class="s0">, </span><span class="s1">sharex=</span><span class="s0">True, </span><span class="s1">sharey=</span><span class="s0">True, </span><span class="s1">figsize=figsize</span><span class="s0">, </span><span class="s1">ax=ax</span><span class="s0">, </span><span class="s1">layout=layout</span>
+    <span class="s1">)</span>
+
+    <span class="s1">_axes = flatten_axes(axes)</span>
+
+    <span class="s1">ax_values = []</span>
+
+    <span class="s0">for </span><span class="s1">i</span><span class="s0">, </span><span class="s1">col </span><span class="s0">in </span><span class="s1">enumerate(columns):</span>
+        <span class="s1">ax = _axes[i]</span>
+        <span class="s1">gp_col = grouped[col]</span>
+        <span class="s1">keys</span><span class="s0">, </span><span class="s1">values = zip(*gp_col)</span>
+        <span class="s1">re_plotf = plotf(keys</span><span class="s0">, </span><span class="s1">values</span><span class="s0">, </span><span class="s1">ax</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+        <span class="s1">ax.set_title(col)</span>
+        <span class="s1">ax.set_xlabel(pprint_thing(by))</span>
+        <span class="s1">ax_values.append(re_plotf)</span>
+        <span class="s1">ax.grid(grid)</span>
+
+    <span class="s1">result = pd.Series(ax_values</span><span class="s0">, </span><span class="s1">index=columns)</span>
+
+    <span class="s3"># Return axes in multiplot case, maybe revisit later # 985</span>
+    <span class="s0">if </span><span class="s1">return_type </span><span class="s0">is None</span><span class="s1">:</span>
+        <span class="s1">result = axes</span>
+
+    <span class="s1">byline = by[</span><span class="s4">0</span><span class="s1">] </span><span class="s0">if </span><span class="s1">len(by) == </span><span class="s4">1 </span><span class="s0">else </span><span class="s1">by</span>
+    <span class="s1">fig.suptitle(</span><span class="s2">f&quot;Boxplot grouped by </span><span class="s0">{</span><span class="s1">byline</span><span class="s0">}</span><span class="s2">&quot;</span><span class="s1">)</span>
+    <span class="s1">maybe_adjust_figure(fig</span><span class="s0">, </span><span class="s1">bottom=</span><span class="s4">0.15</span><span class="s0">, </span><span class="s1">top=</span><span class="s4">0.9</span><span class="s0">, </span><span class="s1">left=</span><span class="s4">0.1</span><span class="s0">, </span><span class="s1">right=</span><span class="s4">0.9</span><span class="s0">, </span><span class="s1">wspace=</span><span class="s4">0.2</span><span class="s1">)</span>
+
+    <span class="s0">return </span><span class="s1">result</span>
+
+
+<span class="s0">def </span><span class="s1">boxplot(</span>
+    <span class="s1">data</span><span class="s0">,</span>
+    <span class="s1">column=</span><span class="s0">None,</span>
+    <span class="s1">by=</span><span class="s0">None,</span>
+    <span class="s1">ax=</span><span class="s0">None,</span>
+    <span class="s1">fontsize=</span><span class="s0">None,</span>
+    <span class="s1">rot=</span><span class="s4">0</span><span class="s0">,</span>
+    <span class="s1">grid=</span><span class="s0">True,</span>
+    <span class="s1">figsize=</span><span class="s0">None,</span>
+    <span class="s1">layout=</span><span class="s0">None,</span>
+    <span class="s1">return_type=</span><span class="s0">None,</span>
+    <span class="s1">**kwds</span><span class="s0">,</span>
+<span class="s1">):</span>
+
+    <span class="s0">import </span><span class="s1">matplotlib.pyplot </span><span class="s0">as </span><span class="s1">plt</span>
+
+    <span class="s3"># validate return_type:</span>
+    <span class="s0">if </span><span class="s1">return_type </span><span class="s0">not in </span><span class="s1">BoxPlot._valid_return_types:</span>
+        <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s2">&quot;return_type must be {'axes', 'dict', 'both'}&quot;</span><span class="s1">)</span>
+
+    <span class="s0">if </span><span class="s1">isinstance(data</span><span class="s0">, </span><span class="s1">pd.Series):</span>
+        <span class="s1">data = data.to_frame(</span><span class="s2">&quot;x&quot;</span><span class="s1">)</span>
+        <span class="s1">column = </span><span class="s2">&quot;x&quot;</span>
+
+    <span class="s0">def </span><span class="s1">_get_colors():</span>
+        <span class="s3">#  num_colors=3 is required as method maybe_color_bp takes the colors</span>
+        <span class="s3">#  in positions 0 and 2.</span>
+        <span class="s3">#  if colors not provided, use same defaults as DataFrame.plot.box</span>
+        <span class="s1">result = get_standard_colors(num_colors=</span><span class="s4">3</span><span class="s1">)</span>
+        <span class="s1">result = np.take(result</span><span class="s0">, </span><span class="s1">[</span><span class="s4">0</span><span class="s0">, </span><span class="s4">0</span><span class="s0">, </span><span class="s4">2</span><span class="s1">])</span>
+        <span class="s1">result = np.append(result</span><span class="s0">, </span><span class="s2">&quot;k&quot;</span><span class="s1">)</span>
+
+        <span class="s1">colors = kwds.pop(</span><span class="s2">&quot;color&quot;</span><span class="s0">, None</span><span class="s1">)</span>
+        <span class="s0">if </span><span class="s1">colors:</span>
+            <span class="s0">if </span><span class="s1">is_dict_like(colors):</span>
+                <span class="s3"># replace colors in result array with user-specified colors</span>
+                <span class="s3"># taken from the colors dict parameter</span>
+                <span class="s3"># &quot;boxes&quot; value placed in position 0, &quot;whiskers&quot; in 1, etc.</span>
+                <span class="s1">valid_keys = [</span><span class="s2">&quot;boxes&quot;</span><span class="s0">, </span><span class="s2">&quot;whiskers&quot;</span><span class="s0">, </span><span class="s2">&quot;medians&quot;</span><span class="s0">, </span><span class="s2">&quot;caps&quot;</span><span class="s1">]</span>
+                <span class="s1">key_to_index = dict(zip(valid_keys</span><span class="s0">, </span><span class="s1">range(</span><span class="s4">4</span><span class="s1">)))</span>
+                <span class="s0">for </span><span class="s1">key</span><span class="s0">, </span><span class="s1">value </span><span class="s0">in </span><span class="s1">colors.items():</span>
+                    <span class="s0">if </span><span class="s1">key </span><span class="s0">in </span><span class="s1">valid_keys:</span>
+                        <span class="s1">result[key_to_index[key]] = value</span>
+                    <span class="s0">else</span><span class="s1">:</span>
+                        <span class="s0">raise </span><span class="s1">ValueError(</span>
+                            <span class="s2">f&quot;color dict contains invalid key '</span><span class="s0">{</span><span class="s1">key</span><span class="s0">}</span><span class="s2">'. &quot;</span>
+                            <span class="s2">f&quot;The key must be either </span><span class="s0">{</span><span class="s1">valid_keys</span><span class="s0">}</span><span class="s2">&quot;</span>
+                        <span class="s1">)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">result.fill(colors)</span>
+
+        <span class="s0">return </span><span class="s1">result</span>
+
+    <span class="s0">def </span><span class="s1">maybe_color_bp(bp</span><span class="s0">, </span><span class="s1">**kwds):</span>
+        <span class="s3"># GH 30346, when users specifying those arguments explicitly, our defaults</span>
+        <span class="s3"># for these four kwargs should be overridden; if not, use Pandas settings</span>
+        <span class="s0">if not </span><span class="s1">kwds.get(</span><span class="s2">&quot;boxprops&quot;</span><span class="s1">):</span>
+            <span class="s1">setp(bp[</span><span class="s2">&quot;boxes&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">color=colors[</span><span class="s4">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">alpha=</span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s0">if not </span><span class="s1">kwds.get(</span><span class="s2">&quot;whiskerprops&quot;</span><span class="s1">):</span>
+            <span class="s1">setp(bp[</span><span class="s2">&quot;whiskers&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">color=colors[</span><span class="s4">1</span><span class="s1">]</span><span class="s0">, </span><span class="s1">alpha=</span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s0">if not </span><span class="s1">kwds.get(</span><span class="s2">&quot;medianprops&quot;</span><span class="s1">):</span>
+            <span class="s1">setp(bp[</span><span class="s2">&quot;medians&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">color=colors[</span><span class="s4">2</span><span class="s1">]</span><span class="s0">, </span><span class="s1">alpha=</span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s0">if not </span><span class="s1">kwds.get(</span><span class="s2">&quot;capprops&quot;</span><span class="s1">):</span>
+            <span class="s1">setp(bp[</span><span class="s2">&quot;caps&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">color=colors[</span><span class="s4">3</span><span class="s1">]</span><span class="s0">, </span><span class="s1">alpha=</span><span class="s4">1</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">plot_group(keys</span><span class="s0">, </span><span class="s1">values</span><span class="s0">, </span><span class="s1">ax: Axes):</span>
+        <span class="s1">keys = [pprint_thing(x) </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">keys]</span>
+        <span class="s1">values = [np.asarray(remove_na_arraylike(v)</span><span class="s0">, </span><span class="s1">dtype=object) </span><span class="s0">for </span><span class="s1">v </span><span class="s0">in </span><span class="s1">values]</span>
+        <span class="s1">bp = ax.boxplot(values</span><span class="s0">, </span><span class="s1">**kwds)</span>
+        <span class="s0">if </span><span class="s1">fontsize </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">ax.tick_params(axis=</span><span class="s2">&quot;both&quot;</span><span class="s0">, </span><span class="s1">labelsize=fontsize)</span>
+        <span class="s0">if </span><span class="s1">kwds.get(</span><span class="s2">&quot;vert&quot;</span><span class="s0">, </span><span class="s4">1</span><span class="s1">):</span>
+            <span class="s1">ticks = ax.get_xticks()</span>
+            <span class="s0">if </span><span class="s1">len(ticks) != len(keys):</span>
+                <span class="s1">i</span><span class="s0">, </span><span class="s1">remainder = divmod(len(ticks)</span><span class="s0">, </span><span class="s1">len(keys))</span>
+                <span class="s0">assert </span><span class="s1">remainder == </span><span class="s4">0</span><span class="s0">, </span><span class="s1">remainder</span>
+                <span class="s1">keys *= i</span>
+            <span class="s1">ax.set_xticklabels(keys</span><span class="s0">, </span><span class="s1">rotation=rot)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">ax.set_yticklabels(keys</span><span class="s0">, </span><span class="s1">rotation=rot)</span>
+        <span class="s1">maybe_color_bp(bp</span><span class="s0">, </span><span class="s1">**kwds)</span>
+
+        <span class="s3"># Return axes in multiplot case, maybe revisit later # 985</span>
+        <span class="s0">if </span><span class="s1">return_type == </span><span class="s2">&quot;dict&quot;</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">bp</span>
+        <span class="s0">elif </span><span class="s1">return_type == </span><span class="s2">&quot;both&quot;</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">BoxPlot.BP(ax=ax</span><span class="s0">, </span><span class="s1">lines=bp)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">ax</span>
+
+    <span class="s1">colors = _get_colors()</span>
+    <span class="s0">if </span><span class="s1">column </span><span class="s0">is None</span><span class="s1">:</span>
+        <span class="s1">columns = </span><span class="s0">None</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s0">if </span><span class="s1">isinstance(column</span><span class="s0">, </span><span class="s1">(list</span><span class="s0">, </span><span class="s1">tuple)):</span>
+            <span class="s1">columns = column</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">columns = [column]</span>
+
+    <span class="s0">if </span><span class="s1">by </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s3"># Prefer array return type for 2-D plots to match the subplot layout</span>
+        <span class="s3"># https://github.com/pandas-dev/pandas/pull/12216#issuecomment-241175580</span>
+        <span class="s1">result = _grouped_plot_by_column(</span>
+            <span class="s1">plot_group</span><span class="s0">,</span>
+            <span class="s1">data</span><span class="s0">,</span>
+            <span class="s1">columns=columns</span><span class="s0">,</span>
+            <span class="s1">by=by</span><span class="s0">,</span>
+            <span class="s1">grid=grid</span><span class="s0">,</span>
+            <span class="s1">figsize=figsize</span><span class="s0">,</span>
+            <span class="s1">ax=ax</span><span class="s0">,</span>
+            <span class="s1">layout=layout</span><span class="s0">,</span>
+            <span class="s1">return_type=return_type</span><span class="s0">,</span>
+        <span class="s1">)</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s0">if </span><span class="s1">return_type </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">return_type = </span><span class="s2">&quot;axes&quot;</span>
+        <span class="s0">if </span><span class="s1">layout </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s2">&quot;The 'layout' keyword is not supported when 'by' is None&quot;</span><span class="s1">)</span>
+
+        <span class="s0">if </span><span class="s1">ax </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">rc = {</span><span class="s2">&quot;figure.figsize&quot;</span><span class="s1">: figsize} </span><span class="s0">if </span><span class="s1">figsize </span><span class="s0">is not None else </span><span class="s1">{}</span>
+            <span class="s0">with </span><span class="s1">plt.rc_context(rc):</span>
+                <span class="s1">ax = plt.gca()</span>
+        <span class="s1">data = data._get_numeric_data()</span>
+        <span class="s1">naxes = len(data.columns)</span>
+        <span class="s0">if </span><span class="s1">naxes == </span><span class="s4">0</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span>
+                <span class="s2">&quot;boxplot method requires numerical columns, nothing to plot.&quot;</span>
+            <span class="s1">)</span>
+        <span class="s0">if </span><span class="s1">columns </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">columns = data.columns</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">data = data[columns]</span>
+
+        <span class="s1">result = plot_group(columns</span><span class="s0">, </span><span class="s1">data.values.T</span><span class="s0">, </span><span class="s1">ax)</span>
+        <span class="s1">ax.grid(grid)</span>
+
+    <span class="s0">return </span><span class="s1">result</span>
+
+
+<span class="s0">def </span><span class="s1">boxplot_frame(</span>
+    <span class="s1">self</span><span class="s0">,</span>
+    <span class="s1">column=</span><span class="s0">None,</span>
+    <span class="s1">by=</span><span class="s0">None,</span>
+    <span class="s1">ax=</span><span class="s0">None,</span>
+    <span class="s1">fontsize=</span><span class="s0">None,</span>
+    <span class="s1">rot=</span><span class="s4">0</span><span class="s0">,</span>
+    <span class="s1">grid=</span><span class="s0">True,</span>
+    <span class="s1">figsize=</span><span class="s0">None,</span>
+    <span class="s1">layout=</span><span class="s0">None,</span>
+    <span class="s1">return_type=</span><span class="s0">None,</span>
+    <span class="s1">**kwds</span><span class="s0">,</span>
+<span class="s1">):</span>
+    <span class="s0">import </span><span class="s1">matplotlib.pyplot </span><span class="s0">as </span><span class="s1">plt</span>
+
+    <span class="s1">ax = boxplot(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">column=column</span><span class="s0">,</span>
+        <span class="s1">by=by</span><span class="s0">,</span>
+        <span class="s1">ax=ax</span><span class="s0">,</span>
+        <span class="s1">fontsize=fontsize</span><span class="s0">,</span>
+        <span class="s1">grid=grid</span><span class="s0">,</span>
+        <span class="s1">rot=rot</span><span class="s0">,</span>
+        <span class="s1">figsize=figsize</span><span class="s0">,</span>
+        <span class="s1">layout=layout</span><span class="s0">,</span>
+        <span class="s1">return_type=return_type</span><span class="s0">,</span>
+        <span class="s1">**kwds</span><span class="s0">,</span>
+    <span class="s1">)</span>
+    <span class="s1">plt.draw_if_interactive()</span>
+    <span class="s0">return </span><span class="s1">ax</span>
+
+
+<span class="s0">def </span><span class="s1">boxplot_frame_groupby(</span>
+    <span class="s1">grouped</span><span class="s0">,</span>
+    <span class="s1">subplots=</span><span class="s0">True,</span>
+    <span class="s1">column=</span><span class="s0">None,</span>
+    <span class="s1">fontsize=</span><span class="s0">None,</span>
+    <span class="s1">rot=</span><span class="s4">0</span><span class="s0">,</span>
+    <span class="s1">grid=</span><span class="s0">True,</span>
+    <span class="s1">ax=</span><span class="s0">None,</span>
+    <span class="s1">figsize=</span><span class="s0">None,</span>
+    <span class="s1">layout=</span><span class="s0">None,</span>
+    <span class="s1">sharex=</span><span class="s0">False,</span>
+    <span class="s1">sharey=</span><span class="s0">True,</span>
+    <span class="s1">**kwds</span><span class="s0">,</span>
+<span class="s1">):</span>
+    <span class="s0">if </span><span class="s1">subplots </span><span class="s0">is True</span><span class="s1">:</span>
+        <span class="s1">naxes = len(grouped)</span>
+        <span class="s1">fig</span><span class="s0">, </span><span class="s1">axes = create_subplots(</span>
+            <span class="s1">naxes=naxes</span><span class="s0">,</span>
+            <span class="s1">squeeze=</span><span class="s0">False,</span>
+            <span class="s1">ax=ax</span><span class="s0">,</span>
+            <span class="s1">sharex=sharex</span><span class="s0">,</span>
+            <span class="s1">sharey=sharey</span><span class="s0">,</span>
+            <span class="s1">figsize=figsize</span><span class="s0">,</span>
+            <span class="s1">layout=layout</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s1">axes = flatten_axes(axes)</span>
+
+        <span class="s1">ret = pd.Series(dtype=object)</span>
+
+        <span class="s0">for </span><span class="s1">(key</span><span class="s0">, </span><span class="s1">group)</span><span class="s0">, </span><span class="s1">ax </span><span class="s0">in </span><span class="s1">zip(grouped</span><span class="s0">, </span><span class="s1">axes):</span>
+            <span class="s1">d = group.boxplot(</span>
+                <span class="s1">ax=ax</span><span class="s0">, </span><span class="s1">column=column</span><span class="s0">, </span><span class="s1">fontsize=fontsize</span><span class="s0">, </span><span class="s1">rot=rot</span><span class="s0">, </span><span class="s1">grid=grid</span><span class="s0">, </span><span class="s1">**kwds</span>
+            <span class="s1">)</span>
+            <span class="s1">ax.set_title(pprint_thing(key))</span>
+            <span class="s1">ret.loc[key] = d</span>
+        <span class="s1">maybe_adjust_figure(fig</span><span class="s0">, </span><span class="s1">bottom=</span><span class="s4">0.15</span><span class="s0">, </span><span class="s1">top=</span><span class="s4">0.9</span><span class="s0">, </span><span class="s1">left=</span><span class="s4">0.1</span><span class="s0">, </span><span class="s1">right=</span><span class="s4">0.9</span><span class="s0">, </span><span class="s1">wspace=</span><span class="s4">0.2</span><span class="s1">)</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">keys</span><span class="s0">, </span><span class="s1">frames = zip(*grouped)</span>
+        <span class="s0">if </span><span class="s1">grouped.axis == </span><span class="s4">0</span><span class="s1">:</span>
+            <span class="s1">df = pd.concat(frames</span><span class="s0">, </span><span class="s1">keys=keys</span><span class="s0">, </span><span class="s1">axis=</span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">if </span><span class="s1">len(frames) &gt; </span><span class="s4">1</span><span class="s1">:</span>
+                <span class="s1">df = frames[</span><span class="s4">0</span><span class="s1">].join(frames[</span><span class="s4">1</span><span class="s1">::])</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">df = frames[</span><span class="s4">0</span><span class="s1">]</span>
+
+        <span class="s3"># GH 16748, DataFrameGroupby fails when subplots=False and `column` argument</span>
+        <span class="s3"># is assigned, and in this case, since `df` here becomes MI after groupby,</span>
+        <span class="s3"># so we need to couple the keys (grouped values) and column (original df</span>
+        <span class="s3"># column) together to search for subset to plot</span>
+        <span class="s0">if </span><span class="s1">column </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">column = com.convert_to_list_like(column)</span>
+            <span class="s1">multi_key = pd.MultiIndex.from_product([keys</span><span class="s0">, </span><span class="s1">column])</span>
+            <span class="s1">column = list(multi_key.values)</span>
+        <span class="s1">ret = df.boxplot(</span>
+            <span class="s1">column=column</span><span class="s0">,</span>
+            <span class="s1">fontsize=fontsize</span><span class="s0">,</span>
+            <span class="s1">rot=rot</span><span class="s0">,</span>
+            <span class="s1">grid=grid</span><span class="s0">,</span>
+            <span class="s1">ax=ax</span><span class="s0">,</span>
+            <span class="s1">figsize=figsize</span><span class="s0">,</span>
+            <span class="s1">layout=layout</span><span class="s0">,</span>
+            <span class="s1">**kwds</span><span class="s0">,</span>
+        <span class="s1">)</span>
+    <span class="s0">return </span><span class="s1">ret</span>
+</pre>
+</body>
+</html>

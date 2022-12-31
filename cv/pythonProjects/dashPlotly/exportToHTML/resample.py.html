@@ -1,0 +1,2152 @@
+<html>
+<head>
+<title>resample.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #808080;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+resample.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">copy</span>
+<span class="s0">from </span><span class="s1">datetime </span><span class="s0">import </span><span class="s1">timedelta</span>
+<span class="s0">from </span><span class="s1">textwrap </span><span class="s0">import </span><span class="s1">dedent</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">TYPE_CHECKING</span><span class="s0">,</span>
+    <span class="s1">Callable</span><span class="s0">,</span>
+    <span class="s1">Hashable</span><span class="s0">,</span>
+    <span class="s1">Literal</span><span class="s0">,</span>
+    <span class="s1">final</span><span class="s0">,</span>
+    <span class="s1">no_type_check</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">import </span><span class="s1">warnings</span>
+
+<span class="s0">import </span><span class="s1">numpy </span><span class="s0">as </span><span class="s1">np</span>
+
+<span class="s0">from </span><span class="s1">pandas._libs </span><span class="s0">import </span><span class="s1">lib</span>
+<span class="s0">from </span><span class="s1">pandas._libs.tslibs </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">BaseOffset</span><span class="s0">,</span>
+    <span class="s1">IncompatibleFrequency</span><span class="s0">,</span>
+    <span class="s1">NaT</span><span class="s0">,</span>
+    <span class="s1">Period</span><span class="s0">,</span>
+    <span class="s1">Timedelta</span><span class="s0">,</span>
+    <span class="s1">Timestamp</span><span class="s0">,</span>
+    <span class="s1">to_offset</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas._typing </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">IndexLabel</span><span class="s0">,</span>
+    <span class="s1">NDFrameT</span><span class="s0">,</span>
+    <span class="s1">T</span><span class="s0">,</span>
+    <span class="s1">TimedeltaConvertibleTypes</span><span class="s0">,</span>
+    <span class="s1">TimestampConvertibleTypes</span><span class="s0">,</span>
+    <span class="s1">npt</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.compat.numpy </span><span class="s0">import </span><span class="s1">function </span><span class="s0">as </span><span class="s1">nv</span>
+<span class="s0">from </span><span class="s1">pandas.errors </span><span class="s0">import </span><span class="s1">AbstractMethodError</span>
+<span class="s0">from </span><span class="s1">pandas.util._decorators </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">Appender</span><span class="s0">,</span>
+    <span class="s1">Substitution</span><span class="s0">,</span>
+    <span class="s1">deprecate_nonkeyword_arguments</span><span class="s0">,</span>
+    <span class="s1">doc</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.util._exceptions </span><span class="s0">import </span><span class="s1">find_stack_level</span>
+
+<span class="s0">from </span><span class="s1">pandas.core.dtypes.generic </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">ABCDataFrame</span><span class="s0">,</span>
+    <span class="s1">ABCSeries</span><span class="s0">,</span>
+<span class="s1">)</span>
+
+<span class="s0">import </span><span class="s1">pandas.core.algorithms </span><span class="s0">as </span><span class="s1">algos</span>
+<span class="s0">from </span><span class="s1">pandas.core.apply </span><span class="s0">import </span><span class="s1">ResamplerWindowApply</span>
+<span class="s0">from </span><span class="s1">pandas.core.base </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">DataError</span><span class="s0">,</span>
+    <span class="s1">PandasObject</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">import </span><span class="s1">pandas.core.common </span><span class="s0">as </span><span class="s1">com</span>
+<span class="s0">from </span><span class="s1">pandas.core.generic </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">NDFrame</span><span class="s0">,</span>
+    <span class="s1">_shared_docs</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.core.groupby.generic </span><span class="s0">import </span><span class="s1">SeriesGroupBy</span>
+<span class="s0">from </span><span class="s1">pandas.core.groupby.groupby </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">BaseGroupBy</span><span class="s0">,</span>
+    <span class="s1">GroupBy</span><span class="s0">,</span>
+    <span class="s1">_pipe_template</span><span class="s0">,</span>
+    <span class="s1">get_groupby</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.core.groupby.grouper </span><span class="s0">import </span><span class="s1">Grouper</span>
+<span class="s0">from </span><span class="s1">pandas.core.groupby.ops </span><span class="s0">import </span><span class="s1">BinGrouper</span>
+<span class="s0">from </span><span class="s1">pandas.core.indexes.api </span><span class="s0">import </span><span class="s1">Index</span>
+<span class="s0">from </span><span class="s1">pandas.core.indexes.datetimes </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">DatetimeIndex</span><span class="s0">,</span>
+    <span class="s1">date_range</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.core.indexes.period </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">PeriodIndex</span><span class="s0">,</span>
+    <span class="s1">period_range</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.core.indexes.timedeltas </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">TimedeltaIndex</span><span class="s0">,</span>
+    <span class="s1">timedelta_range</span><span class="s0">,</span>
+<span class="s1">)</span>
+
+<span class="s0">from </span><span class="s1">pandas.tseries.frequencies </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">is_subperiod</span><span class="s0">,</span>
+    <span class="s1">is_superperiod</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.tseries.offsets </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">DateOffset</span><span class="s0">,</span>
+    <span class="s1">Day</span><span class="s0">,</span>
+    <span class="s1">Nano</span><span class="s0">,</span>
+    <span class="s1">Tick</span><span class="s0">,</span>
+<span class="s1">)</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING:</span>
+    <span class="s0">from </span><span class="s1">pandas </span><span class="s0">import </span><span class="s1">(</span>
+        <span class="s1">DataFrame</span><span class="s0">,</span>
+        <span class="s1">Series</span><span class="s0">,</span>
+    <span class="s1">)</span>
+
+<span class="s1">_shared_docs_kwargs: dict[str</span><span class="s0">, </span><span class="s1">str] = {}</span>
+
+
+<span class="s0">class </span><span class="s1">Resampler(BaseGroupBy</span><span class="s0">, </span><span class="s1">PandasObject):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Class for resampling datetimelike data, a groupby-like operation. 
+    See aggregate, transform, and apply functions on this object. 
+ 
+    It's easiest to use obj.resample(...) to use Resampler. 
+ 
+    Parameters 
+    ---------- 
+    obj : Series or DataFrame 
+    groupby : TimeGrouper 
+    axis : int, default 0 
+    kind : str or None 
+        'period', 'timestamp' to override default index treatment 
+ 
+    Returns 
+    ------- 
+    a Resampler of the appropriate type 
+ 
+    Notes 
+    ----- 
+    After resampling, see aggregate, apply, and transform functions. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">grouper: BinGrouper</span>
+    <span class="s1">exclusions: frozenset[Hashable] = frozenset()  </span><span class="s3"># for SelectionMixin compat</span>
+
+    <span class="s3"># to the groupby descriptor</span>
+    <span class="s1">_attributes = [</span>
+        <span class="s4">&quot;freq&quot;</span><span class="s0">,</span>
+        <span class="s4">&quot;axis&quot;</span><span class="s0">,</span>
+        <span class="s4">&quot;closed&quot;</span><span class="s0">,</span>
+        <span class="s4">&quot;label&quot;</span><span class="s0">,</span>
+        <span class="s4">&quot;convention&quot;</span><span class="s0">,</span>
+        <span class="s4">&quot;loffset&quot;</span><span class="s0">,</span>
+        <span class="s4">&quot;kind&quot;</span><span class="s0">,</span>
+        <span class="s4">&quot;origin&quot;</span><span class="s0">,</span>
+        <span class="s4">&quot;offset&quot;</span><span class="s0">,</span>
+    <span class="s1">]</span>
+
+    <span class="s0">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">obj: DataFrame | Series</span><span class="s0">,</span>
+        <span class="s1">groupby: TimeGrouper</span><span class="s0">,</span>
+        <span class="s1">axis: int = </span><span class="s5">0</span><span class="s0">,</span>
+        <span class="s1">kind=</span><span class="s0">None,</span>
+        <span class="s1">*</span><span class="s0">,</span>
+        <span class="s1">selection=</span><span class="s0">None,</span>
+        <span class="s1">**kwargs</span><span class="s0">,</span>
+    <span class="s1">):</span>
+        <span class="s1">self.groupby = groupby</span>
+        <span class="s1">self.keys = </span><span class="s0">None</span>
+        <span class="s1">self.sort = </span><span class="s0">True</span>
+        <span class="s1">self.axis = axis</span>
+        <span class="s1">self.kind = kind</span>
+        <span class="s1">self.squeeze = </span><span class="s0">False</span>
+        <span class="s1">self.group_keys = </span><span class="s0">True</span>
+        <span class="s1">self.as_index = </span><span class="s0">True</span>
+
+        <span class="s1">self.groupby._set_grouper(self._convert_obj(obj)</span><span class="s0">, </span><span class="s1">sort=</span><span class="s0">True</span><span class="s1">)</span>
+        <span class="s1">self.binner</span><span class="s0">, </span><span class="s1">self.grouper = self._get_binner()</span>
+        <span class="s1">self._selection = selection</span>
+
+    <span class="s1">@final</span>
+    <span class="s0">def </span><span class="s1">_shallow_copy(self</span><span class="s0">, </span><span class="s1">obj</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        return a new object with the replacement attributes 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">isinstance(obj</span><span class="s0">, </span><span class="s1">self._constructor):</span>
+            <span class="s1">obj = obj.obj</span>
+        <span class="s0">for </span><span class="s1">attr </span><span class="s0">in </span><span class="s1">self._attributes:</span>
+            <span class="s0">if </span><span class="s1">attr </span><span class="s0">not in </span><span class="s1">kwargs:</span>
+                <span class="s1">kwargs[attr] = getattr(self</span><span class="s0">, </span><span class="s1">attr)</span>
+        <span class="s0">return </span><span class="s1">self._constructor(obj</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s0">def </span><span class="s1">__str__(self) -&gt; str:</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Provide a nice str repr of our rolling object. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">attrs = (</span>
+            <span class="s4">f&quot;</span><span class="s0">{</span><span class="s1">k</span><span class="s0">}</span><span class="s4">=</span><span class="s0">{</span><span class="s1">getattr(self.groupby</span><span class="s0">, </span><span class="s1">k)</span><span class="s0">}</span><span class="s4">&quot;</span>
+            <span class="s0">for </span><span class="s1">k </span><span class="s0">in </span><span class="s1">self._attributes</span>
+            <span class="s0">if </span><span class="s1">getattr(self.groupby</span><span class="s0">, </span><span class="s1">k</span><span class="s0">, None</span><span class="s1">) </span><span class="s0">is not None</span>
+        <span class="s1">)</span>
+        <span class="s0">return </span><span class="s4">f&quot;</span><span class="s0">{</span><span class="s1">type(self).__name__</span><span class="s0">} </span><span class="s4">[</span><span class="s0">{</span><span class="s4">', '</span><span class="s1">.join(attrs)</span><span class="s0">}</span><span class="s4">]&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__getattr__(self</span><span class="s0">, </span><span class="s1">attr: str):</span>
+        <span class="s0">if </span><span class="s1">attr </span><span class="s0">in </span><span class="s1">self._internal_names_set:</span>
+            <span class="s0">return </span><span class="s1">object.__getattribute__(self</span><span class="s0">, </span><span class="s1">attr)</span>
+        <span class="s0">if </span><span class="s1">attr </span><span class="s0">in </span><span class="s1">self._attributes:</span>
+            <span class="s0">return </span><span class="s1">getattr(self.groupby</span><span class="s0">, </span><span class="s1">attr)</span>
+        <span class="s0">if </span><span class="s1">attr </span><span class="s0">in </span><span class="s1">self.obj:</span>
+            <span class="s0">return </span><span class="s1">self[attr]</span>
+
+        <span class="s0">return </span><span class="s1">object.__getattribute__(self</span><span class="s0">, </span><span class="s1">attr)</span>
+
+    <span class="s3"># error: Signature of &quot;obj&quot; incompatible with supertype &quot;BaseGroupBy&quot;</span>
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">obj(self) -&gt; NDFrameT:  </span><span class="s3"># type: ignore[override]</span>
+        <span class="s3"># error: Incompatible return value type (got &quot;Optional[Any]&quot;,</span>
+        <span class="s3"># expected &quot;NDFrameT&quot;)</span>
+        <span class="s0">return </span><span class="s1">self.groupby.obj  </span><span class="s3"># type: ignore[return-value]</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">ax(self):</span>
+        <span class="s3"># we can infer that this is a PeriodIndex/DatetimeIndex/TimedeltaIndex,</span>
+        <span class="s3">#  but skipping annotating bc the overrides overwhelming</span>
+        <span class="s0">return </span><span class="s1">self.groupby.ax</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">_from_selection(self) -&gt; bool:</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Is the resampling from a DataFrame column or MultiIndex level. 
+        &quot;&quot;&quot;</span>
+        <span class="s3"># upsampling and PeriodIndex resampling do not work</span>
+        <span class="s3"># with selection, this state used to catch and raise an error</span>
+        <span class="s0">return </span><span class="s1">self.groupby </span><span class="s0">is not None and </span><span class="s1">(</span>
+            <span class="s1">self.groupby.key </span><span class="s0">is not None or </span><span class="s1">self.groupby.level </span><span class="s0">is not None</span>
+        <span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">_convert_obj(self</span><span class="s0">, </span><span class="s1">obj: NDFrameT) -&gt; NDFrameT:</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Provide any conversions for the object in order to correctly handle. 
+ 
+        Parameters 
+        ---------- 
+        obj : Series or DataFrame 
+ 
+        Returns 
+        ------- 
+        Series or DataFrame 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">obj._consolidate()</span>
+
+    <span class="s0">def </span><span class="s1">_get_binner_for_time(self):</span>
+        <span class="s0">raise </span><span class="s1">AbstractMethodError(self)</span>
+
+    <span class="s1">@final</span>
+    <span class="s0">def </span><span class="s1">_get_binner(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Create the BinGrouper, assume that self.set_grouper(obj) 
+        has already been called. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">binner</span><span class="s0">, </span><span class="s1">bins</span><span class="s0">, </span><span class="s1">binlabels = self._get_binner_for_time()</span>
+        <span class="s0">assert </span><span class="s1">len(bins) == len(binlabels)</span>
+        <span class="s1">bin_grouper = BinGrouper(bins</span><span class="s0">, </span><span class="s1">binlabels</span><span class="s0">, </span><span class="s1">indexer=self.groupby.indexer)</span>
+        <span class="s0">return </span><span class="s1">binner</span><span class="s0">, </span><span class="s1">bin_grouper</span>
+
+    <span class="s1">@Substitution(</span>
+        <span class="s1">klass=</span><span class="s4">&quot;Resampler&quot;</span><span class="s0">,</span>
+        <span class="s1">examples=</span><span class="s4">&quot;&quot;&quot; 
+    &gt;&gt;&gt; df = pd.DataFrame({'A': [1, 2, 3, 4]}, 
+    ...                   index=pd.date_range('2012-08-02', periods=4)) 
+    &gt;&gt;&gt; df 
+                A 
+    2012-08-02  1 
+    2012-08-03  2 
+    2012-08-04  3 
+    2012-08-05  4 
+ 
+    To get the difference between each 2-day period's maximum and minimum 
+    value in one pass, you can do 
+ 
+    &gt;&gt;&gt; df.resample('2D').pipe(lambda x: x.max() - x.min()) 
+                A 
+    2012-08-02  1 
+    2012-08-04  1&quot;&quot;&quot;</span><span class="s0">,</span>
+    <span class="s1">)</span>
+    <span class="s1">@Appender(_pipe_template)</span>
+    <span class="s0">def </span><span class="s1">pipe(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">func: Callable[...</span><span class="s0">, </span><span class="s1">T] | tuple[Callable[...</span><span class="s0">, </span><span class="s1">T]</span><span class="s0">, </span><span class="s1">str]</span><span class="s0">,</span>
+        <span class="s1">*args</span><span class="s0">,</span>
+        <span class="s1">**kwargs</span><span class="s0">,</span>
+    <span class="s1">) -&gt; T:</span>
+        <span class="s0">return </span><span class="s1">super().pipe(func</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s1">_agg_see_also_doc = dedent(</span>
+        <span class="s4">&quot;&quot;&quot; 
+    See Also 
+    -------- 
+    DataFrame.groupby.aggregate : Aggregate using callable, string, dict, 
+        or list of string/callables. 
+    DataFrame.resample.transform : Transforms the Series on each group 
+        based on the given function. 
+    DataFrame.aggregate: Aggregate using one or more 
+        operations over the specified axis. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">)</span>
+
+    <span class="s1">_agg_examples_doc = dedent(</span>
+        <span class="s4">&quot;&quot;&quot; 
+    Examples 
+    -------- 
+    &gt;&gt;&gt; s = pd.Series([1, 2, 3, 4, 5], 
+    ...               index=pd.date_range('20130101', periods=5, freq='s')) 
+    &gt;&gt;&gt; s 
+    2013-01-01 00:00:00    1 
+    2013-01-01 00:00:01    2 
+    2013-01-01 00:00:02    3 
+    2013-01-01 00:00:03    4 
+    2013-01-01 00:00:04    5 
+    Freq: S, dtype: int64 
+ 
+    &gt;&gt;&gt; r = s.resample('2s') 
+ 
+    &gt;&gt;&gt; r.agg(np.sum) 
+    2013-01-01 00:00:00    3 
+    2013-01-01 00:00:02    7 
+    2013-01-01 00:00:04    5 
+    Freq: 2S, dtype: int64 
+ 
+    &gt;&gt;&gt; r.agg(['sum', 'mean', 'max']) 
+                         sum  mean  max 
+    2013-01-01 00:00:00    3   1.5    2 
+    2013-01-01 00:00:02    7   3.5    4 
+    2013-01-01 00:00:04    5   5.0    5 
+ 
+    &gt;&gt;&gt; r.agg({'result': lambda x: x.mean() / x.std(), 
+    ...        'total': np.sum}) 
+                           result  total 
+    2013-01-01 00:00:00  2.121320      3 
+    2013-01-01 00:00:02  4.949747      7 
+    2013-01-01 00:00:04       NaN      5 
+ 
+    &gt;&gt;&gt; r.agg(average=&quot;mean&quot;, total=&quot;sum&quot;) 
+                             average  total 
+    2013-01-01 00:00:00      1.5      3 
+    2013-01-01 00:00:02      3.5      7 
+    2013-01-01 00:00:04      5.0      5 
+    &quot;&quot;&quot;</span>
+    <span class="s1">)</span>
+
+    <span class="s1">@doc(</span>
+        <span class="s1">_shared_docs[</span><span class="s4">&quot;aggregate&quot;</span><span class="s1">]</span><span class="s0">,</span>
+        <span class="s1">see_also=_agg_see_also_doc</span><span class="s0">,</span>
+        <span class="s1">examples=_agg_examples_doc</span><span class="s0">,</span>
+        <span class="s1">klass=</span><span class="s4">&quot;DataFrame&quot;</span><span class="s0">,</span>
+        <span class="s1">axis=</span><span class="s4">&quot;&quot;</span><span class="s0">,</span>
+    <span class="s1">)</span>
+    <span class="s0">def </span><span class="s1">aggregate(self</span><span class="s0">, </span><span class="s1">func=</span><span class="s0">None, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+
+        <span class="s1">result = ResamplerWindowApply(self</span><span class="s0">, </span><span class="s1">func</span><span class="s0">, </span><span class="s1">args=args</span><span class="s0">, </span><span class="s1">kwargs=kwargs).agg()</span>
+        <span class="s0">if </span><span class="s1">result </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">how = func</span>
+            <span class="s1">result = self._groupby_and_aggregate(how</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+        <span class="s1">result = self._apply_loffset(result)</span>
+        <span class="s0">return </span><span class="s1">result</span>
+
+    <span class="s1">agg = aggregate</span>
+    <span class="s1">apply = aggregate</span>
+
+    <span class="s0">def </span><span class="s1">transform(self</span><span class="s0">, </span><span class="s1">arg</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Call function producing a like-indexed Series on each group and return 
+        a Series with the transformed values. 
+ 
+        Parameters 
+        ---------- 
+        arg : function 
+            To apply to each group. Should return a Series with the same index. 
+ 
+        Returns 
+        ------- 
+        transformed : Series 
+ 
+        Examples 
+        -------- 
+        &gt;&gt;&gt; s = pd.Series([1, 2], 
+        ...               index=pd.date_range('20180101', 
+        ...                                   periods=2, 
+        ...                                   freq='1h')) 
+        &gt;&gt;&gt; s 
+        2018-01-01 00:00:00    1 
+        2018-01-01 01:00:00    2 
+        Freq: H, dtype: int64 
+ 
+        &gt;&gt;&gt; resampled = s.resample('15min') 
+        &gt;&gt;&gt; resampled.transform(lambda x: (x - x.mean()) / x.std()) 
+        2018-01-01 00:00:00   NaN 
+        2018-01-01 01:00:00   NaN 
+        Freq: H, dtype: float64 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self._selected_obj.groupby(self.groupby).transform(arg</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s0">def </span><span class="s1">_downsample(self</span><span class="s0">, </span><span class="s1">f):</span>
+        <span class="s0">raise </span><span class="s1">AbstractMethodError(self)</span>
+
+    <span class="s0">def </span><span class="s1">_upsample(self</span><span class="s0">, </span><span class="s1">f</span><span class="s0">, </span><span class="s1">limit=</span><span class="s0">None, </span><span class="s1">fill_value=</span><span class="s0">None</span><span class="s1">):</span>
+        <span class="s0">raise </span><span class="s1">AbstractMethodError(self)</span>
+
+    <span class="s0">def </span><span class="s1">_gotitem(self</span><span class="s0">, </span><span class="s1">key</span><span class="s0">, </span><span class="s1">ndim: int</span><span class="s0">, </span><span class="s1">subset=</span><span class="s0">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Sub-classes to define. Return a sliced object. 
+ 
+        Parameters 
+        ---------- 
+        key : string / list of selections 
+        ndim : {1, 2} 
+            requested ndim of result 
+        subset : object, default None 
+            subset to act on 
+        &quot;&quot;&quot;</span>
+        <span class="s1">grouper = self.grouper</span>
+        <span class="s0">if </span><span class="s1">subset </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">subset = self.obj</span>
+        <span class="s1">grouped = get_groupby(subset</span><span class="s0">, </span><span class="s1">by=</span><span class="s0">None, </span><span class="s1">grouper=grouper</span><span class="s0">, </span><span class="s1">axis=self.axis)</span>
+
+        <span class="s3"># try the key selection</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">grouped[key]</span>
+        <span class="s0">except </span><span class="s1">KeyError:</span>
+            <span class="s0">return </span><span class="s1">grouped</span>
+
+    <span class="s0">def </span><span class="s1">_groupby_and_aggregate(self</span><span class="s0">, </span><span class="s1">how</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Re-evaluate the obj with a groupby aggregation. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">grouper = self.grouper</span>
+
+        <span class="s1">obj = self._selected_obj</span>
+
+        <span class="s1">grouped = get_groupby(obj</span><span class="s0">, </span><span class="s1">by=</span><span class="s0">None, </span><span class="s1">grouper=grouper</span><span class="s0">, </span><span class="s1">axis=self.axis)</span>
+
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">if </span><span class="s1">isinstance(obj</span><span class="s0">, </span><span class="s1">ABCDataFrame) </span><span class="s0">and </span><span class="s1">callable(how):</span>
+                <span class="s3"># Check if the function is reducing or not.</span>
+                <span class="s1">result = grouped._aggregate_item_by_item(how</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">result = grouped.aggregate(how</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+        <span class="s0">except </span><span class="s1">DataError:</span>
+            <span class="s3"># got TypeErrors on aggregation</span>
+            <span class="s1">result = grouped.apply(how</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+        <span class="s0">except </span><span class="s1">(AttributeError</span><span class="s0">, </span><span class="s1">KeyError):</span>
+            <span class="s3"># we have a non-reducing function; try to evaluate</span>
+            <span class="s3"># alternatively we want to evaluate only a column of the input</span>
+
+            <span class="s3"># test_apply_to_one_column_of_df the function being applied references</span>
+            <span class="s3">#  a DataFrame column, but aggregate_item_by_item operates column-wise</span>
+            <span class="s3">#  on Series, raising AttributeError or KeyError</span>
+            <span class="s3">#  (depending on whether the column lookup uses getattr/__getitem__)</span>
+            <span class="s1">result = grouped.apply(how</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+        <span class="s0">except </span><span class="s1">ValueError </span><span class="s0">as </span><span class="s1">err:</span>
+            <span class="s0">if </span><span class="s4">&quot;Must produce aggregated value&quot; </span><span class="s0">in </span><span class="s1">str(err):</span>
+                <span class="s3"># raised in _aggregate_named</span>
+                <span class="s3"># see test_apply_without_aggregation, test_apply_with_mutated_index</span>
+                <span class="s0">pass</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s0">raise</span>
+
+            <span class="s3"># we have a non-reducing function</span>
+            <span class="s3"># try to evaluate</span>
+            <span class="s1">result = grouped.apply(how</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+        <span class="s1">result = self._apply_loffset(result)</span>
+        <span class="s0">return </span><span class="s1">self._wrap_result(result)</span>
+
+    <span class="s0">def </span><span class="s1">_apply_loffset(self</span><span class="s0">, </span><span class="s1">result):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        If loffset is set, offset the result index. 
+ 
+        This is NOT an idempotent routine, it will be applied 
+        exactly once to the result. 
+ 
+        Parameters 
+        ---------- 
+        result : Series or DataFrame 
+            the result of resample 
+        &quot;&quot;&quot;</span>
+        <span class="s3"># error: Cannot determine type of 'loffset'</span>
+        <span class="s1">needs_offset = (</span>
+            <span class="s1">isinstance(</span>
+                <span class="s1">self.loffset</span><span class="s0">,  </span><span class="s3"># type: ignore[has-type]</span>
+                <span class="s1">(DateOffset</span><span class="s0">, </span><span class="s1">timedelta</span><span class="s0">, </span><span class="s1">np.timedelta64)</span><span class="s0">,</span>
+            <span class="s1">)</span>
+            <span class="s0">and </span><span class="s1">isinstance(result.index</span><span class="s0">, </span><span class="s1">DatetimeIndex)</span>
+            <span class="s0">and </span><span class="s1">len(result.index) &gt; </span><span class="s5">0</span>
+        <span class="s1">)</span>
+
+        <span class="s0">if </span><span class="s1">needs_offset:</span>
+            <span class="s3"># error: Cannot determine type of 'loffset'</span>
+            <span class="s1">result.index = result.index + self.loffset  </span><span class="s3"># type: ignore[has-type]</span>
+
+        <span class="s1">self.loffset = </span><span class="s0">None</span>
+        <span class="s0">return </span><span class="s1">result</span>
+
+    <span class="s0">def </span><span class="s1">_get_resampler_for_grouping(self</span><span class="s0">, </span><span class="s1">groupby):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return the correct class for resampling with groupby. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self._resampler_for_grouping(self</span><span class="s0">, </span><span class="s1">groupby=groupby)</span>
+
+    <span class="s0">def </span><span class="s1">_wrap_result(self</span><span class="s0">, </span><span class="s1">result):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Potentially wrap any results. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">isinstance(result</span><span class="s0">, </span><span class="s1">ABCSeries) </span><span class="s0">and </span><span class="s1">self._selection </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">result.name = self._selection</span>
+
+        <span class="s0">if </span><span class="s1">isinstance(result</span><span class="s0">, </span><span class="s1">ABCSeries) </span><span class="s0">and </span><span class="s1">result.empty:</span>
+            <span class="s1">obj = self.obj</span>
+            <span class="s3"># When index is all NaT, result is empty but index is not</span>
+            <span class="s1">result.index = _asfreq_compat(obj.index[:</span><span class="s5">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">freq=self.freq)</span>
+            <span class="s1">result.name = getattr(obj</span><span class="s0">, </span><span class="s4">&quot;name&quot;</span><span class="s0">, None</span><span class="s1">)</span>
+
+        <span class="s0">return </span><span class="s1">result</span>
+
+    <span class="s0">def </span><span class="s1">ffill(self</span><span class="s0">, </span><span class="s1">limit=</span><span class="s0">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Forward fill the values. 
+ 
+        Parameters 
+        ---------- 
+        limit : int, optional 
+            Limit of how many values to fill. 
+ 
+        Returns 
+        ------- 
+        An upsampled Series. 
+ 
+        See Also 
+        -------- 
+        Series.fillna: Fill NA/NaN values using the specified method. 
+        DataFrame.fillna: Fill NA/NaN values using the specified method. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self._upsample(</span><span class="s4">&quot;ffill&quot;</span><span class="s0">, </span><span class="s1">limit=limit)</span>
+
+    <span class="s0">def </span><span class="s1">pad(self</span><span class="s0">, </span><span class="s1">limit=</span><span class="s0">None</span><span class="s1">):</span>
+        <span class="s1">warnings.warn(</span>
+            <span class="s4">&quot;pad is deprecated and will be removed in a future version. &quot;</span>
+            <span class="s4">&quot;Use ffill instead.&quot;</span><span class="s0">,</span>
+            <span class="s1">FutureWarning</span><span class="s0">,</span>
+            <span class="s1">stacklevel=find_stack_level()</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s0">return </span><span class="s1">self.ffill(limit=limit)</span>
+
+    <span class="s1">pad.__doc__ = ffill.__doc__</span>
+
+    <span class="s0">def </span><span class="s1">nearest(self</span><span class="s0">, </span><span class="s1">limit=</span><span class="s0">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Resample by using the nearest value. 
+ 
+        When resampling data, missing values may appear (e.g., when the 
+        resampling frequency is higher than the original frequency). 
+        The `nearest` method will replace ``NaN`` values that appeared in 
+        the resampled data with the value from the nearest member of the 
+        sequence, based on the index value. 
+        Missing values that existed in the original data will not be modified. 
+        If `limit` is given, fill only this many values in each direction for 
+        each of the original values. 
+ 
+        Parameters 
+        ---------- 
+        limit : int, optional 
+            Limit of how many values to fill. 
+ 
+        Returns 
+        ------- 
+        Series or DataFrame 
+            An upsampled Series or DataFrame with ``NaN`` values filled with 
+            their nearest value. 
+ 
+        See Also 
+        -------- 
+        backfill : Backward fill the new missing values in the resampled data. 
+        pad : Forward fill ``NaN`` values. 
+ 
+        Examples 
+        -------- 
+        &gt;&gt;&gt; s = pd.Series([1, 2], 
+        ...               index=pd.date_range('20180101', 
+        ...                                   periods=2, 
+        ...                                   freq='1h')) 
+        &gt;&gt;&gt; s 
+        2018-01-01 00:00:00    1 
+        2018-01-01 01:00:00    2 
+        Freq: H, dtype: int64 
+ 
+        &gt;&gt;&gt; s.resample('15min').nearest() 
+        2018-01-01 00:00:00    1 
+        2018-01-01 00:15:00    1 
+        2018-01-01 00:30:00    2 
+        2018-01-01 00:45:00    2 
+        2018-01-01 01:00:00    2 
+        Freq: 15T, dtype: int64 
+ 
+        Limit the number of upsampled values imputed by the nearest: 
+ 
+        &gt;&gt;&gt; s.resample('15min').nearest(limit=1) 
+        2018-01-01 00:00:00    1.0 
+        2018-01-01 00:15:00    1.0 
+        2018-01-01 00:30:00    NaN 
+        2018-01-01 00:45:00    2.0 
+        2018-01-01 01:00:00    2.0 
+        Freq: 15T, dtype: float64 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self._upsample(</span><span class="s4">&quot;nearest&quot;</span><span class="s0">, </span><span class="s1">limit=limit)</span>
+
+    <span class="s0">def </span><span class="s1">bfill(self</span><span class="s0">, </span><span class="s1">limit=</span><span class="s0">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Backward fill the new missing values in the resampled data. 
+ 
+        In statistics, imputation is the process of replacing missing data with 
+        substituted values [1]_. When resampling data, missing values may 
+        appear (e.g., when the resampling frequency is higher than the original 
+        frequency). The backward fill will replace NaN values that appeared in 
+        the resampled data with the next value in the original sequence. 
+        Missing values that existed in the original data will not be modified. 
+ 
+        Parameters 
+        ---------- 
+        limit : int, optional 
+            Limit of how many values to fill. 
+ 
+        Returns 
+        ------- 
+        Series, DataFrame 
+            An upsampled Series or DataFrame with backward filled NaN values. 
+ 
+        See Also 
+        -------- 
+        bfill : Alias of backfill. 
+        fillna : Fill NaN values using the specified method, which can be 
+            'backfill'. 
+        nearest : Fill NaN values with nearest neighbor starting from center. 
+        ffill : Forward fill NaN values. 
+        Series.fillna : Fill NaN values in the Series using the 
+            specified method, which can be 'backfill'. 
+        DataFrame.fillna : Fill NaN values in the DataFrame using the 
+            specified method, which can be 'backfill'. 
+ 
+        References 
+        ---------- 
+        .. [1] https://en.wikipedia.org/wiki/Imputation_(statistics) 
+ 
+        Examples 
+        -------- 
+        Resampling a Series: 
+ 
+        &gt;&gt;&gt; s = pd.Series([1, 2, 3], 
+        ...               index=pd.date_range('20180101', periods=3, freq='h')) 
+        &gt;&gt;&gt; s 
+        2018-01-01 00:00:00    1 
+        2018-01-01 01:00:00    2 
+        2018-01-01 02:00:00    3 
+        Freq: H, dtype: int64 
+ 
+        &gt;&gt;&gt; s.resample('30min').bfill() 
+        2018-01-01 00:00:00    1 
+        2018-01-01 00:30:00    2 
+        2018-01-01 01:00:00    2 
+        2018-01-01 01:30:00    3 
+        2018-01-01 02:00:00    3 
+        Freq: 30T, dtype: int64 
+ 
+        &gt;&gt;&gt; s.resample('15min').bfill(limit=2) 
+        2018-01-01 00:00:00    1.0 
+        2018-01-01 00:15:00    NaN 
+        2018-01-01 00:30:00    2.0 
+        2018-01-01 00:45:00    2.0 
+        2018-01-01 01:00:00    2.0 
+        2018-01-01 01:15:00    NaN 
+        2018-01-01 01:30:00    3.0 
+        2018-01-01 01:45:00    3.0 
+        2018-01-01 02:00:00    3.0 
+        Freq: 15T, dtype: float64 
+ 
+        Resampling a DataFrame that has missing values: 
+ 
+        &gt;&gt;&gt; df = pd.DataFrame({'a': [2, np.nan, 6], 'b': [1, 3, 5]}, 
+        ...                   index=pd.date_range('20180101', periods=3, 
+        ...                                       freq='h')) 
+        &gt;&gt;&gt; df 
+                               a  b 
+        2018-01-01 00:00:00  2.0  1 
+        2018-01-01 01:00:00  NaN  3 
+        2018-01-01 02:00:00  6.0  5 
+ 
+        &gt;&gt;&gt; df.resample('30min').bfill() 
+                               a  b 
+        2018-01-01 00:00:00  2.0  1 
+        2018-01-01 00:30:00  NaN  3 
+        2018-01-01 01:00:00  NaN  3 
+        2018-01-01 01:30:00  6.0  5 
+        2018-01-01 02:00:00  6.0  5 
+ 
+        &gt;&gt;&gt; df.resample('15min').bfill(limit=2) 
+                               a    b 
+        2018-01-01 00:00:00  2.0  1.0 
+        2018-01-01 00:15:00  NaN  NaN 
+        2018-01-01 00:30:00  NaN  3.0 
+        2018-01-01 00:45:00  NaN  3.0 
+        2018-01-01 01:00:00  NaN  3.0 
+        2018-01-01 01:15:00  NaN  NaN 
+        2018-01-01 01:30:00  6.0  5.0 
+        2018-01-01 01:45:00  6.0  5.0 
+        2018-01-01 02:00:00  6.0  5.0 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self._upsample(</span><span class="s4">&quot;bfill&quot;</span><span class="s0">, </span><span class="s1">limit=limit)</span>
+
+    <span class="s0">def </span><span class="s1">backfill(self</span><span class="s0">, </span><span class="s1">limit=</span><span class="s0">None</span><span class="s1">):</span>
+        <span class="s1">warnings.warn(</span>
+            <span class="s4">&quot;backfill is deprecated and will be removed in a future version. &quot;</span>
+            <span class="s4">&quot;Use bfill instead.&quot;</span><span class="s0">,</span>
+            <span class="s1">FutureWarning</span><span class="s0">,</span>
+            <span class="s1">stacklevel=find_stack_level()</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s0">return </span><span class="s1">self.bfill(limit=limit)</span>
+
+    <span class="s1">backfill.__doc__ = bfill.__doc__</span>
+
+    <span class="s0">def </span><span class="s1">fillna(self</span><span class="s0">, </span><span class="s1">method</span><span class="s0">, </span><span class="s1">limit=</span><span class="s0">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Fill missing values introduced by upsampling. 
+ 
+        In statistics, imputation is the process of replacing missing data with 
+        substituted values [1]_. When resampling data, missing values may 
+        appear (e.g., when the resampling frequency is higher than the original 
+        frequency). 
+ 
+        Missing values that existed in the original data will 
+        not be modified. 
+ 
+        Parameters 
+        ---------- 
+        method : {'pad', 'backfill', 'ffill', 'bfill', 'nearest'} 
+            Method to use for filling holes in resampled data 
+ 
+            * 'pad' or 'ffill': use previous valid observation to fill gap 
+              (forward fill). 
+            * 'backfill' or 'bfill': use next valid observation to fill gap. 
+            * 'nearest': use nearest valid observation to fill gap. 
+ 
+        limit : int, optional 
+            Limit of how many consecutive missing values to fill. 
+ 
+        Returns 
+        ------- 
+        Series or DataFrame 
+            An upsampled Series or DataFrame with missing values filled. 
+ 
+        See Also 
+        -------- 
+        bfill : Backward fill NaN values in the resampled data. 
+        ffill : Forward fill NaN values in the resampled data. 
+        nearest : Fill NaN values in the resampled data 
+            with nearest neighbor starting from center. 
+        interpolate : Fill NaN values using interpolation. 
+        Series.fillna : Fill NaN values in the Series using the 
+            specified method, which can be 'bfill' and 'ffill'. 
+        DataFrame.fillna : Fill NaN values in the DataFrame using the 
+            specified method, which can be 'bfill' and 'ffill'. 
+ 
+        References 
+        ---------- 
+        .. [1] https://en.wikipedia.org/wiki/Imputation_(statistics) 
+ 
+        Examples 
+        -------- 
+        Resampling a Series: 
+ 
+        &gt;&gt;&gt; s = pd.Series([1, 2, 3], 
+        ...               index=pd.date_range('20180101', periods=3, freq='h')) 
+        &gt;&gt;&gt; s 
+        2018-01-01 00:00:00    1 
+        2018-01-01 01:00:00    2 
+        2018-01-01 02:00:00    3 
+        Freq: H, dtype: int64 
+ 
+        Without filling the missing values you get: 
+ 
+        &gt;&gt;&gt; s.resample(&quot;30min&quot;).asfreq() 
+        2018-01-01 00:00:00    1.0 
+        2018-01-01 00:30:00    NaN 
+        2018-01-01 01:00:00    2.0 
+        2018-01-01 01:30:00    NaN 
+        2018-01-01 02:00:00    3.0 
+        Freq: 30T, dtype: float64 
+ 
+        &gt;&gt;&gt; s.resample('30min').fillna(&quot;backfill&quot;) 
+        2018-01-01 00:00:00    1 
+        2018-01-01 00:30:00    2 
+        2018-01-01 01:00:00    2 
+        2018-01-01 01:30:00    3 
+        2018-01-01 02:00:00    3 
+        Freq: 30T, dtype: int64 
+ 
+        &gt;&gt;&gt; s.resample('15min').fillna(&quot;backfill&quot;, limit=2) 
+        2018-01-01 00:00:00    1.0 
+        2018-01-01 00:15:00    NaN 
+        2018-01-01 00:30:00    2.0 
+        2018-01-01 00:45:00    2.0 
+        2018-01-01 01:00:00    2.0 
+        2018-01-01 01:15:00    NaN 
+        2018-01-01 01:30:00    3.0 
+        2018-01-01 01:45:00    3.0 
+        2018-01-01 02:00:00    3.0 
+        Freq: 15T, dtype: float64 
+ 
+        &gt;&gt;&gt; s.resample('30min').fillna(&quot;pad&quot;) 
+        2018-01-01 00:00:00    1 
+        2018-01-01 00:30:00    1 
+        2018-01-01 01:00:00    2 
+        2018-01-01 01:30:00    2 
+        2018-01-01 02:00:00    3 
+        Freq: 30T, dtype: int64 
+ 
+        &gt;&gt;&gt; s.resample('30min').fillna(&quot;nearest&quot;) 
+        2018-01-01 00:00:00    1 
+        2018-01-01 00:30:00    2 
+        2018-01-01 01:00:00    2 
+        2018-01-01 01:30:00    3 
+        2018-01-01 02:00:00    3 
+        Freq: 30T, dtype: int64 
+ 
+        Missing values present before the upsampling are not affected. 
+ 
+        &gt;&gt;&gt; sm = pd.Series([1, None, 3], 
+        ...               index=pd.date_range('20180101', periods=3, freq='h')) 
+        &gt;&gt;&gt; sm 
+        2018-01-01 00:00:00    1.0 
+        2018-01-01 01:00:00    NaN 
+        2018-01-01 02:00:00    3.0 
+        Freq: H, dtype: float64 
+ 
+        &gt;&gt;&gt; sm.resample('30min').fillna('backfill') 
+        2018-01-01 00:00:00    1.0 
+        2018-01-01 00:30:00    NaN 
+        2018-01-01 01:00:00    NaN 
+        2018-01-01 01:30:00    3.0 
+        2018-01-01 02:00:00    3.0 
+        Freq: 30T, dtype: float64 
+ 
+        &gt;&gt;&gt; sm.resample('30min').fillna('pad') 
+        2018-01-01 00:00:00    1.0 
+        2018-01-01 00:30:00    1.0 
+        2018-01-01 01:00:00    NaN 
+        2018-01-01 01:30:00    NaN 
+        2018-01-01 02:00:00    3.0 
+        Freq: 30T, dtype: float64 
+ 
+        &gt;&gt;&gt; sm.resample('30min').fillna('nearest') 
+        2018-01-01 00:00:00    1.0 
+        2018-01-01 00:30:00    NaN 
+        2018-01-01 01:00:00    NaN 
+        2018-01-01 01:30:00    3.0 
+        2018-01-01 02:00:00    3.0 
+        Freq: 30T, dtype: float64 
+ 
+        DataFrame resampling is done column-wise. All the same options are 
+        available. 
+ 
+        &gt;&gt;&gt; df = pd.DataFrame({'a': [2, np.nan, 6], 'b': [1, 3, 5]}, 
+        ...                   index=pd.date_range('20180101', periods=3, 
+        ...                                       freq='h')) 
+        &gt;&gt;&gt; df 
+                               a  b 
+        2018-01-01 00:00:00  2.0  1 
+        2018-01-01 01:00:00  NaN  3 
+        2018-01-01 02:00:00  6.0  5 
+ 
+        &gt;&gt;&gt; df.resample('30min').fillna(&quot;bfill&quot;) 
+                               a  b 
+        2018-01-01 00:00:00  2.0  1 
+        2018-01-01 00:30:00  NaN  3 
+        2018-01-01 01:00:00  NaN  3 
+        2018-01-01 01:30:00  6.0  5 
+        2018-01-01 02:00:00  6.0  5 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self._upsample(method</span><span class="s0">, </span><span class="s1">limit=limit)</span>
+
+    <span class="s1">@deprecate_nonkeyword_arguments(version=</span><span class="s0">None, </span><span class="s1">allowed_args=[</span><span class="s4">&quot;self&quot;</span><span class="s0">, </span><span class="s4">&quot;method&quot;</span><span class="s1">])</span>
+    <span class="s1">@doc(NDFrame.interpolate</span><span class="s0">, </span><span class="s1">**_shared_docs_kwargs)</span>
+    <span class="s0">def </span><span class="s1">interpolate(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">method=</span><span class="s4">&quot;linear&quot;</span><span class="s0">,</span>
+        <span class="s1">axis=</span><span class="s5">0</span><span class="s0">,</span>
+        <span class="s1">limit=</span><span class="s0">None,</span>
+        <span class="s1">inplace=</span><span class="s0">False,</span>
+        <span class="s1">limit_direction=</span><span class="s4">&quot;forward&quot;</span><span class="s0">,</span>
+        <span class="s1">limit_area=</span><span class="s0">None,</span>
+        <span class="s1">downcast=</span><span class="s0">None,</span>
+        <span class="s1">**kwargs</span><span class="s0">,</span>
+    <span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Interpolate values according to different methods. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">result = self._upsample(</span><span class="s4">&quot;asfreq&quot;</span><span class="s1">)</span>
+        <span class="s0">return </span><span class="s1">result.interpolate(</span>
+            <span class="s1">method=method</span><span class="s0">,</span>
+            <span class="s1">axis=axis</span><span class="s0">,</span>
+            <span class="s1">limit=limit</span><span class="s0">,</span>
+            <span class="s1">inplace=inplace</span><span class="s0">,</span>
+            <span class="s1">limit_direction=limit_direction</span><span class="s0">,</span>
+            <span class="s1">limit_area=limit_area</span><span class="s0">,</span>
+            <span class="s1">downcast=downcast</span><span class="s0">,</span>
+            <span class="s1">**kwargs</span><span class="s0">,</span>
+        <span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">asfreq(self</span><span class="s0">, </span><span class="s1">fill_value=</span><span class="s0">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return the values at the new freq, essentially a reindex. 
+ 
+        Parameters 
+        ---------- 
+        fill_value : scalar, optional 
+            Value to use for missing values, applied during upsampling (note 
+            this does not fill NaNs that already were present). 
+ 
+        Returns 
+        ------- 
+        DataFrame or Series 
+            Values at the specified freq. 
+ 
+        See Also 
+        -------- 
+        Series.asfreq: Convert TimeSeries to specified frequency. 
+        DataFrame.asfreq: Convert TimeSeries to specified frequency. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self._upsample(</span><span class="s4">&quot;asfreq&quot;</span><span class="s0">, </span><span class="s1">fill_value=fill_value)</span>
+
+    <span class="s0">def </span><span class="s1">std(self</span><span class="s0">, </span><span class="s1">ddof=</span><span class="s5">1</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Compute standard deviation of groups, excluding missing values. 
+ 
+        Parameters 
+        ---------- 
+        ddof : int, default 1 
+            Degrees of freedom. 
+ 
+        Returns 
+        ------- 
+        DataFrame or Series 
+            Standard deviation of values within each group. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">nv.validate_resampler_func(</span><span class="s4">&quot;std&quot;</span><span class="s0">, </span><span class="s1">args</span><span class="s0">, </span><span class="s1">kwargs)</span>
+        <span class="s3"># error: Unexpected keyword argument &quot;ddof&quot; for &quot;_downsample&quot;</span>
+        <span class="s0">return </span><span class="s1">self._downsample(</span><span class="s4">&quot;std&quot;</span><span class="s0">, </span><span class="s1">ddof=ddof)  </span><span class="s3"># type: ignore[call-arg]</span>
+
+    <span class="s0">def </span><span class="s1">var(self</span><span class="s0">, </span><span class="s1">ddof=</span><span class="s5">1</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Compute variance of groups, excluding missing values. 
+ 
+        Parameters 
+        ---------- 
+        ddof : int, default 1 
+            Degrees of freedom. 
+ 
+        Returns 
+        ------- 
+        DataFrame or Series 
+            Variance of values within each group. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">nv.validate_resampler_func(</span><span class="s4">&quot;var&quot;</span><span class="s0">, </span><span class="s1">args</span><span class="s0">, </span><span class="s1">kwargs)</span>
+        <span class="s3"># error: Unexpected keyword argument &quot;ddof&quot; for &quot;_downsample&quot;</span>
+        <span class="s0">return </span><span class="s1">self._downsample(</span><span class="s4">&quot;var&quot;</span><span class="s0">, </span><span class="s1">ddof=ddof)  </span><span class="s3"># type: ignore[call-arg]</span>
+
+    <span class="s1">@doc(GroupBy.size)</span>
+    <span class="s0">def </span><span class="s1">size(self):</span>
+        <span class="s1">result = self._downsample(</span><span class="s4">&quot;size&quot;</span><span class="s1">)</span>
+        <span class="s0">if not </span><span class="s1">len(self.ax):</span>
+            <span class="s0">from </span><span class="s1">pandas </span><span class="s0">import </span><span class="s1">Series</span>
+
+            <span class="s0">if </span><span class="s1">self._selected_obj.ndim == </span><span class="s5">1</span><span class="s1">:</span>
+                <span class="s1">name = self._selected_obj.name</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">name = </span><span class="s0">None</span>
+            <span class="s1">result = Series([]</span><span class="s0">, </span><span class="s1">index=result.index</span><span class="s0">, </span><span class="s1">dtype=</span><span class="s4">&quot;int64&quot;</span><span class="s0">, </span><span class="s1">name=name)</span>
+        <span class="s0">return </span><span class="s1">result</span>
+
+    <span class="s1">@doc(GroupBy.count)</span>
+    <span class="s0">def </span><span class="s1">count(self):</span>
+        <span class="s1">result = self._downsample(</span><span class="s4">&quot;count&quot;</span><span class="s1">)</span>
+        <span class="s0">if not </span><span class="s1">len(self.ax):</span>
+            <span class="s0">if </span><span class="s1">self._selected_obj.ndim == </span><span class="s5">1</span><span class="s1">:</span>
+                <span class="s1">result = type(self._selected_obj)(</span>
+                    <span class="s1">[]</span><span class="s0">, </span><span class="s1">index=result.index</span><span class="s0">, </span><span class="s1">dtype=</span><span class="s4">&quot;int64&quot;</span><span class="s0">, </span><span class="s1">name=self._selected_obj.name</span>
+                <span class="s1">)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s0">from </span><span class="s1">pandas </span><span class="s0">import </span><span class="s1">DataFrame</span>
+
+                <span class="s1">result = DataFrame(</span>
+                    <span class="s1">[]</span><span class="s0">, </span><span class="s1">index=result.index</span><span class="s0">, </span><span class="s1">columns=result.columns</span><span class="s0">, </span><span class="s1">dtype=</span><span class="s4">&quot;int64&quot;</span>
+                <span class="s1">)</span>
+
+        <span class="s0">return </span><span class="s1">result</span>
+
+    <span class="s0">def </span><span class="s1">quantile(self</span><span class="s0">, </span><span class="s1">q=</span><span class="s5">0.5</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return value at the given quantile. 
+ 
+        Parameters 
+        ---------- 
+        q : float or array-like, default 0.5 (50% quantile) 
+ 
+        Returns 
+        ------- 
+        DataFrame or Series 
+            Quantile of values within each group. 
+ 
+        See Also 
+        -------- 
+        Series.quantile 
+            Return a series, where the index is q and the values are the quantiles. 
+        DataFrame.quantile 
+            Return a DataFrame, where the columns are the columns of self, 
+            and the values are the quantiles. 
+        DataFrameGroupBy.quantile 
+            Return a DataFrame, where the coulmns are groupby columns, 
+            and the values are its quantiles. 
+        &quot;&quot;&quot;</span>
+        <span class="s3"># error: Unexpected keyword argument &quot;q&quot; for &quot;_downsample&quot;</span>
+        <span class="s3"># error: Too many arguments for &quot;_downsample&quot;</span>
+        <span class="s0">return </span><span class="s1">self._downsample(</span><span class="s4">&quot;quantile&quot;</span><span class="s0">, </span><span class="s1">q=q</span><span class="s0">, </span><span class="s1">**kwargs)  </span><span class="s3"># type: ignore[call-arg]</span>
+
+
+<span class="s3"># downsample methods</span>
+<span class="s0">for </span><span class="s1">method </span><span class="s0">in </span><span class="s1">[</span><span class="s4">&quot;sum&quot;</span><span class="s0">, </span><span class="s4">&quot;prod&quot;</span><span class="s0">, </span><span class="s4">&quot;min&quot;</span><span class="s0">, </span><span class="s4">&quot;max&quot;</span><span class="s0">, </span><span class="s4">&quot;first&quot;</span><span class="s0">, </span><span class="s4">&quot;last&quot;</span><span class="s1">]:</span>
+
+    <span class="s0">def </span><span class="s1">f(self</span><span class="s0">, </span><span class="s1">_method=method</span><span class="s0">, </span><span class="s1">min_count=</span><span class="s5">0</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">nv.validate_resampler_func(_method</span><span class="s0">, </span><span class="s1">args</span><span class="s0">, </span><span class="s1">kwargs)</span>
+        <span class="s0">return </span><span class="s1">self._downsample(_method</span><span class="s0">, </span><span class="s1">min_count=min_count)</span>
+
+    <span class="s1">f.__doc__ = getattr(GroupBy</span><span class="s0">, </span><span class="s1">method).__doc__</span>
+    <span class="s1">setattr(Resampler</span><span class="s0">, </span><span class="s1">method</span><span class="s0">, </span><span class="s1">f)</span>
+
+
+<span class="s3"># downsample methods</span>
+<span class="s0">for </span><span class="s1">method </span><span class="s0">in </span><span class="s1">[</span><span class="s4">&quot;mean&quot;</span><span class="s0">, </span><span class="s4">&quot;sem&quot;</span><span class="s0">, </span><span class="s4">&quot;median&quot;</span><span class="s0">, </span><span class="s4">&quot;ohlc&quot;</span><span class="s1">]:</span>
+
+    <span class="s0">def </span><span class="s1">g(self</span><span class="s0">, </span><span class="s1">_method=method</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">nv.validate_resampler_func(_method</span><span class="s0">, </span><span class="s1">args</span><span class="s0">, </span><span class="s1">kwargs)</span>
+        <span class="s0">return </span><span class="s1">self._downsample(_method)</span>
+
+    <span class="s1">g.__doc__ = getattr(GroupBy</span><span class="s0">, </span><span class="s1">method).__doc__</span>
+    <span class="s1">setattr(Resampler</span><span class="s0">, </span><span class="s1">method</span><span class="s0">, </span><span class="s1">g)</span>
+
+
+<span class="s3"># series only methods</span>
+<span class="s0">for </span><span class="s1">method </span><span class="s0">in </span><span class="s1">[</span><span class="s4">&quot;nunique&quot;</span><span class="s1">]:</span>
+
+    <span class="s0">def </span><span class="s1">h(self</span><span class="s0">, </span><span class="s1">_method=method):</span>
+        <span class="s0">return </span><span class="s1">self._downsample(_method)</span>
+
+    <span class="s1">h.__doc__ = getattr(SeriesGroupBy</span><span class="s0">, </span><span class="s1">method).__doc__</span>
+    <span class="s1">setattr(Resampler</span><span class="s0">, </span><span class="s1">method</span><span class="s0">, </span><span class="s1">h)</span>
+
+
+<span class="s0">class </span><span class="s1">_GroupByMixin(PandasObject):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Provide the groupby facilities. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">_attributes: list[str]  </span><span class="s3"># in practice the same as Resampler._attributes</span>
+    <span class="s1">_selection: IndexLabel | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">obj</span><span class="s0">, </span><span class="s1">parent=</span><span class="s0">None, </span><span class="s1">groupby=</span><span class="s0">None, </span><span class="s1">**kwargs):</span>
+        <span class="s3"># reached via ._gotitem and _get_resampler_for_grouping</span>
+
+        <span class="s0">if </span><span class="s1">parent </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">parent = obj</span>
+
+        <span class="s3"># initialize our GroupByMixin object with</span>
+        <span class="s3"># the resampler attributes</span>
+        <span class="s0">for </span><span class="s1">attr </span><span class="s0">in </span><span class="s1">self._attributes:</span>
+            <span class="s1">setattr(self</span><span class="s0">, </span><span class="s1">attr</span><span class="s0">, </span><span class="s1">kwargs.get(attr</span><span class="s0">, </span><span class="s1">getattr(parent</span><span class="s0">, </span><span class="s1">attr)))</span>
+        <span class="s1">self._selection = kwargs.get(</span><span class="s4">&quot;selection&quot;</span><span class="s1">)</span>
+
+        <span class="s1">self.binner = parent.binner</span>
+
+        <span class="s1">self._groupby = groupby</span>
+        <span class="s1">self._groupby.mutated = </span><span class="s0">True</span>
+        <span class="s1">self._groupby.grouper.mutated = </span><span class="s0">True</span>
+        <span class="s1">self.groupby = copy.copy(parent.groupby)</span>
+
+    <span class="s1">@no_type_check</span>
+    <span class="s0">def </span><span class="s1">_apply(self</span><span class="s0">, </span><span class="s1">f</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Dispatch to _upsample; we are stripping all of the _upsample kwargs and 
+        performing the original function call on the grouped object. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s0">def </span><span class="s1">func(x):</span>
+            <span class="s1">x = self._shallow_copy(x</span><span class="s0">, </span><span class="s1">groupby=self.groupby)</span>
+
+            <span class="s0">if </span><span class="s1">isinstance(f</span><span class="s0">, </span><span class="s1">str):</span>
+                <span class="s0">return </span><span class="s1">getattr(x</span><span class="s0">, </span><span class="s1">f)(**kwargs)</span>
+
+            <span class="s0">return </span><span class="s1">x.apply(f</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+        <span class="s1">result = self._groupby.apply(func)</span>
+        <span class="s0">return </span><span class="s1">self._wrap_result(result)</span>
+
+    <span class="s1">_upsample = _apply</span>
+    <span class="s1">_downsample = _apply</span>
+    <span class="s1">_groupby_and_aggregate = _apply</span>
+
+    <span class="s1">@final</span>
+    <span class="s0">def </span><span class="s1">_gotitem(self</span><span class="s0">, </span><span class="s1">key</span><span class="s0">, </span><span class="s1">ndim</span><span class="s0">, </span><span class="s1">subset=</span><span class="s0">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Sub-classes to define. Return a sliced object. 
+ 
+        Parameters 
+        ---------- 
+        key : string / list of selections 
+        ndim : {1, 2} 
+            requested ndim of result 
+        subset : object, default None 
+            subset to act on 
+        &quot;&quot;&quot;</span>
+        <span class="s3"># create a new object to prevent aliasing</span>
+        <span class="s0">if </span><span class="s1">subset </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s3"># error: &quot;GotItemMixin&quot; has no attribute &quot;obj&quot;</span>
+            <span class="s1">subset = self.obj  </span><span class="s3"># type: ignore[attr-defined]</span>
+
+        <span class="s3"># we need to make a shallow copy of ourselves</span>
+        <span class="s3"># with the same groupby</span>
+        <span class="s1">kwargs = {attr: getattr(self</span><span class="s0">, </span><span class="s1">attr) </span><span class="s0">for </span><span class="s1">attr </span><span class="s0">in </span><span class="s1">self._attributes}</span>
+
+        <span class="s3"># Try to select from a DataFrame, falling back to a Series</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">groupby = self._groupby[key]</span>
+        <span class="s0">except </span><span class="s1">IndexError:</span>
+            <span class="s1">groupby = self._groupby</span>
+
+        <span class="s1">selection = </span><span class="s0">None</span>
+        <span class="s0">if </span><span class="s1">subset.ndim == </span><span class="s5">2 </span><span class="s0">and </span><span class="s1">(</span>
+            <span class="s1">(lib.is_scalar(key) </span><span class="s0">and </span><span class="s1">key </span><span class="s0">in </span><span class="s1">subset) </span><span class="s0">or </span><span class="s1">lib.is_list_like(key)</span>
+        <span class="s1">):</span>
+            <span class="s1">selection = key</span>
+
+        <span class="s1">new_rs = type(self)(</span>
+            <span class="s1">subset</span><span class="s0">, </span><span class="s1">groupby=groupby</span><span class="s0">, </span><span class="s1">parent=self</span><span class="s0">, </span><span class="s1">selection=selection</span><span class="s0">, </span><span class="s1">**kwargs</span>
+        <span class="s1">)</span>
+        <span class="s0">return </span><span class="s1">new_rs</span>
+
+
+<span class="s0">class </span><span class="s1">DatetimeIndexResampler(Resampler):</span>
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">_resampler_for_grouping(self):</span>
+        <span class="s0">return </span><span class="s1">DatetimeIndexResamplerGroupby</span>
+
+    <span class="s0">def </span><span class="s1">_get_binner_for_time(self):</span>
+
+        <span class="s3"># this is how we are actually creating the bins</span>
+        <span class="s0">if </span><span class="s1">self.kind == </span><span class="s4">&quot;period&quot;</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">self.groupby._get_time_period_bins(self.ax)</span>
+        <span class="s0">return </span><span class="s1">self.groupby._get_time_bins(self.ax)</span>
+
+    <span class="s0">def </span><span class="s1">_downsample(self</span><span class="s0">, </span><span class="s1">how</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Downsample the cython defined function. 
+ 
+        Parameters 
+        ---------- 
+        how : string / cython mapped function 
+        **kwargs : kw args passed to how function 
+        &quot;&quot;&quot;</span>
+        <span class="s1">how = com.get_cython_func(how) </span><span class="s0">or </span><span class="s1">how</span>
+        <span class="s1">ax = self.ax</span>
+        <span class="s1">obj = self._selected_obj</span>
+
+        <span class="s0">if not </span><span class="s1">len(ax):</span>
+            <span class="s3"># reset to the new freq</span>
+            <span class="s1">obj = obj.copy()</span>
+            <span class="s1">obj.index = obj.index._with_freq(self.freq)</span>
+            <span class="s0">assert </span><span class="s1">obj.index.freq == self.freq</span><span class="s0">, </span><span class="s1">(obj.index.freq</span><span class="s0">, </span><span class="s1">self.freq)</span>
+            <span class="s0">return </span><span class="s1">obj</span>
+
+        <span class="s3"># do we have a regular frequency</span>
+
+        <span class="s3"># error: Item &quot;None&quot; of &quot;Optional[Any]&quot; has no attribute &quot;binlabels&quot;</span>
+        <span class="s0">if </span><span class="s1">(</span>
+            <span class="s1">(ax.freq </span><span class="s0">is not None or </span><span class="s1">ax.inferred_freq </span><span class="s0">is not None</span><span class="s1">)</span>
+            <span class="s0">and </span><span class="s1">len(self.grouper.binlabels) &gt; len(ax)</span>
+            <span class="s0">and </span><span class="s1">how </span><span class="s0">is None</span>
+        <span class="s1">):</span>
+
+            <span class="s3"># let's do an asfreq</span>
+            <span class="s0">return </span><span class="s1">self.asfreq()</span>
+
+        <span class="s3"># we are downsampling</span>
+        <span class="s3"># we want to call the actual grouper method here</span>
+        <span class="s1">result = obj.groupby(self.grouper</span><span class="s0">, </span><span class="s1">axis=self.axis).aggregate(how</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+        <span class="s1">result = self._apply_loffset(result)</span>
+        <span class="s0">return </span><span class="s1">self._wrap_result(result)</span>
+
+    <span class="s0">def </span><span class="s1">_adjust_binner_for_upsample(self</span><span class="s0">, </span><span class="s1">binner):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Adjust our binner when upsampling. 
+ 
+        The range of a new index should not be outside specified range 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">self.closed == </span><span class="s4">&quot;right&quot;</span><span class="s1">:</span>
+            <span class="s1">binner = binner[</span><span class="s5">1</span><span class="s1">:]</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">binner = binner[:-</span><span class="s5">1</span><span class="s1">]</span>
+        <span class="s0">return </span><span class="s1">binner</span>
+
+    <span class="s0">def </span><span class="s1">_upsample(self</span><span class="s0">, </span><span class="s1">method</span><span class="s0">, </span><span class="s1">limit=</span><span class="s0">None, </span><span class="s1">fill_value=</span><span class="s0">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Parameters 
+        ---------- 
+        method : string {'backfill', 'bfill', 'pad', 
+            'ffill', 'asfreq'} method for upsampling 
+        limit : int, default None 
+            Maximum size gap to fill when reindexing 
+        fill_value : scalar, default None 
+            Value to use for missing values 
+ 
+        See Also 
+        -------- 
+        .fillna: Fill NA/NaN values using the specified method. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">self.axis:</span>
+            <span class="s0">raise </span><span class="s1">AssertionError(</span><span class="s4">&quot;axis must be 0&quot;</span><span class="s1">)</span>
+        <span class="s0">if </span><span class="s1">self._from_selection:</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span>
+                <span class="s4">&quot;Upsampling from level= or on= selection &quot;</span>
+                <span class="s4">&quot;is not supported, use .set_index(...) &quot;</span>
+                <span class="s4">&quot;to explicitly set index to datetime-like&quot;</span>
+            <span class="s1">)</span>
+
+        <span class="s1">ax = self.ax</span>
+        <span class="s1">obj = self._selected_obj</span>
+        <span class="s1">binner = self.binner</span>
+        <span class="s1">res_index = self._adjust_binner_for_upsample(binner)</span>
+
+        <span class="s3"># if we have the same frequency as our axis, then we are equal sampling</span>
+        <span class="s0">if </span><span class="s1">(</span>
+            <span class="s1">limit </span><span class="s0">is None</span>
+            <span class="s0">and </span><span class="s1">to_offset(ax.inferred_freq) == self.freq</span>
+            <span class="s0">and </span><span class="s1">len(obj) == len(res_index)</span>
+        <span class="s1">):</span>
+            <span class="s1">result = obj.copy()</span>
+            <span class="s1">result.index = res_index</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">result = obj.reindex(</span>
+                <span class="s1">res_index</span><span class="s0">, </span><span class="s1">method=method</span><span class="s0">, </span><span class="s1">limit=limit</span><span class="s0">, </span><span class="s1">fill_value=fill_value</span>
+            <span class="s1">)</span>
+
+        <span class="s1">result = self._apply_loffset(result)</span>
+        <span class="s0">return </span><span class="s1">self._wrap_result(result)</span>
+
+    <span class="s0">def </span><span class="s1">_wrap_result(self</span><span class="s0">, </span><span class="s1">result):</span>
+        <span class="s1">result = super()._wrap_result(result)</span>
+
+        <span class="s3"># we may have a different kind that we were asked originally</span>
+        <span class="s3"># convert if needed</span>
+        <span class="s0">if </span><span class="s1">self.kind == </span><span class="s4">&quot;period&quot; </span><span class="s0">and not </span><span class="s1">isinstance(result.index</span><span class="s0">, </span><span class="s1">PeriodIndex):</span>
+            <span class="s1">result.index = result.index.to_period(self.freq)</span>
+        <span class="s0">return </span><span class="s1">result</span>
+
+
+<span class="s0">class </span><span class="s1">DatetimeIndexResamplerGroupby(_GroupByMixin</span><span class="s0">, </span><span class="s1">DatetimeIndexResampler):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Provides a resample of a groupby implementation 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">_constructor(self):</span>
+        <span class="s0">return </span><span class="s1">DatetimeIndexResampler</span>
+
+
+<span class="s0">class </span><span class="s1">PeriodIndexResampler(DatetimeIndexResampler):</span>
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">_resampler_for_grouping(self):</span>
+        <span class="s0">return </span><span class="s1">PeriodIndexResamplerGroupby</span>
+
+    <span class="s0">def </span><span class="s1">_get_binner_for_time(self):</span>
+        <span class="s0">if </span><span class="s1">self.kind == </span><span class="s4">&quot;timestamp&quot;</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">super()._get_binner_for_time()</span>
+        <span class="s0">return </span><span class="s1">self.groupby._get_period_bins(self.ax)</span>
+
+    <span class="s0">def </span><span class="s1">_convert_obj(self</span><span class="s0">, </span><span class="s1">obj: NDFrameT) -&gt; NDFrameT:</span>
+        <span class="s1">obj = super()._convert_obj(obj)</span>
+
+        <span class="s0">if </span><span class="s1">self._from_selection:</span>
+            <span class="s3"># see GH 14008, GH 12871</span>
+            <span class="s1">msg = (</span>
+                <span class="s4">&quot;Resampling from level= or on= selection &quot;</span>
+                <span class="s4">&quot;with a PeriodIndex is not currently supported, &quot;</span>
+                <span class="s4">&quot;use .set_index(...) to explicitly set index&quot;</span>
+            <span class="s1">)</span>
+            <span class="s0">raise </span><span class="s1">NotImplementedError(msg)</span>
+
+        <span class="s0">if </span><span class="s1">self.loffset </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s3"># Cannot apply loffset/timedelta to PeriodIndex -&gt; convert to</span>
+            <span class="s3"># timestamps</span>
+            <span class="s1">self.kind = </span><span class="s4">&quot;timestamp&quot;</span>
+
+        <span class="s3"># convert to timestamp</span>
+        <span class="s0">if </span><span class="s1">self.kind == </span><span class="s4">&quot;timestamp&quot;</span><span class="s1">:</span>
+            <span class="s1">obj = obj.to_timestamp(how=self.convention)</span>
+
+        <span class="s0">return </span><span class="s1">obj</span>
+
+    <span class="s0">def </span><span class="s1">_downsample(self</span><span class="s0">, </span><span class="s1">how</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Downsample the cython defined function. 
+ 
+        Parameters 
+        ---------- 
+        how : string / cython mapped function 
+        **kwargs : kw args passed to how function 
+        &quot;&quot;&quot;</span>
+        <span class="s3"># we may need to actually resample as if we are timestamps</span>
+        <span class="s0">if </span><span class="s1">self.kind == </span><span class="s4">&quot;timestamp&quot;</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">super()._downsample(how</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+        <span class="s1">how = com.get_cython_func(how) </span><span class="s0">or </span><span class="s1">how</span>
+        <span class="s1">ax = self.ax</span>
+
+        <span class="s0">if </span><span class="s1">is_subperiod(ax.freq</span><span class="s0">, </span><span class="s1">self.freq):</span>
+            <span class="s3"># Downsampling</span>
+            <span class="s0">return </span><span class="s1">self._groupby_and_aggregate(how</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+        <span class="s0">elif </span><span class="s1">is_superperiod(ax.freq</span><span class="s0">, </span><span class="s1">self.freq):</span>
+            <span class="s0">if </span><span class="s1">how == </span><span class="s4">&quot;ohlc&quot;</span><span class="s1">:</span>
+                <span class="s3"># GH #13083</span>
+                <span class="s3"># upsampling to subperiods is handled as an asfreq, which works</span>
+                <span class="s3"># for pure aggregating/reducing methods</span>
+                <span class="s3"># OHLC reduces along the time dimension, but creates multiple</span>
+                <span class="s3"># values for each period -&gt; handle by _groupby_and_aggregate()</span>
+                <span class="s0">return </span><span class="s1">self._groupby_and_aggregate(how)</span>
+            <span class="s0">return </span><span class="s1">self.asfreq()</span>
+        <span class="s0">elif </span><span class="s1">ax.freq == self.freq:</span>
+            <span class="s0">return </span><span class="s1">self.asfreq()</span>
+
+        <span class="s0">raise </span><span class="s1">IncompatibleFrequency(</span>
+            <span class="s4">f&quot;Frequency </span><span class="s0">{</span><span class="s1">ax.freq</span><span class="s0">} </span><span class="s4">cannot be resampled to </span><span class="s0">{</span><span class="s1">self.freq</span><span class="s0">}</span><span class="s4">, &quot;</span>
+            <span class="s4">&quot;as they are not sub or super periods&quot;</span>
+        <span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">_upsample(self</span><span class="s0">, </span><span class="s1">method</span><span class="s0">, </span><span class="s1">limit=</span><span class="s0">None, </span><span class="s1">fill_value=</span><span class="s0">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Parameters 
+        ---------- 
+        method : {'backfill', 'bfill', 'pad', 'ffill'} 
+            Method for upsampling. 
+        limit : int, default None 
+            Maximum size gap to fill when reindexing. 
+        fill_value : scalar, default None 
+            Value to use for missing values. 
+ 
+        See Also 
+        -------- 
+        .fillna: Fill NA/NaN values using the specified method. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s3"># we may need to actually resample as if we are timestamps</span>
+        <span class="s0">if </span><span class="s1">self.kind == </span><span class="s4">&quot;timestamp&quot;</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">super()._upsample(method</span><span class="s0">, </span><span class="s1">limit=limit</span><span class="s0">, </span><span class="s1">fill_value=fill_value)</span>
+
+        <span class="s1">ax = self.ax</span>
+        <span class="s1">obj = self.obj</span>
+        <span class="s1">new_index = self.binner</span>
+
+        <span class="s3"># Start vs. end of period</span>
+        <span class="s1">memb = ax.asfreq(self.freq</span><span class="s0">, </span><span class="s1">how=self.convention)</span>
+
+        <span class="s3"># Get the fill indexer</span>
+        <span class="s1">indexer = memb.get_indexer(new_index</span><span class="s0">, </span><span class="s1">method=method</span><span class="s0">, </span><span class="s1">limit=limit)</span>
+        <span class="s1">new_obj = _take_new_index(</span>
+            <span class="s1">obj</span><span class="s0">,</span>
+            <span class="s1">indexer</span><span class="s0">,</span>
+            <span class="s1">new_index</span><span class="s0">,</span>
+            <span class="s1">axis=self.axis</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s0">return </span><span class="s1">self._wrap_result(new_obj)</span>
+
+
+<span class="s0">class </span><span class="s1">PeriodIndexResamplerGroupby(_GroupByMixin</span><span class="s0">, </span><span class="s1">PeriodIndexResampler):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Provides a resample of a groupby implementation. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">_constructor(self):</span>
+        <span class="s0">return </span><span class="s1">PeriodIndexResampler</span>
+
+
+<span class="s0">class </span><span class="s1">TimedeltaIndexResampler(DatetimeIndexResampler):</span>
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">_resampler_for_grouping(self):</span>
+        <span class="s0">return </span><span class="s1">TimedeltaIndexResamplerGroupby</span>
+
+    <span class="s0">def </span><span class="s1">_get_binner_for_time(self):</span>
+        <span class="s0">return </span><span class="s1">self.groupby._get_time_delta_bins(self.ax)</span>
+
+    <span class="s0">def </span><span class="s1">_adjust_binner_for_upsample(self</span><span class="s0">, </span><span class="s1">binner):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Adjust our binner when upsampling. 
+ 
+        The range of a new index is allowed to be greater than original range 
+        so we don't need to change the length of a binner, GH 13022 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">binner</span>
+
+
+<span class="s0">class </span><span class="s1">TimedeltaIndexResamplerGroupby(_GroupByMixin</span><span class="s0">, </span><span class="s1">TimedeltaIndexResampler):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Provides a resample of a groupby implementation. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">_constructor(self):</span>
+        <span class="s0">return </span><span class="s1">TimedeltaIndexResampler</span>
+
+
+<span class="s0">def </span><span class="s1">get_resampler(obj</span><span class="s0">, </span><span class="s1">kind=</span><span class="s0">None, </span><span class="s1">**kwds):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Create a TimeGrouper and return our resampler. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">tg = TimeGrouper(**kwds)</span>
+    <span class="s0">return </span><span class="s1">tg._get_resampler(obj</span><span class="s0">, </span><span class="s1">kind=kind)</span>
+
+
+<span class="s1">get_resampler.__doc__ = Resampler.__doc__</span>
+
+
+<span class="s0">def </span><span class="s1">get_resampler_for_grouping(</span>
+    <span class="s1">groupby</span><span class="s0">, </span><span class="s1">rule</span><span class="s0">, </span><span class="s1">how=</span><span class="s0">None, </span><span class="s1">fill_method=</span><span class="s0">None, </span><span class="s1">limit=</span><span class="s0">None, </span><span class="s1">kind=</span><span class="s0">None, </span><span class="s1">on=</span><span class="s0">None, </span><span class="s1">**kwargs</span>
+<span class="s1">):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Return our appropriate resampler when grouping as well. 
+    &quot;&quot;&quot;</span>
+    <span class="s3"># .resample uses 'on' similar to how .groupby uses 'key'</span>
+    <span class="s1">tg = TimeGrouper(freq=rule</span><span class="s0">, </span><span class="s1">key=on</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+    <span class="s1">resampler = tg._get_resampler(groupby.obj</span><span class="s0">, </span><span class="s1">kind=kind)</span>
+    <span class="s0">return </span><span class="s1">resampler._get_resampler_for_grouping(groupby=groupby)</span>
+
+
+<span class="s0">class </span><span class="s1">TimeGrouper(Grouper):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Custom groupby class for time-interval grouping. 
+ 
+    Parameters 
+    ---------- 
+    freq : pandas date offset or offset alias for identifying bin edges 
+    closed : closed end of interval; 'left' or 'right' 
+    label : interval boundary to use for labeling; 'left' or 'right' 
+    convention : {'start', 'end', 'e', 's'} 
+        If axis is PeriodIndex 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">_attributes = Grouper._attributes + (</span>
+        <span class="s4">&quot;closed&quot;</span><span class="s0">,</span>
+        <span class="s4">&quot;label&quot;</span><span class="s0">,</span>
+        <span class="s4">&quot;how&quot;</span><span class="s0">,</span>
+        <span class="s4">&quot;loffset&quot;</span><span class="s0">,</span>
+        <span class="s4">&quot;kind&quot;</span><span class="s0">,</span>
+        <span class="s4">&quot;convention&quot;</span><span class="s0">,</span>
+        <span class="s4">&quot;origin&quot;</span><span class="s0">,</span>
+        <span class="s4">&quot;offset&quot;</span><span class="s0">,</span>
+    <span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">freq=</span><span class="s4">&quot;Min&quot;</span><span class="s0">,</span>
+        <span class="s1">closed: Literal[</span><span class="s4">&quot;left&quot;</span><span class="s0">, </span><span class="s4">&quot;right&quot;</span><span class="s1">] | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">label: str | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">how=</span><span class="s4">&quot;mean&quot;</span><span class="s0">,</span>
+        <span class="s1">axis=</span><span class="s5">0</span><span class="s0">,</span>
+        <span class="s1">fill_method=</span><span class="s0">None,</span>
+        <span class="s1">limit=</span><span class="s0">None,</span>
+        <span class="s1">loffset=</span><span class="s0">None,</span>
+        <span class="s1">kind: str | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">convention: str | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">base: int | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">origin: str | TimestampConvertibleTypes = </span><span class="s4">&quot;start_day&quot;</span><span class="s0">,</span>
+        <span class="s1">offset: TimedeltaConvertibleTypes | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">**kwargs</span><span class="s0">,</span>
+    <span class="s1">):</span>
+        <span class="s3"># Check for correctness of the keyword arguments which would</span>
+        <span class="s3"># otherwise silently use the default if misspelled</span>
+        <span class="s0">if </span><span class="s1">label </span><span class="s0">not in </span><span class="s1">{</span><span class="s0">None, </span><span class="s4">&quot;left&quot;</span><span class="s0">, </span><span class="s4">&quot;right&quot;</span><span class="s1">}:</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;Unsupported value </span><span class="s0">{</span><span class="s1">label</span><span class="s0">} </span><span class="s4">for `label`&quot;</span><span class="s1">)</span>
+        <span class="s0">if </span><span class="s1">closed </span><span class="s0">not in </span><span class="s1">{</span><span class="s0">None, </span><span class="s4">&quot;left&quot;</span><span class="s0">, </span><span class="s4">&quot;right&quot;</span><span class="s1">}:</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;Unsupported value </span><span class="s0">{</span><span class="s1">closed</span><span class="s0">} </span><span class="s4">for `closed`&quot;</span><span class="s1">)</span>
+        <span class="s0">if </span><span class="s1">convention </span><span class="s0">not in </span><span class="s1">{</span><span class="s0">None, </span><span class="s4">&quot;start&quot;</span><span class="s0">, </span><span class="s4">&quot;end&quot;</span><span class="s0">, </span><span class="s4">&quot;e&quot;</span><span class="s0">, </span><span class="s4">&quot;s&quot;</span><span class="s1">}:</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;Unsupported value </span><span class="s0">{</span><span class="s1">convention</span><span class="s0">} </span><span class="s4">for `convention`&quot;</span><span class="s1">)</span>
+
+        <span class="s1">freq = to_offset(freq)</span>
+
+        <span class="s1">end_types = {</span><span class="s4">&quot;M&quot;</span><span class="s0">, </span><span class="s4">&quot;A&quot;</span><span class="s0">, </span><span class="s4">&quot;Q&quot;</span><span class="s0">, </span><span class="s4">&quot;BM&quot;</span><span class="s0">, </span><span class="s4">&quot;BA&quot;</span><span class="s0">, </span><span class="s4">&quot;BQ&quot;</span><span class="s0">, </span><span class="s4">&quot;W&quot;</span><span class="s1">}</span>
+        <span class="s1">rule = freq.rule_code</span>
+        <span class="s0">if </span><span class="s1">rule </span><span class="s0">in </span><span class="s1">end_types </span><span class="s0">or </span><span class="s1">(</span><span class="s4">&quot;-&quot; </span><span class="s0">in </span><span class="s1">rule </span><span class="s0">and </span><span class="s1">rule[: rule.find(</span><span class="s4">&quot;-&quot;</span><span class="s1">)] </span><span class="s0">in </span><span class="s1">end_types):</span>
+            <span class="s0">if </span><span class="s1">closed </span><span class="s0">is None</span><span class="s1">:</span>
+                <span class="s1">closed = </span><span class="s4">&quot;right&quot;</span>
+            <span class="s0">if </span><span class="s1">label </span><span class="s0">is None</span><span class="s1">:</span>
+                <span class="s1">label = </span><span class="s4">&quot;right&quot;</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s3"># The backward resample sets ``closed`` to ``'right'`` by default</span>
+            <span class="s3"># since the last value should be considered as the edge point for</span>
+            <span class="s3"># the last bin. When origin in &quot;end&quot; or &quot;end_day&quot;, the value for a</span>
+            <span class="s3"># specific ``Timestamp`` index stands for the resample result from</span>
+            <span class="s3"># the current ``Timestamp`` minus ``freq`` to the current</span>
+            <span class="s3"># ``Timestamp`` with a right close.</span>
+            <span class="s0">if </span><span class="s1">origin </span><span class="s0">in </span><span class="s1">[</span><span class="s4">&quot;end&quot;</span><span class="s0">, </span><span class="s4">&quot;end_day&quot;</span><span class="s1">]:</span>
+                <span class="s0">if </span><span class="s1">closed </span><span class="s0">is None</span><span class="s1">:</span>
+                    <span class="s1">closed = </span><span class="s4">&quot;right&quot;</span>
+                <span class="s0">if </span><span class="s1">label </span><span class="s0">is None</span><span class="s1">:</span>
+                    <span class="s1">label = </span><span class="s4">&quot;right&quot;</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s0">if </span><span class="s1">closed </span><span class="s0">is None</span><span class="s1">:</span>
+                    <span class="s1">closed = </span><span class="s4">&quot;left&quot;</span>
+                <span class="s0">if </span><span class="s1">label </span><span class="s0">is None</span><span class="s1">:</span>
+                    <span class="s1">label = </span><span class="s4">&quot;left&quot;</span>
+
+        <span class="s1">self.closed = closed</span>
+        <span class="s1">self.label = label</span>
+        <span class="s1">self.kind = kind</span>
+
+        <span class="s1">self.convention = convention </span><span class="s0">or </span><span class="s4">&quot;E&quot;</span>
+        <span class="s1">self.convention = self.convention.lower()</span>
+
+        <span class="s1">self.how = how</span>
+        <span class="s1">self.fill_method = fill_method</span>
+        <span class="s1">self.limit = limit</span>
+
+        <span class="s0">if </span><span class="s1">origin </span><span class="s0">in </span><span class="s1">(</span><span class="s4">&quot;epoch&quot;</span><span class="s0">, </span><span class="s4">&quot;start&quot;</span><span class="s0">, </span><span class="s4">&quot;start_day&quot;</span><span class="s0">, </span><span class="s4">&quot;end&quot;</span><span class="s0">, </span><span class="s4">&quot;end_day&quot;</span><span class="s1">):</span>
+            <span class="s1">self.origin = origin</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">self.origin = Timestamp(origin)</span>
+            <span class="s0">except </span><span class="s1">(ValueError</span><span class="s0">, </span><span class="s1">TypeError) </span><span class="s0">as </span><span class="s1">err:</span>
+                <span class="s0">raise </span><span class="s1">ValueError(</span>
+                    <span class="s4">&quot;'origin' should be equal to 'epoch', 'start', 'start_day', &quot;</span>
+                    <span class="s4">&quot;'end', 'end_day' or &quot;</span>
+                    <span class="s4">f&quot;should be a Timestamp convertible type. Got '</span><span class="s0">{</span><span class="s1">origin</span><span class="s0">}</span><span class="s4">' instead.&quot;</span>
+                <span class="s1">) </span><span class="s0">from </span><span class="s1">err</span>
+
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">self.offset = Timedelta(offset) </span><span class="s0">if </span><span class="s1">offset </span><span class="s0">is not None else None</span>
+        <span class="s0">except </span><span class="s1">(ValueError</span><span class="s0">, </span><span class="s1">TypeError) </span><span class="s0">as </span><span class="s1">err:</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span>
+                <span class="s4">&quot;'offset' should be a Timedelta convertible type. &quot;</span>
+                <span class="s4">f&quot;Got '</span><span class="s0">{</span><span class="s1">offset</span><span class="s0">}</span><span class="s4">' instead.&quot;</span>
+            <span class="s1">) </span><span class="s0">from </span><span class="s1">err</span>
+
+        <span class="s3"># always sort time groupers</span>
+        <span class="s1">kwargs[</span><span class="s4">&quot;sort&quot;</span><span class="s1">] = </span><span class="s0">True</span>
+
+        <span class="s3"># Handle deprecated arguments since v1.1.0 of `base` and `loffset` (GH #31809)</span>
+        <span class="s0">if </span><span class="s1">base </span><span class="s0">is not None and </span><span class="s1">offset </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;'offset' and 'base' cannot be present at the same time&quot;</span><span class="s1">)</span>
+
+        <span class="s0">if </span><span class="s1">base </span><span class="s0">and </span><span class="s1">isinstance(freq</span><span class="s0">, </span><span class="s1">Tick):</span>
+            <span class="s3"># this conversion handle the default behavior of base and the</span>
+            <span class="s3"># special case of GH #10530. Indeed in case when dealing with</span>
+            <span class="s3"># a TimedeltaIndex base was treated as a 'pure' offset even though</span>
+            <span class="s3"># the default behavior of base was equivalent of a modulo on</span>
+            <span class="s3"># freq_nanos.</span>
+            <span class="s1">self.offset = Timedelta(base * freq.nanos // freq.n)</span>
+
+        <span class="s0">if </span><span class="s1">isinstance(loffset</span><span class="s0">, </span><span class="s1">str):</span>
+            <span class="s1">loffset = to_offset(loffset)</span>
+        <span class="s1">self.loffset = loffset</span>
+
+        <span class="s1">super().__init__(freq=freq</span><span class="s0">, </span><span class="s1">axis=axis</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s0">def </span><span class="s1">_get_resampler(self</span><span class="s0">, </span><span class="s1">obj</span><span class="s0">, </span><span class="s1">kind=</span><span class="s0">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return my resampler or raise if we have an invalid axis. 
+ 
+        Parameters 
+        ---------- 
+        obj : input object 
+        kind : string, optional 
+            'period','timestamp','timedelta' are valid 
+ 
+        Returns 
+        ------- 
+        a Resampler 
+ 
+        Raises 
+        ------ 
+        TypeError if incompatible axis 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self._set_grouper(obj)</span>
+
+        <span class="s1">ax = self.ax</span>
+        <span class="s0">if </span><span class="s1">isinstance(ax</span><span class="s0">, </span><span class="s1">DatetimeIndex):</span>
+            <span class="s0">return </span><span class="s1">DatetimeIndexResampler(obj</span><span class="s0">, </span><span class="s1">groupby=self</span><span class="s0">, </span><span class="s1">kind=kind</span><span class="s0">, </span><span class="s1">axis=self.axis)</span>
+        <span class="s0">elif </span><span class="s1">isinstance(ax</span><span class="s0">, </span><span class="s1">PeriodIndex) </span><span class="s0">or </span><span class="s1">kind == </span><span class="s4">&quot;period&quot;</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">PeriodIndexResampler(obj</span><span class="s0">, </span><span class="s1">groupby=self</span><span class="s0">, </span><span class="s1">kind=kind</span><span class="s0">, </span><span class="s1">axis=self.axis)</span>
+        <span class="s0">elif </span><span class="s1">isinstance(ax</span><span class="s0">, </span><span class="s1">TimedeltaIndex):</span>
+            <span class="s0">return </span><span class="s1">TimedeltaIndexResampler(obj</span><span class="s0">, </span><span class="s1">groupby=self</span><span class="s0">, </span><span class="s1">axis=self.axis)</span>
+
+        <span class="s0">raise </span><span class="s1">TypeError(</span>
+            <span class="s4">&quot;Only valid with DatetimeIndex, &quot;</span>
+            <span class="s4">&quot;TimedeltaIndex or PeriodIndex, &quot;</span>
+            <span class="s4">f&quot;but got an instance of '</span><span class="s0">{</span><span class="s1">type(ax).__name__</span><span class="s0">}</span><span class="s4">'&quot;</span>
+        <span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">_get_grouper(self</span><span class="s0">, </span><span class="s1">obj</span><span class="s0">, </span><span class="s1">validate: bool = </span><span class="s0">True</span><span class="s1">):</span>
+        <span class="s3"># create the resampler and return our binner</span>
+        <span class="s1">r = self._get_resampler(obj)</span>
+        <span class="s0">return </span><span class="s1">r.binner</span><span class="s0">, </span><span class="s1">r.grouper</span><span class="s0">, </span><span class="s1">r.obj</span>
+
+    <span class="s0">def </span><span class="s1">_get_time_bins(self</span><span class="s0">, </span><span class="s1">ax: DatetimeIndex):</span>
+        <span class="s0">if not </span><span class="s1">isinstance(ax</span><span class="s0">, </span><span class="s1">DatetimeIndex):</span>
+            <span class="s0">raise </span><span class="s1">TypeError(</span>
+                <span class="s4">&quot;axis must be a DatetimeIndex, but got &quot;</span>
+                <span class="s4">f&quot;an instance of </span><span class="s0">{</span><span class="s1">type(ax).__name__</span><span class="s0">}</span><span class="s4">&quot;</span>
+            <span class="s1">)</span>
+
+        <span class="s0">if </span><span class="s1">len(ax) == </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s1">binner = labels = DatetimeIndex(data=[]</span><span class="s0">, </span><span class="s1">freq=self.freq</span><span class="s0">, </span><span class="s1">name=ax.name)</span>
+            <span class="s0">return </span><span class="s1">binner</span><span class="s0">, </span><span class="s1">[]</span><span class="s0">, </span><span class="s1">labels</span>
+
+        <span class="s1">first</span><span class="s0">, </span><span class="s1">last = _get_timestamp_range_edges(</span>
+            <span class="s1">ax.min()</span><span class="s0">,</span>
+            <span class="s1">ax.max()</span><span class="s0">,</span>
+            <span class="s1">self.freq</span><span class="s0">,</span>
+            <span class="s1">closed=self.closed</span><span class="s0">,</span>
+            <span class="s1">origin=self.origin</span><span class="s0">,</span>
+            <span class="s1">offset=self.offset</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s3"># GH #12037</span>
+        <span class="s3"># use first/last directly instead of call replace() on them</span>
+        <span class="s3"># because replace() will swallow the nanosecond part</span>
+        <span class="s3"># thus last bin maybe slightly before the end if the end contains</span>
+        <span class="s3"># nanosecond part and lead to `Values falls after last bin` error</span>
+        <span class="s3"># GH 25758: If DST lands at midnight (e.g. 'America/Havana'), user feedback</span>
+        <span class="s3"># has noted that ambiguous=True provides the most sensible result</span>
+        <span class="s1">binner = labels = date_range(</span>
+            <span class="s1">freq=self.freq</span><span class="s0">,</span>
+            <span class="s1">start=first</span><span class="s0">,</span>
+            <span class="s1">end=last</span><span class="s0">,</span>
+            <span class="s1">tz=ax.tz</span><span class="s0">,</span>
+            <span class="s1">name=ax.name</span><span class="s0">,</span>
+            <span class="s1">ambiguous=</span><span class="s0">True,</span>
+            <span class="s1">nonexistent=</span><span class="s4">&quot;shift_forward&quot;</span><span class="s0">,</span>
+        <span class="s1">)</span>
+
+        <span class="s1">ax_values = ax.asi8</span>
+        <span class="s1">binner</span><span class="s0">, </span><span class="s1">bin_edges = self._adjust_bin_edges(binner</span><span class="s0">, </span><span class="s1">ax_values)</span>
+
+        <span class="s3"># general version, knowing nothing about relative frequencies</span>
+        <span class="s1">bins = lib.generate_bins_dt64(</span>
+            <span class="s1">ax_values</span><span class="s0">, </span><span class="s1">bin_edges</span><span class="s0">, </span><span class="s1">self.closed</span><span class="s0">, </span><span class="s1">hasnans=ax.hasnans</span>
+        <span class="s1">)</span>
+
+        <span class="s0">if </span><span class="s1">self.closed == </span><span class="s4">&quot;right&quot;</span><span class="s1">:</span>
+            <span class="s1">labels = binner</span>
+            <span class="s0">if </span><span class="s1">self.label == </span><span class="s4">&quot;right&quot;</span><span class="s1">:</span>
+                <span class="s1">labels = labels[</span><span class="s5">1</span><span class="s1">:]</span>
+        <span class="s0">elif </span><span class="s1">self.label == </span><span class="s4">&quot;right&quot;</span><span class="s1">:</span>
+            <span class="s1">labels = labels[</span><span class="s5">1</span><span class="s1">:]</span>
+
+        <span class="s0">if </span><span class="s1">ax.hasnans:</span>
+            <span class="s1">binner = binner.insert(</span><span class="s5">0</span><span class="s0">, </span><span class="s1">NaT)</span>
+            <span class="s1">labels = labels.insert(</span><span class="s5">0</span><span class="s0">, </span><span class="s1">NaT)</span>
+
+        <span class="s3"># if we end up with more labels than bins</span>
+        <span class="s3"># adjust the labels</span>
+        <span class="s3"># GH4076</span>
+        <span class="s0">if </span><span class="s1">len(bins) &lt; len(labels):</span>
+            <span class="s1">labels = labels[: len(bins)]</span>
+
+        <span class="s0">return </span><span class="s1">binner</span><span class="s0">, </span><span class="s1">bins</span><span class="s0">, </span><span class="s1">labels</span>
+
+    <span class="s0">def </span><span class="s1">_adjust_bin_edges(self</span><span class="s0">, </span><span class="s1">binner</span><span class="s0">, </span><span class="s1">ax_values):</span>
+        <span class="s3"># Some hacks for &gt; daily data, see #1471, #1458, #1483</span>
+
+        <span class="s0">if </span><span class="s1">self.freq != </span><span class="s4">&quot;D&quot; </span><span class="s0">and </span><span class="s1">is_superperiod(self.freq</span><span class="s0">, </span><span class="s4">&quot;D&quot;</span><span class="s1">):</span>
+            <span class="s0">if </span><span class="s1">self.closed == </span><span class="s4">&quot;right&quot;</span><span class="s1">:</span>
+                <span class="s3"># GH 21459, GH 9119: Adjust the bins relative to the wall time</span>
+                <span class="s1">bin_edges = binner.tz_localize(</span><span class="s0">None</span><span class="s1">)</span>
+                <span class="s1">bin_edges = bin_edges + timedelta(</span><span class="s5">1</span><span class="s1">) - Nano(</span><span class="s5">1</span><span class="s1">)</span>
+                <span class="s1">bin_edges = bin_edges.tz_localize(binner.tz).asi8</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">bin_edges = binner.asi8</span>
+
+            <span class="s3"># intraday values on last day</span>
+            <span class="s0">if </span><span class="s1">bin_edges[-</span><span class="s5">2</span><span class="s1">] &gt; ax_values.max():</span>
+                <span class="s1">bin_edges = bin_edges[:-</span><span class="s5">1</span><span class="s1">]</span>
+                <span class="s1">binner = binner[:-</span><span class="s5">1</span><span class="s1">]</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">bin_edges = binner.asi8</span>
+        <span class="s0">return </span><span class="s1">binner</span><span class="s0">, </span><span class="s1">bin_edges</span>
+
+    <span class="s0">def </span><span class="s1">_get_time_delta_bins(self</span><span class="s0">, </span><span class="s1">ax: TimedeltaIndex):</span>
+        <span class="s0">if not </span><span class="s1">isinstance(ax</span><span class="s0">, </span><span class="s1">TimedeltaIndex):</span>
+            <span class="s0">raise </span><span class="s1">TypeError(</span>
+                <span class="s4">&quot;axis must be a TimedeltaIndex, but got &quot;</span>
+                <span class="s4">f&quot;an instance of </span><span class="s0">{</span><span class="s1">type(ax).__name__</span><span class="s0">}</span><span class="s4">&quot;</span>
+            <span class="s1">)</span>
+
+        <span class="s0">if not </span><span class="s1">len(ax):</span>
+            <span class="s1">binner = labels = TimedeltaIndex(data=[]</span><span class="s0">, </span><span class="s1">freq=self.freq</span><span class="s0">, </span><span class="s1">name=ax.name)</span>
+            <span class="s0">return </span><span class="s1">binner</span><span class="s0">, </span><span class="s1">[]</span><span class="s0">, </span><span class="s1">labels</span>
+
+        <span class="s1">start</span><span class="s0">, </span><span class="s1">end = ax.min()</span><span class="s0">, </span><span class="s1">ax.max()</span>
+        <span class="s1">labels = binner = timedelta_range(</span>
+            <span class="s1">start=start</span><span class="s0">, </span><span class="s1">end=end</span><span class="s0">, </span><span class="s1">freq=self.freq</span><span class="s0">, </span><span class="s1">name=ax.name</span>
+        <span class="s1">)</span>
+
+        <span class="s1">end_stamps = labels + self.freq</span>
+        <span class="s1">bins = ax.searchsorted(end_stamps</span><span class="s0">, </span><span class="s1">side=</span><span class="s4">&quot;left&quot;</span><span class="s1">)</span>
+
+        <span class="s0">if </span><span class="s1">self.offset:</span>
+            <span class="s3"># GH 10530 &amp; 31809</span>
+            <span class="s1">labels += self.offset</span>
+        <span class="s0">if </span><span class="s1">self.loffset:</span>
+            <span class="s3"># GH 33498</span>
+            <span class="s1">labels += self.loffset</span>
+
+        <span class="s0">return </span><span class="s1">binner</span><span class="s0">, </span><span class="s1">bins</span><span class="s0">, </span><span class="s1">labels</span>
+
+    <span class="s0">def </span><span class="s1">_get_time_period_bins(self</span><span class="s0">, </span><span class="s1">ax: DatetimeIndex):</span>
+        <span class="s0">if not </span><span class="s1">isinstance(ax</span><span class="s0">, </span><span class="s1">DatetimeIndex):</span>
+            <span class="s0">raise </span><span class="s1">TypeError(</span>
+                <span class="s4">&quot;axis must be a DatetimeIndex, but got &quot;</span>
+                <span class="s4">f&quot;an instance of </span><span class="s0">{</span><span class="s1">type(ax).__name__</span><span class="s0">}</span><span class="s4">&quot;</span>
+            <span class="s1">)</span>
+
+        <span class="s1">freq = self.freq</span>
+
+        <span class="s0">if not </span><span class="s1">len(ax):</span>
+            <span class="s1">binner = labels = PeriodIndex(data=[]</span><span class="s0">, </span><span class="s1">freq=freq</span><span class="s0">, </span><span class="s1">name=ax.name)</span>
+            <span class="s0">return </span><span class="s1">binner</span><span class="s0">, </span><span class="s1">[]</span><span class="s0">, </span><span class="s1">labels</span>
+
+        <span class="s1">labels = binner = period_range(start=ax[</span><span class="s5">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">end=ax[-</span><span class="s5">1</span><span class="s1">]</span><span class="s0">, </span><span class="s1">freq=freq</span><span class="s0">, </span><span class="s1">name=ax.name)</span>
+
+        <span class="s1">end_stamps = (labels + freq).asfreq(freq</span><span class="s0">, </span><span class="s4">&quot;s&quot;</span><span class="s1">).to_timestamp()</span>
+        <span class="s0">if </span><span class="s1">ax.tz:</span>
+            <span class="s1">end_stamps = end_stamps.tz_localize(ax.tz)</span>
+        <span class="s1">bins = ax.searchsorted(end_stamps</span><span class="s0">, </span><span class="s1">side=</span><span class="s4">&quot;left&quot;</span><span class="s1">)</span>
+
+        <span class="s0">return </span><span class="s1">binner</span><span class="s0">, </span><span class="s1">bins</span><span class="s0">, </span><span class="s1">labels</span>
+
+    <span class="s0">def </span><span class="s1">_get_period_bins(self</span><span class="s0">, </span><span class="s1">ax: PeriodIndex):</span>
+        <span class="s0">if not </span><span class="s1">isinstance(ax</span><span class="s0">, </span><span class="s1">PeriodIndex):</span>
+            <span class="s0">raise </span><span class="s1">TypeError(</span>
+                <span class="s4">&quot;axis must be a PeriodIndex, but got &quot;</span>
+                <span class="s4">f&quot;an instance of </span><span class="s0">{</span><span class="s1">type(ax).__name__</span><span class="s0">}</span><span class="s4">&quot;</span>
+            <span class="s1">)</span>
+
+        <span class="s1">memb = ax.asfreq(self.freq</span><span class="s0">, </span><span class="s1">how=self.convention)</span>
+
+        <span class="s3"># NaT handling as in pandas._lib.lib.generate_bins_dt64()</span>
+        <span class="s1">nat_count = </span><span class="s5">0</span>
+        <span class="s0">if </span><span class="s1">memb.hasnans:</span>
+            <span class="s1">nat_count = np.sum(memb._isnan)</span>
+            <span class="s1">memb = memb[~memb._isnan]</span>
+
+        <span class="s0">if not </span><span class="s1">len(memb):</span>
+            <span class="s3"># index contains no valid (non-NaT) values</span>
+            <span class="s1">bins = np.array([]</span><span class="s0">, </span><span class="s1">dtype=np.int64)</span>
+            <span class="s1">binner = labels = PeriodIndex(data=[]</span><span class="s0">, </span><span class="s1">freq=self.freq</span><span class="s0">, </span><span class="s1">name=ax.name)</span>
+            <span class="s0">if </span><span class="s1">len(ax) &gt; </span><span class="s5">0</span><span class="s1">:</span>
+                <span class="s3"># index is all NaT</span>
+                <span class="s1">binner</span><span class="s0">, </span><span class="s1">bins</span><span class="s0">, </span><span class="s1">labels = _insert_nat_bin(binner</span><span class="s0">, </span><span class="s1">bins</span><span class="s0">, </span><span class="s1">labels</span><span class="s0">, </span><span class="s1">len(ax))</span>
+            <span class="s0">return </span><span class="s1">binner</span><span class="s0">, </span><span class="s1">bins</span><span class="s0">, </span><span class="s1">labels</span>
+
+        <span class="s1">freq_mult = self.freq.n</span>
+
+        <span class="s1">start = ax.min().asfreq(self.freq</span><span class="s0">, </span><span class="s1">how=self.convention)</span>
+        <span class="s1">end = ax.max().asfreq(self.freq</span><span class="s0">, </span><span class="s1">how=</span><span class="s4">&quot;end&quot;</span><span class="s1">)</span>
+        <span class="s1">bin_shift = </span><span class="s5">0</span>
+
+        <span class="s0">if </span><span class="s1">isinstance(self.freq</span><span class="s0">, </span><span class="s1">Tick):</span>
+            <span class="s3"># GH 23882 &amp; 31809: get adjusted bin edge labels with 'origin'</span>
+            <span class="s3"># and 'origin' support. This call only makes sense if the freq is a</span>
+            <span class="s3"># Tick since offset and origin are only used in those cases.</span>
+            <span class="s3"># Not doing this check could create an extra empty bin.</span>
+            <span class="s1">p_start</span><span class="s0">, </span><span class="s1">end = _get_period_range_edges(</span>
+                <span class="s1">start</span><span class="s0">,</span>
+                <span class="s1">end</span><span class="s0">,</span>
+                <span class="s1">self.freq</span><span class="s0">,</span>
+                <span class="s1">closed=self.closed</span><span class="s0">,</span>
+                <span class="s1">origin=self.origin</span><span class="s0">,</span>
+                <span class="s1">offset=self.offset</span><span class="s0">,</span>
+            <span class="s1">)</span>
+
+            <span class="s3"># Get offset for bin edge (not label edge) adjustment</span>
+            <span class="s1">start_offset = Period(start</span><span class="s0">, </span><span class="s1">self.freq) - Period(p_start</span><span class="s0">, </span><span class="s1">self.freq)</span>
+            <span class="s3"># error: Item &quot;Period&quot; of &quot;Union[Period, Any]&quot; has no attribute &quot;n&quot;</span>
+            <span class="s1">bin_shift = start_offset.n % freq_mult  </span><span class="s3"># type: ignore[union-attr]</span>
+            <span class="s1">start = p_start</span>
+
+        <span class="s1">labels = binner = period_range(</span>
+            <span class="s1">start=start</span><span class="s0">, </span><span class="s1">end=end</span><span class="s0">, </span><span class="s1">freq=self.freq</span><span class="s0">, </span><span class="s1">name=ax.name</span>
+        <span class="s1">)</span>
+
+        <span class="s1">i8 = memb.asi8</span>
+
+        <span class="s3"># when upsampling to subperiods, we need to generate enough bins</span>
+        <span class="s1">expected_bins_count = len(binner) * freq_mult</span>
+        <span class="s1">i8_extend = expected_bins_count - (i8[-</span><span class="s5">1</span><span class="s1">] - i8[</span><span class="s5">0</span><span class="s1">])</span>
+        <span class="s1">rng = np.arange(i8[</span><span class="s5">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">i8[-</span><span class="s5">1</span><span class="s1">] + i8_extend</span><span class="s0">, </span><span class="s1">freq_mult)</span>
+        <span class="s1">rng += freq_mult</span>
+        <span class="s3"># adjust bin edge indexes to account for base</span>
+        <span class="s1">rng -= bin_shift</span>
+
+        <span class="s3"># Wrap in PeriodArray for PeriodArray.searchsorted</span>
+        <span class="s1">prng = type(memb._data)(rng</span><span class="s0">, </span><span class="s1">dtype=memb.dtype)</span>
+        <span class="s1">bins = memb.searchsorted(prng</span><span class="s0">, </span><span class="s1">side=</span><span class="s4">&quot;left&quot;</span><span class="s1">)</span>
+
+        <span class="s0">if </span><span class="s1">nat_count &gt; </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s1">binner</span><span class="s0">, </span><span class="s1">bins</span><span class="s0">, </span><span class="s1">labels = _insert_nat_bin(binner</span><span class="s0">, </span><span class="s1">bins</span><span class="s0">, </span><span class="s1">labels</span><span class="s0">, </span><span class="s1">nat_count)</span>
+
+        <span class="s0">return </span><span class="s1">binner</span><span class="s0">, </span><span class="s1">bins</span><span class="s0">, </span><span class="s1">labels</span>
+
+
+<span class="s0">def </span><span class="s1">_take_new_index(</span>
+    <span class="s1">obj: NDFrameT</span><span class="s0">, </span><span class="s1">indexer: npt.NDArray[np.intp]</span><span class="s0">, </span><span class="s1">new_index: Index</span><span class="s0">, </span><span class="s1">axis: int = </span><span class="s5">0</span>
+<span class="s1">) -&gt; NDFrameT:</span>
+
+    <span class="s0">if </span><span class="s1">isinstance(obj</span><span class="s0">, </span><span class="s1">ABCSeries):</span>
+        <span class="s1">new_values = algos.take_nd(obj._values</span><span class="s0">, </span><span class="s1">indexer)</span>
+        <span class="s3"># error: Incompatible return value type (got &quot;Series&quot;, expected &quot;NDFrameT&quot;)</span>
+        <span class="s0">return </span><span class="s1">obj._constructor(  </span><span class="s3"># type: ignore[return-value]</span>
+            <span class="s1">new_values</span><span class="s0">, </span><span class="s1">index=new_index</span><span class="s0">, </span><span class="s1">name=obj.name</span>
+        <span class="s1">)</span>
+    <span class="s0">elif </span><span class="s1">isinstance(obj</span><span class="s0">, </span><span class="s1">ABCDataFrame):</span>
+        <span class="s0">if </span><span class="s1">axis == </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">NotImplementedError(</span><span class="s4">&quot;axis 1 is not supported&quot;</span><span class="s1">)</span>
+        <span class="s1">new_mgr = obj._mgr.reindex_indexer(new_axis=new_index</span><span class="s0">, </span><span class="s1">indexer=indexer</span><span class="s0">, </span><span class="s1">axis=</span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s3"># error: Incompatible return value type</span>
+        <span class="s3"># (got &quot;DataFrame&quot;, expected &quot;NDFrameT&quot;)</span>
+        <span class="s0">return </span><span class="s1">obj._constructor(new_mgr)  </span><span class="s3"># type: ignore[return-value]</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;'obj' should be either a Series or a DataFrame&quot;</span><span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">_get_timestamp_range_edges(</span>
+    <span class="s1">first: Timestamp</span><span class="s0">,</span>
+    <span class="s1">last: Timestamp</span><span class="s0">,</span>
+    <span class="s1">freq: BaseOffset</span><span class="s0">,</span>
+    <span class="s1">closed: Literal[</span><span class="s4">&quot;right&quot;</span><span class="s0">, </span><span class="s4">&quot;left&quot;</span><span class="s1">] = </span><span class="s4">&quot;left&quot;</span><span class="s0">,</span>
+    <span class="s1">origin=</span><span class="s4">&quot;start_day&quot;</span><span class="s0">,</span>
+    <span class="s1">offset: Timedelta | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+<span class="s1">) -&gt; tuple[Timestamp</span><span class="s0">, </span><span class="s1">Timestamp]:</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Adjust the `first` Timestamp to the preceding Timestamp that resides on 
+    the provided offset. Adjust the `last` Timestamp to the following 
+    Timestamp that resides on the provided offset. Input Timestamps that 
+    already reside on the offset will be adjusted depending on the type of 
+    offset and the `closed` parameter. 
+ 
+    Parameters 
+    ---------- 
+    first : pd.Timestamp 
+        The beginning Timestamp of the range to be adjusted. 
+    last : pd.Timestamp 
+        The ending Timestamp of the range to be adjusted. 
+    freq : pd.DateOffset 
+        The dateoffset to which the Timestamps will be adjusted. 
+    closed : {'right', 'left'}, default &quot;left&quot; 
+        Which side of bin interval is closed. 
+    origin : {'epoch', 'start', 'start_day'} or Timestamp, default 'start_day' 
+        The timestamp on which to adjust the grouping. The timezone of origin must 
+        match the timezone of the index. 
+        If a timestamp is not used, these values are also supported: 
+ 
+        - 'epoch': `origin` is 1970-01-01 
+        - 'start': `origin` is the first value of the timeseries 
+        - 'start_day': `origin` is the first day at midnight of the timeseries 
+    offset : pd.Timedelta, default is None 
+        An offset timedelta added to the origin. 
+ 
+    Returns 
+    ------- 
+    A tuple of length 2, containing the adjusted pd.Timestamp objects. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">isinstance(freq</span><span class="s0">, </span><span class="s1">Tick):</span>
+        <span class="s1">index_tz = first.tz</span>
+        <span class="s0">if </span><span class="s1">isinstance(origin</span><span class="s0">, </span><span class="s1">Timestamp) </span><span class="s0">and </span><span class="s1">(origin.tz </span><span class="s0">is None</span><span class="s1">) != (index_tz </span><span class="s0">is None</span><span class="s1">):</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;The origin must have the same timezone as the index.&quot;</span><span class="s1">)</span>
+        <span class="s0">elif </span><span class="s1">origin == </span><span class="s4">&quot;epoch&quot;</span><span class="s1">:</span>
+            <span class="s3"># set the epoch based on the timezone to have similar bins results when</span>
+            <span class="s3"># resampling on the same kind of indexes on different timezones</span>
+            <span class="s1">origin = Timestamp(</span><span class="s4">&quot;1970-01-01&quot;</span><span class="s0">, </span><span class="s1">tz=index_tz)</span>
+
+        <span class="s0">if </span><span class="s1">isinstance(freq</span><span class="s0">, </span><span class="s1">Day):</span>
+            <span class="s3"># _adjust_dates_anchored assumes 'D' means 24H, but first/last</span>
+            <span class="s3"># might contain a DST transition (23H, 24H, or 25H).</span>
+            <span class="s3"># So &quot;pretend&quot; the dates are naive when adjusting the endpoints</span>
+            <span class="s1">first = first.tz_localize(</span><span class="s0">None</span><span class="s1">)</span>
+            <span class="s1">last = last.tz_localize(</span><span class="s0">None</span><span class="s1">)</span>
+            <span class="s0">if </span><span class="s1">isinstance(origin</span><span class="s0">, </span><span class="s1">Timestamp):</span>
+                <span class="s1">origin = origin.tz_localize(</span><span class="s0">None</span><span class="s1">)</span>
+
+        <span class="s1">first</span><span class="s0">, </span><span class="s1">last = _adjust_dates_anchored(</span>
+            <span class="s1">first</span><span class="s0">, </span><span class="s1">last</span><span class="s0">, </span><span class="s1">freq</span><span class="s0">, </span><span class="s1">closed=closed</span><span class="s0">, </span><span class="s1">origin=origin</span><span class="s0">, </span><span class="s1">offset=offset</span>
+        <span class="s1">)</span>
+        <span class="s0">if </span><span class="s1">isinstance(freq</span><span class="s0">, </span><span class="s1">Day):</span>
+            <span class="s1">first = first.tz_localize(index_tz)</span>
+            <span class="s1">last = last.tz_localize(index_tz)</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">first = first.normalize()</span>
+        <span class="s1">last = last.normalize()</span>
+
+        <span class="s0">if </span><span class="s1">closed == </span><span class="s4">&quot;left&quot;</span><span class="s1">:</span>
+            <span class="s1">first = Timestamp(freq.rollback(first))</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">first = Timestamp(first - freq)</span>
+
+        <span class="s1">last = Timestamp(last + freq)</span>
+
+    <span class="s0">return </span><span class="s1">first</span><span class="s0">, </span><span class="s1">last</span>
+
+
+<span class="s0">def </span><span class="s1">_get_period_range_edges(</span>
+    <span class="s1">first: Period</span><span class="s0">,</span>
+    <span class="s1">last: Period</span><span class="s0">,</span>
+    <span class="s1">freq: BaseOffset</span><span class="s0">,</span>
+    <span class="s1">closed: Literal[</span><span class="s4">&quot;right&quot;</span><span class="s0">, </span><span class="s4">&quot;left&quot;</span><span class="s1">] = </span><span class="s4">&quot;left&quot;</span><span class="s0">,</span>
+    <span class="s1">origin=</span><span class="s4">&quot;start_day&quot;</span><span class="s0">,</span>
+    <span class="s1">offset: Timedelta | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+<span class="s1">) -&gt; tuple[Period</span><span class="s0">, </span><span class="s1">Period]:</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Adjust the provided `first` and `last` Periods to the respective Period of 
+    the given offset that encompasses them. 
+ 
+    Parameters 
+    ---------- 
+    first : pd.Period 
+        The beginning Period of the range to be adjusted. 
+    last : pd.Period 
+        The ending Period of the range to be adjusted. 
+    freq : pd.DateOffset 
+        The freq to which the Periods will be adjusted. 
+    closed : {'right', 'left'}, default &quot;left&quot; 
+        Which side of bin interval is closed. 
+    origin : {'epoch', 'start', 'start_day'}, Timestamp, default 'start_day' 
+        The timestamp on which to adjust the grouping. The timezone of origin must 
+        match the timezone of the index. 
+ 
+        If a timestamp is not used, these values are also supported: 
+ 
+        - 'epoch': `origin` is 1970-01-01 
+        - 'start': `origin` is the first value of the timeseries 
+        - 'start_day': `origin` is the first day at midnight of the timeseries 
+    offset : pd.Timedelta, default is None 
+        An offset timedelta added to the origin. 
+ 
+    Returns 
+    ------- 
+    A tuple of length 2, containing the adjusted pd.Period objects. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if not </span><span class="s1">all(isinstance(obj</span><span class="s0">, </span><span class="s1">Period) </span><span class="s0">for </span><span class="s1">obj </span><span class="s0">in </span><span class="s1">[first</span><span class="s0">, </span><span class="s1">last]):</span>
+        <span class="s0">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;'first' and 'last' must be instances of type Period&quot;</span><span class="s1">)</span>
+
+    <span class="s3"># GH 23882</span>
+    <span class="s1">first_ts = first.to_timestamp()</span>
+    <span class="s1">last_ts = last.to_timestamp()</span>
+    <span class="s1">adjust_first = </span><span class="s0">not </span><span class="s1">freq.is_on_offset(first_ts)</span>
+    <span class="s1">adjust_last = freq.is_on_offset(last_ts)</span>
+
+    <span class="s1">first_ts</span><span class="s0">, </span><span class="s1">last_ts = _get_timestamp_range_edges(</span>
+        <span class="s1">first_ts</span><span class="s0">, </span><span class="s1">last_ts</span><span class="s0">, </span><span class="s1">freq</span><span class="s0">, </span><span class="s1">closed=closed</span><span class="s0">, </span><span class="s1">origin=origin</span><span class="s0">, </span><span class="s1">offset=offset</span>
+    <span class="s1">)</span>
+
+    <span class="s1">first = (first_ts + int(adjust_first) * freq).to_period(freq)</span>
+    <span class="s1">last = (last_ts - int(adjust_last) * freq).to_period(freq)</span>
+    <span class="s0">return </span><span class="s1">first</span><span class="s0">, </span><span class="s1">last</span>
+
+
+<span class="s0">def </span><span class="s1">_insert_nat_bin(</span>
+    <span class="s1">binner: PeriodIndex</span><span class="s0">, </span><span class="s1">bins: np.ndarray</span><span class="s0">, </span><span class="s1">labels: PeriodIndex</span><span class="s0">, </span><span class="s1">nat_count: int</span>
+<span class="s1">) -&gt; tuple[PeriodIndex</span><span class="s0">, </span><span class="s1">np.ndarray</span><span class="s0">, </span><span class="s1">PeriodIndex]:</span>
+    <span class="s3"># NaT handling as in pandas._lib.lib.generate_bins_dt64()</span>
+    <span class="s3"># shift bins by the number of NaT</span>
+    <span class="s0">assert </span><span class="s1">nat_count &gt; </span><span class="s5">0</span>
+    <span class="s1">bins += nat_count</span>
+    <span class="s1">bins = np.insert(bins</span><span class="s0">, </span><span class="s5">0</span><span class="s0">, </span><span class="s1">nat_count)</span>
+
+    <span class="s3"># Incompatible types in assignment (expression has type &quot;Index&quot;, variable</span>
+    <span class="s3"># has type &quot;PeriodIndex&quot;)</span>
+    <span class="s1">binner = binner.insert(</span><span class="s5">0</span><span class="s0">, </span><span class="s1">NaT)  </span><span class="s3"># type: ignore[assignment]</span>
+    <span class="s3"># Incompatible types in assignment (expression has type &quot;Index&quot;, variable</span>
+    <span class="s3"># has type &quot;PeriodIndex&quot;)</span>
+    <span class="s1">labels = labels.insert(</span><span class="s5">0</span><span class="s0">, </span><span class="s1">NaT)  </span><span class="s3"># type: ignore[assignment]</span>
+    <span class="s0">return </span><span class="s1">binner</span><span class="s0">, </span><span class="s1">bins</span><span class="s0">, </span><span class="s1">labels</span>
+
+
+<span class="s0">def </span><span class="s1">_adjust_dates_anchored(</span>
+    <span class="s1">first: Timestamp</span><span class="s0">,</span>
+    <span class="s1">last: Timestamp</span><span class="s0">,</span>
+    <span class="s1">freq: Tick</span><span class="s0">,</span>
+    <span class="s1">closed: Literal[</span><span class="s4">&quot;right&quot;</span><span class="s0">, </span><span class="s4">&quot;left&quot;</span><span class="s1">] = </span><span class="s4">&quot;right&quot;</span><span class="s0">,</span>
+    <span class="s1">origin=</span><span class="s4">&quot;start_day&quot;</span><span class="s0">,</span>
+    <span class="s1">offset: Timedelta | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+<span class="s1">) -&gt; tuple[Timestamp</span><span class="s0">, </span><span class="s1">Timestamp]:</span>
+    <span class="s3"># First and last offsets should be calculated from the start day to fix an</span>
+    <span class="s3"># error cause by resampling across multiple days when a one day period is</span>
+    <span class="s3"># not a multiple of the frequency. See GH 8683</span>
+    <span class="s3"># To handle frequencies that are not multiple or divisible by a day we let</span>
+    <span class="s3"># the possibility to define a fixed origin timestamp. See GH 31809</span>
+    <span class="s1">origin_nanos = </span><span class="s5">0  </span><span class="s3"># origin == &quot;epoch&quot;</span>
+    <span class="s0">if </span><span class="s1">origin == </span><span class="s4">&quot;start_day&quot;</span><span class="s1">:</span>
+        <span class="s1">origin_nanos = first.normalize().value</span>
+    <span class="s0">elif </span><span class="s1">origin == </span><span class="s4">&quot;start&quot;</span><span class="s1">:</span>
+        <span class="s1">origin_nanos = first.value</span>
+    <span class="s0">elif </span><span class="s1">isinstance(origin</span><span class="s0">, </span><span class="s1">Timestamp):</span>
+        <span class="s1">origin_nanos = origin.value</span>
+    <span class="s0">elif </span><span class="s1">origin </span><span class="s0">in </span><span class="s1">[</span><span class="s4">&quot;end&quot;</span><span class="s0">, </span><span class="s4">&quot;end_day&quot;</span><span class="s1">]:</span>
+        <span class="s1">origin = last </span><span class="s0">if </span><span class="s1">origin == </span><span class="s4">&quot;end&quot; </span><span class="s0">else </span><span class="s1">last.ceil(</span><span class="s4">&quot;D&quot;</span><span class="s1">)</span>
+        <span class="s1">sub_freq_times = (origin.value - first.value) // freq.nanos</span>
+        <span class="s0">if </span><span class="s1">closed == </span><span class="s4">&quot;left&quot;</span><span class="s1">:</span>
+            <span class="s1">sub_freq_times += </span><span class="s5">1</span>
+        <span class="s1">first = origin - sub_freq_times * freq</span>
+        <span class="s1">origin_nanos = first.value</span>
+    <span class="s1">origin_nanos += offset.value </span><span class="s0">if </span><span class="s1">offset </span><span class="s0">else </span><span class="s5">0</span>
+
+    <span class="s3"># GH 10117 &amp; GH 19375. If first and last contain timezone information,</span>
+    <span class="s3"># Perform the calculation in UTC in order to avoid localizing on an</span>
+    <span class="s3"># Ambiguous or Nonexistent time.</span>
+    <span class="s1">first_tzinfo = first.tzinfo</span>
+    <span class="s1">last_tzinfo = last.tzinfo</span>
+    <span class="s0">if </span><span class="s1">first_tzinfo </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s1">first = first.tz_convert(</span><span class="s4">&quot;UTC&quot;</span><span class="s1">)</span>
+    <span class="s0">if </span><span class="s1">last_tzinfo </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s1">last = last.tz_convert(</span><span class="s4">&quot;UTC&quot;</span><span class="s1">)</span>
+
+    <span class="s1">foffset = (first.value - origin_nanos) % freq.nanos</span>
+    <span class="s1">loffset = (last.value - origin_nanos) % freq.nanos</span>
+
+    <span class="s0">if </span><span class="s1">closed == </span><span class="s4">&quot;right&quot;</span><span class="s1">:</span>
+        <span class="s0">if </span><span class="s1">foffset &gt; </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s3"># roll back</span>
+            <span class="s1">fresult_int = first.value - foffset</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">fresult_int = first.value - freq.nanos</span>
+
+        <span class="s0">if </span><span class="s1">loffset &gt; </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s3"># roll forward</span>
+            <span class="s1">lresult_int = last.value + (freq.nanos - loffset)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s3"># already the end of the road</span>
+            <span class="s1">lresult_int = last.value</span>
+    <span class="s0">else</span><span class="s1">:  </span><span class="s3"># closed == 'left'</span>
+        <span class="s0">if </span><span class="s1">foffset &gt; </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s1">fresult_int = first.value - foffset</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s3"># start of the road</span>
+            <span class="s1">fresult_int = first.value</span>
+
+        <span class="s0">if </span><span class="s1">loffset &gt; </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s3"># roll forward</span>
+            <span class="s1">lresult_int = last.value + (freq.nanos - loffset)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">lresult_int = last.value + freq.nanos</span>
+    <span class="s1">fresult = Timestamp(fresult_int)</span>
+    <span class="s1">lresult = Timestamp(lresult_int)</span>
+    <span class="s0">if </span><span class="s1">first_tzinfo </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s1">fresult = fresult.tz_localize(</span><span class="s4">&quot;UTC&quot;</span><span class="s1">).tz_convert(first_tzinfo)</span>
+    <span class="s0">if </span><span class="s1">last_tzinfo </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s1">lresult = lresult.tz_localize(</span><span class="s4">&quot;UTC&quot;</span><span class="s1">).tz_convert(last_tzinfo)</span>
+    <span class="s0">return </span><span class="s1">fresult</span><span class="s0">, </span><span class="s1">lresult</span>
+
+
+<span class="s0">def </span><span class="s1">asfreq(</span>
+    <span class="s1">obj: NDFrameT</span><span class="s0">,</span>
+    <span class="s1">freq</span><span class="s0">,</span>
+    <span class="s1">method=</span><span class="s0">None,</span>
+    <span class="s1">how=</span><span class="s0">None,</span>
+    <span class="s1">normalize: bool = </span><span class="s0">False,</span>
+    <span class="s1">fill_value=</span><span class="s0">None,</span>
+<span class="s1">) -&gt; NDFrameT:</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Utility frequency conversion method for Series/DataFrame. 
+ 
+    See :meth:`pandas.NDFrame.asfreq` for full documentation. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">isinstance(obj.index</span><span class="s0">, </span><span class="s1">PeriodIndex):</span>
+        <span class="s0">if </span><span class="s1">method </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">NotImplementedError(</span><span class="s4">&quot;'method' argument is not supported&quot;</span><span class="s1">)</span>
+
+        <span class="s0">if </span><span class="s1">how </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">how = </span><span class="s4">&quot;E&quot;</span>
+
+        <span class="s1">new_obj = obj.copy()</span>
+        <span class="s1">new_obj.index = obj.index.asfreq(freq</span><span class="s0">, </span><span class="s1">how=how)</span>
+
+    <span class="s0">elif </span><span class="s1">len(obj.index) == </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s1">new_obj = obj.copy()</span>
+
+        <span class="s1">new_obj.index = _asfreq_compat(obj.index</span><span class="s0">, </span><span class="s1">freq)</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">dti = date_range(obj.index.min()</span><span class="s0">, </span><span class="s1">obj.index.max()</span><span class="s0">, </span><span class="s1">freq=freq)</span>
+        <span class="s1">dti.name = obj.index.name</span>
+        <span class="s1">new_obj = obj.reindex(dti</span><span class="s0">, </span><span class="s1">method=method</span><span class="s0">, </span><span class="s1">fill_value=fill_value)</span>
+        <span class="s0">if </span><span class="s1">normalize:</span>
+            <span class="s1">new_obj.index = new_obj.index.normalize()</span>
+
+    <span class="s0">return </span><span class="s1">new_obj</span>
+
+
+<span class="s0">def </span><span class="s1">_asfreq_compat(index: DatetimeIndex | PeriodIndex | TimedeltaIndex</span><span class="s0">, </span><span class="s1">freq):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Helper to mimic asfreq on (empty) DatetimeIndex and TimedeltaIndex. 
+ 
+    Parameters 
+    ---------- 
+    index : PeriodIndex, DatetimeIndex, or TimedeltaIndex 
+    freq : DateOffset 
+ 
+    Returns 
+    ------- 
+    same type as index 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">len(index) != </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s3"># This should never be reached, always checked by the caller</span>
+        <span class="s0">raise </span><span class="s1">ValueError(</span>
+            <span class="s4">&quot;Can only set arbitrary freq for empty DatetimeIndex or TimedeltaIndex&quot;</span>
+        <span class="s1">)</span>
+    <span class="s1">new_index: Index</span>
+    <span class="s0">if </span><span class="s1">isinstance(index</span><span class="s0">, </span><span class="s1">PeriodIndex):</span>
+        <span class="s1">new_index = index.asfreq(freq=freq)</span>
+    <span class="s0">elif </span><span class="s1">isinstance(index</span><span class="s0">, </span><span class="s1">DatetimeIndex):</span>
+        <span class="s1">new_index = DatetimeIndex([]</span><span class="s0">, </span><span class="s1">dtype=index.dtype</span><span class="s0">, </span><span class="s1">freq=freq</span><span class="s0">, </span><span class="s1">name=index.name)</span>
+    <span class="s0">elif </span><span class="s1">isinstance(index</span><span class="s0">, </span><span class="s1">TimedeltaIndex):</span>
+        <span class="s1">new_index = TimedeltaIndex([]</span><span class="s0">, </span><span class="s1">dtype=index.dtype</span><span class="s0">, </span><span class="s1">freq=freq</span><span class="s0">, </span><span class="s1">name=index.name)</span>
+    <span class="s0">else</span><span class="s1">:  </span><span class="s3"># pragma: no cover</span>
+        <span class="s0">raise </span><span class="s1">TypeError(type(index))</span>
+    <span class="s0">return </span><span class="s1">new_index</span>
+</pre>
+</body>
+</html>

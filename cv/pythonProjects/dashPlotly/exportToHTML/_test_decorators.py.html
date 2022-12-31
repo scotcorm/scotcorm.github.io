@@ -1,0 +1,329 @@
+<html>
+<head>
+<title>_test_decorators.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #808080;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_test_decorators.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+This module provides decorator functions which can be applied to test objects 
+in order to skip those objects when certain conditions occur. A sample use case 
+is to detect if the platform is missing ``matplotlib``. If so, any test objects 
+which require ``matplotlib`` and decorated with ``@td.skip_if_no_mpl`` will be 
+skipped by ``pytest`` during the execution of the test suite. 
+ 
+To illustrate, after importing this module: 
+ 
+import pandas.util._test_decorators as td 
+ 
+The decorators can be applied to classes: 
+ 
+@td.skip_if_some_reason 
+class Foo: 
+    ... 
+ 
+Or individual functions: 
+ 
+@td.skip_if_some_reason 
+def test_foo(): 
+    ... 
+ 
+For more information, refer to the ``pytest`` documentation on ``skipif``. 
+&quot;&quot;&quot;</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">from </span><span class="s1">contextlib </span><span class="s2">import </span><span class="s1">contextmanager</span>
+<span class="s2">import </span><span class="s1">locale</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Callable</span>
+<span class="s2">import </span><span class="s1">warnings</span>
+
+<span class="s2">import </span><span class="s1">numpy </span><span class="s2">as </span><span class="s1">np</span>
+<span class="s2">import </span><span class="s1">pytest</span>
+
+<span class="s2">from </span><span class="s1">pandas._config </span><span class="s2">import </span><span class="s1">get_option</span>
+
+<span class="s2">from </span><span class="s1">pandas.compat </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">IS64</span><span class="s2">,</span>
+    <span class="s1">is_platform_windows</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas.compat._optional </span><span class="s2">import </span><span class="s1">import_optional_dependency</span>
+
+<span class="s2">from </span><span class="s1">pandas.core.computation.expressions </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">NUMEXPR_INSTALLED</span><span class="s2">,</span>
+    <span class="s1">USE_NUMEXPR</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas.util.version </span><span class="s2">import </span><span class="s1">Version</span>
+
+
+<span class="s2">def </span><span class="s1">safe_import(mod_name: str</span><span class="s2">, </span><span class="s1">min_version: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Parameters 
+    ---------- 
+    mod_name : str 
+        Name of the module to be imported 
+    min_version : str, default None 
+        Minimum required version of the specified mod_name 
+ 
+    Returns 
+    ------- 
+    object 
+        The imported module if successful, or False 
+    &quot;&quot;&quot;</span>
+    <span class="s2">with </span><span class="s1">warnings.catch_warnings():</span>
+        <span class="s3"># Suppress warnings that we can't do anything about,</span>
+        <span class="s3">#  e.g. from aiohttp</span>
+        <span class="s1">warnings.filterwarnings(</span>
+            <span class="s4">&quot;ignore&quot;</span><span class="s2">,</span>
+            <span class="s1">category=DeprecationWarning</span><span class="s2">,</span>
+            <span class="s1">module=</span><span class="s4">&quot;aiohttp&quot;</span><span class="s2">,</span>
+            <span class="s1">message=</span><span class="s4">&quot;.*decorator is deprecated since Python 3.8.*&quot;</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+        <span class="s3"># fastparquet import accesses pd.Int64Index</span>
+        <span class="s1">warnings.filterwarnings(</span>
+            <span class="s4">&quot;ignore&quot;</span><span class="s2">,</span>
+            <span class="s1">category=FutureWarning</span><span class="s2">,</span>
+            <span class="s1">module=</span><span class="s4">&quot;fastparquet&quot;</span><span class="s2">,</span>
+            <span class="s1">message=</span><span class="s4">&quot;.*Int64Index.*&quot;</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">mod = __import__(mod_name)</span>
+        <span class="s2">except </span><span class="s1">ImportError:</span>
+            <span class="s2">return False</span>
+
+    <span class="s2">if not </span><span class="s1">min_version:</span>
+        <span class="s2">return </span><span class="s1">mod</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">import </span><span class="s1">sys</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">version = getattr(sys.modules[mod_name]</span><span class="s2">, </span><span class="s4">&quot;__version__&quot;</span><span class="s1">)</span>
+        <span class="s2">except </span><span class="s1">AttributeError:</span>
+            <span class="s3"># xlrd uses a capitalized attribute name</span>
+            <span class="s1">version = getattr(sys.modules[mod_name]</span><span class="s2">, </span><span class="s4">&quot;__VERSION__&quot;</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">version </span><span class="s2">and </span><span class="s1">Version(version) &gt;= Version(min_version):</span>
+            <span class="s2">return </span><span class="s1">mod</span>
+
+    <span class="s2">return False</span>
+
+
+<span class="s2">def </span><span class="s1">_skip_if_no_mpl():</span>
+    <span class="s1">mod = safe_import(</span><span class="s4">&quot;matplotlib&quot;</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">mod:</span>
+        <span class="s1">mod.use(</span><span class="s4">&quot;Agg&quot;</span><span class="s1">)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">return True</span>
+
+
+<span class="s2">def </span><span class="s1">_skip_if_has_locale():</span>
+    <span class="s1">lang</span><span class="s2">, </span><span class="s1">_ = locale.getlocale()</span>
+    <span class="s2">if </span><span class="s1">lang </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s2">return True</span>
+
+
+<span class="s2">def </span><span class="s1">_skip_if_not_us_locale():</span>
+    <span class="s1">lang</span><span class="s2">, </span><span class="s1">_ = locale.getlocale()</span>
+    <span class="s2">if </span><span class="s1">lang != </span><span class="s4">&quot;en_US&quot;</span><span class="s1">:</span>
+        <span class="s2">return True</span>
+
+
+<span class="s2">def </span><span class="s1">_skip_if_no_scipy() -&gt; bool:</span>
+    <span class="s2">return not </span><span class="s1">(</span>
+        <span class="s1">safe_import(</span><span class="s4">&quot;scipy.stats&quot;</span><span class="s1">)</span>
+        <span class="s2">and </span><span class="s1">safe_import(</span><span class="s4">&quot;scipy.sparse&quot;</span><span class="s1">)</span>
+        <span class="s2">and </span><span class="s1">safe_import(</span><span class="s4">&quot;scipy.interpolate&quot;</span><span class="s1">)</span>
+        <span class="s2">and </span><span class="s1">safe_import(</span><span class="s4">&quot;scipy.signal&quot;</span><span class="s1">)</span>
+    <span class="s1">)</span>
+
+
+<span class="s3"># TODO(pytest#7469): return type, _pytest.mark.structures.MarkDecorator is not public</span>
+<span class="s3"># https://github.com/pytest-dev/pytest/issues/7469</span>
+<span class="s2">def </span><span class="s1">skip_if_installed(package: str):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Skip a test if a package is installed. 
+ 
+    Parameters 
+    ---------- 
+    package : str 
+        The name of the package. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">return </span><span class="s1">pytest.mark.skipif(</span>
+        <span class="s1">safe_import(package)</span><span class="s2">, </span><span class="s1">reason=</span><span class="s4">f&quot;Skipping because </span><span class="s2">{</span><span class="s1">package</span><span class="s2">} </span><span class="s4">is installed.&quot;</span>
+    <span class="s1">)</span>
+
+
+<span class="s3"># TODO(pytest#7469): return type, _pytest.mark.structures.MarkDecorator is not public</span>
+<span class="s3"># https://github.com/pytest-dev/pytest/issues/7469</span>
+<span class="s2">def </span><span class="s1">skip_if_no(package: str</span><span class="s2">, </span><span class="s1">min_version: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Generic function to help skip tests when required packages are not 
+    present on the testing system. 
+ 
+    This function returns a pytest mark with a skip condition that will be 
+    evaluated during test collection. An attempt will be made to import the 
+    specified ``package`` and optionally ensure it meets the ``min_version`` 
+ 
+    The mark can be used as either a decorator for a test function or to be 
+    applied to parameters in pytest.mark.parametrize calls or parametrized 
+    fixtures. 
+ 
+    If the import and version check are unsuccessful, then the test function 
+    (or test case when used in conjunction with parametrization) will be 
+    skipped. 
+ 
+    Parameters 
+    ---------- 
+    package: str 
+        The name of the required package. 
+    min_version: str or None, default None 
+        Optional minimum version of the package. 
+ 
+    Returns 
+    ------- 
+    _pytest.mark.structures.MarkDecorator 
+        a pytest.mark.skipif to use as either a test decorator or a 
+        parametrization mark. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">msg = </span><span class="s4">f&quot;Could not import '</span><span class="s2">{</span><span class="s1">package</span><span class="s2">}</span><span class="s4">'&quot;</span>
+    <span class="s2">if </span><span class="s1">min_version:</span>
+        <span class="s1">msg += </span><span class="s4">f&quot; satisfying a min_version of </span><span class="s2">{</span><span class="s1">min_version</span><span class="s2">}</span><span class="s4">&quot;</span>
+    <span class="s2">return </span><span class="s1">pytest.mark.skipif(</span>
+        <span class="s2">not </span><span class="s1">safe_import(package</span><span class="s2">, </span><span class="s1">min_version=min_version)</span><span class="s2">, </span><span class="s1">reason=msg</span>
+    <span class="s1">)</span>
+
+
+<span class="s1">skip_if_no_mpl = pytest.mark.skipif(</span>
+    <span class="s1">_skip_if_no_mpl()</span><span class="s2">, </span><span class="s1">reason=</span><span class="s4">&quot;Missing matplotlib dependency&quot;</span>
+<span class="s1">)</span>
+<span class="s1">skip_if_mpl = pytest.mark.skipif(</span><span class="s2">not </span><span class="s1">_skip_if_no_mpl()</span><span class="s2">, </span><span class="s1">reason=</span><span class="s4">&quot;matplotlib is present&quot;</span><span class="s1">)</span>
+<span class="s1">skip_if_32bit = pytest.mark.skipif(</span><span class="s2">not </span><span class="s1">IS64</span><span class="s2">, </span><span class="s1">reason=</span><span class="s4">&quot;skipping for 32 bit&quot;</span><span class="s1">)</span>
+<span class="s1">skip_if_windows = pytest.mark.skipif(is_platform_windows()</span><span class="s2">, </span><span class="s1">reason=</span><span class="s4">&quot;Running on Windows&quot;</span><span class="s1">)</span>
+<span class="s1">skip_if_has_locale = pytest.mark.skipif(</span>
+    <span class="s1">_skip_if_has_locale()</span><span class="s2">, </span><span class="s1">reason=</span><span class="s4">f&quot;Specific locale is set </span><span class="s2">{</span><span class="s1">locale.getlocale()[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">}</span><span class="s4">&quot;</span>
+<span class="s1">)</span>
+<span class="s1">skip_if_not_us_locale = pytest.mark.skipif(</span>
+    <span class="s1">_skip_if_not_us_locale()</span><span class="s2">, </span><span class="s1">reason=</span><span class="s4">f&quot;Specific locale is set </span><span class="s2">{</span><span class="s1">locale.getlocale()[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">}</span><span class="s4">&quot;</span>
+<span class="s1">)</span>
+<span class="s1">skip_if_no_scipy = pytest.mark.skipif(</span>
+    <span class="s1">_skip_if_no_scipy()</span><span class="s2">, </span><span class="s1">reason=</span><span class="s4">&quot;Missing SciPy requirement&quot;</span>
+<span class="s1">)</span>
+<span class="s1">skip_if_no_ne = pytest.mark.skipif(</span>
+    <span class="s2">not </span><span class="s1">USE_NUMEXPR</span><span class="s2">,</span>
+    <span class="s1">reason=</span><span class="s4">f&quot;numexpr enabled-&gt;</span><span class="s2">{</span><span class="s1">USE_NUMEXPR</span><span class="s2">}</span><span class="s4">, installed-&gt;</span><span class="s2">{</span><span class="s1">NUMEXPR_INSTALLED</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s2">,</span>
+<span class="s1">)</span>
+
+
+<span class="s3"># TODO(pytest#7469): return type, _pytest.mark.structures.MarkDecorator is not public</span>
+<span class="s3"># https://github.com/pytest-dev/pytest/issues/7469</span>
+<span class="s2">def </span><span class="s1">skip_if_np_lt(ver_str: str</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">reason: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s2">if </span><span class="s1">reason </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">reason = </span><span class="s4">f&quot;NumPy </span><span class="s2">{</span><span class="s1">ver_str</span><span class="s2">} </span><span class="s4">or greater required&quot;</span>
+    <span class="s2">return </span><span class="s1">pytest.mark.skipif(</span>
+        <span class="s1">Version(np.__version__) &lt; Version(ver_str)</span><span class="s2">,</span>
+        <span class="s1">*args</span><span class="s2">,</span>
+        <span class="s1">reason=reason</span><span class="s2">,</span>
+    <span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">parametrize_fixture_doc(*args):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Intended for use as a decorator for parametrized fixture, 
+    this function will wrap the decorated function with a pytest 
+    ``parametrize_fixture_doc`` mark. That mark will format 
+    initial fixture docstring by replacing placeholders {0}, {1} etc 
+    with parameters passed as arguments. 
+ 
+    Parameters 
+    ---------- 
+    args: iterable 
+        Positional arguments for docstring. 
+ 
+    Returns 
+    ------- 
+    function 
+        The decorated function wrapped within a pytest 
+        ``parametrize_fixture_doc`` mark 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">documented_fixture(fixture):</span>
+        <span class="s1">fixture.__doc__ = fixture.__doc__.format(*args)</span>
+        <span class="s2">return </span><span class="s1">fixture</span>
+
+    <span class="s2">return </span><span class="s1">documented_fixture</span>
+
+
+<span class="s2">def </span><span class="s1">check_file_leaks(func) -&gt; Callable:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Decorate a test function to check that we are not leaking file descriptors. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">with </span><span class="s1">file_leak_context():</span>
+        <span class="s2">return </span><span class="s1">func</span>
+
+
+<span class="s1">@contextmanager</span>
+<span class="s2">def </span><span class="s1">file_leak_context():</span>
+    <span class="s0">&quot;&quot;&quot; 
+    ContextManager analogue to check_file_leaks. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">psutil = safe_import(</span><span class="s4">&quot;psutil&quot;</span><span class="s1">)</span>
+    <span class="s2">if not </span><span class="s1">psutil:</span>
+        <span class="s2">yield</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">proc = psutil.Process()</span>
+        <span class="s1">flist = proc.open_files()</span>
+        <span class="s1">conns = proc.connections()</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">yield</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">flist2 = proc.open_files()</span>
+            <span class="s3"># on some builds open_files includes file position, which we _dont_</span>
+            <span class="s3">#  expect to remain unchanged, so we need to compare excluding that</span>
+            <span class="s1">flist_ex = [(x.path</span><span class="s2">, </span><span class="s1">x.fd) </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">flist]</span>
+            <span class="s1">flist2_ex = [(x.path</span><span class="s2">, </span><span class="s1">x.fd) </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">flist2]</span>
+            <span class="s2">assert </span><span class="s1">flist2_ex == flist_ex</span><span class="s2">, </span><span class="s1">(flist2</span><span class="s2">, </span><span class="s1">flist)</span>
+
+            <span class="s1">conns2 = proc.connections()</span>
+            <span class="s2">assert </span><span class="s1">conns2 == conns</span><span class="s2">, </span><span class="s1">(conns2</span><span class="s2">, </span><span class="s1">conns)</span>
+
+
+<span class="s2">def </span><span class="s1">async_mark():</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">import_optional_dependency(</span><span class="s4">&quot;pytest_asyncio&quot;</span><span class="s1">)</span>
+        <span class="s1">async_mark = pytest.mark.asyncio</span>
+    <span class="s2">except </span><span class="s1">ImportError:</span>
+        <span class="s1">async_mark = pytest.mark.skip(reason=</span><span class="s4">&quot;Missing dependency pytest-asyncio&quot;</span><span class="s1">)</span>
+
+    <span class="s2">return </span><span class="s1">async_mark</span>
+
+
+<span class="s2">def </span><span class="s1">mark_array_manager_not_yet_implemented(request):</span>
+    <span class="s1">mark = pytest.mark.xfail(reason=</span><span class="s4">&quot;Not yet implemented for ArrayManager&quot;</span><span class="s1">)</span>
+    <span class="s1">request.node.add_marker(mark)</span>
+
+
+<span class="s1">skip_array_manager_not_yet_implemented = pytest.mark.xfail(</span>
+    <span class="s1">get_option(</span><span class="s4">&quot;mode.data_manager&quot;</span><span class="s1">) == </span><span class="s4">&quot;array&quot;</span><span class="s2">,</span>
+    <span class="s1">reason=</span><span class="s4">&quot;Not yet implemented for ArrayManager&quot;</span><span class="s2">,</span>
+<span class="s1">)</span>
+
+<span class="s1">skip_array_manager_invalid_test = pytest.mark.skipif(</span>
+    <span class="s1">get_option(</span><span class="s4">&quot;mode.data_manager&quot;</span><span class="s1">) == </span><span class="s4">&quot;array&quot;</span><span class="s2">,</span>
+    <span class="s1">reason=</span><span class="s4">&quot;Test that relies on BlockManager internals or specific behaviour&quot;</span><span class="s2">,</span>
+<span class="s1">)</span>
+</pre>
+</body>
+</html>

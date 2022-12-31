@@ -1,0 +1,1075 @@
+<html>
+<head>
+<title>types.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #6897bb;}
+.s4 { color: #808080;}
+.s5 { color: #6a8759;}
+.s6 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+types.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">stat</span>
+<span class="s0">import </span><span class="s1">typing </span><span class="s0">as </span><span class="s1">t</span>
+<span class="s0">from </span><span class="s1">datetime </span><span class="s0">import </span><span class="s1">datetime</span>
+<span class="s0">from </span><span class="s1">gettext </span><span class="s0">import </span><span class="s1">gettext </span><span class="s0">as </span><span class="s1">_</span>
+<span class="s0">from </span><span class="s1">gettext </span><span class="s0">import </span><span class="s1">ngettext</span>
+
+<span class="s0">from </span><span class="s1">._compat </span><span class="s0">import </span><span class="s1">_get_argv_encoding</span>
+<span class="s0">from </span><span class="s1">._compat </span><span class="s0">import </span><span class="s1">get_filesystem_encoding</span>
+<span class="s0">from </span><span class="s1">._compat </span><span class="s0">import </span><span class="s1">open_stream</span>
+<span class="s0">from </span><span class="s1">.exceptions </span><span class="s0">import </span><span class="s1">BadParameter</span>
+<span class="s0">from </span><span class="s1">.utils </span><span class="s0">import </span><span class="s1">LazyFile</span>
+<span class="s0">from </span><span class="s1">.utils </span><span class="s0">import </span><span class="s1">safecall</span>
+
+<span class="s0">if </span><span class="s1">t.TYPE_CHECKING:</span>
+    <span class="s0">import </span><span class="s1">typing_extensions </span><span class="s0">as </span><span class="s1">te</span>
+    <span class="s0">from </span><span class="s1">.core </span><span class="s0">import </span><span class="s1">Context</span>
+    <span class="s0">from </span><span class="s1">.core </span><span class="s0">import </span><span class="s1">Parameter</span>
+    <span class="s0">from </span><span class="s1">.shell_completion </span><span class="s0">import </span><span class="s1">CompletionItem</span>
+
+
+<span class="s0">class </span><span class="s1">ParamType:</span>
+    <span class="s2">&quot;&quot;&quot;Represents the type of a parameter. Validates and converts values 
+    from the command line or Python into the correct type. 
+ 
+    To implement a custom type, subclass and implement at least the 
+    following: 
+ 
+    -   The :attr:`name` class attribute must be set. 
+    -   Calling an instance of the type with ``None`` must return 
+        ``None``. This is already implemented by default. 
+    -   :meth:`convert` must convert string values to the correct type. 
+    -   :meth:`convert` must accept values that are already the correct 
+        type. 
+    -   It must be able to convert a value if the ``ctx`` and ``param`` 
+        arguments are ``None``. This can occur when converting prompt 
+        input. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">is_composite: t.ClassVar[bool] = </span><span class="s0">False</span>
+    <span class="s1">arity: t.ClassVar[int] = </span><span class="s3">1</span>
+
+    <span class="s4">#: the descriptive name of this type</span>
+    <span class="s1">name: str</span>
+
+    <span class="s4">#: if a list of this type is expected and the value is pulled from a</span>
+    <span class="s4">#: string environment variable, this is what splits it up.  `None`</span>
+    <span class="s4">#: means any whitespace.  For all parameters the general rule is that</span>
+    <span class="s4">#: whitespace splits them up.  The exception are paths and files which</span>
+    <span class="s4">#: are split by ``os.path.pathsep`` by default (&quot;:&quot; on Unix and &quot;;&quot; on</span>
+    <span class="s4">#: Windows).</span>
+    <span class="s1">envvar_list_splitter: t.ClassVar[t.Optional[str]] = </span><span class="s0">None</span>
+
+    <span class="s0">def </span><span class="s1">to_info_dict(self) -&gt; t.Dict[str</span><span class="s0">, </span><span class="s1">t.Any]:</span>
+        <span class="s2">&quot;&quot;&quot;Gather information that could be useful for a tool generating 
+        user-facing documentation. 
+ 
+        Use :meth:`click.Context.to_info_dict` to traverse the entire 
+        CLI structure. 
+ 
+        .. versionadded:: 8.0 
+        &quot;&quot;&quot;</span>
+        <span class="s4"># The class name without the &quot;ParamType&quot; suffix.</span>
+        <span class="s1">param_type = type(self).__name__.partition(</span><span class="s5">&quot;ParamType&quot;</span><span class="s1">)[</span><span class="s3">0</span><span class="s1">]</span>
+        <span class="s1">param_type = param_type.partition(</span><span class="s5">&quot;ParameterType&quot;</span><span class="s1">)[</span><span class="s3">0</span><span class="s1">]</span>
+        <span class="s0">return </span><span class="s1">{</span><span class="s5">&quot;param_type&quot;</span><span class="s1">: param_type</span><span class="s0">, </span><span class="s5">&quot;name&quot;</span><span class="s1">: self.name}</span>
+
+    <span class="s0">def </span><span class="s1">__call__(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">value: t.Any</span><span class="s0">,</span>
+        <span class="s1">param: t.Optional[</span><span class="s5">&quot;Parameter&quot;</span><span class="s1">] = </span><span class="s0">None,</span>
+        <span class="s1">ctx: t.Optional[</span><span class="s5">&quot;Context&quot;</span><span class="s1">] = </span><span class="s0">None,</span>
+    <span class="s1">) -&gt; t.Any:</span>
+        <span class="s0">if </span><span class="s1">value </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">self.convert(value</span><span class="s0">, </span><span class="s1">param</span><span class="s0">, </span><span class="s1">ctx)</span>
+
+    <span class="s0">def </span><span class="s1">get_metavar(self</span><span class="s0">, </span><span class="s1">param: </span><span class="s5">&quot;Parameter&quot;</span><span class="s1">) -&gt; t.Optional[str]:</span>
+        <span class="s2">&quot;&quot;&quot;Returns the metavar default for this param if it provides one.&quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">get_missing_message(self</span><span class="s0">, </span><span class="s1">param: </span><span class="s5">&quot;Parameter&quot;</span><span class="s1">) -&gt; t.Optional[str]:</span>
+        <span class="s2">&quot;&quot;&quot;Optionally might return extra information about a missing 
+        parameter. 
+ 
+        .. versionadded:: 2.0 
+        &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">convert(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">value: t.Any</span><span class="s0">, </span><span class="s1">param: t.Optional[</span><span class="s5">&quot;Parameter&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">ctx: t.Optional[</span><span class="s5">&quot;Context&quot;</span><span class="s1">]</span>
+    <span class="s1">) -&gt; t.Any:</span>
+        <span class="s2">&quot;&quot;&quot;Convert the value to the correct type. This is not called if 
+        the value is ``None`` (the missing value). 
+ 
+        This must accept string values from the command line, as well as 
+        values that are already the correct type. It may also convert 
+        other compatible types. 
+ 
+        The ``param`` and ``ctx`` arguments may be ``None`` in certain 
+        situations, such as when converting prompt input. 
+ 
+        If the value cannot be converted, call :meth:`fail` with a 
+        descriptive message. 
+ 
+        :param value: The value to convert. 
+        :param param: The parameter that is using this type to convert 
+            its value. May be ``None``. 
+        :param ctx: The current context that arrived at this value. May 
+            be ``None``. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">value</span>
+
+    <span class="s0">def </span><span class="s1">split_envvar_value(self</span><span class="s0">, </span><span class="s1">rv: str) -&gt; t.Sequence[str]:</span>
+        <span class="s2">&quot;&quot;&quot;Given a value from an environment variable this splits it up 
+        into small chunks depending on the defined envvar list splitter. 
+ 
+        If the splitter is set to `None`, which means that whitespace splits, 
+        then leading and trailing whitespace is ignored.  Otherwise, leading 
+        and trailing splitters usually lead to empty items being included. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">(rv </span><span class="s0">or </span><span class="s5">&quot;&quot;</span><span class="s1">).split(self.envvar_list_splitter)</span>
+
+    <span class="s0">def </span><span class="s1">fail(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">message: str</span><span class="s0">,</span>
+        <span class="s1">param: t.Optional[</span><span class="s5">&quot;Parameter&quot;</span><span class="s1">] = </span><span class="s0">None,</span>
+        <span class="s1">ctx: t.Optional[</span><span class="s5">&quot;Context&quot;</span><span class="s1">] = </span><span class="s0">None,</span>
+    <span class="s1">) -&gt; </span><span class="s5">&quot;t.NoReturn&quot;</span><span class="s1">:</span>
+        <span class="s2">&quot;&quot;&quot;Helper method to fail with an invalid value message.&quot;&quot;&quot;</span>
+        <span class="s0">raise </span><span class="s1">BadParameter(message</span><span class="s0">, </span><span class="s1">ctx=ctx</span><span class="s0">, </span><span class="s1">param=param)</span>
+
+    <span class="s0">def </span><span class="s1">shell_complete(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">ctx: </span><span class="s5">&quot;Context&quot;</span><span class="s0">, </span><span class="s1">param: </span><span class="s5">&quot;Parameter&quot;</span><span class="s0">, </span><span class="s1">incomplete: str</span>
+    <span class="s1">) -&gt; t.List[</span><span class="s5">&quot;CompletionItem&quot;</span><span class="s1">]:</span>
+        <span class="s2">&quot;&quot;&quot;Return a list of 
+        :class:`~click.shell_completion.CompletionItem` objects for the 
+        incomplete value. Most types do not provide completions, but 
+        some do, and this allows custom types to provide custom 
+        completions as well. 
+ 
+        :param ctx: Invocation context for this command. 
+        :param param: The parameter that is requesting completion. 
+        :param incomplete: Value being completed. May be empty. 
+ 
+        .. versionadded:: 8.0 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">[]</span>
+
+
+<span class="s0">class </span><span class="s1">CompositeParamType(ParamType):</span>
+    <span class="s1">is_composite = </span><span class="s0">True</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">arity(self) -&gt; int:  </span><span class="s4"># type: ignore</span>
+        <span class="s0">raise </span><span class="s1">NotImplementedError()</span>
+
+
+<span class="s0">class </span><span class="s1">FuncParamType(ParamType):</span>
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">func: t.Callable[[t.Any]</span><span class="s0">, </span><span class="s1">t.Any]) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self.name = func.__name__</span>
+        <span class="s1">self.func = func</span>
+
+    <span class="s0">def </span><span class="s1">to_info_dict(self) -&gt; t.Dict[str</span><span class="s0">, </span><span class="s1">t.Any]:</span>
+        <span class="s1">info_dict = super().to_info_dict()</span>
+        <span class="s1">info_dict[</span><span class="s5">&quot;func&quot;</span><span class="s1">] = self.func</span>
+        <span class="s0">return </span><span class="s1">info_dict</span>
+
+    <span class="s0">def </span><span class="s1">convert(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">value: t.Any</span><span class="s0">, </span><span class="s1">param: t.Optional[</span><span class="s5">&quot;Parameter&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">ctx: t.Optional[</span><span class="s5">&quot;Context&quot;</span><span class="s1">]</span>
+    <span class="s1">) -&gt; t.Any:</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">self.func(value)</span>
+        <span class="s0">except </span><span class="s1">ValueError:</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">value = str(value)</span>
+            <span class="s0">except </span><span class="s1">UnicodeError:</span>
+                <span class="s1">value = value.decode(</span><span class="s5">&quot;utf-8&quot;</span><span class="s0">, </span><span class="s5">&quot;replace&quot;</span><span class="s1">)</span>
+
+            <span class="s1">self.fail(value</span><span class="s0">, </span><span class="s1">param</span><span class="s0">, </span><span class="s1">ctx)</span>
+
+
+<span class="s0">class </span><span class="s1">UnprocessedParamType(ParamType):</span>
+    <span class="s1">name = </span><span class="s5">&quot;text&quot;</span>
+
+    <span class="s0">def </span><span class="s1">convert(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">value: t.Any</span><span class="s0">, </span><span class="s1">param: t.Optional[</span><span class="s5">&quot;Parameter&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">ctx: t.Optional[</span><span class="s5">&quot;Context&quot;</span><span class="s1">]</span>
+    <span class="s1">) -&gt; t.Any:</span>
+        <span class="s0">return </span><span class="s1">value</span>
+
+    <span class="s0">def </span><span class="s1">__repr__(self) -&gt; str:</span>
+        <span class="s0">return </span><span class="s5">&quot;UNPROCESSED&quot;</span>
+
+
+<span class="s0">class </span><span class="s1">StringParamType(ParamType):</span>
+    <span class="s1">name = </span><span class="s5">&quot;text&quot;</span>
+
+    <span class="s0">def </span><span class="s1">convert(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">value: t.Any</span><span class="s0">, </span><span class="s1">param: t.Optional[</span><span class="s5">&quot;Parameter&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">ctx: t.Optional[</span><span class="s5">&quot;Context&quot;</span><span class="s1">]</span>
+    <span class="s1">) -&gt; t.Any:</span>
+        <span class="s0">if </span><span class="s1">isinstance(value</span><span class="s0">, </span><span class="s1">bytes):</span>
+            <span class="s1">enc = _get_argv_encoding()</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">value = value.decode(enc)</span>
+            <span class="s0">except </span><span class="s1">UnicodeError:</span>
+                <span class="s1">fs_enc = get_filesystem_encoding()</span>
+                <span class="s0">if </span><span class="s1">fs_enc != enc:</span>
+                    <span class="s0">try</span><span class="s1">:</span>
+                        <span class="s1">value = value.decode(fs_enc)</span>
+                    <span class="s0">except </span><span class="s1">UnicodeError:</span>
+                        <span class="s1">value = value.decode(</span><span class="s5">&quot;utf-8&quot;</span><span class="s0">, </span><span class="s5">&quot;replace&quot;</span><span class="s1">)</span>
+                <span class="s0">else</span><span class="s1">:</span>
+                    <span class="s1">value = value.decode(</span><span class="s5">&quot;utf-8&quot;</span><span class="s0">, </span><span class="s5">&quot;replace&quot;</span><span class="s1">)</span>
+            <span class="s0">return </span><span class="s1">value</span>
+        <span class="s0">return </span><span class="s1">str(value)</span>
+
+    <span class="s0">def </span><span class="s1">__repr__(self) -&gt; str:</span>
+        <span class="s0">return </span><span class="s5">&quot;STRING&quot;</span>
+
+
+<span class="s0">class </span><span class="s1">Choice(ParamType):</span>
+    <span class="s2">&quot;&quot;&quot;The choice type allows a value to be checked against a fixed set 
+    of supported values. All of these values have to be strings. 
+ 
+    You should only pass a list or tuple of choices. Other iterables 
+    (like generators) may lead to surprising results. 
+ 
+    The resulting value will always be one of the originally passed choices 
+    regardless of ``case_sensitive`` or any ``ctx.token_normalize_func`` 
+    being specified. 
+ 
+    See :ref:`choice-opts` for an example. 
+ 
+    :param case_sensitive: Set to false to make choices case 
+        insensitive. Defaults to true. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">name = </span><span class="s5">&quot;choice&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">choices: t.Sequence[str]</span><span class="s0">, </span><span class="s1">case_sensitive: bool = </span><span class="s0">True</span><span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self.choices = choices</span>
+        <span class="s1">self.case_sensitive = case_sensitive</span>
+
+    <span class="s0">def </span><span class="s1">to_info_dict(self) -&gt; t.Dict[str</span><span class="s0">, </span><span class="s1">t.Any]:</span>
+        <span class="s1">info_dict = super().to_info_dict()</span>
+        <span class="s1">info_dict[</span><span class="s5">&quot;choices&quot;</span><span class="s1">] = self.choices</span>
+        <span class="s1">info_dict[</span><span class="s5">&quot;case_sensitive&quot;</span><span class="s1">] = self.case_sensitive</span>
+        <span class="s0">return </span><span class="s1">info_dict</span>
+
+    <span class="s0">def </span><span class="s1">get_metavar(self</span><span class="s0">, </span><span class="s1">param: </span><span class="s5">&quot;Parameter&quot;</span><span class="s1">) -&gt; str:</span>
+        <span class="s1">choices_str = </span><span class="s5">&quot;|&quot;</span><span class="s1">.join(self.choices)</span>
+
+        <span class="s4"># Use curly braces to indicate a required argument.</span>
+        <span class="s0">if </span><span class="s1">param.required </span><span class="s0">and </span><span class="s1">param.param_type_name == </span><span class="s5">&quot;argument&quot;</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s5">f&quot;</span><span class="s0">{{{</span><span class="s1">choices_str</span><span class="s0">}}}</span><span class="s5">&quot;</span>
+
+        <span class="s4"># Use square braces to indicate an option or optional argument.</span>
+        <span class="s0">return </span><span class="s5">f&quot;[</span><span class="s0">{</span><span class="s1">choices_str</span><span class="s0">}</span><span class="s5">]&quot;</span>
+
+    <span class="s0">def </span><span class="s1">get_missing_message(self</span><span class="s0">, </span><span class="s1">param: </span><span class="s5">&quot;Parameter&quot;</span><span class="s1">) -&gt; str:</span>
+        <span class="s0">return </span><span class="s1">_(</span><span class="s5">&quot;Choose from:</span><span class="s0">\n\t</span><span class="s5">{choices}&quot;</span><span class="s1">).format(choices=</span><span class="s5">&quot;,</span><span class="s0">\n\t</span><span class="s5">&quot;</span><span class="s1">.join(self.choices))</span>
+
+    <span class="s0">def </span><span class="s1">convert(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">value: t.Any</span><span class="s0">, </span><span class="s1">param: t.Optional[</span><span class="s5">&quot;Parameter&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">ctx: t.Optional[</span><span class="s5">&quot;Context&quot;</span><span class="s1">]</span>
+    <span class="s1">) -&gt; t.Any:</span>
+        <span class="s4"># Match through normalization and case sensitivity</span>
+        <span class="s4"># first do token_normalize_func, then lowercase</span>
+        <span class="s4"># preserve original `value` to produce an accurate message in</span>
+        <span class="s4"># `self.fail`</span>
+        <span class="s1">normed_value = value</span>
+        <span class="s1">normed_choices = {choice: choice </span><span class="s0">for </span><span class="s1">choice </span><span class="s0">in </span><span class="s1">self.choices}</span>
+
+        <span class="s0">if </span><span class="s1">ctx </span><span class="s0">is not None and </span><span class="s1">ctx.token_normalize_func </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">normed_value = ctx.token_normalize_func(value)</span>
+            <span class="s1">normed_choices = {</span>
+                <span class="s1">ctx.token_normalize_func(normed_choice): original</span>
+                <span class="s0">for </span><span class="s1">normed_choice</span><span class="s0">, </span><span class="s1">original </span><span class="s0">in </span><span class="s1">normed_choices.items()</span>
+            <span class="s1">}</span>
+
+        <span class="s0">if not </span><span class="s1">self.case_sensitive:</span>
+            <span class="s1">normed_value = normed_value.casefold()</span>
+            <span class="s1">normed_choices = {</span>
+                <span class="s1">normed_choice.casefold(): original</span>
+                <span class="s0">for </span><span class="s1">normed_choice</span><span class="s0">, </span><span class="s1">original </span><span class="s0">in </span><span class="s1">normed_choices.items()</span>
+            <span class="s1">}</span>
+
+        <span class="s0">if </span><span class="s1">normed_value </span><span class="s0">in </span><span class="s1">normed_choices:</span>
+            <span class="s0">return </span><span class="s1">normed_choices[normed_value]</span>
+
+        <span class="s1">choices_str = </span><span class="s5">&quot;, &quot;</span><span class="s1">.join(map(repr</span><span class="s0">, </span><span class="s1">self.choices))</span>
+        <span class="s1">self.fail(</span>
+            <span class="s1">ngettext(</span>
+                <span class="s5">&quot;{value!r} is not {choice}.&quot;</span><span class="s0">,</span>
+                <span class="s5">&quot;{value!r} is not one of {choices}.&quot;</span><span class="s0">,</span>
+                <span class="s1">len(self.choices)</span><span class="s0">,</span>
+            <span class="s1">).format(value=value</span><span class="s0">, </span><span class="s1">choice=choices_str</span><span class="s0">, </span><span class="s1">choices=choices_str)</span><span class="s0">,</span>
+            <span class="s1">param</span><span class="s0">,</span>
+            <span class="s1">ctx</span><span class="s0">,</span>
+        <span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">__repr__(self) -&gt; str:</span>
+        <span class="s0">return </span><span class="s5">f&quot;Choice(</span><span class="s0">{</span><span class="s1">list(self.choices)</span><span class="s0">}</span><span class="s5">)&quot;</span>
+
+    <span class="s0">def </span><span class="s1">shell_complete(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">ctx: </span><span class="s5">&quot;Context&quot;</span><span class="s0">, </span><span class="s1">param: </span><span class="s5">&quot;Parameter&quot;</span><span class="s0">, </span><span class="s1">incomplete: str</span>
+    <span class="s1">) -&gt; t.List[</span><span class="s5">&quot;CompletionItem&quot;</span><span class="s1">]:</span>
+        <span class="s2">&quot;&quot;&quot;Complete choices that start with the incomplete value. 
+ 
+        :param ctx: Invocation context for this command. 
+        :param param: The parameter that is requesting completion. 
+        :param incomplete: Value being completed. May be empty. 
+ 
+        .. versionadded:: 8.0 
+        &quot;&quot;&quot;</span>
+        <span class="s0">from </span><span class="s1">click.shell_completion </span><span class="s0">import </span><span class="s1">CompletionItem</span>
+
+        <span class="s1">str_choices = map(str</span><span class="s0">, </span><span class="s1">self.choices)</span>
+
+        <span class="s0">if </span><span class="s1">self.case_sensitive:</span>
+            <span class="s1">matched = (c </span><span class="s0">for </span><span class="s1">c </span><span class="s0">in </span><span class="s1">str_choices </span><span class="s0">if </span><span class="s1">c.startswith(incomplete))</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">incomplete = incomplete.lower()</span>
+            <span class="s1">matched = (c </span><span class="s0">for </span><span class="s1">c </span><span class="s0">in </span><span class="s1">str_choices </span><span class="s0">if </span><span class="s1">c.lower().startswith(incomplete))</span>
+
+        <span class="s0">return </span><span class="s1">[CompletionItem(c) </span><span class="s0">for </span><span class="s1">c </span><span class="s0">in </span><span class="s1">matched]</span>
+
+
+<span class="s0">class </span><span class="s1">DateTime(ParamType):</span>
+    <span class="s2">&quot;&quot;&quot;The DateTime type converts date strings into `datetime` objects. 
+ 
+    The format strings which are checked are configurable, but default to some 
+    common (non-timezone aware) ISO 8601 formats. 
+ 
+    When specifying *DateTime* formats, you should only pass a list or a tuple. 
+    Other iterables, like generators, may lead to surprising results. 
+ 
+    The format strings are processed using ``datetime.strptime``, and this 
+    consequently defines the format strings which are allowed. 
+ 
+    Parsing is tried using each format, in order, and the first format which 
+    parses successfully is used. 
+ 
+    :param formats: A list or tuple of date format strings, in the order in 
+                    which they should be tried. Defaults to 
+                    ``'%Y-%m-%d'``, ``'%Y-%m-%dT%H:%M:%S'``, 
+                    ``'%Y-%m-%d %H:%M:%S'``. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">name = </span><span class="s5">&quot;datetime&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">formats: t.Optional[t.Sequence[str]] = </span><span class="s0">None</span><span class="s1">):</span>
+        <span class="s1">self.formats = formats </span><span class="s0">or </span><span class="s1">[</span><span class="s5">&quot;%Y-%m-%d&quot;</span><span class="s0">, </span><span class="s5">&quot;%Y-%m-%dT%H:%M:%S&quot;</span><span class="s0">, </span><span class="s5">&quot;%Y-%m-%d %H:%M:%S&quot;</span><span class="s1">]</span>
+
+    <span class="s0">def </span><span class="s1">to_info_dict(self) -&gt; t.Dict[str</span><span class="s0">, </span><span class="s1">t.Any]:</span>
+        <span class="s1">info_dict = super().to_info_dict()</span>
+        <span class="s1">info_dict[</span><span class="s5">&quot;formats&quot;</span><span class="s1">] = self.formats</span>
+        <span class="s0">return </span><span class="s1">info_dict</span>
+
+    <span class="s0">def </span><span class="s1">get_metavar(self</span><span class="s0">, </span><span class="s1">param: </span><span class="s5">&quot;Parameter&quot;</span><span class="s1">) -&gt; str:</span>
+        <span class="s0">return </span><span class="s5">f&quot;[</span><span class="s0">{</span><span class="s5">'|'</span><span class="s1">.join(self.formats)</span><span class="s0">}</span><span class="s5">]&quot;</span>
+
+    <span class="s0">def </span><span class="s1">_try_to_convert_date(self</span><span class="s0">, </span><span class="s1">value: t.Any</span><span class="s0">, </span><span class="s1">format: str) -&gt; t.Optional[datetime]:</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">datetime.strptime(value</span><span class="s0">, </span><span class="s1">format)</span>
+        <span class="s0">except </span><span class="s1">ValueError:</span>
+            <span class="s0">return None</span>
+
+    <span class="s0">def </span><span class="s1">convert(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">value: t.Any</span><span class="s0">, </span><span class="s1">param: t.Optional[</span><span class="s5">&quot;Parameter&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">ctx: t.Optional[</span><span class="s5">&quot;Context&quot;</span><span class="s1">]</span>
+    <span class="s1">) -&gt; t.Any:</span>
+        <span class="s0">if </span><span class="s1">isinstance(value</span><span class="s0">, </span><span class="s1">datetime):</span>
+            <span class="s0">return </span><span class="s1">value</span>
+
+        <span class="s0">for </span><span class="s1">format </span><span class="s0">in </span><span class="s1">self.formats:</span>
+            <span class="s1">converted = self._try_to_convert_date(value</span><span class="s0">, </span><span class="s1">format)</span>
+
+            <span class="s0">if </span><span class="s1">converted </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s0">return </span><span class="s1">converted</span>
+
+        <span class="s1">formats_str = </span><span class="s5">&quot;, &quot;</span><span class="s1">.join(map(repr</span><span class="s0">, </span><span class="s1">self.formats))</span>
+        <span class="s1">self.fail(</span>
+            <span class="s1">ngettext(</span>
+                <span class="s5">&quot;{value!r} does not match the format {format}.&quot;</span><span class="s0">,</span>
+                <span class="s5">&quot;{value!r} does not match the formats {formats}.&quot;</span><span class="s0">,</span>
+                <span class="s1">len(self.formats)</span><span class="s0">,</span>
+            <span class="s1">).format(value=value</span><span class="s0">, </span><span class="s1">format=formats_str</span><span class="s0">, </span><span class="s1">formats=formats_str)</span><span class="s0">,</span>
+            <span class="s1">param</span><span class="s0">,</span>
+            <span class="s1">ctx</span><span class="s0">,</span>
+        <span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">__repr__(self) -&gt; str:</span>
+        <span class="s0">return </span><span class="s5">&quot;DateTime&quot;</span>
+
+
+<span class="s0">class </span><span class="s1">_NumberParamTypeBase(ParamType):</span>
+    <span class="s1">_number_class: t.ClassVar[t.Type]</span>
+
+    <span class="s0">def </span><span class="s1">convert(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">value: t.Any</span><span class="s0">, </span><span class="s1">param: t.Optional[</span><span class="s5">&quot;Parameter&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">ctx: t.Optional[</span><span class="s5">&quot;Context&quot;</span><span class="s1">]</span>
+    <span class="s1">) -&gt; t.Any:</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">self._number_class(value)</span>
+        <span class="s0">except </span><span class="s1">ValueError:</span>
+            <span class="s1">self.fail(</span>
+                <span class="s1">_(</span><span class="s5">&quot;{value!r} is not a valid {number_type}.&quot;</span><span class="s1">).format(</span>
+                    <span class="s1">value=value</span><span class="s0">, </span><span class="s1">number_type=self.name</span>
+                <span class="s1">)</span><span class="s0">,</span>
+                <span class="s1">param</span><span class="s0">,</span>
+                <span class="s1">ctx</span><span class="s0">,</span>
+            <span class="s1">)</span>
+
+
+<span class="s0">class </span><span class="s1">_NumberRangeBase(_NumberParamTypeBase):</span>
+    <span class="s0">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">min: t.Optional[float] = </span><span class="s0">None,</span>
+        <span class="s1">max: t.Optional[float] = </span><span class="s0">None,</span>
+        <span class="s1">min_open: bool = </span><span class="s0">False,</span>
+        <span class="s1">max_open: bool = </span><span class="s0">False,</span>
+        <span class="s1">clamp: bool = </span><span class="s0">False,</span>
+    <span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self.min = min</span>
+        <span class="s1">self.max = max</span>
+        <span class="s1">self.min_open = min_open</span>
+        <span class="s1">self.max_open = max_open</span>
+        <span class="s1">self.clamp = clamp</span>
+
+    <span class="s0">def </span><span class="s1">to_info_dict(self) -&gt; t.Dict[str</span><span class="s0">, </span><span class="s1">t.Any]:</span>
+        <span class="s1">info_dict = super().to_info_dict()</span>
+        <span class="s1">info_dict.update(</span>
+            <span class="s1">min=self.min</span><span class="s0">,</span>
+            <span class="s1">max=self.max</span><span class="s0">,</span>
+            <span class="s1">min_open=self.min_open</span><span class="s0">,</span>
+            <span class="s1">max_open=self.max_open</span><span class="s0">,</span>
+            <span class="s1">clamp=self.clamp</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s0">return </span><span class="s1">info_dict</span>
+
+    <span class="s0">def </span><span class="s1">convert(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">value: t.Any</span><span class="s0">, </span><span class="s1">param: t.Optional[</span><span class="s5">&quot;Parameter&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">ctx: t.Optional[</span><span class="s5">&quot;Context&quot;</span><span class="s1">]</span>
+    <span class="s1">) -&gt; t.Any:</span>
+        <span class="s0">import </span><span class="s1">operator</span>
+
+        <span class="s1">rv = super().convert(value</span><span class="s0">, </span><span class="s1">param</span><span class="s0">, </span><span class="s1">ctx)</span>
+        <span class="s1">lt_min: bool = self.min </span><span class="s0">is not None and </span><span class="s1">(</span>
+            <span class="s1">operator.le </span><span class="s0">if </span><span class="s1">self.min_open </span><span class="s0">else </span><span class="s1">operator.lt</span>
+        <span class="s1">)(rv</span><span class="s0">, </span><span class="s1">self.min)</span>
+        <span class="s1">gt_max: bool = self.max </span><span class="s0">is not None and </span><span class="s1">(</span>
+            <span class="s1">operator.ge </span><span class="s0">if </span><span class="s1">self.max_open </span><span class="s0">else </span><span class="s1">operator.gt</span>
+        <span class="s1">)(rv</span><span class="s0">, </span><span class="s1">self.max)</span>
+
+        <span class="s0">if </span><span class="s1">self.clamp:</span>
+            <span class="s0">if </span><span class="s1">lt_min:</span>
+                <span class="s0">return </span><span class="s1">self._clamp(self.min</span><span class="s0">, </span><span class="s3">1</span><span class="s0">, </span><span class="s1">self.min_open)  </span><span class="s4"># type: ignore</span>
+
+            <span class="s0">if </span><span class="s1">gt_max:</span>
+                <span class="s0">return </span><span class="s1">self._clamp(self.max</span><span class="s0">, </span><span class="s1">-</span><span class="s3">1</span><span class="s0">, </span><span class="s1">self.max_open)  </span><span class="s4"># type: ignore</span>
+
+        <span class="s0">if </span><span class="s1">lt_min </span><span class="s0">or </span><span class="s1">gt_max:</span>
+            <span class="s1">self.fail(</span>
+                <span class="s1">_(</span><span class="s5">&quot;{value} is not in the range {range}.&quot;</span><span class="s1">).format(</span>
+                    <span class="s1">value=rv</span><span class="s0">, </span><span class="s1">range=self._describe_range()</span>
+                <span class="s1">)</span><span class="s0">,</span>
+                <span class="s1">param</span><span class="s0">,</span>
+                <span class="s1">ctx</span><span class="s0">,</span>
+            <span class="s1">)</span>
+
+        <span class="s0">return </span><span class="s1">rv</span>
+
+    <span class="s0">def </span><span class="s1">_clamp(self</span><span class="s0">, </span><span class="s1">bound: float</span><span class="s0">, </span><span class="s1">dir: </span><span class="s5">&quot;te.Literal[1, -1]&quot;</span><span class="s0">, </span><span class="s1">open: bool) -&gt; float:</span>
+        <span class="s2">&quot;&quot;&quot;Find the valid value to clamp to bound in the given 
+        direction. 
+ 
+        :param bound: The boundary value. 
+        :param dir: 1 or -1 indicating the direction to move. 
+        :param open: If true, the range does not include the bound. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">raise </span><span class="s1">NotImplementedError</span>
+
+    <span class="s0">def </span><span class="s1">_describe_range(self) -&gt; str:</span>
+        <span class="s2">&quot;&quot;&quot;Describe the range for use in help text.&quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">self.min </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">op = </span><span class="s5">&quot;&lt;&quot; </span><span class="s0">if </span><span class="s1">self.max_open </span><span class="s0">else </span><span class="s5">&quot;&lt;=&quot;</span>
+            <span class="s0">return </span><span class="s5">f&quot;x</span><span class="s0">{</span><span class="s1">op</span><span class="s0">}{</span><span class="s1">self.max</span><span class="s0">}</span><span class="s5">&quot;</span>
+
+        <span class="s0">if </span><span class="s1">self.max </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">op = </span><span class="s5">&quot;&gt;&quot; </span><span class="s0">if </span><span class="s1">self.min_open </span><span class="s0">else </span><span class="s5">&quot;&gt;=&quot;</span>
+            <span class="s0">return </span><span class="s5">f&quot;x</span><span class="s0">{</span><span class="s1">op</span><span class="s0">}{</span><span class="s1">self.min</span><span class="s0">}</span><span class="s5">&quot;</span>
+
+        <span class="s1">lop = </span><span class="s5">&quot;&lt;&quot; </span><span class="s0">if </span><span class="s1">self.min_open </span><span class="s0">else </span><span class="s5">&quot;&lt;=&quot;</span>
+        <span class="s1">rop = </span><span class="s5">&quot;&lt;&quot; </span><span class="s0">if </span><span class="s1">self.max_open </span><span class="s0">else </span><span class="s5">&quot;&lt;=&quot;</span>
+        <span class="s0">return </span><span class="s5">f&quot;</span><span class="s0">{</span><span class="s1">self.min</span><span class="s0">}{</span><span class="s1">lop</span><span class="s0">}</span><span class="s5">x</span><span class="s0">{</span><span class="s1">rop</span><span class="s0">}{</span><span class="s1">self.max</span><span class="s0">}</span><span class="s5">&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__repr__(self) -&gt; str:</span>
+        <span class="s1">clamp = </span><span class="s5">&quot; clamped&quot; </span><span class="s0">if </span><span class="s1">self.clamp </span><span class="s0">else </span><span class="s5">&quot;&quot;</span>
+        <span class="s0">return </span><span class="s5">f&quot;&lt;</span><span class="s0">{</span><span class="s1">type(self).__name__</span><span class="s0">} {</span><span class="s1">self._describe_range()</span><span class="s0">}{</span><span class="s1">clamp</span><span class="s0">}</span><span class="s5">&gt;&quot;</span>
+
+
+<span class="s0">class </span><span class="s1">IntParamType(_NumberParamTypeBase):</span>
+    <span class="s1">name = </span><span class="s5">&quot;integer&quot;</span>
+    <span class="s1">_number_class = int</span>
+
+    <span class="s0">def </span><span class="s1">__repr__(self) -&gt; str:</span>
+        <span class="s0">return </span><span class="s5">&quot;INT&quot;</span>
+
+
+<span class="s0">class </span><span class="s1">IntRange(_NumberRangeBase</span><span class="s0">, </span><span class="s1">IntParamType):</span>
+    <span class="s2">&quot;&quot;&quot;Restrict an :data:`click.INT` value to a range of accepted 
+    values. See :ref:`ranges`. 
+ 
+    If ``min`` or ``max`` are not passed, any value is accepted in that 
+    direction. If ``min_open`` or ``max_open`` are enabled, the 
+    corresponding boundary is not included in the range. 
+ 
+    If ``clamp`` is enabled, a value outside the range is clamped to the 
+    boundary instead of failing. 
+ 
+    .. versionchanged:: 8.0 
+        Added the ``min_open`` and ``max_open`` parameters. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">name = </span><span class="s5">&quot;integer range&quot;</span>
+
+    <span class="s0">def </span><span class="s1">_clamp(  </span><span class="s4"># type: ignore</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">bound: int</span><span class="s0">, </span><span class="s1">dir: </span><span class="s5">&quot;te.Literal[1, -1]&quot;</span><span class="s0">, </span><span class="s1">open: bool</span>
+    <span class="s1">) -&gt; int:</span>
+        <span class="s0">if not </span><span class="s1">open:</span>
+            <span class="s0">return </span><span class="s1">bound</span>
+
+        <span class="s0">return </span><span class="s1">bound + dir</span>
+
+
+<span class="s0">class </span><span class="s1">FloatParamType(_NumberParamTypeBase):</span>
+    <span class="s1">name = </span><span class="s5">&quot;float&quot;</span>
+    <span class="s1">_number_class = float</span>
+
+    <span class="s0">def </span><span class="s1">__repr__(self) -&gt; str:</span>
+        <span class="s0">return </span><span class="s5">&quot;FLOAT&quot;</span>
+
+
+<span class="s0">class </span><span class="s1">FloatRange(_NumberRangeBase</span><span class="s0">, </span><span class="s1">FloatParamType):</span>
+    <span class="s2">&quot;&quot;&quot;Restrict a :data:`click.FLOAT` value to a range of accepted 
+    values. See :ref:`ranges`. 
+ 
+    If ``min`` or ``max`` are not passed, any value is accepted in that 
+    direction. If ``min_open`` or ``max_open`` are enabled, the 
+    corresponding boundary is not included in the range. 
+ 
+    If ``clamp`` is enabled, a value outside the range is clamped to the 
+    boundary instead of failing. This is not supported if either 
+    boundary is marked ``open``. 
+ 
+    .. versionchanged:: 8.0 
+        Added the ``min_open`` and ``max_open`` parameters. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">name = </span><span class="s5">&quot;float range&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">min: t.Optional[float] = </span><span class="s0">None,</span>
+        <span class="s1">max: t.Optional[float] = </span><span class="s0">None,</span>
+        <span class="s1">min_open: bool = </span><span class="s0">False,</span>
+        <span class="s1">max_open: bool = </span><span class="s0">False,</span>
+        <span class="s1">clamp: bool = </span><span class="s0">False,</span>
+    <span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">super().__init__(</span>
+            <span class="s1">min=min</span><span class="s0">, </span><span class="s1">max=max</span><span class="s0">, </span><span class="s1">min_open=min_open</span><span class="s0">, </span><span class="s1">max_open=max_open</span><span class="s0">, </span><span class="s1">clamp=clamp</span>
+        <span class="s1">)</span>
+
+        <span class="s0">if </span><span class="s1">(min_open </span><span class="s0">or </span><span class="s1">max_open) </span><span class="s0">and </span><span class="s1">clamp:</span>
+            <span class="s0">raise </span><span class="s1">TypeError(</span><span class="s5">&quot;Clamping is not supported for open bounds.&quot;</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">_clamp(self</span><span class="s0">, </span><span class="s1">bound: float</span><span class="s0">, </span><span class="s1">dir: </span><span class="s5">&quot;te.Literal[1, -1]&quot;</span><span class="s0">, </span><span class="s1">open: bool) -&gt; float:</span>
+        <span class="s0">if not </span><span class="s1">open:</span>
+            <span class="s0">return </span><span class="s1">bound</span>
+
+        <span class="s4"># Could use Python 3.9's math.nextafter here, but clamping an</span>
+        <span class="s4"># open float range doesn't seem to be particularly useful. It's</span>
+        <span class="s4"># left up to the user to write a callback to do it if needed.</span>
+        <span class="s0">raise </span><span class="s1">RuntimeError(</span><span class="s5">&quot;Clamping is not supported for open bounds.&quot;</span><span class="s1">)</span>
+
+
+<span class="s0">class </span><span class="s1">BoolParamType(ParamType):</span>
+    <span class="s1">name = </span><span class="s5">&quot;boolean&quot;</span>
+
+    <span class="s0">def </span><span class="s1">convert(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">value: t.Any</span><span class="s0">, </span><span class="s1">param: t.Optional[</span><span class="s5">&quot;Parameter&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">ctx: t.Optional[</span><span class="s5">&quot;Context&quot;</span><span class="s1">]</span>
+    <span class="s1">) -&gt; t.Any:</span>
+        <span class="s0">if </span><span class="s1">value </span><span class="s0">in </span><span class="s1">{</span><span class="s0">False, True</span><span class="s1">}:</span>
+            <span class="s0">return </span><span class="s1">bool(value)</span>
+
+        <span class="s1">norm = value.strip().lower()</span>
+
+        <span class="s0">if </span><span class="s1">norm </span><span class="s0">in </span><span class="s1">{</span><span class="s5">&quot;1&quot;</span><span class="s0">, </span><span class="s5">&quot;true&quot;</span><span class="s0">, </span><span class="s5">&quot;t&quot;</span><span class="s0">, </span><span class="s5">&quot;yes&quot;</span><span class="s0">, </span><span class="s5">&quot;y&quot;</span><span class="s0">, </span><span class="s5">&quot;on&quot;</span><span class="s1">}:</span>
+            <span class="s0">return True</span>
+
+        <span class="s0">if </span><span class="s1">norm </span><span class="s0">in </span><span class="s1">{</span><span class="s5">&quot;0&quot;</span><span class="s0">, </span><span class="s5">&quot;false&quot;</span><span class="s0">, </span><span class="s5">&quot;f&quot;</span><span class="s0">, </span><span class="s5">&quot;no&quot;</span><span class="s0">, </span><span class="s5">&quot;n&quot;</span><span class="s0">, </span><span class="s5">&quot;off&quot;</span><span class="s1">}:</span>
+            <span class="s0">return False</span>
+
+        <span class="s1">self.fail(</span>
+            <span class="s1">_(</span><span class="s5">&quot;{value!r} is not a valid boolean.&quot;</span><span class="s1">).format(value=value)</span><span class="s0">, </span><span class="s1">param</span><span class="s0">, </span><span class="s1">ctx</span>
+        <span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">__repr__(self) -&gt; str:</span>
+        <span class="s0">return </span><span class="s5">&quot;BOOL&quot;</span>
+
+
+<span class="s0">class </span><span class="s1">UUIDParameterType(ParamType):</span>
+    <span class="s1">name = </span><span class="s5">&quot;uuid&quot;</span>
+
+    <span class="s0">def </span><span class="s1">convert(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">value: t.Any</span><span class="s0">, </span><span class="s1">param: t.Optional[</span><span class="s5">&quot;Parameter&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">ctx: t.Optional[</span><span class="s5">&quot;Context&quot;</span><span class="s1">]</span>
+    <span class="s1">) -&gt; t.Any:</span>
+        <span class="s0">import </span><span class="s1">uuid</span>
+
+        <span class="s0">if </span><span class="s1">isinstance(value</span><span class="s0">, </span><span class="s1">uuid.UUID):</span>
+            <span class="s0">return </span><span class="s1">value</span>
+
+        <span class="s1">value = value.strip()</span>
+
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">uuid.UUID(value)</span>
+        <span class="s0">except </span><span class="s1">ValueError:</span>
+            <span class="s1">self.fail(</span>
+                <span class="s1">_(</span><span class="s5">&quot;{value!r} is not a valid UUID.&quot;</span><span class="s1">).format(value=value)</span><span class="s0">, </span><span class="s1">param</span><span class="s0">, </span><span class="s1">ctx</span>
+            <span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">__repr__(self) -&gt; str:</span>
+        <span class="s0">return </span><span class="s5">&quot;UUID&quot;</span>
+
+
+<span class="s0">class </span><span class="s1">File(ParamType):</span>
+    <span class="s2">&quot;&quot;&quot;Declares a parameter to be a file for reading or writing.  The file 
+    is automatically closed once the context tears down (after the command 
+    finished working). 
+ 
+    Files can be opened for reading or writing.  The special value ``-`` 
+    indicates stdin or stdout depending on the mode. 
+ 
+    By default, the file is opened for reading text data, but it can also be 
+    opened in binary mode or for writing.  The encoding parameter can be used 
+    to force a specific encoding. 
+ 
+    The `lazy` flag controls if the file should be opened immediately or upon 
+    first IO. The default is to be non-lazy for standard input and output 
+    streams as well as files opened for reading, `lazy` otherwise. When opening a 
+    file lazily for reading, it is still opened temporarily for validation, but 
+    will not be held open until first IO. lazy is mainly useful when opening 
+    for writing to avoid creating the file until it is needed. 
+ 
+    Starting with Click 2.0, files can also be opened atomically in which 
+    case all writes go into a separate file in the same folder and upon 
+    completion the file will be moved over to the original location.  This 
+    is useful if a file regularly read by other users is modified. 
+ 
+    See :ref:`file-args` for more information. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">name = </span><span class="s5">&quot;filename&quot;</span>
+    <span class="s1">envvar_list_splitter = os.path.pathsep</span>
+
+    <span class="s0">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">mode: str = </span><span class="s5">&quot;r&quot;</span><span class="s0">,</span>
+        <span class="s1">encoding: t.Optional[str] = </span><span class="s0">None,</span>
+        <span class="s1">errors: t.Optional[str] = </span><span class="s5">&quot;strict&quot;</span><span class="s0">,</span>
+        <span class="s1">lazy: t.Optional[bool] = </span><span class="s0">None,</span>
+        <span class="s1">atomic: bool = </span><span class="s0">False,</span>
+    <span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self.mode = mode</span>
+        <span class="s1">self.encoding = encoding</span>
+        <span class="s1">self.errors = errors</span>
+        <span class="s1">self.lazy = lazy</span>
+        <span class="s1">self.atomic = atomic</span>
+
+    <span class="s0">def </span><span class="s1">to_info_dict(self) -&gt; t.Dict[str</span><span class="s0">, </span><span class="s1">t.Any]:</span>
+        <span class="s1">info_dict = super().to_info_dict()</span>
+        <span class="s1">info_dict.update(mode=self.mode</span><span class="s0">, </span><span class="s1">encoding=self.encoding)</span>
+        <span class="s0">return </span><span class="s1">info_dict</span>
+
+    <span class="s0">def </span><span class="s1">resolve_lazy_flag(self</span><span class="s0">, </span><span class="s1">value: t.Any) -&gt; bool:</span>
+        <span class="s0">if </span><span class="s1">self.lazy </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">self.lazy</span>
+        <span class="s0">if </span><span class="s1">value == </span><span class="s5">&quot;-&quot;</span><span class="s1">:</span>
+            <span class="s0">return False</span>
+        <span class="s0">elif </span><span class="s5">&quot;w&quot; </span><span class="s0">in </span><span class="s1">self.mode:</span>
+            <span class="s0">return True</span>
+        <span class="s0">return False</span>
+
+    <span class="s0">def </span><span class="s1">convert(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">value: t.Any</span><span class="s0">, </span><span class="s1">param: t.Optional[</span><span class="s5">&quot;Parameter&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">ctx: t.Optional[</span><span class="s5">&quot;Context&quot;</span><span class="s1">]</span>
+    <span class="s1">) -&gt; t.Any:</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">if </span><span class="s1">hasattr(value</span><span class="s0">, </span><span class="s5">&quot;read&quot;</span><span class="s1">) </span><span class="s0">or </span><span class="s1">hasattr(value</span><span class="s0">, </span><span class="s5">&quot;write&quot;</span><span class="s1">):</span>
+                <span class="s0">return </span><span class="s1">value</span>
+
+            <span class="s1">lazy = self.resolve_lazy_flag(value)</span>
+
+            <span class="s0">if </span><span class="s1">lazy:</span>
+                <span class="s1">f: t.IO = t.cast(</span>
+                    <span class="s1">t.IO</span><span class="s0">,</span>
+                    <span class="s1">LazyFile(</span>
+                        <span class="s1">value</span><span class="s0">, </span><span class="s1">self.mode</span><span class="s0">, </span><span class="s1">self.encoding</span><span class="s0">, </span><span class="s1">self.errors</span><span class="s0">, </span><span class="s1">atomic=self.atomic</span>
+                    <span class="s1">)</span><span class="s0">,</span>
+                <span class="s1">)</span>
+
+                <span class="s0">if </span><span class="s1">ctx </span><span class="s0">is not None</span><span class="s1">:</span>
+                    <span class="s1">ctx.call_on_close(f.close_intelligently)  </span><span class="s4"># type: ignore</span>
+
+                <span class="s0">return </span><span class="s1">f</span>
+
+            <span class="s1">f</span><span class="s0">, </span><span class="s1">should_close = open_stream(</span>
+                <span class="s1">value</span><span class="s0">, </span><span class="s1">self.mode</span><span class="s0">, </span><span class="s1">self.encoding</span><span class="s0">, </span><span class="s1">self.errors</span><span class="s0">, </span><span class="s1">atomic=self.atomic</span>
+            <span class="s1">)</span>
+
+            <span class="s4"># If a context is provided, we automatically close the file</span>
+            <span class="s4"># at the end of the context execution (or flush out).  If a</span>
+            <span class="s4"># context does not exist, it's the caller's responsibility to</span>
+            <span class="s4"># properly close the file.  This for instance happens when the</span>
+            <span class="s4"># type is used with prompts.</span>
+            <span class="s0">if </span><span class="s1">ctx </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s0">if </span><span class="s1">should_close:</span>
+                    <span class="s1">ctx.call_on_close(safecall(f.close))</span>
+                <span class="s0">else</span><span class="s1">:</span>
+                    <span class="s1">ctx.call_on_close(safecall(f.flush))</span>
+
+            <span class="s0">return </span><span class="s1">f</span>
+        <span class="s0">except </span><span class="s1">OSError </span><span class="s0">as </span><span class="s1">e:  </span><span class="s4"># noqa: B014</span>
+            <span class="s1">self.fail(</span><span class="s5">f&quot;</span><span class="s0">{</span><span class="s1">os.fsdecode(value)</span><span class="s0">!r}</span><span class="s5">: </span><span class="s0">{</span><span class="s1">e.strerror</span><span class="s0">}</span><span class="s5">&quot;</span><span class="s0">, </span><span class="s1">param</span><span class="s0">, </span><span class="s1">ctx)</span>
+
+    <span class="s0">def </span><span class="s1">shell_complete(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">ctx: </span><span class="s5">&quot;Context&quot;</span><span class="s0">, </span><span class="s1">param: </span><span class="s5">&quot;Parameter&quot;</span><span class="s0">, </span><span class="s1">incomplete: str</span>
+    <span class="s1">) -&gt; t.List[</span><span class="s5">&quot;CompletionItem&quot;</span><span class="s1">]:</span>
+        <span class="s2">&quot;&quot;&quot;Return a special completion marker that tells the completion 
+        system to use the shell to provide file path completions. 
+ 
+        :param ctx: Invocation context for this command. 
+        :param param: The parameter that is requesting completion. 
+        :param incomplete: Value being completed. May be empty. 
+ 
+        .. versionadded:: 8.0 
+        &quot;&quot;&quot;</span>
+        <span class="s0">from </span><span class="s1">click.shell_completion </span><span class="s0">import </span><span class="s1">CompletionItem</span>
+
+        <span class="s0">return </span><span class="s1">[CompletionItem(incomplete</span><span class="s0">, </span><span class="s1">type=</span><span class="s5">&quot;file&quot;</span><span class="s1">)]</span>
+
+
+<span class="s0">class </span><span class="s1">Path(ParamType):</span>
+    <span class="s2">&quot;&quot;&quot;The path type is similar to the :class:`File` type but it performs 
+    different checks.  First of all, instead of returning an open file 
+    handle it returns just the filename.  Secondly, it can perform various 
+    basic checks about what the file or directory should be. 
+ 
+    :param exists: if set to true, the file or directory needs to exist for 
+                   this value to be valid.  If this is not required and a 
+                   file does indeed not exist, then all further checks are 
+                   silently skipped. 
+    :param file_okay: controls if a file is a possible value. 
+    :param dir_okay: controls if a directory is a possible value. 
+    :param writable: if true, a writable check is performed. 
+    :param readable: if true, a readable check is performed. 
+    :param resolve_path: if this is true, then the path is fully resolved 
+                         before the value is passed onwards.  This means 
+                         that it's absolute and symlinks are resolved.  It 
+                         will not expand a tilde-prefix, as this is 
+                         supposed to be done by the shell only. 
+    :param allow_dash: If this is set to `True`, a single dash to indicate 
+                       standard streams is permitted. 
+    :param path_type: Convert the incoming path value to this type. If 
+        ``None``, keep Python's default, which is ``str``. Useful to 
+        convert to :class:`pathlib.Path`. 
+ 
+    .. versionchanged:: 8.0 
+        Allow passing ``type=pathlib.Path``. 
+ 
+    .. versionchanged:: 6.0 
+        Added the ``allow_dash`` parameter. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">envvar_list_splitter = os.path.pathsep</span>
+
+    <span class="s0">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">exists: bool = </span><span class="s0">False,</span>
+        <span class="s1">file_okay: bool = </span><span class="s0">True,</span>
+        <span class="s1">dir_okay: bool = </span><span class="s0">True,</span>
+        <span class="s1">writable: bool = </span><span class="s0">False,</span>
+        <span class="s1">readable: bool = </span><span class="s0">True,</span>
+        <span class="s1">resolve_path: bool = </span><span class="s0">False,</span>
+        <span class="s1">allow_dash: bool = </span><span class="s0">False,</span>
+        <span class="s1">path_type: t.Optional[t.Type] = </span><span class="s0">None,</span>
+    <span class="s1">):</span>
+        <span class="s1">self.exists = exists</span>
+        <span class="s1">self.file_okay = file_okay</span>
+        <span class="s1">self.dir_okay = dir_okay</span>
+        <span class="s1">self.writable = writable</span>
+        <span class="s1">self.readable = readable</span>
+        <span class="s1">self.resolve_path = resolve_path</span>
+        <span class="s1">self.allow_dash = allow_dash</span>
+        <span class="s1">self.type = path_type</span>
+
+        <span class="s0">if </span><span class="s1">self.file_okay </span><span class="s0">and not </span><span class="s1">self.dir_okay:</span>
+            <span class="s1">self.name = _(</span><span class="s5">&quot;file&quot;</span><span class="s1">)</span>
+        <span class="s0">elif </span><span class="s1">self.dir_okay </span><span class="s0">and not </span><span class="s1">self.file_okay:</span>
+            <span class="s1">self.name = _(</span><span class="s5">&quot;directory&quot;</span><span class="s1">)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">self.name = _(</span><span class="s5">&quot;path&quot;</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">to_info_dict(self) -&gt; t.Dict[str</span><span class="s0">, </span><span class="s1">t.Any]:</span>
+        <span class="s1">info_dict = super().to_info_dict()</span>
+        <span class="s1">info_dict.update(</span>
+            <span class="s1">exists=self.exists</span><span class="s0">,</span>
+            <span class="s1">file_okay=self.file_okay</span><span class="s0">,</span>
+            <span class="s1">dir_okay=self.dir_okay</span><span class="s0">,</span>
+            <span class="s1">writable=self.writable</span><span class="s0">,</span>
+            <span class="s1">readable=self.readable</span><span class="s0">,</span>
+            <span class="s1">allow_dash=self.allow_dash</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s0">return </span><span class="s1">info_dict</span>
+
+    <span class="s0">def </span><span class="s1">coerce_path_result(self</span><span class="s0">, </span><span class="s1">rv: t.Any) -&gt; t.Any:</span>
+        <span class="s0">if </span><span class="s1">self.type </span><span class="s0">is not None and not </span><span class="s1">isinstance(rv</span><span class="s0">, </span><span class="s1">self.type):</span>
+            <span class="s0">if </span><span class="s1">self.type </span><span class="s0">is </span><span class="s1">str:</span>
+                <span class="s1">rv = os.fsdecode(rv)</span>
+            <span class="s0">elif </span><span class="s1">self.type </span><span class="s0">is </span><span class="s1">bytes:</span>
+                <span class="s1">rv = os.fsencode(rv)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">rv = self.type(rv)</span>
+
+        <span class="s0">return </span><span class="s1">rv</span>
+
+    <span class="s0">def </span><span class="s1">convert(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">value: t.Any</span><span class="s0">, </span><span class="s1">param: t.Optional[</span><span class="s5">&quot;Parameter&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">ctx: t.Optional[</span><span class="s5">&quot;Context&quot;</span><span class="s1">]</span>
+    <span class="s1">) -&gt; t.Any:</span>
+        <span class="s1">rv = value</span>
+
+        <span class="s1">is_dash = self.file_okay </span><span class="s0">and </span><span class="s1">self.allow_dash </span><span class="s0">and </span><span class="s1">rv </span><span class="s0">in </span><span class="s1">(</span><span class="s6">b&quot;-&quot;</span><span class="s0">, </span><span class="s5">&quot;-&quot;</span><span class="s1">)</span>
+
+        <span class="s0">if not </span><span class="s1">is_dash:</span>
+            <span class="s0">if </span><span class="s1">self.resolve_path:</span>
+                <span class="s4"># os.path.realpath doesn't resolve symlinks on Windows</span>
+                <span class="s4"># until Python 3.8. Use pathlib for now.</span>
+                <span class="s0">import </span><span class="s1">pathlib</span>
+
+                <span class="s1">rv = os.fsdecode(pathlib.Path(rv).resolve())</span>
+
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">st = os.stat(rv)</span>
+            <span class="s0">except </span><span class="s1">OSError:</span>
+                <span class="s0">if not </span><span class="s1">self.exists:</span>
+                    <span class="s0">return </span><span class="s1">self.coerce_path_result(rv)</span>
+                <span class="s1">self.fail(</span>
+                    <span class="s1">_(</span><span class="s5">&quot;{name} {filename!r} does not exist.&quot;</span><span class="s1">).format(</span>
+                        <span class="s1">name=self.name.title()</span><span class="s0">, </span><span class="s1">filename=os.fsdecode(value)</span>
+                    <span class="s1">)</span><span class="s0">,</span>
+                    <span class="s1">param</span><span class="s0">,</span>
+                    <span class="s1">ctx</span><span class="s0">,</span>
+                <span class="s1">)</span>
+
+            <span class="s0">if not </span><span class="s1">self.file_okay </span><span class="s0">and </span><span class="s1">stat.S_ISREG(st.st_mode):</span>
+                <span class="s1">self.fail(</span>
+                    <span class="s1">_(</span><span class="s5">&quot;{name} {filename!r} is a file.&quot;</span><span class="s1">).format(</span>
+                        <span class="s1">name=self.name.title()</span><span class="s0">, </span><span class="s1">filename=os.fsdecode(value)</span>
+                    <span class="s1">)</span><span class="s0">,</span>
+                    <span class="s1">param</span><span class="s0">,</span>
+                    <span class="s1">ctx</span><span class="s0">,</span>
+                <span class="s1">)</span>
+            <span class="s0">if not </span><span class="s1">self.dir_okay </span><span class="s0">and </span><span class="s1">stat.S_ISDIR(st.st_mode):</span>
+                <span class="s1">self.fail(</span>
+                    <span class="s1">_(</span><span class="s5">&quot;{name} {filename!r} is a directory.&quot;</span><span class="s1">).format(</span>
+                        <span class="s1">name=self.name.title()</span><span class="s0">, </span><span class="s1">filename=os.fsdecode(value)</span>
+                    <span class="s1">)</span><span class="s0">,</span>
+                    <span class="s1">param</span><span class="s0">,</span>
+                    <span class="s1">ctx</span><span class="s0">,</span>
+                <span class="s1">)</span>
+            <span class="s0">if </span><span class="s1">self.writable </span><span class="s0">and not </span><span class="s1">os.access(rv</span><span class="s0">, </span><span class="s1">os.W_OK):</span>
+                <span class="s1">self.fail(</span>
+                    <span class="s1">_(</span><span class="s5">&quot;{name} {filename!r} is not writable.&quot;</span><span class="s1">).format(</span>
+                        <span class="s1">name=self.name.title()</span><span class="s0">, </span><span class="s1">filename=os.fsdecode(value)</span>
+                    <span class="s1">)</span><span class="s0">,</span>
+                    <span class="s1">param</span><span class="s0">,</span>
+                    <span class="s1">ctx</span><span class="s0">,</span>
+                <span class="s1">)</span>
+            <span class="s0">if </span><span class="s1">self.readable </span><span class="s0">and not </span><span class="s1">os.access(rv</span><span class="s0">, </span><span class="s1">os.R_OK):</span>
+                <span class="s1">self.fail(</span>
+                    <span class="s1">_(</span><span class="s5">&quot;{name} {filename!r} is not readable.&quot;</span><span class="s1">).format(</span>
+                        <span class="s1">name=self.name.title()</span><span class="s0">, </span><span class="s1">filename=os.fsdecode(value)</span>
+                    <span class="s1">)</span><span class="s0">,</span>
+                    <span class="s1">param</span><span class="s0">,</span>
+                    <span class="s1">ctx</span><span class="s0">,</span>
+                <span class="s1">)</span>
+
+        <span class="s0">return </span><span class="s1">self.coerce_path_result(rv)</span>
+
+    <span class="s0">def </span><span class="s1">shell_complete(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">ctx: </span><span class="s5">&quot;Context&quot;</span><span class="s0">, </span><span class="s1">param: </span><span class="s5">&quot;Parameter&quot;</span><span class="s0">, </span><span class="s1">incomplete: str</span>
+    <span class="s1">) -&gt; t.List[</span><span class="s5">&quot;CompletionItem&quot;</span><span class="s1">]:</span>
+        <span class="s2">&quot;&quot;&quot;Return a special completion marker that tells the completion 
+        system to use the shell to provide path completions for only 
+        directories or any paths. 
+ 
+        :param ctx: Invocation context for this command. 
+        :param param: The parameter that is requesting completion. 
+        :param incomplete: Value being completed. May be empty. 
+ 
+        .. versionadded:: 8.0 
+        &quot;&quot;&quot;</span>
+        <span class="s0">from </span><span class="s1">click.shell_completion </span><span class="s0">import </span><span class="s1">CompletionItem</span>
+
+        <span class="s1">type = </span><span class="s5">&quot;dir&quot; </span><span class="s0">if </span><span class="s1">self.dir_okay </span><span class="s0">and not </span><span class="s1">self.file_okay </span><span class="s0">else </span><span class="s5">&quot;file&quot;</span>
+        <span class="s0">return </span><span class="s1">[CompletionItem(incomplete</span><span class="s0">, </span><span class="s1">type=type)]</span>
+
+
+<span class="s0">class </span><span class="s1">Tuple(CompositeParamType):</span>
+    <span class="s2">&quot;&quot;&quot;The default behavior of Click is to apply a type on a value directly. 
+    This works well in most cases, except for when `nargs` is set to a fixed 
+    count and different types should be used for different items.  In this 
+    case the :class:`Tuple` type can be used.  This type can only be used 
+    if `nargs` is set to a fixed number. 
+ 
+    For more information see :ref:`tuple-type`. 
+ 
+    This can be selected by using a Python tuple literal as a type. 
+ 
+    :param types: a list of types that should be used for the tuple items. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">types: t.Sequence[t.Union[t.Type</span><span class="s0">, </span><span class="s1">ParamType]]) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self.types = [convert_type(ty) </span><span class="s0">for </span><span class="s1">ty </span><span class="s0">in </span><span class="s1">types]</span>
+
+    <span class="s0">def </span><span class="s1">to_info_dict(self) -&gt; t.Dict[str</span><span class="s0">, </span><span class="s1">t.Any]:</span>
+        <span class="s1">info_dict = super().to_info_dict()</span>
+        <span class="s1">info_dict[</span><span class="s5">&quot;types&quot;</span><span class="s1">] = [t.to_info_dict() </span><span class="s0">for </span><span class="s1">t </span><span class="s0">in </span><span class="s1">self.types]</span>
+        <span class="s0">return </span><span class="s1">info_dict</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">name(self) -&gt; str:  </span><span class="s4"># type: ignore</span>
+        <span class="s0">return </span><span class="s5">f&quot;&lt;</span><span class="s0">{</span><span class="s5">' '</span><span class="s1">.join(ty.name </span><span class="s0">for </span><span class="s1">ty </span><span class="s0">in </span><span class="s1">self.types)</span><span class="s0">}</span><span class="s5">&gt;&quot;</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">arity(self) -&gt; int:  </span><span class="s4"># type: ignore</span>
+        <span class="s0">return </span><span class="s1">len(self.types)</span>
+
+    <span class="s0">def </span><span class="s1">convert(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">value: t.Any</span><span class="s0">, </span><span class="s1">param: t.Optional[</span><span class="s5">&quot;Parameter&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">ctx: t.Optional[</span><span class="s5">&quot;Context&quot;</span><span class="s1">]</span>
+    <span class="s1">) -&gt; t.Any:</span>
+        <span class="s1">len_type = len(self.types)</span>
+        <span class="s1">len_value = len(value)</span>
+
+        <span class="s0">if </span><span class="s1">len_value != len_type:</span>
+            <span class="s1">self.fail(</span>
+                <span class="s1">ngettext(</span>
+                    <span class="s5">&quot;{len_type} values are required, but {len_value} was given.&quot;</span><span class="s0">,</span>
+                    <span class="s5">&quot;{len_type} values are required, but {len_value} were given.&quot;</span><span class="s0">,</span>
+                    <span class="s1">len_value</span><span class="s0">,</span>
+                <span class="s1">).format(len_type=len_type</span><span class="s0">, </span><span class="s1">len_value=len_value)</span><span class="s0">,</span>
+                <span class="s1">param=param</span><span class="s0">,</span>
+                <span class="s1">ctx=ctx</span><span class="s0">,</span>
+            <span class="s1">)</span>
+
+        <span class="s0">return </span><span class="s1">tuple(ty(x</span><span class="s0">, </span><span class="s1">param</span><span class="s0">, </span><span class="s1">ctx) </span><span class="s0">for </span><span class="s1">ty</span><span class="s0">, </span><span class="s1">x </span><span class="s0">in </span><span class="s1">zip(self.types</span><span class="s0">, </span><span class="s1">value))</span>
+
+
+<span class="s0">def </span><span class="s1">convert_type(ty: t.Optional[t.Any]</span><span class="s0">, </span><span class="s1">default: t.Optional[t.Any] = </span><span class="s0">None</span><span class="s1">) -&gt; ParamType:</span>
+    <span class="s2">&quot;&quot;&quot;Find the most appropriate :class:`ParamType` for the given Python 
+    type. If the type isn't provided, it can be inferred from a default 
+    value. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">guessed_type = </span><span class="s0">False</span>
+
+    <span class="s0">if </span><span class="s1">ty </span><span class="s0">is None and </span><span class="s1">default </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s0">if </span><span class="s1">isinstance(default</span><span class="s0">, </span><span class="s1">(tuple</span><span class="s0">, </span><span class="s1">list)):</span>
+            <span class="s4"># If the default is empty, ty will remain None and will</span>
+            <span class="s4"># return STRING.</span>
+            <span class="s0">if </span><span class="s1">default:</span>
+                <span class="s1">item = default[</span><span class="s3">0</span><span class="s1">]</span>
+
+                <span class="s4"># A tuple of tuples needs to detect the inner types.</span>
+                <span class="s4"># Can't call convert recursively because that would</span>
+                <span class="s4"># incorrectly unwind the tuple to a single type.</span>
+                <span class="s0">if </span><span class="s1">isinstance(item</span><span class="s0">, </span><span class="s1">(tuple</span><span class="s0">, </span><span class="s1">list)):</span>
+                    <span class="s1">ty = tuple(map(type</span><span class="s0">, </span><span class="s1">item))</span>
+                <span class="s0">else</span><span class="s1">:</span>
+                    <span class="s1">ty = type(item)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">ty = type(default)</span>
+
+        <span class="s1">guessed_type = </span><span class="s0">True</span>
+
+    <span class="s0">if </span><span class="s1">isinstance(ty</span><span class="s0">, </span><span class="s1">tuple):</span>
+        <span class="s0">return </span><span class="s1">Tuple(ty)</span>
+
+    <span class="s0">if </span><span class="s1">isinstance(ty</span><span class="s0">, </span><span class="s1">ParamType):</span>
+        <span class="s0">return </span><span class="s1">ty</span>
+
+    <span class="s0">if </span><span class="s1">ty </span><span class="s0">is </span><span class="s1">str </span><span class="s0">or </span><span class="s1">ty </span><span class="s0">is None</span><span class="s1">:</span>
+        <span class="s0">return </span><span class="s1">STRING</span>
+
+    <span class="s0">if </span><span class="s1">ty </span><span class="s0">is </span><span class="s1">int:</span>
+        <span class="s0">return </span><span class="s1">INT</span>
+
+    <span class="s0">if </span><span class="s1">ty </span><span class="s0">is </span><span class="s1">float:</span>
+        <span class="s0">return </span><span class="s1">FLOAT</span>
+
+    <span class="s0">if </span><span class="s1">ty </span><span class="s0">is </span><span class="s1">bool:</span>
+        <span class="s0">return </span><span class="s1">BOOL</span>
+
+    <span class="s0">if </span><span class="s1">guessed_type:</span>
+        <span class="s0">return </span><span class="s1">STRING</span>
+
+    <span class="s0">if __debug__</span><span class="s1">:</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">if </span><span class="s1">issubclass(ty</span><span class="s0">, </span><span class="s1">ParamType):</span>
+                <span class="s0">raise </span><span class="s1">AssertionError(</span>
+                    <span class="s5">f&quot;Attempted to use an uninstantiated parameter type (</span><span class="s0">{</span><span class="s1">ty</span><span class="s0">}</span><span class="s5">).&quot;</span>
+                <span class="s1">)</span>
+        <span class="s0">except </span><span class="s1">TypeError:</span>
+            <span class="s4"># ty is an instance (correct), so issubclass fails.</span>
+            <span class="s0">pass</span>
+
+    <span class="s0">return </span><span class="s1">FuncParamType(ty)</span>
+
+
+<span class="s4">#: A dummy parameter type that just does nothing.  From a user's</span>
+<span class="s4">#: perspective this appears to just be the same as `STRING` but</span>
+<span class="s4">#: internally no string conversion takes place if the input was bytes.</span>
+<span class="s4">#: This is usually useful when working with file paths as they can</span>
+<span class="s4">#: appear in bytes and unicode.</span>
+<span class="s4">#:</span>
+<span class="s4">#: For path related uses the :class:`Path` type is a better choice but</span>
+<span class="s4">#: there are situations where an unprocessed type is useful which is why</span>
+<span class="s4">#: it is is provided.</span>
+<span class="s4">#:</span>
+<span class="s4">#: .. versionadded:: 4.0</span>
+<span class="s1">UNPROCESSED = UnprocessedParamType()</span>
+
+<span class="s4">#: A unicode string parameter type which is the implicit default.  This</span>
+<span class="s4">#: can also be selected by using ``str`` as type.</span>
+<span class="s1">STRING = StringParamType()</span>
+
+<span class="s4">#: An integer parameter.  This can also be selected by using ``int`` as</span>
+<span class="s4">#: type.</span>
+<span class="s1">INT = IntParamType()</span>
+
+<span class="s4">#: A floating point value parameter.  This can also be selected by using</span>
+<span class="s4">#: ``float`` as type.</span>
+<span class="s1">FLOAT = FloatParamType()</span>
+
+<span class="s4">#: A boolean parameter.  This is the default for boolean flags.  This can</span>
+<span class="s4">#: also be selected by using ``bool`` as a type.</span>
+<span class="s1">BOOL = BoolParamType()</span>
+
+<span class="s4">#: A UUID parameter.</span>
+<span class="s1">UUID = UUIDParameterType()</span>
+</pre>
+</body>
+</html>

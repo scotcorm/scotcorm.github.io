@@ -1,0 +1,699 @@
+<html>
+<head>
+<title>local.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6a8759;}
+.s3 { color: #6897bb;}
+.s4 { color: #808080;}
+.s5 { color: #629755; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+local.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">copy</span>
+<span class="s0">import </span><span class="s1">math</span>
+<span class="s0">import </span><span class="s1">operator</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">import </span><span class="s1">typing </span><span class="s0">as </span><span class="s1">t</span>
+<span class="s0">import </span><span class="s1">warnings</span>
+<span class="s0">from </span><span class="s1">functools </span><span class="s0">import </span><span class="s1">partial</span>
+<span class="s0">from </span><span class="s1">functools </span><span class="s0">import </span><span class="s1">update_wrapper</span>
+
+<span class="s0">from </span><span class="s1">.wsgi </span><span class="s0">import </span><span class="s1">ClosingIterator</span>
+
+<span class="s0">if </span><span class="s1">t.TYPE_CHECKING:</span>
+    <span class="s0">from </span><span class="s1">_typeshed.wsgi </span><span class="s0">import </span><span class="s1">StartResponse</span>
+    <span class="s0">from </span><span class="s1">_typeshed.wsgi </span><span class="s0">import </span><span class="s1">WSGIApplication</span>
+    <span class="s0">from </span><span class="s1">_typeshed.wsgi </span><span class="s0">import </span><span class="s1">WSGIEnvironment</span>
+
+<span class="s1">F = t.TypeVar(</span><span class="s2">&quot;F&quot;</span><span class="s0">, </span><span class="s1">bound=t.Callable[...</span><span class="s0">, </span><span class="s1">t.Any])</span>
+
+<span class="s0">try</span><span class="s1">:</span>
+    <span class="s0">from </span><span class="s1">greenlet </span><span class="s0">import </span><span class="s1">getcurrent </span><span class="s0">as </span><span class="s1">_get_ident</span>
+<span class="s0">except </span><span class="s1">ImportError:</span>
+    <span class="s0">from </span><span class="s1">threading </span><span class="s0">import </span><span class="s1">get_ident </span><span class="s0">as </span><span class="s1">_get_ident</span>
+
+
+<span class="s0">def </span><span class="s1">get_ident() -&gt; int:</span>
+    <span class="s1">warnings.warn(</span>
+        <span class="s2">&quot;'get_ident' is deprecated and will be removed in Werkzeug&quot;</span>
+        <span class="s2">&quot; 2.1. Use 'greenlet.getcurrent' or 'threading.get_ident' for&quot;</span>
+        <span class="s2">&quot; previous behavior.&quot;</span><span class="s0">,</span>
+        <span class="s1">DeprecationWarning</span><span class="s0">,</span>
+        <span class="s1">stacklevel=</span><span class="s3">2</span><span class="s0">,</span>
+    <span class="s1">)</span>
+    <span class="s0">return </span><span class="s1">_get_ident()  </span><span class="s4"># type: ignore</span>
+
+
+<span class="s0">class </span><span class="s1">_CannotUseContextVar(Exception):</span>
+    <span class="s0">pass</span>
+
+
+<span class="s0">try</span><span class="s1">:</span>
+    <span class="s0">from </span><span class="s1">contextvars </span><span class="s0">import </span><span class="s1">ContextVar</span>
+
+    <span class="s0">if </span><span class="s2">&quot;gevent&quot; </span><span class="s0">in </span><span class="s1">sys.modules </span><span class="s0">or </span><span class="s2">&quot;eventlet&quot; </span><span class="s0">in </span><span class="s1">sys.modules:</span>
+        <span class="s4"># Both use greenlet, so first check it has patched</span>
+        <span class="s4"># ContextVars, Greenlet &lt;0.4.17 does not.</span>
+        <span class="s0">import </span><span class="s1">greenlet</span>
+
+        <span class="s1">greenlet_patched = getattr(greenlet</span><span class="s0">, </span><span class="s2">&quot;GREENLET_USE_CONTEXT_VARS&quot;</span><span class="s0">, False</span><span class="s1">)</span>
+
+        <span class="s0">if not </span><span class="s1">greenlet_patched:</span>
+            <span class="s4"># If Gevent is used, check it has patched ContextVars,</span>
+            <span class="s4"># &lt;20.5 does not.</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s0">from </span><span class="s1">gevent.monkey </span><span class="s0">import </span><span class="s1">is_object_patched</span>
+            <span class="s0">except </span><span class="s1">ImportError:</span>
+                <span class="s4"># Gevent isn't used, but Greenlet is and hasn't patched</span>
+                <span class="s0">raise </span><span class="s1">_CannotUseContextVar() </span><span class="s0">from None</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s0">if </span><span class="s1">is_object_patched(</span><span class="s2">&quot;threading&quot;</span><span class="s0">, </span><span class="s2">&quot;local&quot;</span><span class="s1">) </span><span class="s0">and not </span><span class="s1">is_object_patched(</span>
+                    <span class="s2">&quot;contextvars&quot;</span><span class="s0">, </span><span class="s2">&quot;ContextVar&quot;</span>
+                <span class="s1">):</span>
+                    <span class="s0">raise </span><span class="s1">_CannotUseContextVar()</span>
+
+    <span class="s0">def </span><span class="s1">__release_local__(storage: t.Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s4"># Can remove when support for non-stdlib ContextVars is</span>
+        <span class="s4"># removed, see &quot;Fake&quot; version below.</span>
+        <span class="s1">storage.set({})</span>
+
+
+<span class="s0">except </span><span class="s1">(ImportError</span><span class="s0">, </span><span class="s1">_CannotUseContextVar):</span>
+
+    <span class="s0">class </span><span class="s1">ContextVar:  </span><span class="s4"># type: ignore</span>
+        <span class="s5">&quot;&quot;&quot;A fake ContextVar based on the previous greenlet/threading 
+        ident function. Used on Python 3.6, eventlet, and old versions 
+        of gevent. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">_name: str) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+            <span class="s1">self.storage: t.Dict[int</span><span class="s0">, </span><span class="s1">t.Dict[str</span><span class="s0">, </span><span class="s1">t.Any]] = {}</span>
+
+        <span class="s0">def </span><span class="s1">get(self</span><span class="s0">, </span><span class="s1">default: t.Dict[str</span><span class="s0">, </span><span class="s1">t.Any]) -&gt; t.Dict[str</span><span class="s0">, </span><span class="s1">t.Any]:</span>
+            <span class="s0">return </span><span class="s1">self.storage.get(_get_ident()</span><span class="s0">, </span><span class="s1">default)</span>
+
+        <span class="s0">def </span><span class="s1">set(self</span><span class="s0">, </span><span class="s1">value: t.Dict[str</span><span class="s0">, </span><span class="s1">t.Any]) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+            <span class="s1">self.storage[_get_ident()] = value</span>
+
+    <span class="s0">def </span><span class="s1">__release_local__(storage: t.Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s4"># Special version to ensure that the storage is cleaned up on</span>
+        <span class="s4"># release.</span>
+        <span class="s1">storage.storage.pop(_get_ident()</span><span class="s0">, None</span><span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">release_local(local: t.Union[</span><span class="s2">&quot;Local&quot;</span><span class="s0">, </span><span class="s2">&quot;LocalStack&quot;</span><span class="s1">]) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+    <span class="s5">&quot;&quot;&quot;Releases the contents of the local for the current context. 
+    This makes it possible to use locals without a manager. 
+ 
+    Example:: 
+ 
+        &gt;&gt;&gt; loc = Local() 
+        &gt;&gt;&gt; loc.foo = 42 
+        &gt;&gt;&gt; release_local(loc) 
+        &gt;&gt;&gt; hasattr(loc, 'foo') 
+        False 
+ 
+    With this function one can release :class:`Local` objects as well 
+    as :class:`LocalStack` objects.  However it is not possible to 
+    release data held by proxies that way, one always has to retain 
+    a reference to the underlying local object in order to be able 
+    to release it. 
+ 
+    .. versionadded:: 0.6.1 
+    &quot;&quot;&quot;</span>
+    <span class="s1">local.__release_local__()</span>
+
+
+<span class="s0">class </span><span class="s1">Local:</span>
+    <span class="s1">__slots__ = (</span><span class="s2">&quot;_storage&quot;</span><span class="s0">,</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">object.__setattr__(self</span><span class="s0">, </span><span class="s2">&quot;_storage&quot;</span><span class="s0">, </span><span class="s1">ContextVar(</span><span class="s2">&quot;local_storage&quot;</span><span class="s1">))</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">__storage__(self) -&gt; t.Dict[str</span><span class="s0">, </span><span class="s1">t.Any]:</span>
+        <span class="s1">warnings.warn(</span>
+            <span class="s2">&quot;'__storage__' is deprecated and will be removed in Werkzeug 2.1.&quot;</span><span class="s0">,</span>
+            <span class="s1">DeprecationWarning</span><span class="s0">,</span>
+            <span class="s1">stacklevel=</span><span class="s3">2</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s0">return </span><span class="s1">self._storage.get({})  </span><span class="s4"># type: ignore</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">__ident_func__(self) -&gt; t.Callable[[]</span><span class="s0">, </span><span class="s1">int]:</span>
+        <span class="s1">warnings.warn(</span>
+            <span class="s2">&quot;'__ident_func__' is deprecated and will be removed in&quot;</span>
+            <span class="s2">&quot; Werkzeug 2.1. It should not be used in Python 3.7+.&quot;</span><span class="s0">,</span>
+            <span class="s1">DeprecationWarning</span><span class="s0">,</span>
+            <span class="s1">stacklevel=</span><span class="s3">2</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s0">return </span><span class="s1">_get_ident  </span><span class="s4"># type: ignore</span>
+
+    <span class="s1">@__ident_func__.setter</span>
+    <span class="s0">def </span><span class="s1">__ident_func__(self</span><span class="s0">, </span><span class="s1">func: t.Callable[[]</span><span class="s0">, </span><span class="s1">int]) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">warnings.warn(</span>
+            <span class="s2">&quot;'__ident_func__' is deprecated and will be removed in&quot;</span>
+            <span class="s2">&quot; Werkzeug 2.1. Setting it no longer has any effect.&quot;</span><span class="s0">,</span>
+            <span class="s1">DeprecationWarning</span><span class="s0">,</span>
+            <span class="s1">stacklevel=</span><span class="s3">2</span><span class="s0">,</span>
+        <span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">__iter__(self) -&gt; t.Iterator[t.Tuple[int</span><span class="s0">, </span><span class="s1">t.Any]]:</span>
+        <span class="s0">return </span><span class="s1">iter(self._storage.get({}).items())</span>
+
+    <span class="s0">def </span><span class="s1">__call__(self</span><span class="s0">, </span><span class="s1">proxy: str) -&gt; </span><span class="s2">&quot;LocalProxy&quot;</span><span class="s1">:</span>
+        <span class="s5">&quot;&quot;&quot;Create a proxy for a name.&quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">LocalProxy(self</span><span class="s0">, </span><span class="s1">proxy)</span>
+
+    <span class="s0">def </span><span class="s1">__release_local__(self) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">__release_local__(self._storage)</span>
+
+    <span class="s0">def </span><span class="s1">__getattr__(self</span><span class="s0">, </span><span class="s1">name: str) -&gt; t.Any:</span>
+        <span class="s1">values = self._storage.get({})</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">values[name]</span>
+        <span class="s0">except </span><span class="s1">KeyError:</span>
+            <span class="s0">raise </span><span class="s1">AttributeError(name) </span><span class="s0">from None</span>
+
+    <span class="s0">def </span><span class="s1">__setattr__(self</span><span class="s0">, </span><span class="s1">name: str</span><span class="s0">, </span><span class="s1">value: t.Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">values = self._storage.get({}).copy()</span>
+        <span class="s1">values[name] = value</span>
+        <span class="s1">self._storage.set(values)</span>
+
+    <span class="s0">def </span><span class="s1">__delattr__(self</span><span class="s0">, </span><span class="s1">name: str) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">values = self._storage.get({}).copy()</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">del </span><span class="s1">values[name]</span>
+            <span class="s1">self._storage.set(values)</span>
+        <span class="s0">except </span><span class="s1">KeyError:</span>
+            <span class="s0">raise </span><span class="s1">AttributeError(name) </span><span class="s0">from None</span>
+
+
+<span class="s0">class </span><span class="s1">LocalStack:</span>
+    <span class="s5">&quot;&quot;&quot;This class works similar to a :class:`Local` but keeps a stack 
+    of objects instead.  This is best explained with an example:: 
+ 
+        &gt;&gt;&gt; ls = LocalStack() 
+        &gt;&gt;&gt; ls.push(42) 
+        &gt;&gt;&gt; ls.top 
+        42 
+        &gt;&gt;&gt; ls.push(23) 
+        &gt;&gt;&gt; ls.top 
+        23 
+        &gt;&gt;&gt; ls.pop() 
+        23 
+        &gt;&gt;&gt; ls.top 
+        42 
+ 
+    They can be force released by using a :class:`LocalManager` or with 
+    the :func:`release_local` function but the correct way is to pop the 
+    item from the stack after using.  When the stack is empty it will 
+    no longer be bound to the current context (and as such released). 
+ 
+    By calling the stack without arguments it returns a proxy that resolves to 
+    the topmost item on the stack. 
+ 
+    .. versionadded:: 0.6.1 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self._local = Local()</span>
+
+    <span class="s0">def </span><span class="s1">__release_local__(self) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self._local.__release_local__()</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">__ident_func__(self) -&gt; t.Callable[[]</span><span class="s0">, </span><span class="s1">int]:</span>
+        <span class="s0">return </span><span class="s1">self._local.__ident_func__</span>
+
+    <span class="s1">@__ident_func__.setter</span>
+    <span class="s0">def </span><span class="s1">__ident_func__(self</span><span class="s0">, </span><span class="s1">value: t.Callable[[]</span><span class="s0">, </span><span class="s1">int]) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">object.__setattr__(self._local</span><span class="s0">, </span><span class="s2">&quot;__ident_func__&quot;</span><span class="s0">, </span><span class="s1">value)</span>
+
+    <span class="s0">def </span><span class="s1">__call__(self) -&gt; </span><span class="s2">&quot;LocalProxy&quot;</span><span class="s1">:</span>
+        <span class="s0">def </span><span class="s1">_lookup() -&gt; t.Any:</span>
+            <span class="s1">rv = self.top</span>
+            <span class="s0">if </span><span class="s1">rv </span><span class="s0">is None</span><span class="s1">:</span>
+                <span class="s0">raise </span><span class="s1">RuntimeError(</span><span class="s2">&quot;object unbound&quot;</span><span class="s1">)</span>
+            <span class="s0">return </span><span class="s1">rv</span>
+
+        <span class="s0">return </span><span class="s1">LocalProxy(_lookup)</span>
+
+    <span class="s0">def </span><span class="s1">push(self</span><span class="s0">, </span><span class="s1">obj: t.Any) -&gt; t.List[t.Any]:</span>
+        <span class="s5">&quot;&quot;&quot;Pushes a new item to the stack&quot;&quot;&quot;</span>
+        <span class="s1">rv = getattr(self._local</span><span class="s0">, </span><span class="s2">&quot;stack&quot;</span><span class="s0">, </span><span class="s1">[]).copy()</span>
+        <span class="s1">rv.append(obj)</span>
+        <span class="s1">self._local.stack = rv</span>
+        <span class="s0">return </span><span class="s1">rv  </span><span class="s4"># type: ignore</span>
+
+    <span class="s0">def </span><span class="s1">pop(self) -&gt; t.Any:</span>
+        <span class="s5">&quot;&quot;&quot;Removes the topmost item from the stack, will return the 
+        old value or `None` if the stack was already empty. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">stack = getattr(self._local</span><span class="s0">, </span><span class="s2">&quot;stack&quot;</span><span class="s0">, None</span><span class="s1">)</span>
+        <span class="s0">if </span><span class="s1">stack </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s0">return None</span>
+        <span class="s0">elif </span><span class="s1">len(stack) == </span><span class="s3">1</span><span class="s1">:</span>
+            <span class="s1">release_local(self._local)</span>
+            <span class="s0">return </span><span class="s1">stack[-</span><span class="s3">1</span><span class="s1">]</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">stack.pop()</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">top(self) -&gt; t.Any:</span>
+        <span class="s5">&quot;&quot;&quot;The topmost item on the stack.  If the stack is empty, 
+        `None` is returned. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">self._local.stack[-</span><span class="s3">1</span><span class="s1">]</span>
+        <span class="s0">except </span><span class="s1">(AttributeError</span><span class="s0">, </span><span class="s1">IndexError):</span>
+            <span class="s0">return None</span>
+
+
+<span class="s0">class </span><span class="s1">LocalManager:</span>
+    <span class="s5">&quot;&quot;&quot;Local objects cannot manage themselves. For that you need a local 
+    manager. You can pass a local manager multiple locals or add them 
+    later by appending them to `manager.locals`. Every time the manager 
+    cleans up, it will clean up all the data left in the locals for this 
+    context. 
+ 
+    .. versionchanged:: 2.0 
+        ``ident_func`` is deprecated and will be removed in Werkzeug 
+         2.1. 
+ 
+    .. versionchanged:: 0.6.1 
+        The :func:`release_local` function can be used instead of a 
+        manager. 
+ 
+    .. versionchanged:: 0.7 
+        The ``ident_func`` parameter was added. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">locals: t.Optional[t.Iterable[t.Union[Local</span><span class="s0">, </span><span class="s1">LocalStack]]] = </span><span class="s0">None,</span>
+        <span class="s1">ident_func: </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+    <span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s0">if </span><span class="s1">locals </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">self.locals = []</span>
+        <span class="s0">elif </span><span class="s1">isinstance(locals</span><span class="s0">, </span><span class="s1">Local):</span>
+            <span class="s1">self.locals = [locals]</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">self.locals = list(locals)</span>
+
+        <span class="s0">if </span><span class="s1">ident_func </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">warnings.warn(</span>
+                <span class="s2">&quot;'ident_func' is deprecated and will be removed in&quot;</span>
+                <span class="s2">&quot; Werkzeug 2.1. Setting it no longer has any effect.&quot;</span><span class="s0">,</span>
+                <span class="s1">DeprecationWarning</span><span class="s0">,</span>
+                <span class="s1">stacklevel=</span><span class="s3">2</span><span class="s0">,</span>
+            <span class="s1">)</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">ident_func(self) -&gt; t.Callable[[]</span><span class="s0">, </span><span class="s1">int]:</span>
+        <span class="s1">warnings.warn(</span>
+            <span class="s2">&quot;'ident_func' is deprecated and will be removed in Werkzeug 2.1.&quot;</span><span class="s0">,</span>
+            <span class="s1">DeprecationWarning</span><span class="s0">,</span>
+            <span class="s1">stacklevel=</span><span class="s3">2</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s0">return </span><span class="s1">_get_ident  </span><span class="s4"># type: ignore</span>
+
+    <span class="s1">@ident_func.setter</span>
+    <span class="s0">def </span><span class="s1">ident_func(self</span><span class="s0">, </span><span class="s1">func: t.Callable[[]</span><span class="s0">, </span><span class="s1">int]) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">warnings.warn(</span>
+            <span class="s2">&quot;'ident_func' is deprecated and will be removedin Werkzeug&quot;</span>
+            <span class="s2">&quot; 2.1. Setting it no longer has any effect.&quot;</span><span class="s0">,</span>
+            <span class="s1">DeprecationWarning</span><span class="s0">,</span>
+            <span class="s1">stacklevel=</span><span class="s3">2</span><span class="s0">,</span>
+        <span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">get_ident(self) -&gt; int:</span>
+        <span class="s5">&quot;&quot;&quot;Return the context identifier the local objects use internally for 
+        this context.  You cannot override this method to change the behavior 
+        but use it to link other context local objects (such as SQLAlchemy's 
+        scoped sessions) to the Werkzeug locals. 
+ 
+        .. deprecated:: 2.0 
+            Will be removed in Werkzeug 2.1. 
+ 
+        .. versionchanged:: 0.7 
+           You can pass a different ident function to the local manager that 
+           will then be propagated to all the locals passed to the 
+           constructor. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">warnings.warn(</span>
+            <span class="s2">&quot;'get_ident' is deprecated and will be removed in Werkzeug 2.1.&quot;</span><span class="s0">,</span>
+            <span class="s1">DeprecationWarning</span><span class="s0">,</span>
+            <span class="s1">stacklevel=</span><span class="s3">2</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s0">return </span><span class="s1">self.ident_func()</span>
+
+    <span class="s0">def </span><span class="s1">cleanup(self) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s5">&quot;&quot;&quot;Manually clean up the data in the locals for this context.  Call 
+        this at the end of the request or use `make_middleware()`. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">for </span><span class="s1">local </span><span class="s0">in </span><span class="s1">self.locals:</span>
+            <span class="s1">release_local(local)</span>
+
+    <span class="s0">def </span><span class="s1">make_middleware(self</span><span class="s0">, </span><span class="s1">app: </span><span class="s2">&quot;WSGIApplication&quot;</span><span class="s1">) -&gt; </span><span class="s2">&quot;WSGIApplication&quot;</span><span class="s1">:</span>
+        <span class="s5">&quot;&quot;&quot;Wrap a WSGI application so that cleaning up happens after 
+        request end. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s0">def </span><span class="s1">application(</span>
+            <span class="s1">environ: </span><span class="s2">&quot;WSGIEnvironment&quot;</span><span class="s0">, </span><span class="s1">start_response: </span><span class="s2">&quot;StartResponse&quot;</span>
+        <span class="s1">) -&gt; t.Iterable[bytes]:</span>
+            <span class="s0">return </span><span class="s1">ClosingIterator(app(environ</span><span class="s0">, </span><span class="s1">start_response)</span><span class="s0">, </span><span class="s1">self.cleanup)</span>
+
+        <span class="s0">return </span><span class="s1">application</span>
+
+    <span class="s0">def </span><span class="s1">middleware(self</span><span class="s0">, </span><span class="s1">func: </span><span class="s2">&quot;WSGIApplication&quot;</span><span class="s1">) -&gt; </span><span class="s2">&quot;WSGIApplication&quot;</span><span class="s1">:</span>
+        <span class="s5">&quot;&quot;&quot;Like `make_middleware` but for decorating functions. 
+ 
+        Example usage:: 
+ 
+            @manager.middleware 
+            def application(environ, start_response): 
+                ... 
+ 
+        The difference to `make_middleware` is that the function passed 
+        will have all the arguments copied from the inner application 
+        (name, docstring, module). 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">update_wrapper(self.make_middleware(func)</span><span class="s0">, </span><span class="s1">func)</span>
+
+    <span class="s0">def </span><span class="s1">__repr__(self) -&gt; str:</span>
+        <span class="s0">return </span><span class="s2">f&quot;&lt;</span><span class="s0">{</span><span class="s1">type(self).__name__</span><span class="s0">} </span><span class="s2">storages: </span><span class="s0">{</span><span class="s1">len(self.locals)</span><span class="s0">}</span><span class="s2">&gt;&quot;</span>
+
+
+<span class="s0">class </span><span class="s1">_ProxyLookup:</span>
+    <span class="s5">&quot;&quot;&quot;Descriptor that handles proxied attribute lookup for 
+    :class:`LocalProxy`. 
+ 
+    :param f: The built-in function this attribute is accessed through. 
+        Instead of looking up the special method, the function call 
+        is redone on the object. 
+    :param fallback: Call this method if the proxy is unbound instead of 
+        raising a :exc:`RuntimeError`. 
+    :param class_value: Value to return when accessed from the class. 
+        Used for ``__doc__`` so building docs still works. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ = (</span><span class="s2">&quot;bind_f&quot;</span><span class="s0">, </span><span class="s2">&quot;fallback&quot;</span><span class="s0">, </span><span class="s2">&quot;class_value&quot;</span><span class="s0">, </span><span class="s2">&quot;name&quot;</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">f: t.Optional[t.Callable] = </span><span class="s0">None,</span>
+        <span class="s1">fallback: t.Optional[t.Callable] = </span><span class="s0">None,</span>
+        <span class="s1">class_value: t.Optional[t.Any] = </span><span class="s0">None,</span>
+    <span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">bind_f: t.Optional[t.Callable[[</span><span class="s2">&quot;LocalProxy&quot;</span><span class="s0">, </span><span class="s1">t.Any]</span><span class="s0">, </span><span class="s1">t.Callable]]</span>
+
+        <span class="s0">if </span><span class="s1">hasattr(f</span><span class="s0">, </span><span class="s2">&quot;__get__&quot;</span><span class="s1">):</span>
+            <span class="s4"># A Python function, can be turned into a bound method.</span>
+
+            <span class="s0">def </span><span class="s1">bind_f(instance: </span><span class="s2">&quot;LocalProxy&quot;</span><span class="s0">, </span><span class="s1">obj: t.Any) -&gt; t.Callable:</span>
+                <span class="s0">return </span><span class="s1">f.__get__(obj</span><span class="s0">, </span><span class="s1">type(obj))  </span><span class="s4"># type: ignore</span>
+
+        <span class="s0">elif </span><span class="s1">f </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s4"># A C function, use partial to bind the first argument.</span>
+
+            <span class="s0">def </span><span class="s1">bind_f(instance: </span><span class="s2">&quot;LocalProxy&quot;</span><span class="s0">, </span><span class="s1">obj: t.Any) -&gt; t.Callable:</span>
+                <span class="s0">return </span><span class="s1">partial(f</span><span class="s0">, </span><span class="s1">obj)  </span><span class="s4"># type: ignore</span>
+
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s4"># Use getattr, which will produce a bound method.</span>
+            <span class="s1">bind_f = </span><span class="s0">None</span>
+
+        <span class="s1">self.bind_f = bind_f</span>
+        <span class="s1">self.fallback = fallback</span>
+        <span class="s1">self.class_value = class_value</span>
+
+    <span class="s0">def </span><span class="s1">__set_name__(self</span><span class="s0">, </span><span class="s1">owner: </span><span class="s2">&quot;LocalProxy&quot;</span><span class="s0">, </span><span class="s1">name: str) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self.name = name</span>
+
+    <span class="s0">def </span><span class="s1">__get__(self</span><span class="s0">, </span><span class="s1">instance: </span><span class="s2">&quot;LocalProxy&quot;</span><span class="s0">, </span><span class="s1">owner: t.Optional[type] = </span><span class="s0">None</span><span class="s1">) -&gt; t.Any:</span>
+        <span class="s0">if </span><span class="s1">instance </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s0">if </span><span class="s1">self.class_value </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s0">return </span><span class="s1">self.class_value</span>
+
+            <span class="s0">return </span><span class="s1">self</span>
+
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">obj = instance._get_current_object()</span>
+        <span class="s0">except </span><span class="s1">RuntimeError:</span>
+            <span class="s0">if </span><span class="s1">self.fallback </span><span class="s0">is None</span><span class="s1">:</span>
+                <span class="s0">raise</span>
+
+            <span class="s0">return </span><span class="s1">self.fallback.__get__(instance</span><span class="s0">, </span><span class="s1">owner)  </span><span class="s4"># type: ignore</span>
+
+        <span class="s0">if </span><span class="s1">self.bind_f </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">self.bind_f(instance</span><span class="s0">, </span><span class="s1">obj)</span>
+
+        <span class="s0">return </span><span class="s1">getattr(obj</span><span class="s0">, </span><span class="s1">self.name)</span>
+
+    <span class="s0">def </span><span class="s1">__repr__(self) -&gt; str:</span>
+        <span class="s0">return </span><span class="s2">f&quot;proxy </span><span class="s0">{</span><span class="s1">self.name</span><span class="s0">}</span><span class="s2">&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__call__(self</span><span class="s0">, </span><span class="s1">instance: </span><span class="s2">&quot;LocalProxy&quot;</span><span class="s0">, </span><span class="s1">*args: t.Any</span><span class="s0">, </span><span class="s1">**kwargs: t.Any) -&gt; t.Any:</span>
+        <span class="s5">&quot;&quot;&quot;Support calling unbound methods from the class. For example, 
+        this happens with ``copy.copy``, which does 
+        ``type(x).__copy__(x)``. ``type(x)`` can't be proxied, so it 
+        returns the proxy type and descriptor. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self.__get__(instance</span><span class="s0">, </span><span class="s1">type(instance))(*args</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+
+
+<span class="s0">class </span><span class="s1">_ProxyIOp(_ProxyLookup):</span>
+    <span class="s5">&quot;&quot;&quot;Look up an augmented assignment method on a proxied object. The 
+    method is wrapped to return the proxy instead of the object. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ = ()</span>
+
+    <span class="s0">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">f: t.Optional[t.Callable] = </span><span class="s0">None, </span><span class="s1">fallback: t.Optional[t.Callable] = </span><span class="s0">None</span>
+    <span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">super().__init__(f</span><span class="s0">, </span><span class="s1">fallback)</span>
+
+        <span class="s0">def </span><span class="s1">bind_f(instance: </span><span class="s2">&quot;LocalProxy&quot;</span><span class="s0">, </span><span class="s1">obj: t.Any) -&gt; t.Callable:</span>
+            <span class="s0">def </span><span class="s1">i_op(self: t.Any</span><span class="s0">, </span><span class="s1">other: t.Any) -&gt; </span><span class="s2">&quot;LocalProxy&quot;</span><span class="s1">:</span>
+                <span class="s1">f(self</span><span class="s0">, </span><span class="s1">other)  </span><span class="s4"># type: ignore</span>
+                <span class="s0">return </span><span class="s1">instance</span>
+
+            <span class="s0">return </span><span class="s1">i_op.__get__(obj</span><span class="s0">, </span><span class="s1">type(obj))  </span><span class="s4"># type: ignore</span>
+
+        <span class="s1">self.bind_f = bind_f</span>
+
+
+<span class="s0">def </span><span class="s1">_l_to_r_op(op: F) -&gt; F:</span>
+    <span class="s5">&quot;&quot;&quot;Swap the argument order to turn an l-op into an r-op.&quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">r_op(obj: t.Any</span><span class="s0">, </span><span class="s1">other: t.Any) -&gt; t.Any:</span>
+        <span class="s0">return </span><span class="s1">op(other</span><span class="s0">, </span><span class="s1">obj)</span>
+
+    <span class="s0">return </span><span class="s1">t.cast(F</span><span class="s0">, </span><span class="s1">r_op)</span>
+
+
+<span class="s0">class </span><span class="s1">LocalProxy:</span>
+    <span class="s5">&quot;&quot;&quot;A proxy to the object bound to a :class:`Local`. All operations 
+    on the proxy are forwarded to the bound object. If no object is 
+    bound, a :exc:`RuntimeError` is raised. 
+ 
+    .. code-block:: python 
+ 
+        from werkzeug.local import Local 
+        l = Local() 
+ 
+        # a proxy to whatever l.user is set to 
+        user = l(&quot;user&quot;) 
+ 
+        from werkzeug.local import LocalStack 
+        _request_stack = LocalStack() 
+ 
+        # a proxy to _request_stack.top 
+        request = _request_stack() 
+ 
+        # a proxy to the session attribute of the request proxy 
+        session = LocalProxy(lambda: request.session) 
+ 
+    ``__repr__`` and ``__class__`` are forwarded, so ``repr(x)`` and 
+    ``isinstance(x, cls)`` will look like the proxied object. Use 
+    ``issubclass(type(x), LocalProxy)`` to check if an object is a 
+    proxy. 
+ 
+    .. code-block:: python 
+ 
+        repr(user)  # &lt;User admin&gt; 
+        isinstance(user, User)  # True 
+        issubclass(type(user), LocalProxy)  # True 
+ 
+    :param local: The :class:`Local` or callable that provides the 
+        proxied object. 
+    :param name: The attribute name to look up on a :class:`Local`. Not 
+        used if a callable is given. 
+ 
+    .. versionchanged:: 2.0 
+        Updated proxied attributes and methods to reflect the current 
+        data model. 
+ 
+    .. versionchanged:: 0.6.1 
+        The class can be instantiated with a callable. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ = (</span><span class="s2">&quot;__local&quot;</span><span class="s0">, </span><span class="s2">&quot;__name&quot;</span><span class="s0">, </span><span class="s2">&quot;__wrapped__&quot;</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">local: t.Union[</span><span class="s2">&quot;Local&quot;</span><span class="s0">, </span><span class="s1">t.Callable[[]</span><span class="s0">, </span><span class="s1">t.Any]]</span><span class="s0">,</span>
+        <span class="s1">name: t.Optional[str] = </span><span class="s0">None,</span>
+    <span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">object.__setattr__(self</span><span class="s0">, </span><span class="s2">&quot;_LocalProxy__local&quot;</span><span class="s0">, </span><span class="s1">local)</span>
+        <span class="s1">object.__setattr__(self</span><span class="s0">, </span><span class="s2">&quot;_LocalProxy__name&quot;</span><span class="s0">, </span><span class="s1">name)</span>
+
+        <span class="s0">if </span><span class="s1">callable(local) </span><span class="s0">and not </span><span class="s1">hasattr(local</span><span class="s0">, </span><span class="s2">&quot;__release_local__&quot;</span><span class="s1">):</span>
+            <span class="s4"># &quot;local&quot; is a callable that is not an instance of Local or</span>
+            <span class="s4"># LocalManager: mark it as a wrapped function.</span>
+            <span class="s1">object.__setattr__(self</span><span class="s0">, </span><span class="s2">&quot;__wrapped__&quot;</span><span class="s0">, </span><span class="s1">local)</span>
+
+    <span class="s0">def </span><span class="s1">_get_current_object(self) -&gt; t.Any:</span>
+        <span class="s5">&quot;&quot;&quot;Return the current object.  This is useful if you want the real 
+        object behind the proxy at a time for performance reasons or because 
+        you want to pass the object into a different context. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if not </span><span class="s1">hasattr(self.__local</span><span class="s0">, </span><span class="s2">&quot;__release_local__&quot;</span><span class="s1">):  </span><span class="s4"># type: ignore</span>
+            <span class="s0">return </span><span class="s1">self.__local()  </span><span class="s4"># type: ignore</span>
+
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">getattr(self.__local</span><span class="s0">, </span><span class="s1">self.__name)  </span><span class="s4"># type: ignore</span>
+        <span class="s0">except </span><span class="s1">AttributeError:</span>
+            <span class="s1">name = self.__name  </span><span class="s4"># type: ignore</span>
+            <span class="s0">raise </span><span class="s1">RuntimeError(</span><span class="s2">f&quot;no object bound to </span><span class="s0">{</span><span class="s1">name</span><span class="s0">}</span><span class="s2">&quot;</span><span class="s1">) </span><span class="s0">from None</span>
+
+    <span class="s1">__doc__ = _ProxyLookup(  </span><span class="s4"># type: ignore</span>
+        <span class="s1">class_value=__doc__</span><span class="s0">, </span><span class="s1">fallback=</span><span class="s0">lambda </span><span class="s1">self: type(self).__doc__</span>
+    <span class="s1">)</span>
+    <span class="s4"># __del__ should only delete the proxy</span>
+    <span class="s1">__repr__ = _ProxyLookup(  </span><span class="s4"># type: ignore</span>
+        <span class="s1">repr</span><span class="s0">, </span><span class="s1">fallback=</span><span class="s0">lambda </span><span class="s1">self: </span><span class="s2">f&quot;&lt;</span><span class="s0">{</span><span class="s1">type(self).__name__</span><span class="s0">} </span><span class="s2">unbound&gt;&quot;</span>
+    <span class="s1">)</span>
+    <span class="s1">__str__ = _ProxyLookup(str)  </span><span class="s4"># type: ignore</span>
+    <span class="s1">__bytes__ = _ProxyLookup(bytes)</span>
+    <span class="s1">__format__ = _ProxyLookup()  </span><span class="s4"># type: ignore</span>
+    <span class="s1">__lt__ = _ProxyLookup(operator.lt)</span>
+    <span class="s1">__le__ = _ProxyLookup(operator.le)</span>
+    <span class="s1">__eq__ = _ProxyLookup(operator.eq)  </span><span class="s4"># type: ignore</span>
+    <span class="s1">__ne__ = _ProxyLookup(operator.ne)  </span><span class="s4"># type: ignore</span>
+    <span class="s1">__gt__ = _ProxyLookup(operator.gt)</span>
+    <span class="s1">__ge__ = _ProxyLookup(operator.ge)</span>
+    <span class="s1">__hash__ = _ProxyLookup(hash)  </span><span class="s4"># type: ignore</span>
+    <span class="s1">__bool__ = _ProxyLookup(bool</span><span class="s0">, </span><span class="s1">fallback=</span><span class="s0">lambda </span><span class="s1">self: </span><span class="s0">False</span><span class="s1">)</span>
+    <span class="s1">__getattr__ = _ProxyLookup(getattr)</span>
+    <span class="s4"># __getattribute__ triggered through __getattr__</span>
+    <span class="s1">__setattr__ = _ProxyLookup(setattr)  </span><span class="s4"># type: ignore</span>
+    <span class="s1">__delattr__ = _ProxyLookup(delattr)  </span><span class="s4"># type: ignore</span>
+    <span class="s1">__dir__ = _ProxyLookup(dir</span><span class="s0">, </span><span class="s1">fallback=</span><span class="s0">lambda </span><span class="s1">self: [])  </span><span class="s4"># type: ignore</span>
+    <span class="s4"># __get__ (proxying descriptor not supported)</span>
+    <span class="s4"># __set__ (descriptor)</span>
+    <span class="s4"># __delete__ (descriptor)</span>
+    <span class="s4"># __set_name__ (descriptor)</span>
+    <span class="s4"># __objclass__ (descriptor)</span>
+    <span class="s4"># __slots__ used by proxy itself</span>
+    <span class="s4"># __dict__ (__getattr__)</span>
+    <span class="s4"># __weakref__ (__getattr__)</span>
+    <span class="s4"># __init_subclass__ (proxying metaclass not supported)</span>
+    <span class="s4"># __prepare__ (metaclass)</span>
+    <span class="s1">__class__ = _ProxyLookup(fallback=</span><span class="s0">lambda </span><span class="s1">self: type(self))  </span><span class="s4"># type: ignore</span>
+    <span class="s1">__instancecheck__ = _ProxyLookup(</span><span class="s0">lambda </span><span class="s1">self</span><span class="s0">, </span><span class="s1">other: isinstance(other</span><span class="s0">, </span><span class="s1">self))</span>
+    <span class="s1">__subclasscheck__ = _ProxyLookup(</span><span class="s0">lambda </span><span class="s1">self</span><span class="s0">, </span><span class="s1">other: issubclass(other</span><span class="s0">, </span><span class="s1">self))</span>
+    <span class="s4"># __class_getitem__ triggered through __getitem__</span>
+    <span class="s1">__call__ = _ProxyLookup(</span><span class="s0">lambda </span><span class="s1">self</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs: self(*args</span><span class="s0">, </span><span class="s1">**kwargs))</span>
+    <span class="s1">__len__ = _ProxyLookup(len)</span>
+    <span class="s1">__length_hint__ = _ProxyLookup(operator.length_hint)</span>
+    <span class="s1">__getitem__ = _ProxyLookup(operator.getitem)</span>
+    <span class="s1">__setitem__ = _ProxyLookup(operator.setitem)</span>
+    <span class="s1">__delitem__ = _ProxyLookup(operator.delitem)</span>
+    <span class="s4"># __missing__ triggered through __getitem__</span>
+    <span class="s1">__iter__ = _ProxyLookup(iter)</span>
+    <span class="s1">__next__ = _ProxyLookup(next)</span>
+    <span class="s1">__reversed__ = _ProxyLookup(reversed)</span>
+    <span class="s1">__contains__ = _ProxyLookup(operator.contains)</span>
+    <span class="s1">__add__ = _ProxyLookup(operator.add)</span>
+    <span class="s1">__sub__ = _ProxyLookup(operator.sub)</span>
+    <span class="s1">__mul__ = _ProxyLookup(operator.mul)</span>
+    <span class="s1">__matmul__ = _ProxyLookup(operator.matmul)</span>
+    <span class="s1">__truediv__ = _ProxyLookup(operator.truediv)</span>
+    <span class="s1">__floordiv__ = _ProxyLookup(operator.floordiv)</span>
+    <span class="s1">__mod__ = _ProxyLookup(operator.mod)</span>
+    <span class="s1">__divmod__ = _ProxyLookup(divmod)</span>
+    <span class="s1">__pow__ = _ProxyLookup(pow)</span>
+    <span class="s1">__lshift__ = _ProxyLookup(operator.lshift)</span>
+    <span class="s1">__rshift__ = _ProxyLookup(operator.rshift)</span>
+    <span class="s1">__and__ = _ProxyLookup(operator.and_)</span>
+    <span class="s1">__xor__ = _ProxyLookup(operator.xor)</span>
+    <span class="s1">__or__ = _ProxyLookup(operator.or_)</span>
+    <span class="s1">__radd__ = _ProxyLookup(_l_to_r_op(operator.add))</span>
+    <span class="s1">__rsub__ = _ProxyLookup(_l_to_r_op(operator.sub))</span>
+    <span class="s1">__rmul__ = _ProxyLookup(_l_to_r_op(operator.mul))</span>
+    <span class="s1">__rmatmul__ = _ProxyLookup(_l_to_r_op(operator.matmul))</span>
+    <span class="s1">__rtruediv__ = _ProxyLookup(_l_to_r_op(operator.truediv))</span>
+    <span class="s1">__rfloordiv__ = _ProxyLookup(_l_to_r_op(operator.floordiv))</span>
+    <span class="s1">__rmod__ = _ProxyLookup(_l_to_r_op(operator.mod))</span>
+    <span class="s1">__rdivmod__ = _ProxyLookup(_l_to_r_op(divmod))</span>
+    <span class="s1">__rpow__ = _ProxyLookup(_l_to_r_op(pow))</span>
+    <span class="s1">__rlshift__ = _ProxyLookup(_l_to_r_op(operator.lshift))</span>
+    <span class="s1">__rrshift__ = _ProxyLookup(_l_to_r_op(operator.rshift))</span>
+    <span class="s1">__rand__ = _ProxyLookup(_l_to_r_op(operator.and_))</span>
+    <span class="s1">__rxor__ = _ProxyLookup(_l_to_r_op(operator.xor))</span>
+    <span class="s1">__ror__ = _ProxyLookup(_l_to_r_op(operator.or_))</span>
+    <span class="s1">__iadd__ = _ProxyIOp(operator.iadd)</span>
+    <span class="s1">__isub__ = _ProxyIOp(operator.isub)</span>
+    <span class="s1">__imul__ = _ProxyIOp(operator.imul)</span>
+    <span class="s1">__imatmul__ = _ProxyIOp(operator.imatmul)</span>
+    <span class="s1">__itruediv__ = _ProxyIOp(operator.itruediv)</span>
+    <span class="s1">__ifloordiv__ = _ProxyIOp(operator.ifloordiv)</span>
+    <span class="s1">__imod__ = _ProxyIOp(operator.imod)</span>
+    <span class="s1">__ipow__ = _ProxyIOp(operator.ipow)</span>
+    <span class="s1">__ilshift__ = _ProxyIOp(operator.ilshift)</span>
+    <span class="s1">__irshift__ = _ProxyIOp(operator.irshift)</span>
+    <span class="s1">__iand__ = _ProxyIOp(operator.iand)</span>
+    <span class="s1">__ixor__ = _ProxyIOp(operator.ixor)</span>
+    <span class="s1">__ior__ = _ProxyIOp(operator.ior)</span>
+    <span class="s1">__neg__ = _ProxyLookup(operator.neg)</span>
+    <span class="s1">__pos__ = _ProxyLookup(operator.pos)</span>
+    <span class="s1">__abs__ = _ProxyLookup(abs)</span>
+    <span class="s1">__invert__ = _ProxyLookup(operator.invert)</span>
+    <span class="s1">__complex__ = _ProxyLookup(complex)</span>
+    <span class="s1">__int__ = _ProxyLookup(int)</span>
+    <span class="s1">__float__ = _ProxyLookup(float)</span>
+    <span class="s1">__index__ = _ProxyLookup(operator.index)</span>
+    <span class="s1">__round__ = _ProxyLookup(round)</span>
+    <span class="s1">__trunc__ = _ProxyLookup(math.trunc)</span>
+    <span class="s1">__floor__ = _ProxyLookup(math.floor)</span>
+    <span class="s1">__ceil__ = _ProxyLookup(math.ceil)</span>
+    <span class="s1">__enter__ = _ProxyLookup()</span>
+    <span class="s1">__exit__ = _ProxyLookup()</span>
+    <span class="s1">__await__ = _ProxyLookup()</span>
+    <span class="s1">__aiter__ = _ProxyLookup()</span>
+    <span class="s1">__anext__ = _ProxyLookup()</span>
+    <span class="s1">__aenter__ = _ProxyLookup()</span>
+    <span class="s1">__aexit__ = _ProxyLookup()</span>
+    <span class="s1">__copy__ = _ProxyLookup(copy.copy)</span>
+    <span class="s1">__deepcopy__ = _ProxyLookup(copy.deepcopy)</span>
+    <span class="s4"># __getnewargs_ex__ (pickle through proxy not supported)</span>
+    <span class="s4"># __getnewargs__ (pickle)</span>
+    <span class="s4"># __getstate__ (pickle)</span>
+    <span class="s4"># __setstate__ (pickle)</span>
+    <span class="s4"># __reduce__ (pickle)</span>
+    <span class="s4"># __reduce_ex__ (pickle)</span>
+</pre>
+</body>
+</html>

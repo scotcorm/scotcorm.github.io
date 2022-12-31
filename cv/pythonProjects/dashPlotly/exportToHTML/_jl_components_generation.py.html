@@ -1,0 +1,569 @@
+<html>
+<head>
+<title>_jl_components_generation.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #6a8759;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_jl_components_generation.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">copy</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">shutil</span>
+<span class="s0">import </span><span class="s1">warnings</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">import </span><span class="s1">importlib</span>
+<span class="s0">import </span><span class="s1">uuid</span>
+<span class="s0">import </span><span class="s1">hashlib</span>
+
+<span class="s0">from </span><span class="s1">._all_keywords </span><span class="s0">import </span><span class="s1">julia_keywords</span>
+<span class="s0">from </span><span class="s1">._py_components_generation </span><span class="s0">import </span><span class="s1">reorder_props</span>
+
+<span class="s2"># uuid of DashBase Julia package.</span>
+<span class="s1">jl_dash_base_uuid = </span><span class="s3">&quot;03207cf0-e2b3-4b91-9ca8-690cf0fb507e&quot;</span>
+
+<span class="s2"># uuid of Dash Julia package. Used as base for component package uuid</span>
+<span class="s1">jl_dash_uuid = </span><span class="s3">&quot;1b08a953-4be3-4667-9a23-3db579824955&quot;</span>
+
+<span class="s2"># Declaring longer string templates as globals to improve</span>
+<span class="s2"># readability, make method logic clearer to anyone inspecting</span>
+<span class="s2"># code below</span>
+<span class="s1">jl_component_string = </span><span class="s3">''' 
+export {funcname} 
+ 
+&quot;&quot;&quot; 
+    {funcname}(;kwargs...){children_signatures} 
+ 
+{docstring} 
+&quot;&quot;&quot; 
+function {funcname}(; kwargs...) 
+        available_props = Symbol[{component_props}] 
+        wild_props = Symbol[{wildcard_symbols}] 
+        return Component(&quot;{funcname}&quot;, &quot;{element_name}&quot;, &quot;{module_name}&quot;, available_props, wild_props; kwargs...) 
+end 
+{children_definitions} 
+'''  </span><span class="s2"># noqa:E501</span>
+
+<span class="s1">jl_children_signatures = </span><span class="s3">&quot;&quot;&quot; 
+    {funcname}(children::Any;kwargs...) 
+    {funcname}(children_maker::Function;kwargs...) 
+&quot;&quot;&quot;</span>
+
+<span class="s1">jl_children_definitions = </span><span class="s3">&quot;&quot;&quot; 
+{funcname}(children::Any; kwargs...) = {funcname}(;kwargs..., children = children) 
+{funcname}(children_maker::Function; kwargs...) = {funcname}(children_maker(); kwargs...) 
+&quot;&quot;&quot;</span>
+
+<span class="s1">jl_package_file_string = </span><span class="s3">&quot;&quot;&quot; 
+module {package_name} 
+using {base_package} 
+ 
+const resources_path = realpath(joinpath( @__DIR__, &quot;..&quot;, &quot;deps&quot;)) 
+const version = &quot;{version}&quot; 
+ 
+{component_includes} 
+ 
+function __init__() 
+    DashBase.register_package( 
+        DashBase.ResourcePkg( 
+            &quot;{project_shortname}&quot;, 
+            resources_path, 
+            version = version, 
+            [ 
+                {resources_dist} 
+            ] 
+        ) 
+ 
+    ) 
+end 
+end 
+&quot;&quot;&quot;</span>
+
+<span class="s1">jl_projecttoml_string = </span><span class="s3">&quot;&quot;&quot; 
+name = &quot;{package_name}&quot; 
+uuid = &quot;{package_uuid}&quot; 
+{authors}version = &quot;{version}&quot; 
+ 
+[deps] 
+{base_package} = &quot;{dash_uuid}&quot; 
+ 
+[compat] 
+julia = &quot;1.2&quot; 
+{base_package} = &quot;{base_version}&quot; 
+&quot;&quot;&quot;</span>
+
+<span class="s1">jl_base_version = {</span>
+    <span class="s3">&quot;Dash&quot;</span><span class="s1">: </span><span class="s3">&quot;0.1.3, 1.0&quot;</span><span class="s0">,</span>
+    <span class="s3">&quot;DashBase&quot;</span><span class="s1">: </span><span class="s3">&quot;0.1&quot;</span><span class="s0">,</span>
+<span class="s1">}</span>
+
+<span class="s1">jl_component_include_string = </span><span class="s3">'include(&quot;jl/{name}.jl&quot;)'</span>
+
+<span class="s1">jl_resource_tuple_string = </span><span class="s3">&quot;&quot;&quot;DashBase.Resource( 
+    relative_package_path = {relative_package_path}, 
+    external_url = {external_url}, 
+    dynamic = {dynamic}, 
+    async = {async_string}, 
+    type = :{type} 
+)&quot;&quot;&quot;</span>
+
+<span class="s1">core_packages = [</span><span class="s3">&quot;dash_html_components&quot;</span><span class="s0">, </span><span class="s3">&quot;dash_core_components&quot;</span><span class="s0">, </span><span class="s3">&quot;dash_table&quot;</span><span class="s1">]</span>
+
+
+<span class="s0">def </span><span class="s1">jl_package_name(namestring):</span>
+    <span class="s1">s = namestring.split(</span><span class="s3">&quot;_&quot;</span><span class="s1">)</span>
+    <span class="s0">return </span><span class="s3">&quot;&quot;</span><span class="s1">.join(w.capitalize() </span><span class="s0">for </span><span class="s1">w </span><span class="s0">in </span><span class="s1">s)</span>
+
+
+<span class="s0">def </span><span class="s1">stringify_wildcards(wclist</span><span class="s0">, </span><span class="s1">no_symbol=</span><span class="s0">False</span><span class="s1">):</span>
+    <span class="s0">if </span><span class="s1">no_symbol:</span>
+        <span class="s1">wcstring = </span><span class="s3">&quot;|&quot;</span><span class="s1">.join(</span><span class="s3">&quot;{}-&quot;</span><span class="s1">.format(item) </span><span class="s0">for </span><span class="s1">item </span><span class="s0">in </span><span class="s1">wclist)</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">wcstring = </span><span class="s3">&quot;, &quot;</span><span class="s1">.join(</span><span class="s3">'Symbol(&quot;{}-&quot;)'</span><span class="s1">.format(item) </span><span class="s0">for </span><span class="s1">item </span><span class="s0">in </span><span class="s1">wclist)</span>
+    <span class="s0">return </span><span class="s1">wcstring</span>
+
+
+<span class="s0">def </span><span class="s1">get_wildcards_jl(props):</span>
+    <span class="s0">return </span><span class="s1">[key.replace(</span><span class="s3">&quot;-*&quot;</span><span class="s0">, </span><span class="s3">&quot;&quot;</span><span class="s1">) </span><span class="s0">for </span><span class="s1">key </span><span class="s0">in </span><span class="s1">props </span><span class="s0">if </span><span class="s1">key.endswith(</span><span class="s3">&quot;-*&quot;</span><span class="s1">)]</span>
+
+
+<span class="s0">def </span><span class="s1">get_jl_prop_types(type_object):</span>
+    <span class="s4">&quot;&quot;&quot;Mapping from the PropTypes js type object to the Julia type.&quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">shape_or_exact():</span>
+        <span class="s0">return </span><span class="s3">&quot;lists containing elements {}.</span><span class="s0">\n</span><span class="s3">{}&quot;</span><span class="s1">.format(</span>
+            <span class="s3">&quot;, &quot;</span><span class="s1">.join(</span><span class="s3">&quot;'{}'&quot;</span><span class="s1">.format(t) </span><span class="s0">for </span><span class="s1">t </span><span class="s0">in </span><span class="s1">type_object[</span><span class="s3">&quot;value&quot;</span><span class="s1">])</span><span class="s0">,</span>
+            <span class="s3">&quot;Those elements have the following types:</span><span class="s0">\n</span><span class="s3">{}&quot;</span><span class="s1">.format(</span>
+                <span class="s3">&quot;</span><span class="s0">\n</span><span class="s3">&quot;</span><span class="s1">.join(</span>
+                    <span class="s1">create_prop_docstring_jl(</span>
+                        <span class="s1">prop_name=prop_name</span><span class="s0">,</span>
+                        <span class="s1">type_object=prop</span><span class="s0">,</span>
+                        <span class="s1">required=prop[</span><span class="s3">&quot;required&quot;</span><span class="s1">]</span><span class="s0">,</span>
+                        <span class="s1">description=prop.get(</span><span class="s3">&quot;description&quot;</span><span class="s0">, </span><span class="s3">&quot;&quot;</span><span class="s1">)</span><span class="s0">,</span>
+                        <span class="s1">indent_num=</span><span class="s5">1</span><span class="s0">,</span>
+                    <span class="s1">)</span>
+                    <span class="s0">for </span><span class="s1">prop_name</span><span class="s0">, </span><span class="s1">prop </span><span class="s0">in </span><span class="s1">type_object[</span><span class="s3">&quot;value&quot;</span><span class="s1">].items()</span>
+                <span class="s1">)</span>
+            <span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">)</span>
+
+    <span class="s0">return </span><span class="s1">dict(</span>
+        <span class="s1">array=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s3">&quot;Array&quot;</span><span class="s0">,</span>
+        <span class="s1">bool=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s3">&quot;Bool&quot;</span><span class="s0">,</span>
+        <span class="s1">number=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s3">&quot;Real&quot;</span><span class="s0">,</span>
+        <span class="s1">string=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s3">&quot;String&quot;</span><span class="s0">,</span>
+        <span class="s1">object=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s3">&quot;Dict&quot;</span><span class="s0">,</span>
+        <span class="s1">any=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s3">&quot;Bool | Real | String | Dict | Array&quot;</span><span class="s0">,</span>
+        <span class="s1">element=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s3">&quot;dash component&quot;</span><span class="s0">,</span>
+        <span class="s1">node=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s3">&quot;a list of or a singular dash component, string or number&quot;</span><span class="s0">,</span>
+        <span class="s2"># React's PropTypes.oneOf</span>
+        <span class="s1">enum=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s3">&quot;a value equal to: {}&quot;</span><span class="s1">.format(</span>
+            <span class="s3">&quot;, &quot;</span><span class="s1">.join(</span><span class="s3">&quot;{}&quot;</span><span class="s1">.format(str(t[</span><span class="s3">&quot;value&quot;</span><span class="s1">])) </span><span class="s0">for </span><span class="s1">t </span><span class="s0">in </span><span class="s1">type_object[</span><span class="s3">&quot;value&quot;</span><span class="s1">])</span>
+        <span class="s1">)</span><span class="s0">,</span>
+        <span class="s2"># React's PropTypes.oneOfType</span>
+        <span class="s1">union=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s3">&quot;{}&quot;</span><span class="s1">.format(</span>
+            <span class="s3">&quot; | &quot;</span><span class="s1">.join(</span>
+                <span class="s3">&quot;{}&quot;</span><span class="s1">.format(get_jl_type(subType))</span>
+                <span class="s0">for </span><span class="s1">subType </span><span class="s0">in </span><span class="s1">type_object[</span><span class="s3">&quot;value&quot;</span><span class="s1">]</span>
+                <span class="s0">if </span><span class="s1">get_jl_type(subType) != </span><span class="s3">&quot;&quot;</span>
+            <span class="s1">)</span>
+        <span class="s1">)</span><span class="s0">,</span>
+        <span class="s2"># React's PropTypes.arrayOf</span>
+        <span class="s1">arrayOf=</span><span class="s0">lambda</span><span class="s1">: (</span>
+            <span class="s3">&quot;Array&quot;</span>
+            <span class="s1">+ (</span>
+                <span class="s3">&quot; of {}s&quot;</span><span class="s1">.format(get_jl_type(type_object[</span><span class="s3">&quot;value&quot;</span><span class="s1">]))</span>
+                <span class="s0">if </span><span class="s1">get_jl_type(type_object[</span><span class="s3">&quot;value&quot;</span><span class="s1">]) != </span><span class="s3">&quot;&quot;</span>
+                <span class="s0">else </span><span class="s3">&quot;&quot;</span>
+            <span class="s1">)</span>
+        <span class="s1">)</span><span class="s0">,</span>
+        <span class="s2"># React's PropTypes.objectOf</span>
+        <span class="s1">objectOf=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s3">&quot;Dict with Strings as keys and values of type {}&quot;</span><span class="s1">.format(</span>
+            <span class="s1">get_jl_type(type_object[</span><span class="s3">&quot;value&quot;</span><span class="s1">])</span>
+        <span class="s1">)</span><span class="s0">,</span>
+        <span class="s2"># React's PropTypes.shape</span>
+        <span class="s1">shape=shape_or_exact</span><span class="s0">,</span>
+        <span class="s2"># React's PropTypes.exact</span>
+        <span class="s1">exact=shape_or_exact</span><span class="s0">,</span>
+    <span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">filter_props(props):</span>
+    <span class="s4">&quot;&quot;&quot;Filter props from the Component arguments to exclude: 
+        - Those without a &quot;type&quot; or a &quot;flowType&quot; field 
+        - Those with arg.type.name in {'func', 'symbol', 'instanceOf'} 
+    Parameters 
+    ---------- 
+    props: dict 
+        Dictionary with {propName: propMetadata} structure 
+    Returns 
+    ------- 
+    dict 
+        Filtered dictionary with {propName: propMetadata} structure 
+    &quot;&quot;&quot;</span>
+    <span class="s1">filtered_props = copy.deepcopy(props)</span>
+
+    <span class="s0">for </span><span class="s1">arg_name</span><span class="s0">, </span><span class="s1">arg </span><span class="s0">in </span><span class="s1">list(filtered_props.items()):</span>
+        <span class="s0">if </span><span class="s3">&quot;type&quot; </span><span class="s0">not in </span><span class="s1">arg </span><span class="s0">and </span><span class="s3">&quot;flowType&quot; </span><span class="s0">not in </span><span class="s1">arg:</span>
+            <span class="s1">filtered_props.pop(arg_name)</span>
+            <span class="s0">continue</span>
+
+        <span class="s2"># Filter out functions and instances --</span>
+        <span class="s0">if </span><span class="s3">&quot;type&quot; </span><span class="s0">in </span><span class="s1">arg:  </span><span class="s2"># These come from PropTypes</span>
+            <span class="s1">arg_type = arg[</span><span class="s3">&quot;type&quot;</span><span class="s1">][</span><span class="s3">&quot;name&quot;</span><span class="s1">]</span>
+            <span class="s0">if </span><span class="s1">arg_type </span><span class="s0">in </span><span class="s1">{</span><span class="s3">&quot;func&quot;</span><span class="s0">, </span><span class="s3">&quot;symbol&quot;</span><span class="s0">, </span><span class="s3">&quot;instanceOf&quot;</span><span class="s1">}:</span>
+                <span class="s1">filtered_props.pop(arg_name)</span>
+        <span class="s0">elif </span><span class="s3">&quot;flowType&quot; </span><span class="s0">in </span><span class="s1">arg:  </span><span class="s2"># These come from Flow &amp; handled differently</span>
+            <span class="s1">arg_type_name = arg[</span><span class="s3">&quot;flowType&quot;</span><span class="s1">][</span><span class="s3">&quot;name&quot;</span><span class="s1">]</span>
+            <span class="s0">if </span><span class="s1">arg_type_name == </span><span class="s3">&quot;signature&quot;</span><span class="s1">:</span>
+                <span class="s2"># This does the same as the PropTypes filter above, but &quot;func&quot;</span>
+                <span class="s2"># is under &quot;type&quot; if &quot;name&quot; is &quot;signature&quot; vs just in &quot;name&quot;</span>
+                <span class="s0">if </span><span class="s3">&quot;type&quot; </span><span class="s0">not in </span><span class="s1">arg[</span><span class="s3">&quot;flowType&quot;</span><span class="s1">] </span><span class="s0">or </span><span class="s1">arg[</span><span class="s3">&quot;flowType&quot;</span><span class="s1">][</span><span class="s3">&quot;type&quot;</span><span class="s1">] != </span><span class="s3">&quot;object&quot;</span><span class="s1">:</span>
+                    <span class="s1">filtered_props.pop(arg_name)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError</span>
+
+    <span class="s0">return </span><span class="s1">filtered_props</span>
+
+
+<span class="s0">def </span><span class="s1">get_jl_type(type_object):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Convert JS types to Julia types for the component definition 
+    Parameters 
+    ---------- 
+    type_object: dict 
+        react-docgen-generated prop type dictionary 
+    Returns 
+    ------- 
+    str 
+        Julia type string 
+    &quot;&quot;&quot;</span>
+    <span class="s1">js_type_name = type_object[</span><span class="s3">&quot;name&quot;</span><span class="s1">]</span>
+    <span class="s1">js_to_jl_types = get_jl_prop_types(type_object=type_object)</span>
+    <span class="s0">if </span><span class="s1">js_type_name </span><span class="s0">in </span><span class="s1">js_to_jl_types:</span>
+        <span class="s1">prop_type = js_to_jl_types[js_type_name]()</span>
+        <span class="s0">return </span><span class="s1">prop_type</span>
+    <span class="s0">return </span><span class="s3">&quot;&quot;</span>
+
+
+<span class="s0">def </span><span class="s1">print_jl_type(typedata):</span>
+    <span class="s1">typestring = get_jl_type(typedata).capitalize()</span>
+    <span class="s0">if </span><span class="s1">typestring:</span>
+        <span class="s1">typestring += </span><span class="s3">&quot;. &quot;</span>
+    <span class="s0">return </span><span class="s1">typestring</span>
+
+
+<span class="s0">def </span><span class="s1">create_docstring_jl(component_name</span><span class="s0">, </span><span class="s1">props</span><span class="s0">, </span><span class="s1">description):</span>
+    <span class="s4">&quot;&quot;&quot;Create the Dash component docstring. 
+    Parameters 
+    ---------- 
+    component_name: str 
+        Component name 
+    props: dict 
+        Dictionary with {propName: propMetadata} structure 
+    description: str 
+        Component description 
+    Returns 
+    ------- 
+    str 
+        Dash component docstring 
+    &quot;&quot;&quot;</span>
+    <span class="s2"># Ensure props are ordered with children first</span>
+    <span class="s1">props = reorder_props(props=props)</span>
+
+    <span class="s0">return </span><span class="s3">&quot;A{n} {name} component.</span><span class="s0">\n</span><span class="s3">{description}</span><span class="s0">\n</span><span class="s3">Keyword arguments:</span><span class="s0">\n</span><span class="s3">{args}&quot;</span><span class="s1">.format(</span>
+        <span class="s1">n=</span><span class="s3">&quot;n&quot; </span><span class="s0">if </span><span class="s1">component_name[</span><span class="s5">0</span><span class="s1">].lower() </span><span class="s0">in </span><span class="s3">&quot;aeiou&quot; </span><span class="s0">else </span><span class="s3">&quot;&quot;</span><span class="s0">,</span>
+        <span class="s1">name=component_name</span><span class="s0">,</span>
+        <span class="s1">description=description</span><span class="s0">,</span>
+        <span class="s1">args=</span><span class="s3">&quot;</span><span class="s0">\n</span><span class="s3">&quot;</span><span class="s1">.join(</span>
+            <span class="s1">create_prop_docstring_jl(</span>
+                <span class="s1">prop_name=p</span><span class="s0">,</span>
+                <span class="s1">type_object=prop[</span><span class="s3">&quot;type&quot;</span><span class="s1">] </span><span class="s0">if </span><span class="s3">&quot;type&quot; </span><span class="s0">in </span><span class="s1">prop </span><span class="s0">else </span><span class="s1">prop[</span><span class="s3">&quot;flowType&quot;</span><span class="s1">]</span><span class="s0">,</span>
+                <span class="s1">required=prop[</span><span class="s3">&quot;required&quot;</span><span class="s1">]</span><span class="s0">,</span>
+                <span class="s1">description=prop[</span><span class="s3">&quot;description&quot;</span><span class="s1">]</span><span class="s0">,</span>
+                <span class="s1">indent_num=</span><span class="s5">0</span><span class="s0">,</span>
+            <span class="s1">)</span>
+            <span class="s0">for </span><span class="s1">p</span><span class="s0">, </span><span class="s1">prop </span><span class="s0">in </span><span class="s1">filter_props(props).items()</span>
+        <span class="s1">)</span><span class="s0">,</span>
+    <span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">create_prop_docstring_jl(</span>
+    <span class="s1">prop_name</span><span class="s0">,</span>
+    <span class="s1">type_object</span><span class="s0">,</span>
+    <span class="s1">required</span><span class="s0">,</span>
+    <span class="s1">description</span><span class="s0">,</span>
+    <span class="s1">indent_num</span><span class="s0">,</span>
+<span class="s1">):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Create the Dash component prop docstring 
+    Parameters 
+    ---------- 
+    prop_name: str 
+        Name of the Dash component prop 
+    type_object: dict 
+        react-docgen-generated prop type dictionary 
+    required: bool 
+        Component is required? 
+    description: str 
+        Dash component description 
+    indent_num: int 
+        Number of indents to use for the context block 
+        (creates 2 spaces for every indent) 
+    is_flow_type: bool 
+        Does the prop use Flow types? Otherwise, uses PropTypes 
+    Returns 
+    ------- 
+    str 
+        Dash component prop docstring 
+    &quot;&quot;&quot;</span>
+    <span class="s1">jl_type_name = get_jl_type(type_object=type_object)</span>
+
+    <span class="s1">indent_spacing = </span><span class="s3">&quot;  &quot; </span><span class="s1">* indent_num</span>
+    <span class="s0">if </span><span class="s3">&quot;</span><span class="s0">\n</span><span class="s3">&quot; </span><span class="s0">in </span><span class="s1">jl_type_name:</span>
+        <span class="s0">return </span><span class="s1">(</span>
+            <span class="s3">&quot;{indent_spacing}- `{name}` ({is_required}): {description}. &quot;</span>
+            <span class="s3">&quot;{name} has the following type: {type}&quot;</span><span class="s1">.format(</span>
+                <span class="s1">indent_spacing=indent_spacing</span><span class="s0">,</span>
+                <span class="s1">name=prop_name</span><span class="s0">,</span>
+                <span class="s1">type=jl_type_name</span><span class="s0">,</span>
+                <span class="s1">description=description</span><span class="s0">,</span>
+                <span class="s1">is_required=</span><span class="s3">&quot;required&quot; </span><span class="s0">if </span><span class="s1">required </span><span class="s0">else </span><span class="s3">&quot;optional&quot;</span><span class="s0">,</span>
+            <span class="s1">)</span>
+        <span class="s1">)</span>
+    <span class="s0">return </span><span class="s3">&quot;{indent_spacing}- `{name}` ({type}{is_required}){description}&quot;</span><span class="s1">.format(</span>
+        <span class="s1">indent_spacing=indent_spacing</span><span class="s0">,</span>
+        <span class="s1">name=prop_name</span><span class="s0">,</span>
+        <span class="s1">type=</span><span class="s3">&quot;{}; &quot;</span><span class="s1">.format(jl_type_name) </span><span class="s0">if </span><span class="s1">jl_type_name </span><span class="s0">else </span><span class="s3">&quot;&quot;</span><span class="s0">,</span>
+        <span class="s1">description=(</span><span class="s3">&quot;: {}&quot;</span><span class="s1">.format(description) </span><span class="s0">if </span><span class="s1">description != </span><span class="s3">&quot;&quot; </span><span class="s0">else </span><span class="s3">&quot;&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">is_required=</span><span class="s3">&quot;required&quot; </span><span class="s0">if </span><span class="s1">required </span><span class="s0">else </span><span class="s3">&quot;optional&quot;</span><span class="s0">,</span>
+    <span class="s1">)</span>
+
+
+<span class="s2"># this logic will permit passing blank Julia prefixes to</span>
+<span class="s2"># dash-generate-components, while also enforcing</span>
+<span class="s2"># lower case names for the resulting functions; if a prefix</span>
+<span class="s2"># is supplied, leave it as-is</span>
+<span class="s0">def </span><span class="s1">format_fn_name(prefix</span><span class="s0">, </span><span class="s1">name):</span>
+    <span class="s0">if </span><span class="s1">prefix:</span>
+        <span class="s0">return </span><span class="s3">&quot;{}_{}&quot;</span><span class="s1">.format(prefix</span><span class="s0">, </span><span class="s1">name.lower())</span>
+    <span class="s0">return </span><span class="s1">name.lower()</span>
+
+
+<span class="s0">def </span><span class="s1">generate_metadata_strings(resources</span><span class="s0">, </span><span class="s1">metatype):</span>
+    <span class="s0">def </span><span class="s1">nothing_or_string(v):</span>
+        <span class="s0">return </span><span class="s3">'&quot;{}&quot;'</span><span class="s1">.format(v) </span><span class="s0">if </span><span class="s1">v </span><span class="s0">else </span><span class="s3">&quot;nothing&quot;</span>
+
+    <span class="s0">return </span><span class="s1">[</span>
+        <span class="s1">jl_resource_tuple_string.format(</span>
+            <span class="s1">relative_package_path=nothing_or_string(</span>
+                <span class="s1">resource.get(</span><span class="s3">&quot;relative_package_path&quot;</span><span class="s0">, </span><span class="s3">&quot;&quot;</span><span class="s1">)</span>
+            <span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">external_url=nothing_or_string(resource.get(</span><span class="s3">&quot;external_url&quot;</span><span class="s0">, </span><span class="s3">&quot;&quot;</span><span class="s1">))</span><span class="s0">,</span>
+            <span class="s1">dynamic=str(resource.get(</span><span class="s3">&quot;dynamic&quot;</span><span class="s0">, </span><span class="s3">&quot;nothing&quot;</span><span class="s1">)).lower()</span><span class="s0">,</span>
+            <span class="s1">type=metatype</span><span class="s0">,</span>
+            <span class="s1">async_string=</span><span class="s3">&quot;:{}&quot;</span><span class="s1">.format(str(resource.get(</span><span class="s3">&quot;async&quot;</span><span class="s1">)).lower())</span>
+            <span class="s0">if </span><span class="s3">&quot;async&quot; </span><span class="s0">in </span><span class="s1">resource.keys()</span>
+            <span class="s0">else </span><span class="s3">&quot;nothing&quot;</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s0">for </span><span class="s1">resource </span><span class="s0">in </span><span class="s1">resources</span>
+    <span class="s1">]</span>
+
+
+<span class="s0">def </span><span class="s1">is_core_package(project_shortname):</span>
+    <span class="s0">return </span><span class="s1">project_shortname </span><span class="s0">in </span><span class="s1">core_packages</span>
+
+
+<span class="s0">def </span><span class="s1">base_package_name(project_shortname):</span>
+    <span class="s0">return </span><span class="s3">&quot;DashBase&quot; </span><span class="s0">if </span><span class="s1">is_core_package(project_shortname) </span><span class="s0">else </span><span class="s3">&quot;Dash&quot;</span>
+
+
+<span class="s0">def </span><span class="s1">base_package_uid(project_shortname):</span>
+    <span class="s0">return </span><span class="s1">jl_dash_base_uuid </span><span class="s0">if </span><span class="s1">is_core_package(project_shortname) </span><span class="s0">else </span><span class="s1">jl_dash_uuid</span>
+
+
+<span class="s0">def </span><span class="s1">generate_package_file(project_shortname</span><span class="s0">, </span><span class="s1">components</span><span class="s0">, </span><span class="s1">pkg_data</span><span class="s0">, </span><span class="s1">prefix):</span>
+    <span class="s1">package_name = jl_package_name(project_shortname)</span>
+
+    <span class="s1">sys.path.insert(</span><span class="s5">0</span><span class="s0">, </span><span class="s1">os.getcwd())</span>
+    <span class="s1">mod = importlib.import_module(project_shortname)</span>
+    <span class="s1">js_dist = getattr(mod</span><span class="s0">, </span><span class="s3">&quot;_js_dist&quot;</span><span class="s0">, </span><span class="s1">[])</span>
+    <span class="s1">css_dist = getattr(mod</span><span class="s0">, </span><span class="s3">&quot;_css_dist&quot;</span><span class="s0">, </span><span class="s1">[])</span>
+    <span class="s1">project_ver = pkg_data.get(</span><span class="s3">&quot;version&quot;</span><span class="s1">)</span>
+
+    <span class="s1">resources_dist = </span><span class="s3">&quot;,</span><span class="s0">\n</span><span class="s3">&quot;</span><span class="s1">.join(</span>
+        <span class="s1">generate_metadata_strings(js_dist</span><span class="s0">, </span><span class="s3">&quot;js&quot;</span><span class="s1">)</span>
+        <span class="s1">+ generate_metadata_strings(css_dist</span><span class="s0">, </span><span class="s3">&quot;css&quot;</span><span class="s1">)</span>
+    <span class="s1">)</span>
+
+    <span class="s1">package_string = jl_package_file_string.format(</span>
+        <span class="s1">package_name=package_name</span><span class="s0">,</span>
+        <span class="s1">component_includes=</span><span class="s3">&quot;</span><span class="s0">\n</span><span class="s3">&quot;</span><span class="s1">.join(</span>
+            <span class="s1">[</span>
+                <span class="s1">jl_component_include_string.format(</span>
+                    <span class="s1">name=format_fn_name(prefix</span><span class="s0">, </span><span class="s1">comp_name)</span>
+                <span class="s1">)</span>
+                <span class="s0">for </span><span class="s1">comp_name </span><span class="s0">in </span><span class="s1">components</span>
+            <span class="s1">]</span>
+        <span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">resources_dist=resources_dist</span><span class="s0">,</span>
+        <span class="s1">version=project_ver</span><span class="s0">,</span>
+        <span class="s1">project_shortname=project_shortname</span><span class="s0">,</span>
+        <span class="s1">base_package=base_package_name(project_shortname)</span><span class="s0">,</span>
+    <span class="s1">)</span>
+    <span class="s1">file_path = os.path.join(</span><span class="s3">&quot;src&quot;</span><span class="s0">, </span><span class="s1">package_name + </span><span class="s3">&quot;.jl&quot;</span><span class="s1">)</span>
+    <span class="s0">with </span><span class="s1">open(file_path</span><span class="s0">, </span><span class="s3">&quot;w&quot;</span><span class="s1">) </span><span class="s0">as </span><span class="s1">f:</span>
+        <span class="s1">f.write(package_string)</span>
+    <span class="s1">print(</span><span class="s3">&quot;Generated {}&quot;</span><span class="s1">.format(file_path))</span>
+
+
+<span class="s0">def </span><span class="s1">generate_toml_file(project_shortname</span><span class="s0">, </span><span class="s1">pkg_data):</span>
+    <span class="s1">package_author = pkg_data.get(</span><span class="s3">&quot;author&quot;</span><span class="s0">, </span><span class="s3">&quot;&quot;</span><span class="s1">)</span>
+    <span class="s1">project_ver = pkg_data.get(</span><span class="s3">&quot;version&quot;</span><span class="s1">)</span>
+    <span class="s1">package_name = jl_package_name(project_shortname)</span>
+    <span class="s1">u = uuid.UUID(jl_dash_uuid)</span>
+
+    <span class="s1">package_uuid = uuid.UUID(</span>
+        <span class="s1">hex=u.hex[:-</span><span class="s5">12</span><span class="s1">] + hashlib.md5(package_name.encode(</span><span class="s3">&quot;utf-8&quot;</span><span class="s1">)).hexdigest()[-</span><span class="s5">12</span><span class="s1">:]</span>
+    <span class="s1">)</span>
+
+    <span class="s1">authors_string = (</span>
+        <span class="s3">'authors = [&quot;{}&quot;]</span><span class="s0">\n</span><span class="s3">'</span><span class="s1">.format(package_author) </span><span class="s0">if </span><span class="s1">package_author </span><span class="s0">else </span><span class="s3">&quot;&quot;</span>
+    <span class="s1">)</span>
+
+    <span class="s1">base_package = base_package_name(project_shortname)</span>
+
+    <span class="s1">toml_string = jl_projecttoml_string.format(</span>
+        <span class="s1">package_name=package_name</span><span class="s0">,</span>
+        <span class="s1">package_uuid=package_uuid</span><span class="s0">,</span>
+        <span class="s1">version=project_ver</span><span class="s0">,</span>
+        <span class="s1">authors=authors_string</span><span class="s0">,</span>
+        <span class="s1">base_package=base_package</span><span class="s0">,</span>
+        <span class="s1">base_version=jl_base_version[base_package]</span><span class="s0">,</span>
+        <span class="s1">dash_uuid=base_package_uid(project_shortname)</span><span class="s0">,</span>
+    <span class="s1">)</span>
+    <span class="s1">file_path = </span><span class="s3">&quot;Project.toml&quot;</span>
+    <span class="s0">with </span><span class="s1">open(file_path</span><span class="s0">, </span><span class="s3">&quot;w&quot;</span><span class="s1">) </span><span class="s0">as </span><span class="s1">f:</span>
+        <span class="s1">f.write(toml_string)</span>
+    <span class="s1">print(</span><span class="s3">&quot;Generated {}&quot;</span><span class="s1">.format(file_path))</span>
+
+
+<span class="s0">def </span><span class="s1">generate_class_string(name</span><span class="s0">, </span><span class="s1">props</span><span class="s0">, </span><span class="s1">description</span><span class="s0">, </span><span class="s1">project_shortname</span><span class="s0">, </span><span class="s1">prefix):</span>
+    <span class="s2"># Ensure props are ordered with children first</span>
+    <span class="s1">filtered_props = reorder_props(filter_props(props))</span>
+
+    <span class="s1">prop_keys = list(filtered_props.keys())</span>
+
+    <span class="s1">docstring = (</span>
+        <span class="s1">create_docstring_jl(</span>
+            <span class="s1">component_name=name</span><span class="s0">, </span><span class="s1">props=filtered_props</span><span class="s0">, </span><span class="s1">description=description</span>
+        <span class="s1">)</span>
+        <span class="s1">.replace(</span><span class="s3">&quot;</span><span class="s0">\r\n</span><span class="s3">&quot;</span><span class="s0">, </span><span class="s3">&quot;</span><span class="s0">\n</span><span class="s3">&quot;</span><span class="s1">)</span>
+        <span class="s1">.replace(</span><span class="s3">&quot;$&quot;</span><span class="s0">, </span><span class="s3">&quot;</span><span class="s0">\\</span><span class="s3">$&quot;</span><span class="s1">)</span>
+    <span class="s1">)</span>
+
+    <span class="s1">wclist = get_wildcards_jl(props)</span>
+    <span class="s1">default_paramtext = </span><span class="s3">&quot;&quot;</span>
+
+    <span class="s2"># Filter props to remove those we don't want to expose</span>
+    <span class="s0">for </span><span class="s1">item </span><span class="s0">in </span><span class="s1">prop_keys[:]:</span>
+        <span class="s0">if </span><span class="s1">item.endswith(</span><span class="s3">&quot;-*&quot;</span><span class="s1">) </span><span class="s0">or </span><span class="s1">item == </span><span class="s3">&quot;setProps&quot;</span><span class="s1">:</span>
+            <span class="s1">prop_keys.remove(item)</span>
+        <span class="s0">elif </span><span class="s1">item </span><span class="s0">in </span><span class="s1">julia_keywords:</span>
+            <span class="s1">prop_keys.remove(item)</span>
+            <span class="s1">warnings.warn(</span>
+                <span class="s1">(</span>
+                    <span class="s3">'WARNING: prop &quot;{}&quot; in component &quot;{}&quot; is a Julia keyword'</span>
+                    <span class="s3">&quot; - REMOVED FROM THE JULIA COMPONENT&quot;</span>
+                <span class="s1">).format(item</span><span class="s0">, </span><span class="s1">name)</span>
+            <span class="s1">)</span>
+
+    <span class="s1">default_paramtext += </span><span class="s3">&quot;, &quot;</span><span class="s1">.join(</span><span class="s3">&quot;:{}&quot;</span><span class="s1">.format(p) </span><span class="s0">for </span><span class="s1">p </span><span class="s0">in </span><span class="s1">prop_keys)</span>
+
+    <span class="s1">has_children = </span><span class="s3">&quot;children&quot; </span><span class="s0">in </span><span class="s1">prop_keys</span>
+    <span class="s1">funcname = format_fn_name(prefix</span><span class="s0">, </span><span class="s1">name)</span>
+    <span class="s1">children_signatures = (</span>
+        <span class="s1">jl_children_signatures.format(funcname=funcname) </span><span class="s0">if </span><span class="s1">has_children </span><span class="s0">else </span><span class="s3">&quot;&quot;</span>
+    <span class="s1">)</span>
+    <span class="s1">children_definitions = (</span>
+        <span class="s1">jl_children_definitions.format(funcname=funcname) </span><span class="s0">if </span><span class="s1">has_children </span><span class="s0">else </span><span class="s3">&quot;&quot;</span>
+    <span class="s1">)</span>
+    <span class="s0">return </span><span class="s1">jl_component_string.format(</span>
+        <span class="s1">funcname=format_fn_name(prefix</span><span class="s0">, </span><span class="s1">name)</span><span class="s0">,</span>
+        <span class="s1">docstring=docstring</span><span class="s0">,</span>
+        <span class="s1">component_props=default_paramtext</span><span class="s0">,</span>
+        <span class="s1">wildcard_symbols=stringify_wildcards(wclist</span><span class="s0">, </span><span class="s1">no_symbol=</span><span class="s0">False</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">wildcard_names=stringify_wildcards(wclist</span><span class="s0">, </span><span class="s1">no_symbol=</span><span class="s0">True</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">element_name=name</span><span class="s0">,</span>
+        <span class="s1">module_name=project_shortname</span><span class="s0">,</span>
+        <span class="s1">children_signatures=children_signatures</span><span class="s0">,</span>
+        <span class="s1">children_definitions=children_definitions</span><span class="s0">,</span>
+    <span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">generate_struct_file(name</span><span class="s0">, </span><span class="s1">props</span><span class="s0">, </span><span class="s1">description</span><span class="s0">, </span><span class="s1">project_shortname</span><span class="s0">, </span><span class="s1">prefix):</span>
+    <span class="s1">props = reorder_props(props=props)</span>
+    <span class="s1">import_string = </span><span class="s3">&quot;# AUTO GENERATED FILE - DO NOT EDIT</span><span class="s0">\n</span><span class="s3">&quot;</span>
+    <span class="s1">class_string = generate_class_string(</span>
+        <span class="s1">name</span><span class="s0">, </span><span class="s1">props</span><span class="s0">, </span><span class="s1">description</span><span class="s0">, </span><span class="s1">project_shortname</span><span class="s0">, </span><span class="s1">prefix</span>
+    <span class="s1">)</span>
+
+    <span class="s1">file_name = format_fn_name(prefix</span><span class="s0">, </span><span class="s1">name) + </span><span class="s3">&quot;.jl&quot;</span>
+
+    <span class="s2"># put component files in src/jl subdir,</span>
+    <span class="s2"># this also creates the Julia source directory for the package</span>
+    <span class="s2"># if it is missing</span>
+    <span class="s0">if not </span><span class="s1">os.path.exists(</span><span class="s3">&quot;src/jl&quot;</span><span class="s1">):</span>
+        <span class="s1">os.makedirs(</span><span class="s3">&quot;src/jl&quot;</span><span class="s1">)</span>
+
+    <span class="s1">file_path = os.path.join(</span><span class="s3">&quot;src&quot;</span><span class="s0">, </span><span class="s3">&quot;jl&quot;</span><span class="s0">, </span><span class="s1">file_name)</span>
+    <span class="s0">with </span><span class="s1">open(file_path</span><span class="s0">, </span><span class="s3">&quot;w&quot;</span><span class="s1">) </span><span class="s0">as </span><span class="s1">f:</span>
+        <span class="s1">f.write(import_string)</span>
+        <span class="s1">f.write(class_string)</span>
+
+    <span class="s1">print(</span><span class="s3">&quot;Generated {}&quot;</span><span class="s1">.format(file_name))</span>
+
+
+<span class="s2"># pylint: disable=unused-argument</span>
+<span class="s0">def </span><span class="s1">generate_module(</span>
+    <span class="s1">project_shortname</span><span class="s0">, </span><span class="s1">components</span><span class="s0">, </span><span class="s1">metadata</span><span class="s0">, </span><span class="s1">pkg_data</span><span class="s0">, </span><span class="s1">prefix</span><span class="s0">, </span><span class="s1">**kwargs</span>
+<span class="s1">):</span>
+    <span class="s2"># copy over all JS dependencies from the (Python) components dir</span>
+    <span class="s2"># the inst/lib directory for the package won't exist on first call</span>
+    <span class="s2"># create this directory if it is missing</span>
+    <span class="s0">if </span><span class="s1">os.path.exists(</span><span class="s3">&quot;deps&quot;</span><span class="s1">):</span>
+        <span class="s1">shutil.rmtree(</span><span class="s3">&quot;deps&quot;</span><span class="s1">)</span>
+
+    <span class="s1">os.makedirs(</span><span class="s3">&quot;deps&quot;</span><span class="s1">)</span>
+
+    <span class="s0">for </span><span class="s1">rel_dirname</span><span class="s0">, </span><span class="s1">_</span><span class="s0">, </span><span class="s1">filenames </span><span class="s0">in </span><span class="s1">os.walk(project_shortname):</span>
+        <span class="s0">for </span><span class="s1">filename </span><span class="s0">in </span><span class="s1">filenames:</span>
+            <span class="s1">extension = os.path.splitext(filename)[</span><span class="s5">1</span><span class="s1">]</span>
+
+            <span class="s0">if </span><span class="s1">extension </span><span class="s0">in </span><span class="s1">[</span><span class="s3">&quot;.py&quot;</span><span class="s0">, </span><span class="s3">&quot;.pyc&quot;</span><span class="s0">, </span><span class="s3">&quot;.json&quot;</span><span class="s1">]:</span>
+                <span class="s0">continue</span>
+
+            <span class="s1">target_dirname = os.path.join(</span>
+                <span class="s3">&quot;deps/&quot;</span><span class="s0">, </span><span class="s1">os.path.relpath(rel_dirname</span><span class="s0">, </span><span class="s1">project_shortname)</span>
+            <span class="s1">)</span>
+
+            <span class="s0">if not </span><span class="s1">os.path.exists(target_dirname):</span>
+                <span class="s1">os.makedirs(target_dirname)</span>
+
+            <span class="s1">shutil.copy(os.path.join(rel_dirname</span><span class="s0">, </span><span class="s1">filename)</span><span class="s0">, </span><span class="s1">target_dirname)</span>
+
+    <span class="s1">generate_package_file(project_shortname</span><span class="s0">, </span><span class="s1">components</span><span class="s0">, </span><span class="s1">pkg_data</span><span class="s0">, </span><span class="s1">prefix)</span>
+    <span class="s1">generate_toml_file(project_shortname</span><span class="s0">, </span><span class="s1">pkg_data)</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,415 @@
+<html>
+<head>
+<title>bcppcompiler.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+bcppcompiler.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;distutils.bcppcompiler 
+ 
+Contains BorlandCCompiler, an implementation of the abstract CCompiler class 
+for the Borland C++ compiler. 
+&quot;&quot;&quot;</span>
+
+<span class="s2"># This implementation by Lyle Johnson, based on the original msvccompiler.py</span>
+<span class="s2"># module and using the directions originally published by Gordon Williams.</span>
+
+<span class="s2"># XXX looks like there's a LOT of overlap between these two classes:</span>
+<span class="s2"># someone should sit down and factor out the common code as</span>
+<span class="s2"># WindowsCCompiler!  --GPW</span>
+
+
+<span class="s3">import </span><span class="s1">os</span>
+<span class="s3">from </span><span class="s1">distutils.errors </span><span class="s3">import </span><span class="s1">\</span>
+     <span class="s1">DistutilsExecError</span><span class="s3">, </span><span class="s1">\</span>
+     <span class="s1">CompileError</span><span class="s3">, </span><span class="s1">LibError</span><span class="s3">, </span><span class="s1">LinkError</span><span class="s3">, </span><span class="s1">UnknownFileError</span>
+<span class="s3">from </span><span class="s1">distutils.ccompiler </span><span class="s3">import </span><span class="s1">\</span>
+     <span class="s1">CCompiler</span><span class="s3">, </span><span class="s1">gen_preprocess_options</span>
+<span class="s3">from </span><span class="s1">distutils.file_util </span><span class="s3">import </span><span class="s1">write_file</span>
+<span class="s3">from </span><span class="s1">distutils.dep_util </span><span class="s3">import </span><span class="s1">newer</span>
+<span class="s3">from </span><span class="s1">distutils </span><span class="s3">import </span><span class="s1">log</span>
+
+<span class="s3">class </span><span class="s1">BCPPCompiler(CCompiler) :</span>
+    <span class="s0">&quot;&quot;&quot;Concrete class that implements an interface to the Borland C/C++ 
+    compiler, as defined by the CCompiler abstract class. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">compiler_type = </span><span class="s4">'bcpp'</span>
+
+    <span class="s2"># Just set this so CCompiler's constructor doesn't barf.  We currently</span>
+    <span class="s2"># don't use the 'set_executables()' bureaucracy provided by CCompiler,</span>
+    <span class="s2"># as it really isn't necessary for this sort of single-compiler class.</span>
+    <span class="s2"># Would be nice to have a consistent interface with UnixCCompiler,</span>
+    <span class="s2"># though, so it's worth thinking about.</span>
+    <span class="s1">executables = {}</span>
+
+    <span class="s2"># Private class data (need to distinguish C from C++ source for compiler)</span>
+    <span class="s1">_c_extensions = [</span><span class="s4">'.c'</span><span class="s1">]</span>
+    <span class="s1">_cpp_extensions = [</span><span class="s4">'.cc'</span><span class="s3">, </span><span class="s4">'.cpp'</span><span class="s3">, </span><span class="s4">'.cxx'</span><span class="s1">]</span>
+
+    <span class="s2"># Needed for the filename generation methods provided by the</span>
+    <span class="s2"># base class, CCompiler.</span>
+    <span class="s1">src_extensions = _c_extensions + _cpp_extensions</span>
+    <span class="s1">obj_extension = </span><span class="s4">'.obj'</span>
+    <span class="s1">static_lib_extension = </span><span class="s4">'.lib'</span>
+    <span class="s1">shared_lib_extension = </span><span class="s4">'.dll'</span>
+    <span class="s1">static_lib_format = shared_lib_format = </span><span class="s4">'%s%s'</span>
+    <span class="s1">exe_extension = </span><span class="s4">'.exe'</span>
+
+
+    <span class="s3">def </span><span class="s1">__init__ (self</span><span class="s3">,</span>
+                  <span class="s1">verbose=</span><span class="s5">0</span><span class="s3">,</span>
+                  <span class="s1">dry_run=</span><span class="s5">0</span><span class="s3">,</span>
+                  <span class="s1">force=</span><span class="s5">0</span><span class="s1">):</span>
+
+        <span class="s1">CCompiler.__init__ (self</span><span class="s3">, </span><span class="s1">verbose</span><span class="s3">, </span><span class="s1">dry_run</span><span class="s3">, </span><span class="s1">force)</span>
+
+        <span class="s2"># These executables are assumed to all be in the path.</span>
+        <span class="s2"># Borland doesn't seem to use any special registry settings to</span>
+        <span class="s2"># indicate their installation locations.</span>
+
+        <span class="s1">self.cc = </span><span class="s4">&quot;bcc32.exe&quot;</span>
+        <span class="s1">self.linker = </span><span class="s4">&quot;ilink32.exe&quot;</span>
+        <span class="s1">self.lib = </span><span class="s4">&quot;tlib.exe&quot;</span>
+
+        <span class="s1">self.preprocess_options = </span><span class="s3">None</span>
+        <span class="s1">self.compile_options = [</span><span class="s4">'/tWM'</span><span class="s3">, </span><span class="s4">'/O2'</span><span class="s3">, </span><span class="s4">'/q'</span><span class="s3">, </span><span class="s4">'/g0'</span><span class="s1">]</span>
+        <span class="s1">self.compile_options_debug = [</span><span class="s4">'/tWM'</span><span class="s3">, </span><span class="s4">'/Od'</span><span class="s3">, </span><span class="s4">'/q'</span><span class="s3">, </span><span class="s4">'/g0'</span><span class="s1">]</span>
+
+        <span class="s1">self.ldflags_shared = [</span><span class="s4">'/Tpd'</span><span class="s3">, </span><span class="s4">'/Gn'</span><span class="s3">, </span><span class="s4">'/q'</span><span class="s3">, </span><span class="s4">'/x'</span><span class="s1">]</span>
+        <span class="s1">self.ldflags_shared_debug = [</span><span class="s4">'/Tpd'</span><span class="s3">, </span><span class="s4">'/Gn'</span><span class="s3">, </span><span class="s4">'/q'</span><span class="s3">, </span><span class="s4">'/x'</span><span class="s1">]</span>
+        <span class="s1">self.ldflags_static = []</span>
+        <span class="s1">self.ldflags_exe = [</span><span class="s4">'/Gn'</span><span class="s3">, </span><span class="s4">'/q'</span><span class="s3">, </span><span class="s4">'/x'</span><span class="s1">]</span>
+        <span class="s1">self.ldflags_exe_debug = [</span><span class="s4">'/Gn'</span><span class="s3">, </span><span class="s4">'/q'</span><span class="s3">, </span><span class="s4">'/x'</span><span class="s3">,</span><span class="s4">'/r'</span><span class="s1">]</span>
+
+
+    <span class="s2"># -- Worker methods ------------------------------------------------</span>
+
+    <span class="s3">def </span><span class="s1">compile(self</span><span class="s3">, </span><span class="s1">sources</span><span class="s3">,</span>
+                <span class="s1">output_dir=</span><span class="s3">None, </span><span class="s1">macros=</span><span class="s3">None, </span><span class="s1">include_dirs=</span><span class="s3">None, </span><span class="s1">debug=</span><span class="s5">0</span><span class="s3">,</span>
+                <span class="s1">extra_preargs=</span><span class="s3">None, </span><span class="s1">extra_postargs=</span><span class="s3">None, </span><span class="s1">depends=</span><span class="s3">None</span><span class="s1">):</span>
+
+        <span class="s1">macros</span><span class="s3">, </span><span class="s1">objects</span><span class="s3">, </span><span class="s1">extra_postargs</span><span class="s3">, </span><span class="s1">pp_opts</span><span class="s3">, </span><span class="s1">build = \</span>
+                <span class="s1">self._setup_compile(output_dir</span><span class="s3">, </span><span class="s1">macros</span><span class="s3">, </span><span class="s1">include_dirs</span><span class="s3">, </span><span class="s1">sources</span><span class="s3">,</span>
+                                    <span class="s1">depends</span><span class="s3">, </span><span class="s1">extra_postargs)</span>
+        <span class="s1">compile_opts = extra_preargs </span><span class="s3">or </span><span class="s1">[]</span>
+        <span class="s1">compile_opts.append (</span><span class="s4">'-c'</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">debug:</span>
+            <span class="s1">compile_opts.extend (self.compile_options_debug)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">compile_opts.extend (self.compile_options)</span>
+
+        <span class="s3">for </span><span class="s1">obj </span><span class="s3">in </span><span class="s1">objects:</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">src</span><span class="s3">, </span><span class="s1">ext = build[obj]</span>
+            <span class="s3">except </span><span class="s1">KeyError:</span>
+                <span class="s3">continue</span>
+            <span class="s2"># XXX why do the normpath here?</span>
+            <span class="s1">src = os.path.normpath(src)</span>
+            <span class="s1">obj = os.path.normpath(obj)</span>
+            <span class="s2"># XXX _setup_compile() did a mkpath() too but before the normpath.</span>
+            <span class="s2"># Is it possible to skip the normpath?</span>
+            <span class="s1">self.mkpath(os.path.dirname(obj))</span>
+
+            <span class="s3">if </span><span class="s1">ext == </span><span class="s4">'.res'</span><span class="s1">:</span>
+                <span class="s2"># This is already a binary file -- skip it.</span>
+                <span class="s3">continue </span><span class="s2"># the 'for' loop</span>
+            <span class="s3">if </span><span class="s1">ext == </span><span class="s4">'.rc'</span><span class="s1">:</span>
+                <span class="s2"># This needs to be compiled to a .res file -- do it now.</span>
+                <span class="s3">try</span><span class="s1">:</span>
+                    <span class="s1">self.spawn ([</span><span class="s4">&quot;brcc32&quot;</span><span class="s3">, </span><span class="s4">&quot;-fo&quot;</span><span class="s3">, </span><span class="s1">obj</span><span class="s3">, </span><span class="s1">src])</span>
+                <span class="s3">except </span><span class="s1">DistutilsExecError </span><span class="s3">as </span><span class="s1">msg:</span>
+                    <span class="s3">raise </span><span class="s1">CompileError(msg)</span>
+                <span class="s3">continue </span><span class="s2"># the 'for' loop</span>
+
+            <span class="s2"># The next two are both for the real compiler.</span>
+            <span class="s3">if </span><span class="s1">ext </span><span class="s3">in </span><span class="s1">self._c_extensions:</span>
+                <span class="s1">input_opt = </span><span class="s4">&quot;&quot;</span>
+            <span class="s3">elif </span><span class="s1">ext </span><span class="s3">in </span><span class="s1">self._cpp_extensions:</span>
+                <span class="s1">input_opt = </span><span class="s4">&quot;-P&quot;</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s2"># Unknown file type -- no extra options.  The compiler</span>
+                <span class="s2"># will probably fail, but let it just in case this is a</span>
+                <span class="s2"># file the compiler recognizes even if we don't.</span>
+                <span class="s1">input_opt = </span><span class="s4">&quot;&quot;</span>
+
+            <span class="s1">output_opt = </span><span class="s4">&quot;-o&quot; </span><span class="s1">+ obj</span>
+
+            <span class="s2"># Compiler command line syntax is: &quot;bcc32 [options] file(s)&quot;.</span>
+            <span class="s2"># Note that the source file names must appear at the end of</span>
+            <span class="s2"># the command line.</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">self.spawn ([self.cc] + compile_opts + pp_opts +</span>
+                            <span class="s1">[input_opt</span><span class="s3">, </span><span class="s1">output_opt] +</span>
+                            <span class="s1">extra_postargs + [src])</span>
+            <span class="s3">except </span><span class="s1">DistutilsExecError </span><span class="s3">as </span><span class="s1">msg:</span>
+                <span class="s3">raise </span><span class="s1">CompileError(msg)</span>
+
+        <span class="s3">return </span><span class="s1">objects</span>
+
+    <span class="s2"># compile ()</span>
+
+
+    <span class="s3">def </span><span class="s1">create_static_lib (self</span><span class="s3">,</span>
+                           <span class="s1">objects</span><span class="s3">,</span>
+                           <span class="s1">output_libname</span><span class="s3">,</span>
+                           <span class="s1">output_dir=</span><span class="s3">None,</span>
+                           <span class="s1">debug=</span><span class="s5">0</span><span class="s3">,</span>
+                           <span class="s1">target_lang=</span><span class="s3">None</span><span class="s1">):</span>
+
+        <span class="s1">(objects</span><span class="s3">, </span><span class="s1">output_dir) = self._fix_object_args (objects</span><span class="s3">, </span><span class="s1">output_dir)</span>
+        <span class="s1">output_filename = \</span>
+            <span class="s1">self.library_filename (output_libname</span><span class="s3">, </span><span class="s1">output_dir=output_dir)</span>
+
+        <span class="s3">if </span><span class="s1">self._need_link (objects</span><span class="s3">, </span><span class="s1">output_filename):</span>
+            <span class="s1">lib_args = [output_filename</span><span class="s3">, </span><span class="s4">'/u'</span><span class="s1">] + objects</span>
+            <span class="s3">if </span><span class="s1">debug:</span>
+                <span class="s3">pass                    </span><span class="s2"># XXX what goes here?</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">self.spawn ([self.lib] + lib_args)</span>
+            <span class="s3">except </span><span class="s1">DistutilsExecError </span><span class="s3">as </span><span class="s1">msg:</span>
+                <span class="s3">raise </span><span class="s1">LibError(msg)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">log.debug(</span><span class="s4">&quot;skipping %s (up-to-date)&quot;</span><span class="s3">, </span><span class="s1">output_filename)</span>
+
+    <span class="s2"># create_static_lib ()</span>
+
+
+    <span class="s3">def </span><span class="s1">link (self</span><span class="s3">,</span>
+              <span class="s1">target_desc</span><span class="s3">,</span>
+              <span class="s1">objects</span><span class="s3">,</span>
+              <span class="s1">output_filename</span><span class="s3">,</span>
+              <span class="s1">output_dir=</span><span class="s3">None,</span>
+              <span class="s1">libraries=</span><span class="s3">None,</span>
+              <span class="s1">library_dirs=</span><span class="s3">None,</span>
+              <span class="s1">runtime_library_dirs=</span><span class="s3">None,</span>
+              <span class="s1">export_symbols=</span><span class="s3">None,</span>
+              <span class="s1">debug=</span><span class="s5">0</span><span class="s3">,</span>
+              <span class="s1">extra_preargs=</span><span class="s3">None,</span>
+              <span class="s1">extra_postargs=</span><span class="s3">None,</span>
+              <span class="s1">build_temp=</span><span class="s3">None,</span>
+              <span class="s1">target_lang=</span><span class="s3">None</span><span class="s1">):</span>
+
+        <span class="s2"># XXX this ignores 'build_temp'!  should follow the lead of</span>
+        <span class="s2"># msvccompiler.py</span>
+
+        <span class="s1">(objects</span><span class="s3">, </span><span class="s1">output_dir) = self._fix_object_args (objects</span><span class="s3">, </span><span class="s1">output_dir)</span>
+        <span class="s1">(libraries</span><span class="s3">, </span><span class="s1">library_dirs</span><span class="s3">, </span><span class="s1">runtime_library_dirs) = \</span>
+            <span class="s1">self._fix_lib_args (libraries</span><span class="s3">, </span><span class="s1">library_dirs</span><span class="s3">, </span><span class="s1">runtime_library_dirs)</span>
+
+        <span class="s3">if </span><span class="s1">runtime_library_dirs:</span>
+            <span class="s1">log.warn(</span><span class="s4">&quot;I don't know what to do with 'runtime_library_dirs': %s&quot;</span><span class="s3">,</span>
+                     <span class="s1">str(runtime_library_dirs))</span>
+
+        <span class="s3">if </span><span class="s1">output_dir </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">output_filename = os.path.join (output_dir</span><span class="s3">, </span><span class="s1">output_filename)</span>
+
+        <span class="s3">if </span><span class="s1">self._need_link (objects</span><span class="s3">, </span><span class="s1">output_filename):</span>
+
+            <span class="s2"># Figure out linker args based on type of target.</span>
+            <span class="s3">if </span><span class="s1">target_desc == CCompiler.EXECUTABLE:</span>
+                <span class="s1">startup_obj = </span><span class="s4">'c0w32'</span>
+                <span class="s3">if </span><span class="s1">debug:</span>
+                    <span class="s1">ld_args = self.ldflags_exe_debug[:]</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">ld_args = self.ldflags_exe[:]</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">startup_obj = </span><span class="s4">'c0d32'</span>
+                <span class="s3">if </span><span class="s1">debug:</span>
+                    <span class="s1">ld_args = self.ldflags_shared_debug[:]</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">ld_args = self.ldflags_shared[:]</span>
+
+
+            <span class="s2"># Create a temporary exports file for use by the linker</span>
+            <span class="s3">if </span><span class="s1">export_symbols </span><span class="s3">is None</span><span class="s1">:</span>
+                <span class="s1">def_file = </span><span class="s4">''</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">head</span><span class="s3">, </span><span class="s1">tail = os.path.split (output_filename)</span>
+                <span class="s1">modname</span><span class="s3">, </span><span class="s1">ext = os.path.splitext (tail)</span>
+                <span class="s1">temp_dir = os.path.dirname(objects[</span><span class="s5">0</span><span class="s1">]) </span><span class="s2"># preserve tree structure</span>
+                <span class="s1">def_file = os.path.join (temp_dir</span><span class="s3">, </span><span class="s4">'%s.def' </span><span class="s1">% modname)</span>
+                <span class="s1">contents = [</span><span class="s4">'EXPORTS'</span><span class="s1">]</span>
+                <span class="s3">for </span><span class="s1">sym </span><span class="s3">in </span><span class="s1">(export_symbols </span><span class="s3">or </span><span class="s1">[]):</span>
+                    <span class="s1">contents.append(</span><span class="s4">'  %s=_%s' </span><span class="s1">% (sym</span><span class="s3">, </span><span class="s1">sym))</span>
+                <span class="s1">self.execute(write_file</span><span class="s3">, </span><span class="s1">(def_file</span><span class="s3">, </span><span class="s1">contents)</span><span class="s3">,</span>
+                             <span class="s4">&quot;writing %s&quot; </span><span class="s1">% def_file)</span>
+
+            <span class="s2"># Borland C++ has problems with '/' in paths</span>
+            <span class="s1">objects2 = map(os.path.normpath</span><span class="s3">, </span><span class="s1">objects)</span>
+            <span class="s2"># split objects in .obj and .res files</span>
+            <span class="s2"># Borland C++ needs them at different positions in the command line</span>
+            <span class="s1">objects = [startup_obj]</span>
+            <span class="s1">resources = []</span>
+            <span class="s3">for </span><span class="s1">file </span><span class="s3">in </span><span class="s1">objects2:</span>
+                <span class="s1">(base</span><span class="s3">, </span><span class="s1">ext) = os.path.splitext(os.path.normcase(file))</span>
+                <span class="s3">if </span><span class="s1">ext == </span><span class="s4">'.res'</span><span class="s1">:</span>
+                    <span class="s1">resources.append(file)</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">objects.append(file)</span>
+
+
+            <span class="s3">for </span><span class="s1">l </span><span class="s3">in </span><span class="s1">library_dirs:</span>
+                <span class="s1">ld_args.append(</span><span class="s4">&quot;/L%s&quot; </span><span class="s1">% os.path.normpath(l))</span>
+            <span class="s1">ld_args.append(</span><span class="s4">&quot;/L.&quot;</span><span class="s1">) </span><span class="s2"># we sometimes use relative paths</span>
+
+            <span class="s2"># list of object files</span>
+            <span class="s1">ld_args.extend(objects)</span>
+
+            <span class="s2"># XXX the command-line syntax for Borland C++ is a bit wonky;</span>
+            <span class="s2"># certain filenames are jammed together in one big string, but</span>
+            <span class="s2"># comma-delimited.  This doesn't mesh too well with the</span>
+            <span class="s2"># Unix-centric attitude (with a DOS/Windows quoting hack) of</span>
+            <span class="s2"># 'spawn()', so constructing the argument list is a bit</span>
+            <span class="s2"># awkward.  Note that doing the obvious thing and jamming all</span>
+            <span class="s2"># the filenames and commas into one argument would be wrong,</span>
+            <span class="s2"># because 'spawn()' would quote any filenames with spaces in</span>
+            <span class="s2"># them.  Arghghh!.  Apparently it works fine as coded...</span>
+
+            <span class="s2"># name of dll/exe file</span>
+            <span class="s1">ld_args.extend([</span><span class="s4">','</span><span class="s3">,</span><span class="s1">output_filename])</span>
+            <span class="s2"># no map file and start libraries</span>
+            <span class="s1">ld_args.append(</span><span class="s4">',,'</span><span class="s1">)</span>
+
+            <span class="s3">for </span><span class="s1">lib </span><span class="s3">in </span><span class="s1">libraries:</span>
+                <span class="s2"># see if we find it and if there is a bcpp specific lib</span>
+                <span class="s2"># (xxx_bcpp.lib)</span>
+                <span class="s1">libfile = self.find_library_file(library_dirs</span><span class="s3">, </span><span class="s1">lib</span><span class="s3">, </span><span class="s1">debug)</span>
+                <span class="s3">if </span><span class="s1">libfile </span><span class="s3">is None</span><span class="s1">:</span>
+                    <span class="s1">ld_args.append(lib)</span>
+                    <span class="s2"># probably a BCPP internal library -- don't warn</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s2"># full name which prefers bcpp_xxx.lib over xxx.lib</span>
+                    <span class="s1">ld_args.append(libfile)</span>
+
+            <span class="s2"># some default libraries</span>
+            <span class="s1">ld_args.append (</span><span class="s4">'import32'</span><span class="s1">)</span>
+            <span class="s1">ld_args.append (</span><span class="s4">'cw32mt'</span><span class="s1">)</span>
+
+            <span class="s2"># def file for export symbols</span>
+            <span class="s1">ld_args.extend([</span><span class="s4">','</span><span class="s3">,</span><span class="s1">def_file])</span>
+            <span class="s2"># add resource files</span>
+            <span class="s1">ld_args.append(</span><span class="s4">','</span><span class="s1">)</span>
+            <span class="s1">ld_args.extend(resources)</span>
+
+
+            <span class="s3">if </span><span class="s1">extra_preargs:</span>
+                <span class="s1">ld_args[:</span><span class="s5">0</span><span class="s1">] = extra_preargs</span>
+            <span class="s3">if </span><span class="s1">extra_postargs:</span>
+                <span class="s1">ld_args.extend(extra_postargs)</span>
+
+            <span class="s1">self.mkpath (os.path.dirname (output_filename))</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">self.spawn ([self.linker] + ld_args)</span>
+            <span class="s3">except </span><span class="s1">DistutilsExecError </span><span class="s3">as </span><span class="s1">msg:</span>
+                <span class="s3">raise </span><span class="s1">LinkError(msg)</span>
+
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">log.debug(</span><span class="s4">&quot;skipping %s (up-to-date)&quot;</span><span class="s3">, </span><span class="s1">output_filename)</span>
+
+    <span class="s2"># link ()</span>
+
+    <span class="s2"># -- Miscellaneous methods -----------------------------------------</span>
+
+
+    <span class="s3">def </span><span class="s1">find_library_file (self</span><span class="s3">, </span><span class="s1">dirs</span><span class="s3">, </span><span class="s1">lib</span><span class="s3">, </span><span class="s1">debug=</span><span class="s5">0</span><span class="s1">):</span>
+        <span class="s2"># List of effective library names to try, in order of preference:</span>
+        <span class="s2"># xxx_bcpp.lib is better than xxx.lib</span>
+        <span class="s2"># and xxx_d.lib is better than xxx.lib if debug is set</span>
+        <span class="s2">#</span>
+        <span class="s2"># The &quot;_bcpp&quot; suffix is to handle a Python installation for people</span>
+        <span class="s2"># with multiple compilers (primarily Distutils hackers, I suspect</span>
+        <span class="s2"># ;-).  The idea is they'd have one static library for each</span>
+        <span class="s2"># compiler they care about, since (almost?) every Windows compiler</span>
+        <span class="s2"># seems to have a different format for static libraries.</span>
+        <span class="s3">if </span><span class="s1">debug:</span>
+            <span class="s1">dlib = (lib + </span><span class="s4">&quot;_d&quot;</span><span class="s1">)</span>
+            <span class="s1">try_names = (dlib + </span><span class="s4">&quot;_bcpp&quot;</span><span class="s3">, </span><span class="s1">lib + </span><span class="s4">&quot;_bcpp&quot;</span><span class="s3">, </span><span class="s1">dlib</span><span class="s3">, </span><span class="s1">lib)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">try_names = (lib + </span><span class="s4">&quot;_bcpp&quot;</span><span class="s3">, </span><span class="s1">lib)</span>
+
+        <span class="s3">for </span><span class="s1">dir </span><span class="s3">in </span><span class="s1">dirs:</span>
+            <span class="s3">for </span><span class="s1">name </span><span class="s3">in </span><span class="s1">try_names:</span>
+                <span class="s1">libfile = os.path.join(dir</span><span class="s3">, </span><span class="s1">self.library_filename(name))</span>
+                <span class="s3">if </span><span class="s1">os.path.exists(libfile):</span>
+                    <span class="s3">return </span><span class="s1">libfile</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s2"># Oops, didn't find it in *any* of 'dirs'</span>
+            <span class="s3">return None</span>
+
+    <span class="s2"># overwrite the one from CCompiler to support rc and res-files</span>
+    <span class="s3">def </span><span class="s1">object_filenames (self</span><span class="s3">,</span>
+                          <span class="s1">source_filenames</span><span class="s3">,</span>
+                          <span class="s1">strip_dir=</span><span class="s5">0</span><span class="s3">,</span>
+                          <span class="s1">output_dir=</span><span class="s4">''</span><span class="s1">):</span>
+        <span class="s3">if </span><span class="s1">output_dir </span><span class="s3">is None</span><span class="s1">: output_dir = </span><span class="s4">''</span>
+        <span class="s1">obj_names = []</span>
+        <span class="s3">for </span><span class="s1">src_name </span><span class="s3">in </span><span class="s1">source_filenames:</span>
+            <span class="s2"># use normcase to make sure '.rc' is really '.rc' and not '.RC'</span>
+            <span class="s1">(base</span><span class="s3">, </span><span class="s1">ext) = os.path.splitext (os.path.normcase(src_name))</span>
+            <span class="s3">if </span><span class="s1">ext </span><span class="s3">not in </span><span class="s1">(self.src_extensions + [</span><span class="s4">'.rc'</span><span class="s3">,</span><span class="s4">'.res'</span><span class="s1">]):</span>
+                <span class="s3">raise </span><span class="s1">UnknownFileError(</span><span class="s4">&quot;unknown file type '%s' (from '%s')&quot; </span><span class="s1">% \</span>
+                      <span class="s1">(ext</span><span class="s3">, </span><span class="s1">src_name))</span>
+            <span class="s3">if </span><span class="s1">strip_dir:</span>
+                <span class="s1">base = os.path.basename (base)</span>
+            <span class="s3">if </span><span class="s1">ext == </span><span class="s4">'.res'</span><span class="s1">:</span>
+                <span class="s2"># these can go unchanged</span>
+                <span class="s1">obj_names.append (os.path.join (output_dir</span><span class="s3">, </span><span class="s1">base + ext))</span>
+            <span class="s3">elif </span><span class="s1">ext == </span><span class="s4">'.rc'</span><span class="s1">:</span>
+                <span class="s2"># these need to be compiled to .res-files</span>
+                <span class="s1">obj_names.append (os.path.join (output_dir</span><span class="s3">, </span><span class="s1">base + </span><span class="s4">'.res'</span><span class="s1">))</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">obj_names.append (os.path.join (output_dir</span><span class="s3">,</span>
+                                            <span class="s1">base + self.obj_extension))</span>
+        <span class="s3">return </span><span class="s1">obj_names</span>
+
+    <span class="s2"># object_filenames ()</span>
+
+    <span class="s3">def </span><span class="s1">preprocess (self</span><span class="s3">,</span>
+                    <span class="s1">source</span><span class="s3">,</span>
+                    <span class="s1">output_file=</span><span class="s3">None,</span>
+                    <span class="s1">macros=</span><span class="s3">None,</span>
+                    <span class="s1">include_dirs=</span><span class="s3">None,</span>
+                    <span class="s1">extra_preargs=</span><span class="s3">None,</span>
+                    <span class="s1">extra_postargs=</span><span class="s3">None</span><span class="s1">):</span>
+
+        <span class="s1">(_</span><span class="s3">, </span><span class="s1">macros</span><span class="s3">, </span><span class="s1">include_dirs) = \</span>
+            <span class="s1">self._fix_compile_args(</span><span class="s3">None, </span><span class="s1">macros</span><span class="s3">, </span><span class="s1">include_dirs)</span>
+        <span class="s1">pp_opts = gen_preprocess_options(macros</span><span class="s3">, </span><span class="s1">include_dirs)</span>
+        <span class="s1">pp_args = [</span><span class="s4">'cpp32.exe'</span><span class="s1">] + pp_opts</span>
+        <span class="s3">if </span><span class="s1">output_file </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">pp_args.append(</span><span class="s4">'-o' </span><span class="s1">+ output_file)</span>
+        <span class="s3">if </span><span class="s1">extra_preargs:</span>
+            <span class="s1">pp_args[:</span><span class="s5">0</span><span class="s1">] = extra_preargs</span>
+        <span class="s3">if </span><span class="s1">extra_postargs:</span>
+            <span class="s1">pp_args.extend(extra_postargs)</span>
+        <span class="s1">pp_args.append(source)</span>
+
+        <span class="s2"># We need to preprocess: either we're being forced to, or the</span>
+        <span class="s2"># source file is newer than the target (or the target doesn't</span>
+        <span class="s2"># exist).</span>
+        <span class="s3">if </span><span class="s1">self.force </span><span class="s3">or </span><span class="s1">output_file </span><span class="s3">is None or </span><span class="s1">newer(source</span><span class="s3">, </span><span class="s1">output_file):</span>
+            <span class="s3">if </span><span class="s1">output_file:</span>
+                <span class="s1">self.mkpath(os.path.dirname(output_file))</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">self.spawn(pp_args)</span>
+            <span class="s3">except </span><span class="s1">DistutilsExecError </span><span class="s3">as </span><span class="s1">msg:</span>
+                <span class="s1">print(msg)</span>
+                <span class="s3">raise </span><span class="s1">CompileError(msg)</span>
+
+    <span class="s2"># preprocess()</span>
+</pre>
+</body>
+</html>

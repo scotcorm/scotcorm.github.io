@@ -1,0 +1,147 @@
+<html>
+<head>
+<title>extract-meta.js</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+.s1 { color: #6a8759;}
+.s2 { color: #6897bb;}
+.s3 { color: #cc7832;}
+.s4 { color: #4646f1;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+extract-meta.js</font>
+</center></td></tr></table>
+<pre><span class="s0">#!/usr/bin/env node</span>
+
+<span class="s0">const fs = require(</span><span class="s1">'fs'</span><span class="s0">);</span>
+<span class="s0">const path = require(</span><span class="s1">'path'</span><span class="s0">);</span>
+<span class="s0">const reactDocs = require(</span><span class="s1">'react-docgen'</span><span class="s0">);</span>
+
+<span class="s0">const componentPaths = process.argv.slice(</span><span class="s2">4</span><span class="s0">);</span>
+<span class="s0">const ignorePattern = </span><span class="s3">new </span><span class="s0">RegExp(process.argv[</span><span class="s2">2</span><span class="s0">].split(</span><span class="s1">'&quot;'</span><span class="s0">).join(</span><span class="s1">''</span><span class="s0">));</span>
+<span class="s0">const reservedPatterns = process.argv[</span><span class="s2">3</span><span class="s0">].split(</span><span class="s1">'|'</span><span class="s0">).map(part =&gt; </span><span class="s3">new </span><span class="s0">RegExp(part));</span>
+
+<span class="s0">let failed = </span><span class="s3">false</span><span class="s0">;</span>
+
+<span class="s0">const excludedDocProps = [</span>
+    <span class="s1">'setProps'</span><span class="s0">, </span><span class="s1">'id'</span><span class="s0">, </span><span class="s1">'className'</span><span class="s0">, </span><span class="s1">'style'</span>
+<span class="s0">];</span>
+
+<span class="s3">if </span><span class="s0">(!componentPaths.length) {</span>
+    <span class="s0">help();</span>
+    <span class="s0">process.exit(</span><span class="s2">1</span><span class="s0">);</span>
+<span class="s0">}</span>
+
+<span class="s0">const metadata = Object.create(</span><span class="s3">null</span><span class="s0">);</span>
+<span class="s0">componentPaths.forEach(componentPath =&gt;</span>
+    <span class="s0">collectMetadataRecursively(componentPath)</span>
+<span class="s0">);</span>
+<span class="s3">if </span><span class="s0">(failed) {</span>
+    <span class="s0">console.error(</span><span class="s1">'</span><span class="s4">\n</span><span class="s1">extract-meta failed.</span><span class="s4">\n</span><span class="s1">'</span><span class="s0">);</span>
+<span class="s0">}</span>
+<span class="s3">else </span><span class="s0">{</span>
+    <span class="s0">writeOut(metadata);</span>
+<span class="s0">}</span>
+
+<span class="s3">function </span><span class="s0">help() {</span>
+    <span class="s0">console.error(</span><span class="s1">'usage: '</span><span class="s0">);</span>
+    <span class="s0">console.error(</span>
+        <span class="s1">'extract-meta ^fileIgnorePattern ^forbidden$|^props$|^patterns$' </span><span class="s0">+</span>
+        <span class="s1">' path/to/component(s) [path/to/more/component(s) ...] &gt; metadata.json'</span>
+    <span class="s0">);</span>
+<span class="s0">}</span>
+
+<span class="s3">function </span><span class="s0">writeError(msg, filePath) {</span>
+    <span class="s3">if </span><span class="s0">(filePath) {</span>
+        <span class="s0">process.stderr.write(`Error </span><span class="s3">with </span><span class="s0">path ${filePath}`);</span>
+    <span class="s0">}</span>
+
+    <span class="s0">process.stderr.write(msg + </span><span class="s1">'</span><span class="s4">\n</span><span class="s1">'</span><span class="s0">);</span>
+    <span class="s3">if </span><span class="s0">(msg </span><span class="s3">instanceof </span><span class="s0">Error) {</span>
+        <span class="s0">process.stderr.write(msg.stack + </span><span class="s1">'</span><span class="s4">\n</span><span class="s1">'</span><span class="s0">);</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s3">function </span><span class="s0">checkWarn(name, value) {</span>
+    <span class="s3">if </span><span class="s0">(!value || (value.length &lt; </span><span class="s2">1 </span><span class="s0">&amp;&amp; !excludedDocProps.includes(name.split(</span><span class="s1">'.'</span><span class="s0">).pop()))) {</span>
+        <span class="s0">process.stderr.write(`\nDescription </span><span class="s3">for </span><span class="s0">${name} is missing!\n`)</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s3">function </span><span class="s0">docstringWarning(doc) {</span>
+    <span class="s0">checkWarn(doc.displayName, doc.description);</span>
+
+    <span class="s0">Object.entries(doc.props).forEach(</span>
+        <span class="s0">([name, p]) =&gt; checkWarn(`${doc.displayName}.${name}`, p.description)</span>
+    <span class="s0">);</span>
+<span class="s0">}</span>
+
+<span class="s3">function </span><span class="s0">propError(doc) {</span>
+    <span class="s3">for</span><span class="s0">(const propName </span><span class="s3">in </span><span class="s0">doc.props) {</span>
+        <span class="s0">reservedPatterns.forEach(reservedPattern =&gt; {</span>
+            <span class="s3">if </span><span class="s0">(reservedPattern.test(propName)) {</span>
+                <span class="s0">process.stderr.write(</span>
+                    <span class="s0">`\nERROR: </span><span class="s1">&quot;${propName}&quot; </span><span class="s0">matches reserved word ` +</span>
+                    <span class="s0">`pattern: ${reservedPattern.toString()}\n`</span>
+                <span class="s0">);</span>
+                <span class="s0">failed = </span><span class="s3">true</span><span class="s0">;</span>
+            <span class="s0">}</span>
+        <span class="s0">});</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+
+<span class="s3">function </span><span class="s0">parseFile(filepath) {</span>
+    <span class="s0">const urlpath = filepath.split(path.sep).join(</span><span class="s1">'/'</span><span class="s0">);</span>
+    <span class="s0">let src;</span>
+
+    <span class="s3">if </span><span class="s0">(![</span><span class="s1">'.jsx'</span><span class="s0">, </span><span class="s1">'.js'</span><span class="s0">].includes(path.extname(filepath))) {</span>
+        <span class="s3">return</span><span class="s0">;</span>
+    <span class="s0">}</span>
+
+    <span class="s3">try </span><span class="s0">{</span>
+        <span class="s0">src = fs.readFileSync(filepath);</span>
+        <span class="s0">const doc = metadata[urlpath] = reactDocs.parse(src);</span>
+        <span class="s0">docstringWarning(doc);</span>
+        <span class="s0">propError(doc);</span>
+    <span class="s0">} </span><span class="s3">catch </span><span class="s0">(error) {</span>
+        <span class="s0">writeError(error, filepath);</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s3">function </span><span class="s0">collectMetadataRecursively(componentPath) {</span>
+    <span class="s3">if </span><span class="s0">(ignorePattern.test(componentPath)) {</span>
+        <span class="s3">return</span><span class="s0">;</span>
+    <span class="s0">}</span>
+    <span class="s3">if </span><span class="s0">(fs.lstatSync(componentPath).isDirectory()) {</span>
+        <span class="s0">let dirs;</span>
+        <span class="s3">try </span><span class="s0">{</span>
+            <span class="s0">dirs = fs.readdirSync(componentPath);</span>
+        <span class="s0">} </span><span class="s3">catch </span><span class="s0">(error) {</span>
+            <span class="s0">writeError(error, componentPath);</span>
+        <span class="s0">}</span>
+        <span class="s0">dirs.forEach(filename =&gt; {</span>
+            <span class="s0">const filepath = path.join(componentPath, filename);</span>
+            <span class="s3">if </span><span class="s0">(fs.lstatSync(filepath).isDirectory()</span>
+                <span class="s0">&amp;&amp; !ignorePattern.test(filename)) {</span>
+                <span class="s0">collectMetadataRecursively(filepath);</span>
+            <span class="s0">} </span><span class="s3">else if </span><span class="s0">(!ignorePattern.test(filename)) {</span>
+                <span class="s0">parseFile(filepath);</span>
+            <span class="s0">}</span>
+        <span class="s0">});</span>
+    <span class="s0">} </span><span class="s3">else if </span><span class="s0">(!ignorePattern.test(componentPath)) {</span>
+        <span class="s0">parseFile(componentPath);</span>
+    <span class="s0">}</span>
+<span class="s0">}</span>
+
+<span class="s3">function </span><span class="s0">writeOut(result) {</span>
+    <span class="s0">console.log(JSON.stringify(result, </span><span class="s1">'</span><span class="s4">\t</span><span class="s1">'</span><span class="s0">, </span><span class="s2">2</span><span class="s0">));</span>
+<span class="s0">}</span>
+</pre>
+</body>
+</html>

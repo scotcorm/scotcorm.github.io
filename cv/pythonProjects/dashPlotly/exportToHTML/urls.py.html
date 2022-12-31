@@ -1,0 +1,1234 @@
+<html>
+<head>
+<title>urls.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #808080;}
+.s4 { color: #6a8759;}
+.s5 { color: #a5c261;}
+.s6 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+urls.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;Functions for working with URLs. 
+ 
+Contains implementations of functions from :mod:`urllib.parse` that 
+handle bytes and strings. 
+&quot;&quot;&quot;</span>
+<span class="s2">import </span><span class="s1">codecs</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">typing </span><span class="s2">as </span><span class="s1">t</span>
+<span class="s2">import </span><span class="s1">warnings</span>
+
+<span class="s2">from </span><span class="s1">._internal </span><span class="s2">import </span><span class="s1">_check_str_tuple</span>
+<span class="s2">from </span><span class="s1">._internal </span><span class="s2">import </span><span class="s1">_decode_idna</span>
+<span class="s2">from </span><span class="s1">._internal </span><span class="s2">import </span><span class="s1">_encode_idna</span>
+<span class="s2">from </span><span class="s1">._internal </span><span class="s2">import </span><span class="s1">_make_encode_wrapper</span>
+<span class="s2">from </span><span class="s1">._internal </span><span class="s2">import </span><span class="s1">_to_str</span>
+
+<span class="s2">if </span><span class="s1">t.TYPE_CHECKING:</span>
+    <span class="s2">from </span><span class="s1">. </span><span class="s2">import </span><span class="s1">datastructures </span><span class="s2">as </span><span class="s1">ds</span>
+
+<span class="s3"># A regular expression for what a valid schema looks like</span>
+<span class="s1">_scheme_re = re.compile(</span><span class="s4">r&quot;^[a-zA-Z0-9+-.]+$&quot;</span><span class="s1">)</span>
+
+<span class="s3"># Characters that are safe in any part of an URL.</span>
+<span class="s1">_always_safe = frozenset(</span>
+    <span class="s1">bytearray(</span>
+        <span class="s5">b&quot;abcdefghijklmnopqrstuvwxyz&quot;</span>
+        <span class="s5">b&quot;ABCDEFGHIJKLMNOPQRSTUVWXYZ&quot;</span>
+        <span class="s5">b&quot;0123456789&quot;</span>
+        <span class="s5">b&quot;-._~&quot;</span>
+    <span class="s1">)</span>
+<span class="s1">)</span>
+
+<span class="s1">_hexdigits = </span><span class="s4">&quot;0123456789ABCDEFabcdef&quot;</span>
+<span class="s1">_hextobyte = {</span>
+    <span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">a</span><span class="s2">}{</span><span class="s1">b</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s1">.encode(</span><span class="s4">&quot;ascii&quot;</span><span class="s1">): int(</span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">a</span><span class="s2">}{</span><span class="s1">b</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s2">, </span><span class="s6">16</span><span class="s1">)</span>
+    <span class="s2">for </span><span class="s1">a </span><span class="s2">in </span><span class="s1">_hexdigits</span>
+    <span class="s2">for </span><span class="s1">b </span><span class="s2">in </span><span class="s1">_hexdigits</span>
+<span class="s1">}</span>
+<span class="s1">_bytetohex = [</span><span class="s4">f&quot;%</span><span class="s2">{</span><span class="s1">char</span><span class="s2">:</span><span class="s4">02X</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s1">.encode(</span><span class="s4">&quot;ascii&quot;</span><span class="s1">) </span><span class="s2">for </span><span class="s1">char </span><span class="s2">in </span><span class="s1">range(</span><span class="s6">256</span><span class="s1">)]</span>
+
+
+<span class="s2">class </span><span class="s1">_URLTuple(t.NamedTuple):</span>
+    <span class="s1">scheme: str</span>
+    <span class="s1">netloc: str</span>
+    <span class="s1">path: str</span>
+    <span class="s1">query: str</span>
+    <span class="s1">fragment: str</span>
+
+
+<span class="s2">class </span><span class="s1">BaseURL(_URLTuple):</span>
+    <span class="s0">&quot;&quot;&quot;Superclass of :py:class:`URL` and :py:class:`BytesURL`.&quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ = ()</span>
+    <span class="s1">_at: str</span>
+    <span class="s1">_colon: str</span>
+    <span class="s1">_lbracket: str</span>
+    <span class="s1">_rbracket: str</span>
+
+    <span class="s2">def </span><span class="s1">__str__(self) -&gt; str:</span>
+        <span class="s2">return </span><span class="s1">self.to_url()</span>
+
+    <span class="s2">def </span><span class="s1">replace(self</span><span class="s2">, </span><span class="s1">**kwargs: t.Any) -&gt; </span><span class="s4">&quot;BaseURL&quot;</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Return an URL with the same values, except for those parameters 
+        given new values by whichever keyword arguments are specified.&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self._replace(**kwargs)</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">host(self) -&gt; t.Optional[str]:</span>
+        <span class="s0">&quot;&quot;&quot;The host part of the URL if available, otherwise `None`.  The 
+        host is either the hostname or the IP address mentioned in the 
+        URL.  It will not contain the port. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self._split_host()[</span><span class="s6">0</span><span class="s1">]</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">ascii_host(self) -&gt; t.Optional[str]:</span>
+        <span class="s0">&quot;&quot;&quot;Works exactly like :attr:`host` but will return a result that 
+        is restricted to ASCII.  If it finds a netloc that is not ASCII 
+        it will attempt to idna decode it.  This is useful for socket 
+        operations when the URL might include internationalized characters. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">rv = self.host</span>
+        <span class="s2">if </span><span class="s1">rv </span><span class="s2">is not None and </span><span class="s1">isinstance(rv</span><span class="s2">, </span><span class="s1">str):</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">rv = _encode_idna(rv)  </span><span class="s3"># type: ignore</span>
+            <span class="s2">except </span><span class="s1">UnicodeError:</span>
+                <span class="s1">rv = rv.encode(</span><span class="s4">&quot;ascii&quot;</span><span class="s2">, </span><span class="s4">&quot;ignore&quot;</span><span class="s1">)  </span><span class="s3"># type: ignore</span>
+        <span class="s2">return </span><span class="s1">_to_str(rv</span><span class="s2">, </span><span class="s4">&quot;ascii&quot;</span><span class="s2">, </span><span class="s4">&quot;ignore&quot;</span><span class="s1">)</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">port(self) -&gt; t.Optional[int]:</span>
+        <span class="s0">&quot;&quot;&quot;The port in the URL as an integer if it was present, `None` 
+        otherwise.  This does not fill in default ports. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">rv = int(_to_str(self._split_host()[</span><span class="s6">1</span><span class="s1">]))</span>
+            <span class="s2">if </span><span class="s6">0 </span><span class="s1">&lt;= rv &lt;= </span><span class="s6">65535</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">rv</span>
+        <span class="s2">except </span><span class="s1">(ValueError</span><span class="s2">, </span><span class="s1">TypeError):</span>
+            <span class="s2">pass</span>
+        <span class="s2">return None</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">auth(self) -&gt; t.Optional[str]:</span>
+        <span class="s0">&quot;&quot;&quot;The authentication part in the URL if available, `None` 
+        otherwise. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self._split_netloc()[</span><span class="s6">0</span><span class="s1">]</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">username(self) -&gt; t.Optional[str]:</span>
+        <span class="s0">&quot;&quot;&quot;The username if it was part of the URL, `None` otherwise. 
+        This undergoes URL decoding and will always be a string. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">rv = self._split_auth()[</span><span class="s6">0</span><span class="s1">]</span>
+        <span class="s2">if </span><span class="s1">rv </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">_url_unquote_legacy(rv)</span>
+        <span class="s2">return None</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">raw_username(self) -&gt; t.Optional[str]:</span>
+        <span class="s0">&quot;&quot;&quot;The username if it was part of the URL, `None` otherwise. 
+        Unlike :attr:`username` this one is not being decoded. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self._split_auth()[</span><span class="s6">0</span><span class="s1">]</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">password(self) -&gt; t.Optional[str]:</span>
+        <span class="s0">&quot;&quot;&quot;The password if it was part of the URL, `None` otherwise. 
+        This undergoes URL decoding and will always be a string. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">rv = self._split_auth()[</span><span class="s6">1</span><span class="s1">]</span>
+        <span class="s2">if </span><span class="s1">rv </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">_url_unquote_legacy(rv)</span>
+        <span class="s2">return None</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">raw_password(self) -&gt; t.Optional[str]:</span>
+        <span class="s0">&quot;&quot;&quot;The password if it was part of the URL, `None` otherwise. 
+        Unlike :attr:`password` this one is not being decoded. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self._split_auth()[</span><span class="s6">1</span><span class="s1">]</span>
+
+    <span class="s2">def </span><span class="s1">decode_query(self</span><span class="s2">, </span><span class="s1">*args: t.Any</span><span class="s2">, </span><span class="s1">**kwargs: t.Any) -&gt; </span><span class="s4">&quot;ds.MultiDict[str, str]&quot;</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Decodes the query part of the URL.  Ths is a shortcut for 
+        calling :func:`url_decode` on the query argument.  The arguments and 
+        keyword arguments are forwarded to :func:`url_decode` unchanged. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">url_decode(self.query</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s2">def </span><span class="s1">join(self</span><span class="s2">, </span><span class="s1">*args: t.Any</span><span class="s2">, </span><span class="s1">**kwargs: t.Any) -&gt; </span><span class="s4">&quot;BaseURL&quot;</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Joins this URL with another one.  This is just a convenience 
+        function for calling into :meth:`url_join` and then parsing the 
+        return value again. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">url_parse(url_join(self</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs))</span>
+
+    <span class="s2">def </span><span class="s1">to_url(self) -&gt; str:</span>
+        <span class="s0">&quot;&quot;&quot;Returns a URL string or bytes depending on the type of the 
+        information stored.  This is just a convenience function 
+        for calling :meth:`url_unparse` for this URL. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">url_unparse(self)</span>
+
+    <span class="s2">def </span><span class="s1">encode_netloc(self) -&gt; str:</span>
+        <span class="s0">&quot;&quot;&quot;Encodes the netloc part to an ASCII safe URL as bytes.&quot;&quot;&quot;</span>
+        <span class="s1">rv = self.ascii_host </span><span class="s2">or </span><span class="s4">&quot;&quot;</span>
+        <span class="s2">if </span><span class="s4">&quot;:&quot; </span><span class="s2">in </span><span class="s1">rv:</span>
+            <span class="s1">rv = </span><span class="s4">f&quot;[</span><span class="s2">{</span><span class="s1">rv</span><span class="s2">}</span><span class="s4">]&quot;</span>
+        <span class="s1">port = self.port</span>
+        <span class="s2">if </span><span class="s1">port </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">rv = </span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">rv</span><span class="s2">}</span><span class="s4">:</span><span class="s2">{</span><span class="s1">port</span><span class="s2">}</span><span class="s4">&quot;</span>
+        <span class="s1">auth = </span><span class="s4">&quot;:&quot;</span><span class="s1">.join(</span>
+            <span class="s1">filter(</span>
+                <span class="s2">None,</span>
+                <span class="s1">[</span>
+                    <span class="s1">url_quote(self.raw_username </span><span class="s2">or </span><span class="s4">&quot;&quot;</span><span class="s2">, </span><span class="s4">&quot;utf-8&quot;</span><span class="s2">, </span><span class="s4">&quot;strict&quot;</span><span class="s2">, </span><span class="s4">&quot;/:%&quot;</span><span class="s1">)</span><span class="s2">,</span>
+                    <span class="s1">url_quote(self.raw_password </span><span class="s2">or </span><span class="s4">&quot;&quot;</span><span class="s2">, </span><span class="s4">&quot;utf-8&quot;</span><span class="s2">, </span><span class="s4">&quot;strict&quot;</span><span class="s2">, </span><span class="s4">&quot;/:%&quot;</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">]</span><span class="s2">,</span>
+            <span class="s1">)</span>
+        <span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">auth:</span>
+            <span class="s1">rv = </span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">auth</span><span class="s2">}</span><span class="s4">@</span><span class="s2">{</span><span class="s1">rv</span><span class="s2">}</span><span class="s4">&quot;</span>
+        <span class="s2">return </span><span class="s1">rv</span>
+
+    <span class="s2">def </span><span class="s1">decode_netloc(self) -&gt; str:</span>
+        <span class="s0">&quot;&quot;&quot;Decodes the netloc part into a string.&quot;&quot;&quot;</span>
+        <span class="s1">rv = _decode_idna(self.host </span><span class="s2">or </span><span class="s4">&quot;&quot;</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s4">&quot;:&quot; </span><span class="s2">in </span><span class="s1">rv:</span>
+            <span class="s1">rv = </span><span class="s4">f&quot;[</span><span class="s2">{</span><span class="s1">rv</span><span class="s2">}</span><span class="s4">]&quot;</span>
+        <span class="s1">port = self.port</span>
+        <span class="s2">if </span><span class="s1">port </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">rv = </span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">rv</span><span class="s2">}</span><span class="s4">:</span><span class="s2">{</span><span class="s1">port</span><span class="s2">}</span><span class="s4">&quot;</span>
+        <span class="s1">auth = </span><span class="s4">&quot;:&quot;</span><span class="s1">.join(</span>
+            <span class="s1">filter(</span>
+                <span class="s2">None,</span>
+                <span class="s1">[</span>
+                    <span class="s1">_url_unquote_legacy(self.raw_username </span><span class="s2">or </span><span class="s4">&quot;&quot;</span><span class="s2">, </span><span class="s4">&quot;/:%@&quot;</span><span class="s1">)</span><span class="s2">,</span>
+                    <span class="s1">_url_unquote_legacy(self.raw_password </span><span class="s2">or </span><span class="s4">&quot;&quot;</span><span class="s2">, </span><span class="s4">&quot;/:%@&quot;</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">]</span><span class="s2">,</span>
+            <span class="s1">)</span>
+        <span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">auth:</span>
+            <span class="s1">rv = </span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">auth</span><span class="s2">}</span><span class="s4">@</span><span class="s2">{</span><span class="s1">rv</span><span class="s2">}</span><span class="s4">&quot;</span>
+        <span class="s2">return </span><span class="s1">rv</span>
+
+    <span class="s2">def </span><span class="s1">to_uri_tuple(self) -&gt; </span><span class="s4">&quot;BaseURL&quot;</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Returns a :class:`BytesURL` tuple that holds a URI.  This will 
+        encode all the information in the URL properly to ASCII using the 
+        rules a web browser would follow. 
+ 
+        It's usually more interesting to directly call :meth:`iri_to_uri` which 
+        will return a string. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">url_parse(iri_to_uri(self))</span>
+
+    <span class="s2">def </span><span class="s1">to_iri_tuple(self) -&gt; </span><span class="s4">&quot;BaseURL&quot;</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Returns a :class:`URL` tuple that holds a IRI.  This will try 
+        to decode as much information as possible in the URL without 
+        losing information similar to how a web browser does it for the 
+        URL bar. 
+ 
+        It's usually more interesting to directly call :meth:`uri_to_iri` which 
+        will return a string. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">url_parse(uri_to_iri(self))</span>
+
+    <span class="s2">def </span><span class="s1">get_file_location(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">pathformat: t.Optional[str] = </span><span class="s2">None</span>
+    <span class="s1">) -&gt; t.Tuple[t.Optional[str]</span><span class="s2">, </span><span class="s1">t.Optional[str]]:</span>
+        <span class="s0">&quot;&quot;&quot;Returns a tuple with the location of the file in the form 
+        ``(server, location)``.  If the netloc is empty in the URL or 
+        points to localhost, it's represented as ``None``. 
+ 
+        The `pathformat` by default is autodetection but needs to be set 
+        when working with URLs of a specific system.  The supported values 
+        are ``'windows'`` when working with Windows or DOS paths and 
+        ``'posix'`` when working with posix paths. 
+ 
+        If the URL does not point to a local file, the server and location 
+        are both represented as ``None``. 
+ 
+        :param pathformat: The expected format of the path component. 
+                           Currently ``'windows'`` and ``'posix'`` are 
+                           supported.  Defaults to ``None`` which is 
+                           autodetect. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self.scheme != </span><span class="s4">&quot;file&quot;</span><span class="s1">:</span>
+            <span class="s2">return None, None</span>
+
+        <span class="s1">path = url_unquote(self.path)</span>
+        <span class="s1">host = self.netloc </span><span class="s2">or None</span>
+
+        <span class="s2">if </span><span class="s1">pathformat </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">os.name == </span><span class="s4">&quot;nt&quot;</span><span class="s1">:</span>
+                <span class="s1">pathformat = </span><span class="s4">&quot;windows&quot;</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">pathformat = </span><span class="s4">&quot;posix&quot;</span>
+
+        <span class="s2">if </span><span class="s1">pathformat == </span><span class="s4">&quot;windows&quot;</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">path[:</span><span class="s6">1</span><span class="s1">] == </span><span class="s4">&quot;/&quot; </span><span class="s2">and </span><span class="s1">path[</span><span class="s6">1</span><span class="s1">:</span><span class="s6">2</span><span class="s1">].isalpha() </span><span class="s2">and </span><span class="s1">path[</span><span class="s6">2</span><span class="s1">:</span><span class="s6">3</span><span class="s1">] </span><span class="s2">in </span><span class="s4">&quot;|:&quot;</span><span class="s1">:</span>
+                <span class="s1">path = </span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">path[</span><span class="s6">1</span><span class="s1">:</span><span class="s6">2</span><span class="s1">]</span><span class="s2">}</span><span class="s4">:</span><span class="s2">{</span><span class="s1">path[</span><span class="s6">3</span><span class="s1">:]</span><span class="s2">}</span><span class="s4">&quot;</span>
+            <span class="s1">windows_share = path[:</span><span class="s6">3</span><span class="s1">] </span><span class="s2">in </span><span class="s1">(</span><span class="s4">&quot;</span><span class="s2">\\</span><span class="s4">&quot; </span><span class="s1">* </span><span class="s6">3</span><span class="s2">, </span><span class="s4">&quot;/&quot; </span><span class="s1">* </span><span class="s6">3</span><span class="s1">)</span>
+            <span class="s2">import </span><span class="s1">ntpath</span>
+
+            <span class="s1">path = ntpath.normpath(path)</span>
+            <span class="s3"># Windows shared drives are represented as ``\\host\\directory``.</span>
+            <span class="s3"># That results in a URL like ``file://///host/directory``, and a</span>
+            <span class="s3"># path like ``///host/directory``. We need to special-case this</span>
+            <span class="s3"># because the path contains the hostname.</span>
+            <span class="s2">if </span><span class="s1">windows_share </span><span class="s2">and </span><span class="s1">host </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s1">parts = path.lstrip(</span><span class="s4">&quot;</span><span class="s2">\\</span><span class="s4">&quot;</span><span class="s1">).split(</span><span class="s4">&quot;</span><span class="s2">\\</span><span class="s4">&quot;</span><span class="s2">, </span><span class="s6">1</span><span class="s1">)</span>
+                <span class="s2">if </span><span class="s1">len(parts) == </span><span class="s6">2</span><span class="s1">:</span>
+                    <span class="s1">host</span><span class="s2">, </span><span class="s1">path = parts</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">host = parts[</span><span class="s6">0</span><span class="s1">]</span>
+                    <span class="s1">path = </span><span class="s4">&quot;&quot;</span>
+        <span class="s2">elif </span><span class="s1">pathformat == </span><span class="s4">&quot;posix&quot;</span><span class="s1">:</span>
+            <span class="s2">import </span><span class="s1">posixpath</span>
+
+            <span class="s1">path = posixpath.normpath(path)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s4">f&quot;Invalid path format </span><span class="s2">{</span><span class="s1">pathformat</span><span class="s2">!r}</span><span class="s4">&quot;</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">host </span><span class="s2">in </span><span class="s1">(</span><span class="s4">&quot;127.0.0.1&quot;</span><span class="s2">, </span><span class="s4">&quot;::1&quot;</span><span class="s2">, </span><span class="s4">&quot;localhost&quot;</span><span class="s1">):</span>
+            <span class="s1">host = </span><span class="s2">None</span>
+
+        <span class="s2">return </span><span class="s1">host</span><span class="s2">, </span><span class="s1">path</span>
+
+    <span class="s2">def </span><span class="s1">_split_netloc(self) -&gt; t.Tuple[t.Optional[str]</span><span class="s2">, </span><span class="s1">str]:</span>
+        <span class="s2">if </span><span class="s1">self._at </span><span class="s2">in </span><span class="s1">self.netloc:</span>
+            <span class="s1">auth</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">netloc = self.netloc.partition(self._at)</span>
+            <span class="s2">return </span><span class="s1">auth</span><span class="s2">, </span><span class="s1">netloc</span>
+        <span class="s2">return None, </span><span class="s1">self.netloc</span>
+
+    <span class="s2">def </span><span class="s1">_split_auth(self) -&gt; t.Tuple[t.Optional[str]</span><span class="s2">, </span><span class="s1">t.Optional[str]]:</span>
+        <span class="s1">auth = self._split_netloc()[</span><span class="s6">0</span><span class="s1">]</span>
+        <span class="s2">if not </span><span class="s1">auth:</span>
+            <span class="s2">return None, None</span>
+        <span class="s2">if </span><span class="s1">self._colon </span><span class="s2">not in </span><span class="s1">auth:</span>
+            <span class="s2">return </span><span class="s1">auth</span><span class="s2">, None</span>
+
+        <span class="s1">username</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">password = auth.partition(self._colon)</span>
+        <span class="s2">return </span><span class="s1">username</span><span class="s2">, </span><span class="s1">password</span>
+
+    <span class="s2">def </span><span class="s1">_split_host(self) -&gt; t.Tuple[t.Optional[str]</span><span class="s2">, </span><span class="s1">t.Optional[str]]:</span>
+        <span class="s1">rv = self._split_netloc()[</span><span class="s6">1</span><span class="s1">]</span>
+        <span class="s2">if not </span><span class="s1">rv:</span>
+            <span class="s2">return None, None</span>
+
+        <span class="s2">if not </span><span class="s1">rv.startswith(self._lbracket):</span>
+            <span class="s2">if </span><span class="s1">self._colon </span><span class="s2">in </span><span class="s1">rv:</span>
+                <span class="s1">host</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">port = rv.partition(self._colon)</span>
+                <span class="s2">return </span><span class="s1">host</span><span class="s2">, </span><span class="s1">port</span>
+            <span class="s2">return </span><span class="s1">rv</span><span class="s2">, None</span>
+
+        <span class="s1">idx = rv.find(self._rbracket)</span>
+        <span class="s2">if </span><span class="s1">idx &lt; </span><span class="s6">0</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">rv</span><span class="s2">, None</span>
+
+        <span class="s1">host = rv[</span><span class="s6">1</span><span class="s1">:idx]</span>
+        <span class="s1">rest = rv[idx + </span><span class="s6">1 </span><span class="s1">:]</span>
+        <span class="s2">if </span><span class="s1">rest.startswith(self._colon):</span>
+            <span class="s2">return </span><span class="s1">host</span><span class="s2">, </span><span class="s1">rest[</span><span class="s6">1</span><span class="s1">:]</span>
+        <span class="s2">return </span><span class="s1">host</span><span class="s2">, None</span>
+
+
+<span class="s2">class </span><span class="s1">URL(BaseURL):</span>
+    <span class="s0">&quot;&quot;&quot;Represents a parsed URL.  This behaves like a regular tuple but 
+    also has some extra attributes that give further insight into the 
+    URL. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ = ()</span>
+    <span class="s1">_at = </span><span class="s4">&quot;@&quot;</span>
+    <span class="s1">_colon = </span><span class="s4">&quot;:&quot;</span>
+    <span class="s1">_lbracket = </span><span class="s4">&quot;[&quot;</span>
+    <span class="s1">_rbracket = </span><span class="s4">&quot;]&quot;</span>
+
+    <span class="s2">def </span><span class="s1">encode(self</span><span class="s2">, </span><span class="s1">charset: str = </span><span class="s4">&quot;utf-8&quot;</span><span class="s2">, </span><span class="s1">errors: str = </span><span class="s4">&quot;replace&quot;</span><span class="s1">) -&gt; </span><span class="s4">&quot;BytesURL&quot;</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Encodes the URL to a tuple made out of bytes.  The charset is 
+        only being used for the path, query and fragment. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">BytesURL(</span>
+            <span class="s1">self.scheme.encode(</span><span class="s4">&quot;ascii&quot;</span><span class="s1">)</span><span class="s2">,  </span><span class="s3"># type: ignore</span>
+            <span class="s1">self.encode_netloc()</span><span class="s2">,</span>
+            <span class="s1">self.path.encode(charset</span><span class="s2">, </span><span class="s1">errors)</span><span class="s2">,  </span><span class="s3"># type: ignore</span>
+            <span class="s1">self.query.encode(charset</span><span class="s2">, </span><span class="s1">errors)</span><span class="s2">,  </span><span class="s3"># type: ignore</span>
+            <span class="s1">self.fragment.encode(charset</span><span class="s2">, </span><span class="s1">errors)</span><span class="s2">,  </span><span class="s3"># type: ignore</span>
+        <span class="s1">)</span>
+
+
+<span class="s2">class </span><span class="s1">BytesURL(BaseURL):</span>
+    <span class="s0">&quot;&quot;&quot;Represents a parsed URL in bytes.&quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ = ()</span>
+    <span class="s1">_at = </span><span class="s5">b&quot;@&quot;  </span><span class="s3"># type: ignore</span>
+    <span class="s1">_colon = </span><span class="s5">b&quot;:&quot;  </span><span class="s3"># type: ignore</span>
+    <span class="s1">_lbracket = </span><span class="s5">b&quot;[&quot;  </span><span class="s3"># type: ignore</span>
+    <span class="s1">_rbracket = </span><span class="s5">b&quot;]&quot;  </span><span class="s3"># type: ignore</span>
+
+    <span class="s2">def </span><span class="s1">__str__(self) -&gt; str:</span>
+        <span class="s2">return </span><span class="s1">self.to_url().decode(</span><span class="s4">&quot;utf-8&quot;</span><span class="s2">, </span><span class="s4">&quot;replace&quot;</span><span class="s1">)  </span><span class="s3"># type: ignore</span>
+
+    <span class="s2">def </span><span class="s1">encode_netloc(self) -&gt; bytes:  </span><span class="s3"># type: ignore</span>
+        <span class="s0">&quot;&quot;&quot;Returns the netloc unchanged as bytes.&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self.netloc  </span><span class="s3"># type: ignore</span>
+
+    <span class="s2">def </span><span class="s1">decode(self</span><span class="s2">, </span><span class="s1">charset: str = </span><span class="s4">&quot;utf-8&quot;</span><span class="s2">, </span><span class="s1">errors: str = </span><span class="s4">&quot;replace&quot;</span><span class="s1">) -&gt; </span><span class="s4">&quot;URL&quot;</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Decodes the URL to a tuple made out of strings.  The charset is 
+        only being used for the path, query and fragment. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">URL(</span>
+            <span class="s1">self.scheme.decode(</span><span class="s4">&quot;ascii&quot;</span><span class="s1">)</span><span class="s2">,  </span><span class="s3"># type: ignore</span>
+            <span class="s1">self.decode_netloc()</span><span class="s2">,</span>
+            <span class="s1">self.path.decode(charset</span><span class="s2">, </span><span class="s1">errors)</span><span class="s2">,  </span><span class="s3"># type: ignore</span>
+            <span class="s1">self.query.decode(charset</span><span class="s2">, </span><span class="s1">errors)</span><span class="s2">,  </span><span class="s3"># type: ignore</span>
+            <span class="s1">self.fragment.decode(charset</span><span class="s2">, </span><span class="s1">errors)</span><span class="s2">,  </span><span class="s3"># type: ignore</span>
+        <span class="s1">)</span>
+
+
+<span class="s1">_unquote_maps: t.Dict[t.FrozenSet[int]</span><span class="s2">, </span><span class="s1">t.Dict[bytes</span><span class="s2">, </span><span class="s1">int]] = {frozenset(): _hextobyte}</span>
+
+
+<span class="s2">def </span><span class="s1">_unquote_to_bytes(</span>
+    <span class="s1">string: t.Union[str</span><span class="s2">, </span><span class="s1">bytes]</span><span class="s2">, </span><span class="s1">unsafe: t.Union[str</span><span class="s2">, </span><span class="s1">bytes] = </span><span class="s4">&quot;&quot;</span>
+<span class="s1">) -&gt; bytes:</span>
+    <span class="s2">if </span><span class="s1">isinstance(string</span><span class="s2">, </span><span class="s1">str):</span>
+        <span class="s1">string = string.encode(</span><span class="s4">&quot;utf-8&quot;</span><span class="s1">)</span>
+
+    <span class="s2">if </span><span class="s1">isinstance(unsafe</span><span class="s2">, </span><span class="s1">str):</span>
+        <span class="s1">unsafe = unsafe.encode(</span><span class="s4">&quot;utf-8&quot;</span><span class="s1">)</span>
+
+    <span class="s1">unsafe = frozenset(bytearray(unsafe))</span>
+    <span class="s1">groups = iter(string.split(</span><span class="s5">b&quot;%&quot;</span><span class="s1">))</span>
+    <span class="s1">result = bytearray(next(groups</span><span class="s2">, </span><span class="s5">b&quot;&quot;</span><span class="s1">))</span>
+
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">hex_to_byte = _unquote_maps[unsafe]</span>
+    <span class="s2">except </span><span class="s1">KeyError:</span>
+        <span class="s1">hex_to_byte = _unquote_maps[unsafe] = {</span>
+            <span class="s1">h: b </span><span class="s2">for </span><span class="s1">h</span><span class="s2">, </span><span class="s1">b </span><span class="s2">in </span><span class="s1">_hextobyte.items() </span><span class="s2">if </span><span class="s1">b </span><span class="s2">not in </span><span class="s1">unsafe</span>
+        <span class="s1">}</span>
+
+    <span class="s2">for </span><span class="s1">group </span><span class="s2">in </span><span class="s1">groups:</span>
+        <span class="s1">code = group[:</span><span class="s6">2</span><span class="s1">]</span>
+
+        <span class="s2">if </span><span class="s1">code </span><span class="s2">in </span><span class="s1">hex_to_byte:</span>
+            <span class="s1">result.append(hex_to_byte[code])</span>
+            <span class="s1">result.extend(group[</span><span class="s6">2</span><span class="s1">:])</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">result.append(</span><span class="s6">37</span><span class="s1">)  </span><span class="s3"># %</span>
+            <span class="s1">result.extend(group)</span>
+
+    <span class="s2">return </span><span class="s1">bytes(result)</span>
+
+
+<span class="s2">def </span><span class="s1">_url_encode_impl(</span>
+    <span class="s1">obj: t.Union[t.Mapping[str</span><span class="s2">, </span><span class="s1">str]</span><span class="s2">, </span><span class="s1">t.Iterable[t.Tuple[str</span><span class="s2">, </span><span class="s1">str]]]</span><span class="s2">,</span>
+    <span class="s1">charset: str</span><span class="s2">,</span>
+    <span class="s1">sort: bool</span><span class="s2">,</span>
+    <span class="s1">key: t.Optional[t.Callable[[t.Tuple[str</span><span class="s2">, </span><span class="s1">str]]</span><span class="s2">, </span><span class="s1">t.Any]]</span><span class="s2">,</span>
+<span class="s1">) -&gt; t.Iterator[str]:</span>
+    <span class="s2">from </span><span class="s1">.datastructures </span><span class="s2">import </span><span class="s1">iter_multi_items</span>
+
+    <span class="s1">iterable: t.Iterable[t.Tuple[str</span><span class="s2">, </span><span class="s1">str]] = iter_multi_items(obj)</span>
+
+    <span class="s2">if </span><span class="s1">sort:</span>
+        <span class="s1">iterable = sorted(iterable</span><span class="s2">, </span><span class="s1">key=key)</span>
+
+    <span class="s2">for </span><span class="s1">key_str</span><span class="s2">, </span><span class="s1">value_str </span><span class="s2">in </span><span class="s1">iterable:</span>
+        <span class="s2">if </span><span class="s1">value_str </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">continue</span>
+
+        <span class="s2">if not </span><span class="s1">isinstance(key_str</span><span class="s2">, </span><span class="s1">bytes):</span>
+            <span class="s1">key_bytes = str(key_str).encode(charset)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">key_bytes = key_str</span>
+
+        <span class="s2">if not </span><span class="s1">isinstance(value_str</span><span class="s2">, </span><span class="s1">bytes):</span>
+            <span class="s1">value_bytes = str(value_str).encode(charset)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">value_bytes = value_str</span>
+
+        <span class="s2">yield </span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">_fast_url_quote_plus(key_bytes)</span><span class="s2">}</span><span class="s4">=</span><span class="s2">{</span><span class="s1">_fast_url_quote_plus(value_bytes)</span><span class="s2">}</span><span class="s4">&quot;</span>
+
+
+<span class="s2">def </span><span class="s1">_url_unquote_legacy(value: str</span><span class="s2">, </span><span class="s1">unsafe: str = </span><span class="s4">&quot;&quot;</span><span class="s1">) -&gt; str:</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">url_unquote(value</span><span class="s2">, </span><span class="s1">charset=</span><span class="s4">&quot;utf-8&quot;</span><span class="s2">, </span><span class="s1">errors=</span><span class="s4">&quot;strict&quot;</span><span class="s2">, </span><span class="s1">unsafe=unsafe)</span>
+    <span class="s2">except </span><span class="s1">UnicodeError:</span>
+        <span class="s2">return </span><span class="s1">url_unquote(value</span><span class="s2">, </span><span class="s1">charset=</span><span class="s4">&quot;latin1&quot;</span><span class="s2">, </span><span class="s1">unsafe=unsafe)</span>
+
+
+<span class="s2">def </span><span class="s1">url_parse(</span>
+    <span class="s1">url: str</span><span class="s2">, </span><span class="s1">scheme: t.Optional[str] = </span><span class="s2">None, </span><span class="s1">allow_fragments: bool = </span><span class="s2">True</span>
+<span class="s1">) -&gt; BaseURL:</span>
+    <span class="s0">&quot;&quot;&quot;Parses a URL from a string into a :class:`URL` tuple.  If the URL 
+    is lacking a scheme it can be provided as second argument. Otherwise, 
+    it is ignored.  Optionally fragments can be stripped from the URL 
+    by setting `allow_fragments` to `False`. 
+ 
+    The inverse of this function is :func:`url_unparse`. 
+ 
+    :param url: the URL to parse. 
+    :param scheme: the default schema to use if the URL is schemaless. 
+    :param allow_fragments: if set to `False` a fragment will be removed 
+                            from the URL. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">s = _make_encode_wrapper(url)</span>
+    <span class="s1">is_text_based = isinstance(url</span><span class="s2">, </span><span class="s1">str)</span>
+
+    <span class="s2">if </span><span class="s1">scheme </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">scheme = s(</span><span class="s4">&quot;&quot;</span><span class="s1">)</span>
+    <span class="s1">netloc = query = fragment = s(</span><span class="s4">&quot;&quot;</span><span class="s1">)</span>
+    <span class="s1">i = url.find(s(</span><span class="s4">&quot;:&quot;</span><span class="s1">))</span>
+    <span class="s2">if </span><span class="s1">i &gt; </span><span class="s6">0 </span><span class="s2">and </span><span class="s1">_scheme_re.match(_to_str(url[:i]</span><span class="s2">, </span><span class="s1">errors=</span><span class="s4">&quot;replace&quot;</span><span class="s1">)):</span>
+        <span class="s3"># make sure &quot;iri&quot; is not actually a port number (in which case</span>
+        <span class="s3"># &quot;scheme&quot; is really part of the path)</span>
+        <span class="s1">rest = url[i + </span><span class="s6">1 </span><span class="s1">:]</span>
+        <span class="s2">if not </span><span class="s1">rest </span><span class="s2">or </span><span class="s1">any(c </span><span class="s2">not in </span><span class="s1">s(</span><span class="s4">&quot;0123456789&quot;</span><span class="s1">) </span><span class="s2">for </span><span class="s1">c </span><span class="s2">in </span><span class="s1">rest):</span>
+            <span class="s3"># not a port number</span>
+            <span class="s1">scheme</span><span class="s2">, </span><span class="s1">url = url[:i].lower()</span><span class="s2">, </span><span class="s1">rest</span>
+
+    <span class="s2">if </span><span class="s1">url[:</span><span class="s6">2</span><span class="s1">] == s(</span><span class="s4">&quot;//&quot;</span><span class="s1">):</span>
+        <span class="s1">delim = len(url)</span>
+        <span class="s2">for </span><span class="s1">c </span><span class="s2">in </span><span class="s1">s(</span><span class="s4">&quot;/?#&quot;</span><span class="s1">):</span>
+            <span class="s1">wdelim = url.find(c</span><span class="s2">, </span><span class="s6">2</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">wdelim &gt;= </span><span class="s6">0</span><span class="s1">:</span>
+                <span class="s1">delim = min(delim</span><span class="s2">, </span><span class="s1">wdelim)</span>
+        <span class="s1">netloc</span><span class="s2">, </span><span class="s1">url = url[</span><span class="s6">2</span><span class="s1">:delim]</span><span class="s2">, </span><span class="s1">url[delim:]</span>
+        <span class="s2">if </span><span class="s1">(s(</span><span class="s4">&quot;[&quot;</span><span class="s1">) </span><span class="s2">in </span><span class="s1">netloc </span><span class="s2">and </span><span class="s1">s(</span><span class="s4">&quot;]&quot;</span><span class="s1">) </span><span class="s2">not in </span><span class="s1">netloc) </span><span class="s2">or </span><span class="s1">(</span>
+            <span class="s1">s(</span><span class="s4">&quot;]&quot;</span><span class="s1">) </span><span class="s2">in </span><span class="s1">netloc </span><span class="s2">and </span><span class="s1">s(</span><span class="s4">&quot;[&quot;</span><span class="s1">) </span><span class="s2">not in </span><span class="s1">netloc</span>
+        <span class="s1">):</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Invalid IPv6 URL&quot;</span><span class="s1">)</span>
+
+    <span class="s2">if </span><span class="s1">allow_fragments </span><span class="s2">and </span><span class="s1">s(</span><span class="s4">&quot;#&quot;</span><span class="s1">) </span><span class="s2">in </span><span class="s1">url:</span>
+        <span class="s1">url</span><span class="s2">, </span><span class="s1">fragment = url.split(s(</span><span class="s4">&quot;#&quot;</span><span class="s1">)</span><span class="s2">, </span><span class="s6">1</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">s(</span><span class="s4">&quot;?&quot;</span><span class="s1">) </span><span class="s2">in </span><span class="s1">url:</span>
+        <span class="s1">url</span><span class="s2">, </span><span class="s1">query = url.split(s(</span><span class="s4">&quot;?&quot;</span><span class="s1">)</span><span class="s2">, </span><span class="s6">1</span><span class="s1">)</span>
+
+    <span class="s1">result_type = URL </span><span class="s2">if </span><span class="s1">is_text_based </span><span class="s2">else </span><span class="s1">BytesURL</span>
+    <span class="s2">return </span><span class="s1">result_type(scheme</span><span class="s2">, </span><span class="s1">netloc</span><span class="s2">, </span><span class="s1">url</span><span class="s2">, </span><span class="s1">query</span><span class="s2">, </span><span class="s1">fragment)</span>
+
+
+<span class="s2">def </span><span class="s1">_make_fast_url_quote(</span>
+    <span class="s1">charset: str = </span><span class="s4">&quot;utf-8&quot;</span><span class="s2">,</span>
+    <span class="s1">errors: str = </span><span class="s4">&quot;strict&quot;</span><span class="s2">,</span>
+    <span class="s1">safe: t.Union[str</span><span class="s2">, </span><span class="s1">bytes] = </span><span class="s4">&quot;/:&quot;</span><span class="s2">,</span>
+    <span class="s1">unsafe: t.Union[str</span><span class="s2">, </span><span class="s1">bytes] = </span><span class="s4">&quot;&quot;</span><span class="s2">,</span>
+<span class="s1">) -&gt; t.Callable[[bytes]</span><span class="s2">, </span><span class="s1">str]:</span>
+    <span class="s0">&quot;&quot;&quot;Precompile the translation table for a URL encoding function. 
+ 
+    Unlike :func:`url_quote`, the generated function only takes the 
+    string to quote. 
+ 
+    :param charset: The charset to encode the result with. 
+    :param errors: How to handle encoding errors. 
+    :param safe: An optional sequence of safe characters to never encode. 
+    :param unsafe: An optional sequence of unsafe characters to always encode. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">isinstance(safe</span><span class="s2">, </span><span class="s1">str):</span>
+        <span class="s1">safe = safe.encode(charset</span><span class="s2">, </span><span class="s1">errors)</span>
+
+    <span class="s2">if </span><span class="s1">isinstance(unsafe</span><span class="s2">, </span><span class="s1">str):</span>
+        <span class="s1">unsafe = unsafe.encode(charset</span><span class="s2">, </span><span class="s1">errors)</span>
+
+    <span class="s1">safe = (frozenset(bytearray(safe)) | _always_safe) - frozenset(bytearray(unsafe))</span>
+    <span class="s1">table = [chr(c) </span><span class="s2">if </span><span class="s1">c </span><span class="s2">in </span><span class="s1">safe </span><span class="s2">else </span><span class="s4">f&quot;%</span><span class="s2">{</span><span class="s1">c</span><span class="s2">:</span><span class="s4">02X</span><span class="s2">}</span><span class="s4">&quot; </span><span class="s2">for </span><span class="s1">c </span><span class="s2">in </span><span class="s1">range(</span><span class="s6">256</span><span class="s1">)]</span>
+
+    <span class="s2">def </span><span class="s1">quote(string: bytes) -&gt; str:</span>
+        <span class="s2">return </span><span class="s4">&quot;&quot;</span><span class="s1">.join([table[c] </span><span class="s2">for </span><span class="s1">c </span><span class="s2">in </span><span class="s1">string])</span>
+
+    <span class="s2">return </span><span class="s1">quote</span>
+
+
+<span class="s1">_fast_url_quote = _make_fast_url_quote()</span>
+<span class="s1">_fast_quote_plus = _make_fast_url_quote(safe=</span><span class="s4">&quot; &quot;</span><span class="s2">, </span><span class="s1">unsafe=</span><span class="s4">&quot;+&quot;</span><span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">_fast_url_quote_plus(string: bytes) -&gt; str:</span>
+    <span class="s2">return </span><span class="s1">_fast_quote_plus(string).replace(</span><span class="s4">&quot; &quot;</span><span class="s2">, </span><span class="s4">&quot;+&quot;</span><span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">url_quote(</span>
+    <span class="s1">string: t.Union[str</span><span class="s2">, </span><span class="s1">bytes]</span><span class="s2">,</span>
+    <span class="s1">charset: str = </span><span class="s4">&quot;utf-8&quot;</span><span class="s2">,</span>
+    <span class="s1">errors: str = </span><span class="s4">&quot;strict&quot;</span><span class="s2">,</span>
+    <span class="s1">safe: t.Union[str</span><span class="s2">, </span><span class="s1">bytes] = </span><span class="s4">&quot;/:&quot;</span><span class="s2">,</span>
+    <span class="s1">unsafe: t.Union[str</span><span class="s2">, </span><span class="s1">bytes] = </span><span class="s4">&quot;&quot;</span><span class="s2">,</span>
+<span class="s1">) -&gt; str:</span>
+    <span class="s0">&quot;&quot;&quot;URL encode a single string with a given encoding. 
+ 
+    :param s: the string to quote. 
+    :param charset: the charset to be used. 
+    :param safe: an optional sequence of safe characters. 
+    :param unsafe: an optional sequence of unsafe characters. 
+ 
+    .. versionadded:: 0.9.2 
+       The `unsafe` parameter was added. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if not </span><span class="s1">isinstance(string</span><span class="s2">, </span><span class="s1">(str</span><span class="s2">, </span><span class="s1">bytes</span><span class="s2">, </span><span class="s1">bytearray)):</span>
+        <span class="s1">string = str(string)</span>
+    <span class="s2">if </span><span class="s1">isinstance(string</span><span class="s2">, </span><span class="s1">str):</span>
+        <span class="s1">string = string.encode(charset</span><span class="s2">, </span><span class="s1">errors)</span>
+    <span class="s2">if </span><span class="s1">isinstance(safe</span><span class="s2">, </span><span class="s1">str):</span>
+        <span class="s1">safe = safe.encode(charset</span><span class="s2">, </span><span class="s1">errors)</span>
+    <span class="s2">if </span><span class="s1">isinstance(unsafe</span><span class="s2">, </span><span class="s1">str):</span>
+        <span class="s1">unsafe = unsafe.encode(charset</span><span class="s2">, </span><span class="s1">errors)</span>
+    <span class="s1">safe = (frozenset(bytearray(safe)) | _always_safe) - frozenset(bytearray(unsafe))</span>
+    <span class="s1">rv = bytearray()</span>
+    <span class="s2">for </span><span class="s1">char </span><span class="s2">in </span><span class="s1">bytearray(string):</span>
+        <span class="s2">if </span><span class="s1">char </span><span class="s2">in </span><span class="s1">safe:</span>
+            <span class="s1">rv.append(char)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">rv.extend(_bytetohex[char])</span>
+    <span class="s2">return </span><span class="s1">bytes(rv).decode(charset)</span>
+
+
+<span class="s2">def </span><span class="s1">url_quote_plus(</span>
+    <span class="s1">string: str</span><span class="s2">, </span><span class="s1">charset: str = </span><span class="s4">&quot;utf-8&quot;</span><span class="s2">, </span><span class="s1">errors: str = </span><span class="s4">&quot;strict&quot;</span><span class="s2">, </span><span class="s1">safe: str = </span><span class="s4">&quot;&quot;</span>
+<span class="s1">) -&gt; str:</span>
+    <span class="s0">&quot;&quot;&quot;URL encode a single string with the given encoding and convert 
+    whitespace to &quot;+&quot;. 
+ 
+    :param s: The string to quote. 
+    :param charset: The charset to be used. 
+    :param safe: An optional sequence of safe characters. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">return </span><span class="s1">url_quote(string</span><span class="s2">, </span><span class="s1">charset</span><span class="s2">, </span><span class="s1">errors</span><span class="s2">, </span><span class="s1">safe + </span><span class="s4">&quot; &quot;</span><span class="s2">, </span><span class="s4">&quot;+&quot;</span><span class="s1">).replace(</span><span class="s4">&quot; &quot;</span><span class="s2">, </span><span class="s4">&quot;+&quot;</span><span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">url_unparse(components: t.Tuple[str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">str]) -&gt; str:</span>
+    <span class="s0">&quot;&quot;&quot;The reverse operation to :meth:`url_parse`.  This accepts arbitrary 
+    as well as :class:`URL` tuples and returns a URL as a string. 
+ 
+    :param components: the parsed URL as tuple which should be converted 
+                       into a URL string. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">_check_str_tuple(components)</span>
+    <span class="s1">scheme</span><span class="s2">, </span><span class="s1">netloc</span><span class="s2">, </span><span class="s1">path</span><span class="s2">, </span><span class="s1">query</span><span class="s2">, </span><span class="s1">fragment = components</span>
+    <span class="s1">s = _make_encode_wrapper(scheme)</span>
+    <span class="s1">url = s(</span><span class="s4">&quot;&quot;</span><span class="s1">)</span>
+
+    <span class="s3"># We generally treat file:///x and file:/x the same which is also</span>
+    <span class="s3"># what browsers seem to do.  This also allows us to ignore a schema</span>
+    <span class="s3"># register for netloc utilization or having to differentiate between</span>
+    <span class="s3"># empty and missing netloc.</span>
+    <span class="s2">if </span><span class="s1">netloc </span><span class="s2">or </span><span class="s1">(scheme </span><span class="s2">and </span><span class="s1">path.startswith(s(</span><span class="s4">&quot;/&quot;</span><span class="s1">))):</span>
+        <span class="s2">if </span><span class="s1">path </span><span class="s2">and </span><span class="s1">path[:</span><span class="s6">1</span><span class="s1">] != s(</span><span class="s4">&quot;/&quot;</span><span class="s1">):</span>
+            <span class="s1">path = s(</span><span class="s4">&quot;/&quot;</span><span class="s1">) + path</span>
+        <span class="s1">url = s(</span><span class="s4">&quot;//&quot;</span><span class="s1">) + (netloc </span><span class="s2">or </span><span class="s1">s(</span><span class="s4">&quot;&quot;</span><span class="s1">)) + path</span>
+    <span class="s2">elif </span><span class="s1">path:</span>
+        <span class="s1">url += path</span>
+    <span class="s2">if </span><span class="s1">scheme:</span>
+        <span class="s1">url = scheme + s(</span><span class="s4">&quot;:&quot;</span><span class="s1">) + url</span>
+    <span class="s2">if </span><span class="s1">query:</span>
+        <span class="s1">url = url + s(</span><span class="s4">&quot;?&quot;</span><span class="s1">) + query</span>
+    <span class="s2">if </span><span class="s1">fragment:</span>
+        <span class="s1">url = url + s(</span><span class="s4">&quot;#&quot;</span><span class="s1">) + fragment</span>
+    <span class="s2">return </span><span class="s1">url</span>
+
+
+<span class="s2">def </span><span class="s1">url_unquote(</span>
+    <span class="s1">s: t.Union[str</span><span class="s2">, </span><span class="s1">bytes]</span><span class="s2">,</span>
+    <span class="s1">charset: str = </span><span class="s4">&quot;utf-8&quot;</span><span class="s2">,</span>
+    <span class="s1">errors: str = </span><span class="s4">&quot;replace&quot;</span><span class="s2">,</span>
+    <span class="s1">unsafe: str = </span><span class="s4">&quot;&quot;</span><span class="s2">,</span>
+<span class="s1">) -&gt; str:</span>
+    <span class="s0">&quot;&quot;&quot;URL decode a single string with a given encoding.  If the charset 
+    is set to `None` no decoding is performed and raw bytes are 
+    returned. 
+ 
+    :param s: the string to unquote. 
+    :param charset: the charset of the query string.  If set to `None` 
+        no decoding will take place. 
+    :param errors: the error handling for the charset decoding. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">rv = _unquote_to_bytes(s</span><span class="s2">, </span><span class="s1">unsafe)</span>
+    <span class="s2">if </span><span class="s1">charset </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">rv</span>
+    <span class="s2">return </span><span class="s1">rv.decode(charset</span><span class="s2">, </span><span class="s1">errors)</span>
+
+
+<span class="s2">def </span><span class="s1">url_unquote_plus(</span>
+    <span class="s1">s: t.Union[str</span><span class="s2">, </span><span class="s1">bytes]</span><span class="s2">, </span><span class="s1">charset: str = </span><span class="s4">&quot;utf-8&quot;</span><span class="s2">, </span><span class="s1">errors: str = </span><span class="s4">&quot;replace&quot;</span>
+<span class="s1">) -&gt; str:</span>
+    <span class="s0">&quot;&quot;&quot;URL decode a single string with the given `charset` and decode &quot;+&quot; to 
+    whitespace. 
+ 
+    Per default encoding errors are ignored.  If you want a different behavior 
+    you can set `errors` to ``'replace'`` or ``'strict'``. 
+ 
+    :param s: The string to unquote. 
+    :param charset: the charset of the query string.  If set to `None` 
+        no decoding will take place. 
+    :param errors: The error handling for the `charset` decoding. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">isinstance(s</span><span class="s2">, </span><span class="s1">str):</span>
+        <span class="s1">s = s.replace(</span><span class="s4">&quot;+&quot;</span><span class="s2">, </span><span class="s4">&quot; &quot;</span><span class="s1">)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">s = s.replace(</span><span class="s5">b&quot;+&quot;</span><span class="s2">, </span><span class="s5">b&quot; &quot;</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">url_unquote(s</span><span class="s2">, </span><span class="s1">charset</span><span class="s2">, </span><span class="s1">errors)</span>
+
+
+<span class="s2">def </span><span class="s1">url_fix(s: str</span><span class="s2">, </span><span class="s1">charset: str = </span><span class="s4">&quot;utf-8&quot;</span><span class="s1">) -&gt; str:</span>
+    <span class="s0">r&quot;&quot;&quot;Sometimes you get an URL by a user that just isn't a real URL because 
+    it contains unsafe characters like ' ' and so on. This function can fix 
+    some of the problems in a similar way browsers handle data entered by the 
+    user: 
+ 
+    &gt;&gt;&gt; url_fix('http://de.wikipedia.org/wiki/Elf (Begriffskl\xe4rung)') 
+    'http://de.wikipedia.org/wiki/Elf%20(Begriffskl%C3%A4rung)' 
+ 
+    :param s: the string with the URL to fix. 
+    :param charset: The target charset for the URL if the url was given 
+        as a string. 
+    &quot;&quot;&quot;</span>
+    <span class="s3"># First step is to switch to text processing and to convert</span>
+    <span class="s3"># backslashes (which are invalid in URLs anyways) to slashes.  This is</span>
+    <span class="s3"># consistent with what Chrome does.</span>
+    <span class="s1">s = _to_str(s</span><span class="s2">, </span><span class="s1">charset</span><span class="s2">, </span><span class="s4">&quot;replace&quot;</span><span class="s1">).replace(</span><span class="s4">&quot;</span><span class="s2">\\</span><span class="s4">&quot;</span><span class="s2">, </span><span class="s4">&quot;/&quot;</span><span class="s1">)</span>
+
+    <span class="s3"># For the specific case that we look like a malformed windows URL</span>
+    <span class="s3"># we want to fix this up manually:</span>
+    <span class="s2">if </span><span class="s1">s.startswith(</span><span class="s4">&quot;file://&quot;</span><span class="s1">) </span><span class="s2">and </span><span class="s1">s[</span><span class="s6">7</span><span class="s1">:</span><span class="s6">8</span><span class="s1">].isalpha() </span><span class="s2">and </span><span class="s1">s[</span><span class="s6">8</span><span class="s1">:</span><span class="s6">10</span><span class="s1">] </span><span class="s2">in </span><span class="s1">(</span><span class="s4">&quot;:/&quot;</span><span class="s2">, </span><span class="s4">&quot;|/&quot;</span><span class="s1">):</span>
+        <span class="s1">s = </span><span class="s4">f&quot;file:///</span><span class="s2">{</span><span class="s1">s[</span><span class="s6">7</span><span class="s1">:]</span><span class="s2">}</span><span class="s4">&quot;</span>
+
+    <span class="s1">url = url_parse(s)</span>
+    <span class="s1">path = url_quote(url.path</span><span class="s2">, </span><span class="s1">charset</span><span class="s2">, </span><span class="s1">safe=</span><span class="s4">&quot;/%+$!*'(),&quot;</span><span class="s1">)</span>
+    <span class="s1">qs = url_quote_plus(url.query</span><span class="s2">, </span><span class="s1">charset</span><span class="s2">, </span><span class="s1">safe=</span><span class="s4">&quot;:&amp;%=+$!*'(),&quot;</span><span class="s1">)</span>
+    <span class="s1">anchor = url_quote_plus(url.fragment</span><span class="s2">, </span><span class="s1">charset</span><span class="s2">, </span><span class="s1">safe=</span><span class="s4">&quot;:&amp;%=+$!*'(),&quot;</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">url_unparse((url.scheme</span><span class="s2">, </span><span class="s1">url.encode_netloc()</span><span class="s2">, </span><span class="s1">path</span><span class="s2">, </span><span class="s1">qs</span><span class="s2">, </span><span class="s1">anchor))</span>
+
+
+<span class="s3"># not-unreserved characters remain quoted when unquoting to IRI</span>
+<span class="s1">_to_iri_unsafe = </span><span class="s4">&quot;&quot;</span><span class="s1">.join([chr(c) </span><span class="s2">for </span><span class="s1">c </span><span class="s2">in </span><span class="s1">range(</span><span class="s6">128</span><span class="s1">) </span><span class="s2">if </span><span class="s1">c </span><span class="s2">not in </span><span class="s1">_always_safe])</span>
+
+
+<span class="s2">def </span><span class="s1">_codec_error_url_quote(e: UnicodeError) -&gt; t.Tuple[str</span><span class="s2">, </span><span class="s1">int]:</span>
+    <span class="s0">&quot;&quot;&quot;Used in :func:`uri_to_iri` after unquoting to re-quote any 
+    invalid bytes. 
+    &quot;&quot;&quot;</span>
+    <span class="s3"># the docs state that UnicodeError does have these attributes,</span>
+    <span class="s3"># but mypy isn't picking them up</span>
+    <span class="s1">out = _fast_url_quote(e.object[e.start : e.end])  </span><span class="s3"># type: ignore</span>
+    <span class="s2">return </span><span class="s1">out</span><span class="s2">, </span><span class="s1">e.end  </span><span class="s3"># type: ignore</span>
+
+
+<span class="s1">codecs.register_error(</span><span class="s4">&quot;werkzeug.url_quote&quot;</span><span class="s2">, </span><span class="s1">_codec_error_url_quote)</span>
+
+
+<span class="s2">def </span><span class="s1">uri_to_iri(</span>
+    <span class="s1">uri: t.Union[str</span><span class="s2">, </span><span class="s1">t.Tuple[str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">str]]</span><span class="s2">,</span>
+    <span class="s1">charset: str = </span><span class="s4">&quot;utf-8&quot;</span><span class="s2">,</span>
+    <span class="s1">errors: str = </span><span class="s4">&quot;werkzeug.url_quote&quot;</span><span class="s2">,</span>
+<span class="s1">) -&gt; str:</span>
+    <span class="s0">&quot;&quot;&quot;Convert a URI to an IRI. All valid UTF-8 characters are unquoted, 
+    leaving all reserved and invalid characters quoted. If the URL has 
+    a domain, it is decoded from Punycode. 
+ 
+    &gt;&gt;&gt; uri_to_iri(&quot;http://xn--n3h.net/p%C3%A5th?q=%C3%A8ry%DF&quot;) 
+    'http://\\u2603.net/p\\xe5th?q=\\xe8ry%DF' 
+ 
+    :param uri: The URI to convert. 
+    :param charset: The encoding to encode unquoted bytes with. 
+    :param errors: Error handler to use during ``bytes.encode``. By 
+        default, invalid bytes are left quoted. 
+ 
+    .. versionchanged:: 0.15 
+        All reserved and invalid characters remain quoted. Previously, 
+        only some reserved characters were preserved, and invalid bytes 
+        were replaced instead of left quoted. 
+ 
+    .. versionadded:: 0.6 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">isinstance(uri</span><span class="s2">, </span><span class="s1">tuple):</span>
+        <span class="s1">uri = url_unparse(uri)</span>
+
+    <span class="s1">uri = url_parse(_to_str(uri</span><span class="s2">, </span><span class="s1">charset))</span>
+    <span class="s1">path = url_unquote(uri.path</span><span class="s2">, </span><span class="s1">charset</span><span class="s2">, </span><span class="s1">errors</span><span class="s2">, </span><span class="s1">_to_iri_unsafe)</span>
+    <span class="s1">query = url_unquote(uri.query</span><span class="s2">, </span><span class="s1">charset</span><span class="s2">, </span><span class="s1">errors</span><span class="s2">, </span><span class="s1">_to_iri_unsafe)</span>
+    <span class="s1">fragment = url_unquote(uri.fragment</span><span class="s2">, </span><span class="s1">charset</span><span class="s2">, </span><span class="s1">errors</span><span class="s2">, </span><span class="s1">_to_iri_unsafe)</span>
+    <span class="s2">return </span><span class="s1">url_unparse((uri.scheme</span><span class="s2">, </span><span class="s1">uri.decode_netloc()</span><span class="s2">, </span><span class="s1">path</span><span class="s2">, </span><span class="s1">query</span><span class="s2">, </span><span class="s1">fragment))</span>
+
+
+<span class="s3"># reserved characters remain unquoted when quoting to URI</span>
+<span class="s1">_to_uri_safe = </span><span class="s4">&quot;:/?#[]@!$&amp;'()*+,;=%&quot;</span>
+
+
+<span class="s2">def </span><span class="s1">iri_to_uri(</span>
+    <span class="s1">iri: t.Union[str</span><span class="s2">, </span><span class="s1">t.Tuple[str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">str]]</span><span class="s2">,</span>
+    <span class="s1">charset: str = </span><span class="s4">&quot;utf-8&quot;</span><span class="s2">,</span>
+    <span class="s1">errors: str = </span><span class="s4">&quot;strict&quot;</span><span class="s2">,</span>
+    <span class="s1">safe_conversion: bool = </span><span class="s2">False,</span>
+<span class="s1">) -&gt; str:</span>
+    <span class="s0">&quot;&quot;&quot;Convert an IRI to a URI. All non-ASCII and unsafe characters are 
+    quoted. If the URL has a domain, it is encoded to Punycode. 
+ 
+    &gt;&gt;&gt; iri_to_uri('http://\\u2603.net/p\\xe5th?q=\\xe8ry%DF') 
+    'http://xn--n3h.net/p%C3%A5th?q=%C3%A8ry%DF' 
+ 
+    :param iri: The IRI to convert. 
+    :param charset: The encoding of the IRI. 
+    :param errors: Error handler to use during ``bytes.encode``. 
+    :param safe_conversion: Return the URL unchanged if it only contains 
+        ASCII characters and no whitespace. See the explanation below. 
+ 
+    There is a general problem with IRI conversion with some protocols 
+    that are in violation of the URI specification. Consider the 
+    following two IRIs:: 
+ 
+        magnet:?xt=uri:whatever 
+        itms-services://?action=download-manifest 
+ 
+    After parsing, we don't know if the scheme requires the ``//``, 
+    which is dropped if empty, but conveys different meanings in the 
+    final URL if it's present or not. In this case, you can use 
+    ``safe_conversion``, which will return the URL unchanged if it only 
+    contains ASCII characters and no whitespace. This can result in a 
+    URI with unquoted characters if it was not already quoted correctly, 
+    but preserves the URL's semantics. Werkzeug uses this for the 
+    ``Location`` header for redirects. 
+ 
+    .. versionchanged:: 0.15 
+        All reserved characters remain unquoted. Previously, only some 
+        reserved characters were left unquoted. 
+ 
+    .. versionchanged:: 0.9.6 
+       The ``safe_conversion`` parameter was added. 
+ 
+    .. versionadded:: 0.6 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">isinstance(iri</span><span class="s2">, </span><span class="s1">tuple):</span>
+        <span class="s1">iri = url_unparse(iri)</span>
+
+    <span class="s2">if </span><span class="s1">safe_conversion:</span>
+        <span class="s3"># If we're not sure if it's safe to convert the URL, and it only</span>
+        <span class="s3"># contains ASCII characters, return it unconverted.</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">native_iri = _to_str(iri)</span>
+            <span class="s1">ascii_iri = native_iri.encode(</span><span class="s4">&quot;ascii&quot;</span><span class="s1">)</span>
+
+            <span class="s3"># Only return if it doesn't have whitespace. (Why?)</span>
+            <span class="s2">if </span><span class="s1">len(ascii_iri.split()) == </span><span class="s6">1</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">native_iri</span>
+        <span class="s2">except </span><span class="s1">UnicodeError:</span>
+            <span class="s2">pass</span>
+
+    <span class="s1">iri = url_parse(_to_str(iri</span><span class="s2">, </span><span class="s1">charset</span><span class="s2">, </span><span class="s1">errors))</span>
+    <span class="s1">path = url_quote(iri.path</span><span class="s2">, </span><span class="s1">charset</span><span class="s2">, </span><span class="s1">errors</span><span class="s2">, </span><span class="s1">_to_uri_safe)</span>
+    <span class="s1">query = url_quote(iri.query</span><span class="s2">, </span><span class="s1">charset</span><span class="s2">, </span><span class="s1">errors</span><span class="s2">, </span><span class="s1">_to_uri_safe)</span>
+    <span class="s1">fragment = url_quote(iri.fragment</span><span class="s2">, </span><span class="s1">charset</span><span class="s2">, </span><span class="s1">errors</span><span class="s2">, </span><span class="s1">_to_uri_safe)</span>
+    <span class="s2">return </span><span class="s1">url_unparse((iri.scheme</span><span class="s2">, </span><span class="s1">iri.encode_netloc()</span><span class="s2">, </span><span class="s1">path</span><span class="s2">, </span><span class="s1">query</span><span class="s2">, </span><span class="s1">fragment))</span>
+
+
+<span class="s2">def </span><span class="s1">url_decode(</span>
+    <span class="s1">s: t.AnyStr</span><span class="s2">,</span>
+    <span class="s1">charset: str = </span><span class="s4">&quot;utf-8&quot;</span><span class="s2">,</span>
+    <span class="s1">decode_keys: </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">include_empty: bool = </span><span class="s2">True,</span>
+    <span class="s1">errors: str = </span><span class="s4">&quot;replace&quot;</span><span class="s2">,</span>
+    <span class="s1">separator: str = </span><span class="s4">&quot;&amp;&quot;</span><span class="s2">,</span>
+    <span class="s1">cls: t.Optional[t.Type[</span><span class="s4">&quot;ds.MultiDict&quot;</span><span class="s1">]] = </span><span class="s2">None,</span>
+<span class="s1">) -&gt; </span><span class="s4">&quot;ds.MultiDict[str, str]&quot;</span><span class="s1">:</span>
+    <span class="s0">&quot;&quot;&quot;Parse a query string and return it as a :class:`MultiDict`. 
+ 
+    :param s: The query string to parse. 
+    :param charset: Decode bytes to string with this charset. If not 
+        given, bytes are returned as-is. 
+    :param include_empty: Include keys with empty values in the dict. 
+    :param errors: Error handling behavior when decoding bytes. 
+    :param separator: Separator character between pairs. 
+    :param cls: Container to hold result instead of :class:`MultiDict`. 
+ 
+    .. versionchanged:: 2.0 
+        The ``decode_keys`` parameter is deprecated and will be removed 
+        in Werkzeug 2.1. 
+ 
+    .. versionchanged:: 0.5 
+        In previous versions &quot;;&quot; and &quot;&amp;&quot; could be used for url decoding. 
+        Now only &quot;&amp;&quot; is supported. If you want to use &quot;;&quot;, a different 
+        ``separator`` can be provided. 
+ 
+    .. versionchanged:: 0.5 
+        The ``cls`` parameter was added. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">decode_keys </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s1">warnings.warn(</span>
+            <span class="s4">&quot;'decode_keys' is deprecated and will be removed in Werkzeug 2.1.&quot;</span><span class="s2">,</span>
+            <span class="s1">DeprecationWarning</span><span class="s2">,</span>
+            <span class="s1">stacklevel=</span><span class="s6">2</span><span class="s2">,</span>
+        <span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">cls </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">from </span><span class="s1">.datastructures </span><span class="s2">import </span><span class="s1">MultiDict  </span><span class="s3"># noqa: F811</span>
+
+        <span class="s1">cls = MultiDict</span>
+    <span class="s2">if </span><span class="s1">isinstance(s</span><span class="s2">, </span><span class="s1">str) </span><span class="s2">and not </span><span class="s1">isinstance(separator</span><span class="s2">, </span><span class="s1">str):</span>
+        <span class="s1">separator = separator.decode(charset </span><span class="s2">or </span><span class="s4">&quot;ascii&quot;</span><span class="s1">)</span>
+    <span class="s2">elif </span><span class="s1">isinstance(s</span><span class="s2">, </span><span class="s1">bytes) </span><span class="s2">and not </span><span class="s1">isinstance(separator</span><span class="s2">, </span><span class="s1">bytes):</span>
+        <span class="s1">separator = separator.encode(charset </span><span class="s2">or </span><span class="s4">&quot;ascii&quot;</span><span class="s1">)  </span><span class="s3"># type: ignore</span>
+    <span class="s2">return </span><span class="s1">cls(</span>
+        <span class="s1">_url_decode_impl(</span>
+            <span class="s1">s.split(separator)</span><span class="s2">, </span><span class="s1">charset</span><span class="s2">, </span><span class="s1">include_empty</span><span class="s2">, </span><span class="s1">errors  </span><span class="s3"># type: ignore</span>
+        <span class="s1">)</span>
+    <span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">url_decode_stream(</span>
+    <span class="s1">stream: t.IO[bytes]</span><span class="s2">,</span>
+    <span class="s1">charset: str = </span><span class="s4">&quot;utf-8&quot;</span><span class="s2">,</span>
+    <span class="s1">decode_keys: </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">include_empty: bool = </span><span class="s2">True,</span>
+    <span class="s1">errors: str = </span><span class="s4">&quot;replace&quot;</span><span class="s2">,</span>
+    <span class="s1">separator: bytes = </span><span class="s5">b&quot;&amp;&quot;</span><span class="s2">,</span>
+    <span class="s1">cls: t.Optional[t.Type[</span><span class="s4">&quot;ds.MultiDict&quot;</span><span class="s1">]] = </span><span class="s2">None,</span>
+    <span class="s1">limit: t.Optional[int] = </span><span class="s2">None,</span>
+    <span class="s1">return_iterator: bool = </span><span class="s2">False,</span>
+<span class="s1">) -&gt; </span><span class="s4">&quot;ds.MultiDict[str, str]&quot;</span><span class="s1">:</span>
+    <span class="s0">&quot;&quot;&quot;Works like :func:`url_decode` but decodes a stream.  The behavior 
+    of stream and limit follows functions like 
+    :func:`~werkzeug.wsgi.make_line_iter`.  The generator of pairs is 
+    directly fed to the `cls` so you can consume the data while it's 
+    parsed. 
+ 
+    :param stream: a stream with the encoded querystring 
+    :param charset: the charset of the query string.  If set to `None` 
+        no decoding will take place. 
+    :param include_empty: Set to `False` if you don't want empty values to 
+                          appear in the dict. 
+    :param errors: the decoding error behavior. 
+    :param separator: the pair separator to be used, defaults to ``&amp;`` 
+    :param cls: an optional dict class to use.  If this is not specified 
+                       or `None` the default :class:`MultiDict` is used. 
+    :param limit: the content length of the URL data.  Not necessary if 
+                  a limited stream is provided. 
+ 
+    .. versionchanged:: 2.0 
+        The ``decode_keys`` and ``return_iterator`` parameters are 
+        deprecated and will be removed in Werkzeug 2.1. 
+ 
+    .. versionadded:: 0.8 
+    &quot;&quot;&quot;</span>
+    <span class="s2">from </span><span class="s1">.wsgi </span><span class="s2">import </span><span class="s1">make_chunk_iter</span>
+
+    <span class="s2">if </span><span class="s1">decode_keys </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s1">warnings.warn(</span>
+            <span class="s4">&quot;'decode_keys' is deprecated and will be removed in Werkzeug 2.1.&quot;</span><span class="s2">,</span>
+            <span class="s1">DeprecationWarning</span><span class="s2">,</span>
+            <span class="s1">stacklevel=</span><span class="s6">2</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+    <span class="s1">pair_iter = make_chunk_iter(stream</span><span class="s2">, </span><span class="s1">separator</span><span class="s2">, </span><span class="s1">limit)</span>
+    <span class="s1">decoder = _url_decode_impl(pair_iter</span><span class="s2">, </span><span class="s1">charset</span><span class="s2">, </span><span class="s1">include_empty</span><span class="s2">, </span><span class="s1">errors)</span>
+
+    <span class="s2">if </span><span class="s1">return_iterator:</span>
+        <span class="s1">warnings.warn(</span>
+            <span class="s4">&quot;'return_iterator' is deprecated and will be removed in Werkzeug 2.1.&quot;</span><span class="s2">,</span>
+            <span class="s1">DeprecationWarning</span><span class="s2">,</span>
+            <span class="s1">stacklevel=</span><span class="s6">2</span><span class="s2">,</span>
+        <span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">decoder  </span><span class="s3"># type: ignore</span>
+
+    <span class="s2">if </span><span class="s1">cls </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">from </span><span class="s1">.datastructures </span><span class="s2">import </span><span class="s1">MultiDict  </span><span class="s3"># noqa: F811</span>
+
+        <span class="s1">cls = MultiDict</span>
+
+    <span class="s2">return </span><span class="s1">cls(decoder)</span>
+
+
+<span class="s2">def </span><span class="s1">_url_decode_impl(</span>
+    <span class="s1">pair_iter: t.Iterable[t.AnyStr]</span><span class="s2">, </span><span class="s1">charset: str</span><span class="s2">, </span><span class="s1">include_empty: bool</span><span class="s2">, </span><span class="s1">errors: str</span>
+<span class="s1">) -&gt; t.Iterator[t.Tuple[str</span><span class="s2">, </span><span class="s1">str]]:</span>
+    <span class="s2">for </span><span class="s1">pair </span><span class="s2">in </span><span class="s1">pair_iter:</span>
+        <span class="s2">if not </span><span class="s1">pair:</span>
+            <span class="s2">continue</span>
+        <span class="s1">s = _make_encode_wrapper(pair)</span>
+        <span class="s1">equal = s(</span><span class="s4">&quot;=&quot;</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">equal </span><span class="s2">in </span><span class="s1">pair:</span>
+            <span class="s1">key</span><span class="s2">, </span><span class="s1">value = pair.split(equal</span><span class="s2">, </span><span class="s6">1</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">if not </span><span class="s1">include_empty:</span>
+                <span class="s2">continue</span>
+            <span class="s1">key = pair</span>
+            <span class="s1">value = s(</span><span class="s4">&quot;&quot;</span><span class="s1">)</span>
+        <span class="s2">yield </span><span class="s1">(</span>
+            <span class="s1">url_unquote_plus(key</span><span class="s2">, </span><span class="s1">charset</span><span class="s2">, </span><span class="s1">errors)</span><span class="s2">,</span>
+            <span class="s1">url_unquote_plus(value</span><span class="s2">, </span><span class="s1">charset</span><span class="s2">, </span><span class="s1">errors)</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">url_encode(</span>
+    <span class="s1">obj: t.Union[t.Mapping[str</span><span class="s2">, </span><span class="s1">str]</span><span class="s2">, </span><span class="s1">t.Iterable[t.Tuple[str</span><span class="s2">, </span><span class="s1">str]]]</span><span class="s2">,</span>
+    <span class="s1">charset: str = </span><span class="s4">&quot;utf-8&quot;</span><span class="s2">,</span>
+    <span class="s1">encode_keys: </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">sort: bool = </span><span class="s2">False,</span>
+    <span class="s1">key: t.Optional[t.Callable[[t.Tuple[str</span><span class="s2">, </span><span class="s1">str]]</span><span class="s2">, </span><span class="s1">t.Any]] = </span><span class="s2">None,</span>
+    <span class="s1">separator: str = </span><span class="s4">&quot;&amp;&quot;</span><span class="s2">,</span>
+<span class="s1">) -&gt; str:</span>
+    <span class="s0">&quot;&quot;&quot;URL encode a dict/`MultiDict`.  If a value is `None` it will not appear 
+    in the result string.  Per default only values are encoded into the target 
+    charset strings. 
+ 
+    :param obj: the object to encode into a query string. 
+    :param charset: the charset of the query string. 
+    :param sort: set to `True` if you want parameters to be sorted by `key`. 
+    :param separator: the separator to be used for the pairs. 
+    :param key: an optional function to be used for sorting.  For more details 
+                check out the :func:`sorted` documentation. 
+ 
+    .. versionchanged:: 2.0 
+        The ``encode_keys`` parameter is deprecated and will be removed 
+        in Werkzeug 2.1. 
+ 
+    .. versionchanged:: 0.5 
+        Added the ``sort``, ``key``, and ``separator`` parameters. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">encode_keys </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s1">warnings.warn(</span>
+            <span class="s4">&quot;'encode_keys' is deprecated and will be removed in Werkzeug 2.1.&quot;</span><span class="s2">,</span>
+            <span class="s1">DeprecationWarning</span><span class="s2">,</span>
+            <span class="s1">stacklevel=</span><span class="s6">2</span><span class="s2">,</span>
+        <span class="s1">)</span>
+    <span class="s1">separator = _to_str(separator</span><span class="s2">, </span><span class="s4">&quot;ascii&quot;</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">separator.join(_url_encode_impl(obj</span><span class="s2">, </span><span class="s1">charset</span><span class="s2">, </span><span class="s1">sort</span><span class="s2">, </span><span class="s1">key))</span>
+
+
+<span class="s2">def </span><span class="s1">url_encode_stream(</span>
+    <span class="s1">obj: t.Union[t.Mapping[str</span><span class="s2">, </span><span class="s1">str]</span><span class="s2">, </span><span class="s1">t.Iterable[t.Tuple[str</span><span class="s2">, </span><span class="s1">str]]]</span><span class="s2">,</span>
+    <span class="s1">stream: t.Optional[t.IO[str]] = </span><span class="s2">None,</span>
+    <span class="s1">charset: str = </span><span class="s4">&quot;utf-8&quot;</span><span class="s2">,</span>
+    <span class="s1">encode_keys: </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">sort: bool = </span><span class="s2">False,</span>
+    <span class="s1">key: t.Optional[t.Callable[[t.Tuple[str</span><span class="s2">, </span><span class="s1">str]]</span><span class="s2">, </span><span class="s1">t.Any]] = </span><span class="s2">None,</span>
+    <span class="s1">separator: str = </span><span class="s4">&quot;&amp;&quot;</span><span class="s2">,</span>
+<span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+    <span class="s0">&quot;&quot;&quot;Like :meth:`url_encode` but writes the results to a stream 
+    object.  If the stream is `None` a generator over all encoded 
+    pairs is returned. 
+ 
+    :param obj: the object to encode into a query string. 
+    :param stream: a stream to write the encoded object into or `None` if 
+                   an iterator over the encoded pairs should be returned.  In 
+                   that case the separator argument is ignored. 
+    :param charset: the charset of the query string. 
+    :param sort: set to `True` if you want parameters to be sorted by `key`. 
+    :param separator: the separator to be used for the pairs. 
+    :param key: an optional function to be used for sorting.  For more details 
+                check out the :func:`sorted` documentation. 
+ 
+    .. versionchanged:: 2.0 
+        The ``encode_keys`` parameter is deprecated and will be removed 
+        in Werkzeug 2.1. 
+ 
+    .. versionadded:: 0.8 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">encode_keys </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s1">warnings.warn(</span>
+            <span class="s4">&quot;'encode_keys' is deprecated and will be removed in Werkzeug 2.1.&quot;</span><span class="s2">,</span>
+            <span class="s1">DeprecationWarning</span><span class="s2">,</span>
+            <span class="s1">stacklevel=</span><span class="s6">2</span><span class="s2">,</span>
+        <span class="s1">)</span>
+    <span class="s1">separator = _to_str(separator</span><span class="s2">, </span><span class="s4">&quot;ascii&quot;</span><span class="s1">)</span>
+    <span class="s1">gen = _url_encode_impl(obj</span><span class="s2">, </span><span class="s1">charset</span><span class="s2">, </span><span class="s1">sort</span><span class="s2">, </span><span class="s1">key)</span>
+    <span class="s2">if </span><span class="s1">stream </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">gen  </span><span class="s3"># type: ignore</span>
+    <span class="s2">for </span><span class="s1">idx</span><span class="s2">, </span><span class="s1">chunk </span><span class="s2">in </span><span class="s1">enumerate(gen):</span>
+        <span class="s2">if </span><span class="s1">idx:</span>
+            <span class="s1">stream.write(separator)</span>
+        <span class="s1">stream.write(chunk)</span>
+    <span class="s2">return None</span>
+
+
+<span class="s2">def </span><span class="s1">url_join(</span>
+    <span class="s1">base: t.Union[str</span><span class="s2">, </span><span class="s1">t.Tuple[str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">str]]</span><span class="s2">,</span>
+    <span class="s1">url: t.Union[str</span><span class="s2">, </span><span class="s1">t.Tuple[str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">str]]</span><span class="s2">,</span>
+    <span class="s1">allow_fragments: bool = </span><span class="s2">True,</span>
+<span class="s1">) -&gt; str:</span>
+    <span class="s0">&quot;&quot;&quot;Join a base URL and a possibly relative URL to form an absolute 
+    interpretation of the latter. 
+ 
+    :param base: the base URL for the join operation. 
+    :param url: the URL to join. 
+    :param allow_fragments: indicates whether fragments should be allowed. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">isinstance(base</span><span class="s2">, </span><span class="s1">tuple):</span>
+        <span class="s1">base = url_unparse(base)</span>
+    <span class="s2">if </span><span class="s1">isinstance(url</span><span class="s2">, </span><span class="s1">tuple):</span>
+        <span class="s1">url = url_unparse(url)</span>
+
+    <span class="s1">_check_str_tuple((base</span><span class="s2">, </span><span class="s1">url))</span>
+    <span class="s1">s = _make_encode_wrapper(base)</span>
+
+    <span class="s2">if not </span><span class="s1">base:</span>
+        <span class="s2">return </span><span class="s1">url</span>
+    <span class="s2">if not </span><span class="s1">url:</span>
+        <span class="s2">return </span><span class="s1">base</span>
+
+    <span class="s1">bscheme</span><span class="s2">, </span><span class="s1">bnetloc</span><span class="s2">, </span><span class="s1">bpath</span><span class="s2">, </span><span class="s1">bquery</span><span class="s2">, </span><span class="s1">bfragment = url_parse(</span>
+        <span class="s1">base</span><span class="s2">, </span><span class="s1">allow_fragments=allow_fragments</span>
+    <span class="s1">)</span>
+    <span class="s1">scheme</span><span class="s2">, </span><span class="s1">netloc</span><span class="s2">, </span><span class="s1">path</span><span class="s2">, </span><span class="s1">query</span><span class="s2">, </span><span class="s1">fragment = url_parse(url</span><span class="s2">, </span><span class="s1">bscheme</span><span class="s2">, </span><span class="s1">allow_fragments)</span>
+    <span class="s2">if </span><span class="s1">scheme != bscheme:</span>
+        <span class="s2">return </span><span class="s1">url</span>
+    <span class="s2">if </span><span class="s1">netloc:</span>
+        <span class="s2">return </span><span class="s1">url_unparse((scheme</span><span class="s2">, </span><span class="s1">netloc</span><span class="s2">, </span><span class="s1">path</span><span class="s2">, </span><span class="s1">query</span><span class="s2">, </span><span class="s1">fragment))</span>
+    <span class="s1">netloc = bnetloc</span>
+
+    <span class="s2">if </span><span class="s1">path[:</span><span class="s6">1</span><span class="s1">] == s(</span><span class="s4">&quot;/&quot;</span><span class="s1">):</span>
+        <span class="s1">segments = path.split(s(</span><span class="s4">&quot;/&quot;</span><span class="s1">))</span>
+    <span class="s2">elif not </span><span class="s1">path:</span>
+        <span class="s1">segments = bpath.split(s(</span><span class="s4">&quot;/&quot;</span><span class="s1">))</span>
+        <span class="s2">if not </span><span class="s1">query:</span>
+            <span class="s1">query = bquery</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">segments = bpath.split(s(</span><span class="s4">&quot;/&quot;</span><span class="s1">))[:-</span><span class="s6">1</span><span class="s1">] + path.split(s(</span><span class="s4">&quot;/&quot;</span><span class="s1">))</span>
+
+    <span class="s3"># If the rightmost part is &quot;./&quot; we want to keep the slash but</span>
+    <span class="s3"># remove the dot.</span>
+    <span class="s2">if </span><span class="s1">segments[-</span><span class="s6">1</span><span class="s1">] == s(</span><span class="s4">&quot;.&quot;</span><span class="s1">):</span>
+        <span class="s1">segments[-</span><span class="s6">1</span><span class="s1">] = s(</span><span class="s4">&quot;&quot;</span><span class="s1">)</span>
+
+    <span class="s3"># Resolve &quot;..&quot; and &quot;.&quot;</span>
+    <span class="s1">segments = [segment </span><span class="s2">for </span><span class="s1">segment </span><span class="s2">in </span><span class="s1">segments </span><span class="s2">if </span><span class="s1">segment != s(</span><span class="s4">&quot;.&quot;</span><span class="s1">)]</span>
+    <span class="s2">while True</span><span class="s1">:</span>
+        <span class="s1">i = </span><span class="s6">1</span>
+        <span class="s1">n = len(segments) - </span><span class="s6">1</span>
+        <span class="s2">while </span><span class="s1">i &lt; n:</span>
+            <span class="s2">if </span><span class="s1">segments[i] == s(</span><span class="s4">&quot;..&quot;</span><span class="s1">) </span><span class="s2">and </span><span class="s1">segments[i - </span><span class="s6">1</span><span class="s1">] </span><span class="s2">not in </span><span class="s1">(s(</span><span class="s4">&quot;&quot;</span><span class="s1">)</span><span class="s2">, </span><span class="s1">s(</span><span class="s4">&quot;..&quot;</span><span class="s1">)):</span>
+                <span class="s2">del </span><span class="s1">segments[i - </span><span class="s6">1 </span><span class="s1">: i + </span><span class="s6">1</span><span class="s1">]</span>
+                <span class="s2">break</span>
+            <span class="s1">i += </span><span class="s6">1</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">break</span>
+
+    <span class="s3"># Remove trailing &quot;..&quot; if the URL is absolute</span>
+    <span class="s1">unwanted_marker = [s(</span><span class="s4">&quot;&quot;</span><span class="s1">)</span><span class="s2">, </span><span class="s1">s(</span><span class="s4">&quot;..&quot;</span><span class="s1">)]</span>
+    <span class="s2">while </span><span class="s1">segments[:</span><span class="s6">2</span><span class="s1">] == unwanted_marker:</span>
+        <span class="s2">del </span><span class="s1">segments[</span><span class="s6">1</span><span class="s1">]</span>
+
+    <span class="s1">path = s(</span><span class="s4">&quot;/&quot;</span><span class="s1">).join(segments)</span>
+    <span class="s2">return </span><span class="s1">url_unparse((scheme</span><span class="s2">, </span><span class="s1">netloc</span><span class="s2">, </span><span class="s1">path</span><span class="s2">, </span><span class="s1">query</span><span class="s2">, </span><span class="s1">fragment))</span>
+
+
+<span class="s2">class </span><span class="s1">Href:</span>
+    <span class="s0">&quot;&quot;&quot;Implements a callable that constructs URLs with the given base. The 
+    function can be called with any number of positional and keyword 
+    arguments which than are used to assemble the URL.  Works with URLs 
+    and posix paths. 
+ 
+    Positional arguments are appended as individual segments to 
+    the path of the URL: 
+ 
+    &gt;&gt;&gt; href = Href('/foo') 
+    &gt;&gt;&gt; href('bar', 23) 
+    '/foo/bar/23' 
+    &gt;&gt;&gt; href('foo', bar=23) 
+    '/foo/foo?bar=23' 
+ 
+    If any of the arguments (positional or keyword) evaluates to `None` it 
+    will be skipped.  If no keyword arguments are given the last argument 
+    can be a :class:`dict` or :class:`MultiDict` (or any other dict subclass), 
+    otherwise the keyword arguments are used for the query parameters, cutting 
+    off the first trailing underscore of the parameter name: 
+ 
+    &gt;&gt;&gt; href(is_=42) 
+    '/foo?is=42' 
+    &gt;&gt;&gt; href({'foo': 'bar'}) 
+    '/foo?foo=bar' 
+ 
+    Combining of both methods is not allowed: 
+ 
+    &gt;&gt;&gt; href({'foo': 'bar'}, bar=42) 
+    Traceback (most recent call last): 
+      ... 
+    TypeError: keyword arguments and query-dicts can't be combined 
+ 
+    Accessing attributes on the href object creates a new href object with 
+    the attribute name as prefix: 
+ 
+    &gt;&gt;&gt; bar_href = href.bar 
+    &gt;&gt;&gt; bar_href(&quot;blub&quot;) 
+    '/foo/bar/blub' 
+ 
+    If `sort` is set to `True` the items are sorted by `key` or the default 
+    sorting algorithm: 
+ 
+    &gt;&gt;&gt; href = Href(&quot;/&quot;, sort=True) 
+    &gt;&gt;&gt; href(a=1, b=2, c=3) 
+    '/?a=1&amp;b=2&amp;c=3' 
+ 
+    .. deprecated:: 2.0 
+        Will be removed in Werkzeug 2.1. Use :mod:`werkzeug.routing` 
+        instead. 
+ 
+    .. versionadded:: 0.5 
+        `sort` and `key` were added. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(  </span><span class="s3"># type: ignore</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">base=</span><span class="s4">&quot;./&quot;</span><span class="s2">, </span><span class="s1">charset=</span><span class="s4">&quot;utf-8&quot;</span><span class="s2">, </span><span class="s1">sort=</span><span class="s2">False, </span><span class="s1">key=</span><span class="s2">None</span>
+    <span class="s1">):</span>
+        <span class="s1">warnings.warn(</span>
+            <span class="s4">&quot;'Href' is deprecated and will be removed in Werkzeug 2.1.&quot;</span>
+            <span class="s4">&quot; Use 'werkzeug.routing' instead.&quot;</span><span class="s2">,</span>
+            <span class="s1">DeprecationWarning</span><span class="s2">,</span>
+            <span class="s1">stacklevel=</span><span class="s6">2</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+        <span class="s2">if not </span><span class="s1">base:</span>
+            <span class="s1">base = </span><span class="s4">&quot;./&quot;</span>
+        <span class="s1">self.base = base</span>
+        <span class="s1">self.charset = charset</span>
+        <span class="s1">self.sort = sort</span>
+        <span class="s1">self.key = key</span>
+
+    <span class="s2">def </span><span class="s1">__getattr__(self</span><span class="s2">, </span><span class="s1">name):  </span><span class="s3"># type: ignore</span>
+        <span class="s2">if </span><span class="s1">name[:</span><span class="s6">2</span><span class="s1">] == </span><span class="s4">&quot;__&quot;</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">AttributeError(name)</span>
+        <span class="s1">base = self.base</span>
+        <span class="s2">if </span><span class="s1">base[-</span><span class="s6">1</span><span class="s1">:] != </span><span class="s4">&quot;/&quot;</span><span class="s1">:</span>
+            <span class="s1">base += </span><span class="s4">&quot;/&quot;</span>
+        <span class="s2">return </span><span class="s1">Href(url_join(base</span><span class="s2">, </span><span class="s1">name)</span><span class="s2">, </span><span class="s1">self.charset</span><span class="s2">, </span><span class="s1">self.sort</span><span class="s2">, </span><span class="s1">self.key)</span>
+
+    <span class="s2">def </span><span class="s1">__call__(self</span><span class="s2">, </span><span class="s1">*path</span><span class="s2">, </span><span class="s1">**query):  </span><span class="s3"># type: ignore</span>
+        <span class="s2">if </span><span class="s1">path </span><span class="s2">and </span><span class="s1">isinstance(path[-</span><span class="s6">1</span><span class="s1">]</span><span class="s2">, </span><span class="s1">dict):</span>
+            <span class="s2">if </span><span class="s1">query:</span>
+                <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;keyword arguments and query-dicts can't be combined&quot;</span><span class="s1">)</span>
+            <span class="s1">query</span><span class="s2">, </span><span class="s1">path = path[-</span><span class="s6">1</span><span class="s1">]</span><span class="s2">, </span><span class="s1">path[:-</span><span class="s6">1</span><span class="s1">]</span>
+        <span class="s2">elif </span><span class="s1">query:</span>
+            <span class="s1">query = {k[:-</span><span class="s6">1</span><span class="s1">] </span><span class="s2">if </span><span class="s1">k.endswith(</span><span class="s4">&quot;_&quot;</span><span class="s1">) </span><span class="s2">else </span><span class="s1">k: v </span><span class="s2">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">query.items()}</span>
+        <span class="s1">path = </span><span class="s4">&quot;/&quot;</span><span class="s1">.join(</span>
+            <span class="s1">[</span>
+                <span class="s1">_to_str(url_quote(x</span><span class="s2">, </span><span class="s1">self.charset)</span><span class="s2">, </span><span class="s4">&quot;ascii&quot;</span><span class="s1">)</span>
+                <span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">path</span>
+                <span class="s2">if </span><span class="s1">x </span><span class="s2">is not None</span>
+            <span class="s1">]</span>
+        <span class="s1">).lstrip(</span><span class="s4">&quot;/&quot;</span><span class="s1">)</span>
+        <span class="s1">rv = self.base</span>
+        <span class="s2">if </span><span class="s1">path:</span>
+            <span class="s2">if not </span><span class="s1">rv.endswith(</span><span class="s4">&quot;/&quot;</span><span class="s1">):</span>
+                <span class="s1">rv += </span><span class="s4">&quot;/&quot;</span>
+            <span class="s1">rv = url_join(rv</span><span class="s2">, </span><span class="s4">f&quot;./</span><span class="s2">{</span><span class="s1">path</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">query:</span>
+            <span class="s1">rv += </span><span class="s4">&quot;?&quot; </span><span class="s1">+ _to_str(</span>
+                <span class="s1">url_encode(query</span><span class="s2">, </span><span class="s1">self.charset</span><span class="s2">, </span><span class="s1">sort=self.sort</span><span class="s2">, </span><span class="s1">key=self.key)</span><span class="s2">, </span><span class="s4">&quot;ascii&quot;</span>
+            <span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">rv</span>
+</pre>
+</body>
+</html>

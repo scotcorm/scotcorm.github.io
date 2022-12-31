@@ -1,0 +1,276 @@
+<html>
+<head>
+<title>freeze.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #629755; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+freeze.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">collections</span>
+<span class="s0">import </span><span class="s1">logging</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">Container</span><span class="s0">, </span><span class="s1">Dict</span><span class="s0">, </span><span class="s1">Iterable</span><span class="s0">, </span><span class="s1">Iterator</span><span class="s0">, </span><span class="s1">List</span><span class="s0">, </span><span class="s1">NamedTuple</span><span class="s0">, </span><span class="s1">Optional</span><span class="s0">, </span><span class="s1">Set</span>
+
+<span class="s0">from </span><span class="s1">pip._vendor.packaging.utils </span><span class="s0">import </span><span class="s1">canonicalize_name</span>
+<span class="s0">from </span><span class="s1">pip._vendor.packaging.version </span><span class="s0">import </span><span class="s1">Version</span>
+
+<span class="s0">from </span><span class="s1">pip._internal.exceptions </span><span class="s0">import </span><span class="s1">BadCommand</span><span class="s0">, </span><span class="s1">InstallationError</span>
+<span class="s0">from </span><span class="s1">pip._internal.metadata </span><span class="s0">import </span><span class="s1">BaseDistribution</span><span class="s0">, </span><span class="s1">get_environment</span>
+<span class="s0">from </span><span class="s1">pip._internal.req.constructors </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">install_req_from_editable</span><span class="s0">,</span>
+    <span class="s1">install_req_from_line</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pip._internal.req.req_file </span><span class="s0">import </span><span class="s1">COMMENT_RE</span>
+<span class="s0">from </span><span class="s1">pip._internal.utils.direct_url_helpers </span><span class="s0">import </span><span class="s1">direct_url_as_pep440_direct_reference</span>
+
+<span class="s1">logger = logging.getLogger(__name__)</span>
+
+
+<span class="s0">class </span><span class="s1">_EditableInfo(NamedTuple):</span>
+    <span class="s1">requirement: str</span>
+    <span class="s1">comments: List[str]</span>
+
+
+<span class="s0">def </span><span class="s1">freeze(</span>
+    <span class="s1">requirement: Optional[List[str]] = </span><span class="s0">None,</span>
+    <span class="s1">local_only: bool = </span><span class="s0">False,</span>
+    <span class="s1">user_only: bool = </span><span class="s0">False,</span>
+    <span class="s1">paths: Optional[List[str]] = </span><span class="s0">None,</span>
+    <span class="s1">isolated: bool = </span><span class="s0">False,</span>
+    <span class="s1">exclude_editable: bool = </span><span class="s0">False,</span>
+    <span class="s1">skip: Container[str] = ()</span><span class="s0">,</span>
+<span class="s1">) -&gt; Iterator[str]:</span>
+    <span class="s1">installations: Dict[str</span><span class="s0">, </span><span class="s1">FrozenRequirement] = {}</span>
+
+    <span class="s1">dists = get_environment(paths).iter_installed_distributions(</span>
+        <span class="s1">local_only=local_only</span><span class="s0">,</span>
+        <span class="s1">skip=()</span><span class="s0">,</span>
+        <span class="s1">user_only=user_only</span><span class="s0">,</span>
+    <span class="s1">)</span>
+    <span class="s0">for </span><span class="s1">dist </span><span class="s0">in </span><span class="s1">dists:</span>
+        <span class="s1">req = FrozenRequirement.from_dist(dist)</span>
+        <span class="s0">if </span><span class="s1">exclude_editable </span><span class="s0">and </span><span class="s1">req.editable:</span>
+            <span class="s0">continue</span>
+        <span class="s1">installations[req.canonical_name] = req</span>
+
+    <span class="s0">if </span><span class="s1">requirement:</span>
+        <span class="s2"># the options that don't get turned into an InstallRequirement</span>
+        <span class="s2"># should only be emitted once, even if the same option is in multiple</span>
+        <span class="s2"># requirements files, so we need to keep track of what has been emitted</span>
+        <span class="s2"># so that we don't emit it again if it's seen again</span>
+        <span class="s1">emitted_options: Set[str] = set()</span>
+        <span class="s2"># keep track of which files a requirement is in so that we can</span>
+        <span class="s2"># give an accurate warning if a requirement appears multiple times.</span>
+        <span class="s1">req_files: Dict[str</span><span class="s0">, </span><span class="s1">List[str]] = collections.defaultdict(list)</span>
+        <span class="s0">for </span><span class="s1">req_file_path </span><span class="s0">in </span><span class="s1">requirement:</span>
+            <span class="s0">with </span><span class="s1">open(req_file_path) </span><span class="s0">as </span><span class="s1">req_file:</span>
+                <span class="s0">for </span><span class="s1">line </span><span class="s0">in </span><span class="s1">req_file:</span>
+                    <span class="s0">if </span><span class="s1">(</span>
+                        <span class="s0">not </span><span class="s1">line.strip()</span>
+                        <span class="s0">or </span><span class="s1">line.strip().startswith(</span><span class="s3">&quot;#&quot;</span><span class="s1">)</span>
+                        <span class="s0">or </span><span class="s1">line.startswith(</span>
+                            <span class="s1">(</span>
+                                <span class="s3">&quot;-r&quot;</span><span class="s0">,</span>
+                                <span class="s3">&quot;--requirement&quot;</span><span class="s0">,</span>
+                                <span class="s3">&quot;-f&quot;</span><span class="s0">,</span>
+                                <span class="s3">&quot;--find-links&quot;</span><span class="s0">,</span>
+                                <span class="s3">&quot;-i&quot;</span><span class="s0">,</span>
+                                <span class="s3">&quot;--index-url&quot;</span><span class="s0">,</span>
+                                <span class="s3">&quot;--pre&quot;</span><span class="s0">,</span>
+                                <span class="s3">&quot;--trusted-host&quot;</span><span class="s0">,</span>
+                                <span class="s3">&quot;--process-dependency-links&quot;</span><span class="s0">,</span>
+                                <span class="s3">&quot;--extra-index-url&quot;</span><span class="s0">,</span>
+                                <span class="s3">&quot;--use-feature&quot;</span><span class="s0">,</span>
+                            <span class="s1">)</span>
+                        <span class="s1">)</span>
+                    <span class="s1">):</span>
+                        <span class="s1">line = line.rstrip()</span>
+                        <span class="s0">if </span><span class="s1">line </span><span class="s0">not in </span><span class="s1">emitted_options:</span>
+                            <span class="s1">emitted_options.add(line)</span>
+                            <span class="s0">yield </span><span class="s1">line</span>
+                        <span class="s0">continue</span>
+
+                    <span class="s0">if </span><span class="s1">line.startswith(</span><span class="s3">&quot;-e&quot;</span><span class="s1">) </span><span class="s0">or </span><span class="s1">line.startswith(</span><span class="s3">&quot;--editable&quot;</span><span class="s1">):</span>
+                        <span class="s0">if </span><span class="s1">line.startswith(</span><span class="s3">&quot;-e&quot;</span><span class="s1">):</span>
+                            <span class="s1">line = line[</span><span class="s4">2</span><span class="s1">:].strip()</span>
+                        <span class="s0">else</span><span class="s1">:</span>
+                            <span class="s1">line = line[len(</span><span class="s3">&quot;--editable&quot;</span><span class="s1">) :].strip().lstrip(</span><span class="s3">&quot;=&quot;</span><span class="s1">)</span>
+                        <span class="s1">line_req = install_req_from_editable(</span>
+                            <span class="s1">line</span><span class="s0">,</span>
+                            <span class="s1">isolated=isolated</span><span class="s0">,</span>
+                        <span class="s1">)</span>
+                    <span class="s0">else</span><span class="s1">:</span>
+                        <span class="s1">line_req = install_req_from_line(</span>
+                            <span class="s1">COMMENT_RE.sub(</span><span class="s3">&quot;&quot;</span><span class="s0">, </span><span class="s1">line).strip()</span><span class="s0">,</span>
+                            <span class="s1">isolated=isolated</span><span class="s0">,</span>
+                        <span class="s1">)</span>
+
+                    <span class="s0">if not </span><span class="s1">line_req.name:</span>
+                        <span class="s1">logger.info(</span>
+                            <span class="s3">&quot;Skipping line in requirement file [%s] because &quot;</span>
+                            <span class="s3">&quot;it's not clear what it would install: %s&quot;</span><span class="s0">,</span>
+                            <span class="s1">req_file_path</span><span class="s0">,</span>
+                            <span class="s1">line.strip()</span><span class="s0">,</span>
+                        <span class="s1">)</span>
+                        <span class="s1">logger.info(</span>
+                            <span class="s3">&quot;  (add #egg=PackageName to the URL to avoid&quot;</span>
+                            <span class="s3">&quot; this warning)&quot;</span>
+                        <span class="s1">)</span>
+                    <span class="s0">else</span><span class="s1">:</span>
+                        <span class="s1">line_req_canonical_name = canonicalize_name(line_req.name)</span>
+                        <span class="s0">if </span><span class="s1">line_req_canonical_name </span><span class="s0">not in </span><span class="s1">installations:</span>
+                            <span class="s2"># either it's not installed, or it is installed</span>
+                            <span class="s2"># but has been processed already</span>
+                            <span class="s0">if not </span><span class="s1">req_files[line_req.name]:</span>
+                                <span class="s1">logger.warning(</span>
+                                    <span class="s3">&quot;Requirement file [%s] contains %s, but &quot;</span>
+                                    <span class="s3">&quot;package %r is not installed&quot;</span><span class="s0">,</span>
+                                    <span class="s1">req_file_path</span><span class="s0">,</span>
+                                    <span class="s1">COMMENT_RE.sub(</span><span class="s3">&quot;&quot;</span><span class="s0">, </span><span class="s1">line).strip()</span><span class="s0">,</span>
+                                    <span class="s1">line_req.name</span><span class="s0">,</span>
+                                <span class="s1">)</span>
+                            <span class="s0">else</span><span class="s1">:</span>
+                                <span class="s1">req_files[line_req.name].append(req_file_path)</span>
+                        <span class="s0">else</span><span class="s1">:</span>
+                            <span class="s0">yield </span><span class="s1">str(installations[line_req_canonical_name]).rstrip()</span>
+                            <span class="s0">del </span><span class="s1">installations[line_req_canonical_name]</span>
+                            <span class="s1">req_files[line_req.name].append(req_file_path)</span>
+
+        <span class="s2"># Warn about requirements that were included multiple times (in a</span>
+        <span class="s2"># single requirements file or in different requirements files).</span>
+        <span class="s0">for </span><span class="s1">name</span><span class="s0">, </span><span class="s1">files </span><span class="s0">in </span><span class="s1">req_files.items():</span>
+            <span class="s0">if </span><span class="s1">len(files) &gt; </span><span class="s4">1</span><span class="s1">:</span>
+                <span class="s1">logger.warning(</span>
+                    <span class="s3">&quot;Requirement %s included multiple times [%s]&quot;</span><span class="s0">,</span>
+                    <span class="s1">name</span><span class="s0">,</span>
+                    <span class="s3">&quot;, &quot;</span><span class="s1">.join(sorted(set(files)))</span><span class="s0">,</span>
+                <span class="s1">)</span>
+
+        <span class="s0">yield </span><span class="s1">(</span><span class="s3">&quot;## The following requirements were added by pip freeze:&quot;</span><span class="s1">)</span>
+    <span class="s0">for </span><span class="s1">installation </span><span class="s0">in </span><span class="s1">sorted(installations.values()</span><span class="s0">, </span><span class="s1">key=</span><span class="s0">lambda </span><span class="s1">x: x.name.lower()):</span>
+        <span class="s0">if </span><span class="s1">installation.canonical_name </span><span class="s0">not in </span><span class="s1">skip:</span>
+            <span class="s0">yield </span><span class="s1">str(installation).rstrip()</span>
+
+
+<span class="s0">def </span><span class="s1">_format_as_name_version(dist: BaseDistribution) -&gt; str:</span>
+    <span class="s0">if </span><span class="s1">isinstance(dist.version</span><span class="s0">, </span><span class="s1">Version):</span>
+        <span class="s0">return </span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">dist.raw_name</span><span class="s0">}</span><span class="s3">==</span><span class="s0">{</span><span class="s1">dist.version</span><span class="s0">}</span><span class="s3">&quot;</span>
+    <span class="s0">return </span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">dist.raw_name</span><span class="s0">}</span><span class="s3">===</span><span class="s0">{</span><span class="s1">dist.version</span><span class="s0">}</span><span class="s3">&quot;</span>
+
+
+<span class="s0">def </span><span class="s1">_get_editable_info(dist: BaseDistribution) -&gt; _EditableInfo:</span>
+    <span class="s5">&quot;&quot;&quot; 
+    Compute and return values (req, comments) for use in 
+    FrozenRequirement.from_dist(). 
+    &quot;&quot;&quot;</span>
+    <span class="s1">editable_project_location = dist.editable_project_location</span>
+    <span class="s0">assert </span><span class="s1">editable_project_location</span>
+    <span class="s1">location = os.path.normcase(os.path.abspath(editable_project_location))</span>
+
+    <span class="s0">from </span><span class="s1">pip._internal.vcs </span><span class="s0">import </span><span class="s1">RemoteNotFoundError</span><span class="s0">, </span><span class="s1">RemoteNotValidError</span><span class="s0">, </span><span class="s1">vcs</span>
+
+    <span class="s1">vcs_backend = vcs.get_backend_for_dir(location)</span>
+
+    <span class="s0">if </span><span class="s1">vcs_backend </span><span class="s0">is None</span><span class="s1">:</span>
+        <span class="s1">display = _format_as_name_version(dist)</span>
+        <span class="s1">logger.debug(</span>
+            <span class="s3">'No VCS found for editable requirement &quot;%s&quot; in: %r'</span><span class="s0">,</span>
+            <span class="s1">display</span><span class="s0">,</span>
+            <span class="s1">location</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s0">return </span><span class="s1">_EditableInfo(</span>
+            <span class="s1">requirement=location</span><span class="s0">,</span>
+            <span class="s1">comments=[</span><span class="s3">f&quot;# Editable install with no version control (</span><span class="s0">{</span><span class="s1">display</span><span class="s0">}</span><span class="s3">)&quot;</span><span class="s1">]</span><span class="s0">,</span>
+        <span class="s1">)</span>
+
+    <span class="s1">vcs_name = type(vcs_backend).__name__</span>
+
+    <span class="s0">try</span><span class="s1">:</span>
+        <span class="s1">req = vcs_backend.get_src_requirement(location</span><span class="s0">, </span><span class="s1">dist.raw_name)</span>
+    <span class="s0">except </span><span class="s1">RemoteNotFoundError:</span>
+        <span class="s1">display = _format_as_name_version(dist)</span>
+        <span class="s0">return </span><span class="s1">_EditableInfo(</span>
+            <span class="s1">requirement=location</span><span class="s0">,</span>
+            <span class="s1">comments=[</span><span class="s3">f&quot;# Editable </span><span class="s0">{</span><span class="s1">vcs_name</span><span class="s0">} </span><span class="s3">install with no remote (</span><span class="s0">{</span><span class="s1">display</span><span class="s0">}</span><span class="s3">)&quot;</span><span class="s1">]</span><span class="s0">,</span>
+        <span class="s1">)</span>
+    <span class="s0">except </span><span class="s1">RemoteNotValidError </span><span class="s0">as </span><span class="s1">ex:</span>
+        <span class="s1">display = _format_as_name_version(dist)</span>
+        <span class="s0">return </span><span class="s1">_EditableInfo(</span>
+            <span class="s1">requirement=location</span><span class="s0">,</span>
+            <span class="s1">comments=[</span>
+                <span class="s3">f&quot;# Editable </span><span class="s0">{</span><span class="s1">vcs_name</span><span class="s0">} </span><span class="s3">install (</span><span class="s0">{</span><span class="s1">display</span><span class="s0">}</span><span class="s3">) with either a deleted &quot;</span>
+                <span class="s3">f&quot;local remote or invalid URI:&quot;</span><span class="s0">,</span>
+                <span class="s3">f&quot;# '</span><span class="s0">{</span><span class="s1">ex.url</span><span class="s0">}</span><span class="s3">'&quot;</span><span class="s0">,</span>
+            <span class="s1">]</span><span class="s0">,</span>
+        <span class="s1">)</span>
+    <span class="s0">except </span><span class="s1">BadCommand:</span>
+        <span class="s1">logger.warning(</span>
+            <span class="s3">&quot;cannot determine version of editable source in %s &quot;</span>
+            <span class="s3">&quot;(%s command not found in path)&quot;</span><span class="s0">,</span>
+            <span class="s1">location</span><span class="s0">,</span>
+            <span class="s1">vcs_backend.name</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s0">return </span><span class="s1">_EditableInfo(requirement=location</span><span class="s0">, </span><span class="s1">comments=[])</span>
+    <span class="s0">except </span><span class="s1">InstallationError </span><span class="s0">as </span><span class="s1">exc:</span>
+        <span class="s1">logger.warning(</span><span class="s3">&quot;Error when trying to get requirement for VCS system %s&quot;</span><span class="s0">, </span><span class="s1">exc)</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s0">return </span><span class="s1">_EditableInfo(requirement=req</span><span class="s0">, </span><span class="s1">comments=[])</span>
+
+    <span class="s1">logger.warning(</span><span class="s3">&quot;Could not determine repository location of %s&quot;</span><span class="s0">, </span><span class="s1">location)</span>
+
+    <span class="s0">return </span><span class="s1">_EditableInfo(</span>
+        <span class="s1">requirement=location</span><span class="s0">,</span>
+        <span class="s1">comments=[</span><span class="s3">&quot;## !! Could not determine repository location&quot;</span><span class="s1">]</span><span class="s0">,</span>
+    <span class="s1">)</span>
+
+
+<span class="s0">class </span><span class="s1">FrozenRequirement:</span>
+    <span class="s0">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">name: str</span><span class="s0">,</span>
+        <span class="s1">req: str</span><span class="s0">,</span>
+        <span class="s1">editable: bool</span><span class="s0">,</span>
+        <span class="s1">comments: Iterable[str] = ()</span><span class="s0">,</span>
+    <span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self.name = name</span>
+        <span class="s1">self.canonical_name = canonicalize_name(name)</span>
+        <span class="s1">self.req = req</span>
+        <span class="s1">self.editable = editable</span>
+        <span class="s1">self.comments = comments</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s0">def </span><span class="s1">from_dist(cls</span><span class="s0">, </span><span class="s1">dist: BaseDistribution) -&gt; </span><span class="s3">&quot;FrozenRequirement&quot;</span><span class="s1">:</span>
+        <span class="s1">editable = dist.editable</span>
+        <span class="s0">if </span><span class="s1">editable:</span>
+            <span class="s1">req</span><span class="s0">, </span><span class="s1">comments = _get_editable_info(dist)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">comments = []</span>
+            <span class="s1">direct_url = dist.direct_url</span>
+            <span class="s0">if </span><span class="s1">direct_url:</span>
+                <span class="s2"># if PEP 610 metadata is present, use it</span>
+                <span class="s1">req = direct_url_as_pep440_direct_reference(direct_url</span><span class="s0">, </span><span class="s1">dist.raw_name)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s2"># name==version requirement</span>
+                <span class="s1">req = _format_as_name_version(dist)</span>
+
+        <span class="s0">return </span><span class="s1">cls(dist.raw_name</span><span class="s0">, </span><span class="s1">req</span><span class="s0">, </span><span class="s1">editable</span><span class="s0">, </span><span class="s1">comments=comments)</span>
+
+    <span class="s0">def </span><span class="s1">__str__(self) -&gt; str:</span>
+        <span class="s1">req = self.req</span>
+        <span class="s0">if </span><span class="s1">self.editable:</span>
+            <span class="s1">req = </span><span class="s3">f&quot;-e </span><span class="s0">{</span><span class="s1">req</span><span class="s0">}</span><span class="s3">&quot;</span>
+        <span class="s0">return </span><span class="s3">&quot;</span><span class="s0">\n</span><span class="s3">&quot;</span><span class="s1">.join(list(self.comments) + [str(req)]) + </span><span class="s3">&quot;</span><span class="s0">\n</span><span class="s3">&quot;</span>
+</pre>
+</body>
+</html>

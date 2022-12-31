@@ -1,0 +1,1635 @@
+<html>
+<head>
+<title>_parser.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_parser.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># -*- coding: utf-8 -*-</span>
+<span class="s2">&quot;&quot;&quot; 
+This module offers a generic date/time string parser which is able to parse 
+most known formats to represent a date and/or time. 
+ 
+This module attempts to be forgiving with regards to unlikely input formats, 
+returning a datetime object even for dates which are ambiguous. If an element 
+of a date/time stamp is omitted, the following rules are applied: 
+ 
+- If AM or PM is left unspecified, a 24-hour clock is assumed, however, an hour 
+  on a 12-hour clock (``0 &lt;= hour &lt;= 12``) *must* be specified if AM or PM is 
+  specified. 
+- If a time zone is omitted, a timezone-naive datetime is returned. 
+ 
+If any other elements are missing, they are taken from the 
+:class:`datetime.datetime` object passed to the parameter ``default``. If this 
+results in a day number exceeding the valid number of days per month, the 
+value falls back to the end of the month. 
+ 
+Additional resources about date/time string formats can be found below: 
+ 
+- `A summary of the international standard date and time notation 
+  &lt;https://www.cl.cam.ac.uk/~mgk25/iso-time.html&gt;`_ 
+- `W3C Date and Time Formats &lt;https://www.w3.org/TR/NOTE-datetime&gt;`_ 
+- `Time Formats (Planetary Rings Node) &lt;https://pds-rings.seti.org:443/tools/time_formats.html&gt;`_ 
+- `CPAN ParseDate module 
+  &lt;https://metacpan.org/pod/release/MUIR/Time-modules-2013.0912/lib/Time/ParseDate.pm&gt;`_ 
+- `Java SimpleDateFormat Class 
+  &lt;https://docs.oracle.com/javase/6/docs/api/java/text/SimpleDateFormat.html&gt;`_ 
+&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">unicode_literals</span>
+
+<span class="s3">import </span><span class="s1">datetime</span>
+<span class="s3">import </span><span class="s1">re</span>
+<span class="s3">import </span><span class="s1">string</span>
+<span class="s3">import </span><span class="s1">time</span>
+<span class="s3">import </span><span class="s1">warnings</span>
+
+<span class="s3">from </span><span class="s1">calendar </span><span class="s3">import </span><span class="s1">monthrange</span>
+<span class="s3">from </span><span class="s1">io </span><span class="s3">import </span><span class="s1">StringIO</span>
+
+<span class="s3">import </span><span class="s1">six</span>
+<span class="s3">from </span><span class="s1">six </span><span class="s3">import </span><span class="s1">integer_types</span><span class="s3">, </span><span class="s1">text_type</span>
+
+<span class="s3">from </span><span class="s1">decimal </span><span class="s3">import </span><span class="s1">Decimal</span>
+
+<span class="s3">from </span><span class="s1">warnings </span><span class="s3">import </span><span class="s1">warn</span>
+
+<span class="s3">from </span><span class="s1">.. </span><span class="s3">import </span><span class="s1">relativedelta</span>
+<span class="s3">from </span><span class="s1">.. </span><span class="s3">import </span><span class="s1">tz</span>
+
+<span class="s1">__all__ = [</span><span class="s4">&quot;parse&quot;</span><span class="s3">, </span><span class="s4">&quot;parserinfo&quot;</span><span class="s3">, </span><span class="s4">&quot;ParserError&quot;</span><span class="s1">]</span>
+
+
+<span class="s0"># TODO: pandas.core.tools.datetimes imports this explicitly.  Might be worth</span>
+<span class="s0"># making public and/or figuring out if there is something we can</span>
+<span class="s0"># take off their plate.</span>
+<span class="s3">class </span><span class="s1">_timelex(object):</span>
+    <span class="s0"># Fractional seconds are sometimes split by a comma</span>
+    <span class="s1">_split_decimal = re.compile(</span><span class="s4">&quot;([.,])&quot;</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">instream):</span>
+        <span class="s3">if </span><span class="s1">isinstance(instream</span><span class="s3">, </span><span class="s1">(bytes</span><span class="s3">, </span><span class="s1">bytearray)):</span>
+            <span class="s1">instream = instream.decode()</span>
+
+        <span class="s3">if </span><span class="s1">isinstance(instream</span><span class="s3">, </span><span class="s1">text_type):</span>
+            <span class="s1">instream = StringIO(instream)</span>
+        <span class="s3">elif </span><span class="s1">getattr(instream</span><span class="s3">, </span><span class="s4">'read'</span><span class="s3">, None</span><span class="s1">) </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s4">'Parser must be a string or character stream, not '</span>
+                            <span class="s4">'{itype}'</span><span class="s1">.format(itype=instream.__class__.__name__))</span>
+
+        <span class="s1">self.instream = instream</span>
+        <span class="s1">self.charstack = []</span>
+        <span class="s1">self.tokenstack = []</span>
+        <span class="s1">self.eof = </span><span class="s3">False</span>
+
+    <span class="s3">def </span><span class="s1">get_token(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        This function breaks the time string into lexical units (tokens), which 
+        can be parsed by the parser. Lexical units are demarcated by changes in 
+        the character set, so any continuous string of letters is considered 
+        one unit, any continuous string of numbers is considered one unit. 
+ 
+        The main complication arises from the fact that dots ('.') can be used 
+        both as separators (e.g. &quot;Sep.20.2009&quot;) or decimal points (e.g. 
+        &quot;4:30:21.447&quot;). As such, it is necessary to read the full context of 
+        any dot-separated strings before breaking it into tokens; as such, this 
+        function maintains a &quot;token stack&quot;, for when the ambiguous context 
+        demands that multiple tokens be parsed at once. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">self.tokenstack:</span>
+            <span class="s3">return </span><span class="s1">self.tokenstack.pop(</span><span class="s5">0</span><span class="s1">)</span>
+
+        <span class="s1">seenletters = </span><span class="s3">False</span>
+        <span class="s1">token = </span><span class="s3">None</span>
+        <span class="s1">state = </span><span class="s3">None</span>
+
+        <span class="s3">while not </span><span class="s1">self.eof:</span>
+            <span class="s0"># We only realize that we've reached the end of a token when we</span>
+            <span class="s0"># find a character that's not part of the current token - since</span>
+            <span class="s0"># that character may be part of the next token, it's stored in the</span>
+            <span class="s0"># charstack.</span>
+            <span class="s3">if </span><span class="s1">self.charstack:</span>
+                <span class="s1">nextchar = self.charstack.pop(</span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">nextchar = self.instream.read(</span><span class="s5">1</span><span class="s1">)</span>
+                <span class="s3">while </span><span class="s1">nextchar == </span><span class="s4">'</span><span class="s3">\x00</span><span class="s4">'</span><span class="s1">:</span>
+                    <span class="s1">nextchar = self.instream.read(</span><span class="s5">1</span><span class="s1">)</span>
+
+            <span class="s3">if not </span><span class="s1">nextchar:</span>
+                <span class="s1">self.eof = </span><span class="s3">True</span>
+                <span class="s3">break</span>
+            <span class="s3">elif not </span><span class="s1">state:</span>
+                <span class="s0"># First character of the token - determines if we're starting</span>
+                <span class="s0"># to parse a word, a number or something else.</span>
+                <span class="s1">token = nextchar</span>
+                <span class="s3">if </span><span class="s1">self.isword(nextchar):</span>
+                    <span class="s1">state = </span><span class="s4">'a'</span>
+                <span class="s3">elif </span><span class="s1">self.isnum(nextchar):</span>
+                    <span class="s1">state = </span><span class="s4">'0'</span>
+                <span class="s3">elif </span><span class="s1">self.isspace(nextchar):</span>
+                    <span class="s1">token = </span><span class="s4">' '</span>
+                    <span class="s3">break  </span><span class="s0"># emit token</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s3">break  </span><span class="s0"># emit token</span>
+            <span class="s3">elif </span><span class="s1">state == </span><span class="s4">'a'</span><span class="s1">:</span>
+                <span class="s0"># If we've already started reading a word, we keep reading</span>
+                <span class="s0"># letters until we find something that's not part of a word.</span>
+                <span class="s1">seenletters = </span><span class="s3">True</span>
+                <span class="s3">if </span><span class="s1">self.isword(nextchar):</span>
+                    <span class="s1">token += nextchar</span>
+                <span class="s3">elif </span><span class="s1">nextchar == </span><span class="s4">'.'</span><span class="s1">:</span>
+                    <span class="s1">token += nextchar</span>
+                    <span class="s1">state = </span><span class="s4">'a.'</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">self.charstack.append(nextchar)</span>
+                    <span class="s3">break  </span><span class="s0"># emit token</span>
+            <span class="s3">elif </span><span class="s1">state == </span><span class="s4">'0'</span><span class="s1">:</span>
+                <span class="s0"># If we've already started reading a number, we keep reading</span>
+                <span class="s0"># numbers until we find something that doesn't fit.</span>
+                <span class="s3">if </span><span class="s1">self.isnum(nextchar):</span>
+                    <span class="s1">token += nextchar</span>
+                <span class="s3">elif </span><span class="s1">nextchar == </span><span class="s4">'.' </span><span class="s3">or </span><span class="s1">(nextchar == </span><span class="s4">',' </span><span class="s3">and </span><span class="s1">len(token) &gt;= </span><span class="s5">2</span><span class="s1">):</span>
+                    <span class="s1">token += nextchar</span>
+                    <span class="s1">state = </span><span class="s4">'0.'</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">self.charstack.append(nextchar)</span>
+                    <span class="s3">break  </span><span class="s0"># emit token</span>
+            <span class="s3">elif </span><span class="s1">state == </span><span class="s4">'a.'</span><span class="s1">:</span>
+                <span class="s0"># If we've seen some letters and a dot separator, continue</span>
+                <span class="s0"># parsing, and the tokens will be broken up later.</span>
+                <span class="s1">seenletters = </span><span class="s3">True</span>
+                <span class="s3">if </span><span class="s1">nextchar == </span><span class="s4">'.' </span><span class="s3">or </span><span class="s1">self.isword(nextchar):</span>
+                    <span class="s1">token += nextchar</span>
+                <span class="s3">elif </span><span class="s1">self.isnum(nextchar) </span><span class="s3">and </span><span class="s1">token[-</span><span class="s5">1</span><span class="s1">] == </span><span class="s4">'.'</span><span class="s1">:</span>
+                    <span class="s1">token += nextchar</span>
+                    <span class="s1">state = </span><span class="s4">'0.'</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">self.charstack.append(nextchar)</span>
+                    <span class="s3">break  </span><span class="s0"># emit token</span>
+            <span class="s3">elif </span><span class="s1">state == </span><span class="s4">'0.'</span><span class="s1">:</span>
+                <span class="s0"># If we've seen at least one dot separator, keep going, we'll</span>
+                <span class="s0"># break up the tokens later.</span>
+                <span class="s3">if </span><span class="s1">nextchar == </span><span class="s4">'.' </span><span class="s3">or </span><span class="s1">self.isnum(nextchar):</span>
+                    <span class="s1">token += nextchar</span>
+                <span class="s3">elif </span><span class="s1">self.isword(nextchar) </span><span class="s3">and </span><span class="s1">token[-</span><span class="s5">1</span><span class="s1">] == </span><span class="s4">'.'</span><span class="s1">:</span>
+                    <span class="s1">token += nextchar</span>
+                    <span class="s1">state = </span><span class="s4">'a.'</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">self.charstack.append(nextchar)</span>
+                    <span class="s3">break  </span><span class="s0"># emit token</span>
+
+        <span class="s3">if </span><span class="s1">(state </span><span class="s3">in </span><span class="s1">(</span><span class="s4">'a.'</span><span class="s3">, </span><span class="s4">'0.'</span><span class="s1">) </span><span class="s3">and </span><span class="s1">(seenletters </span><span class="s3">or </span><span class="s1">token.count(</span><span class="s4">'.'</span><span class="s1">) &gt; </span><span class="s5">1 </span><span class="s3">or</span>
+                                       <span class="s1">token[-</span><span class="s5">1</span><span class="s1">] </span><span class="s3">in </span><span class="s4">'.,'</span><span class="s1">)):</span>
+            <span class="s1">l = self._split_decimal.split(token)</span>
+            <span class="s1">token = l[</span><span class="s5">0</span><span class="s1">]</span>
+            <span class="s3">for </span><span class="s1">tok </span><span class="s3">in </span><span class="s1">l[</span><span class="s5">1</span><span class="s1">:]:</span>
+                <span class="s3">if </span><span class="s1">tok:</span>
+                    <span class="s1">self.tokenstack.append(tok)</span>
+
+        <span class="s3">if </span><span class="s1">state == </span><span class="s4">'0.' </span><span class="s3">and </span><span class="s1">token.count(</span><span class="s4">'.'</span><span class="s1">) == </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s1">token = token.replace(</span><span class="s4">','</span><span class="s3">, </span><span class="s4">'.'</span><span class="s1">)</span>
+
+        <span class="s3">return </span><span class="s1">token</span>
+
+    <span class="s3">def </span><span class="s1">__iter__(self):</span>
+        <span class="s3">return </span><span class="s1">self</span>
+
+    <span class="s3">def </span><span class="s1">__next__(self):</span>
+        <span class="s1">token = self.get_token()</span>
+        <span class="s3">if </span><span class="s1">token </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">StopIteration</span>
+
+        <span class="s3">return </span><span class="s1">token</span>
+
+    <span class="s3">def </span><span class="s1">next(self):</span>
+        <span class="s3">return </span><span class="s1">self.__next__()  </span><span class="s0"># Python 2.x support</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s3">def </span><span class="s1">split(cls</span><span class="s3">, </span><span class="s1">s):</span>
+        <span class="s3">return </span><span class="s1">list(cls(s))</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s3">def </span><span class="s1">isword(cls</span><span class="s3">, </span><span class="s1">nextchar):</span>
+        <span class="s2">&quot;&quot;&quot; Whether or not the next character is part of a word &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">nextchar.isalpha()</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s3">def </span><span class="s1">isnum(cls</span><span class="s3">, </span><span class="s1">nextchar):</span>
+        <span class="s2">&quot;&quot;&quot; Whether the next character is part of a number &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">nextchar.isdigit()</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s3">def </span><span class="s1">isspace(cls</span><span class="s3">, </span><span class="s1">nextchar):</span>
+        <span class="s2">&quot;&quot;&quot; Whether the next character is whitespace &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">nextchar.isspace()</span>
+
+
+<span class="s3">class </span><span class="s1">_resultbase(object):</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self):</span>
+        <span class="s3">for </span><span class="s1">attr </span><span class="s3">in </span><span class="s1">self.__slots__:</span>
+            <span class="s1">setattr(self</span><span class="s3">, </span><span class="s1">attr</span><span class="s3">, None</span><span class="s1">)</span>
+
+    <span class="s3">def </span><span class="s1">_repr(self</span><span class="s3">, </span><span class="s1">classname):</span>
+        <span class="s1">l = []</span>
+        <span class="s3">for </span><span class="s1">attr </span><span class="s3">in </span><span class="s1">self.__slots__:</span>
+            <span class="s1">value = getattr(self</span><span class="s3">, </span><span class="s1">attr)</span>
+            <span class="s3">if </span><span class="s1">value </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s1">l.append(</span><span class="s4">&quot;%s=%s&quot; </span><span class="s1">% (attr</span><span class="s3">, </span><span class="s1">repr(value)))</span>
+        <span class="s3">return </span><span class="s4">&quot;%s(%s)&quot; </span><span class="s1">% (classname</span><span class="s3">, </span><span class="s4">&quot;, &quot;</span><span class="s1">.join(l))</span>
+
+    <span class="s3">def </span><span class="s1">__len__(self):</span>
+        <span class="s3">return </span><span class="s1">(sum(getattr(self</span><span class="s3">, </span><span class="s1">attr) </span><span class="s3">is not None</span>
+                    <span class="s3">for </span><span class="s1">attr </span><span class="s3">in </span><span class="s1">self.__slots__))</span>
+
+    <span class="s3">def </span><span class="s1">__repr__(self):</span>
+        <span class="s3">return </span><span class="s1">self._repr(self.__class__.__name__)</span>
+
+
+<span class="s3">class </span><span class="s1">parserinfo(object):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Class which handles what inputs are accepted. Subclass this to customize 
+    the language and acceptable values for each parameter. 
+ 
+    :param dayfirst: 
+        Whether to interpret the first value in an ambiguous 3-integer date 
+        (e.g. 01/05/09) as the day (``True``) or month (``False``). If 
+        ``yearfirst`` is set to ``True``, this distinguishes between YDM 
+        and YMD. Default is ``False``. 
+ 
+    :param yearfirst: 
+        Whether to interpret the first value in an ambiguous 3-integer date 
+        (e.g. 01/05/09) as the year. If ``True``, the first number is taken 
+        to be the year, otherwise the last number is taken to be the year. 
+        Default is ``False``. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0"># m from a.m/p.m, t from ISO T separator</span>
+    <span class="s1">JUMP = [</span><span class="s4">&quot; &quot;</span><span class="s3">, </span><span class="s4">&quot;.&quot;</span><span class="s3">, </span><span class="s4">&quot;,&quot;</span><span class="s3">, </span><span class="s4">&quot;;&quot;</span><span class="s3">, </span><span class="s4">&quot;-&quot;</span><span class="s3">, </span><span class="s4">&quot;/&quot;</span><span class="s3">, </span><span class="s4">&quot;'&quot;</span><span class="s3">,</span>
+            <span class="s4">&quot;at&quot;</span><span class="s3">, </span><span class="s4">&quot;on&quot;</span><span class="s3">, </span><span class="s4">&quot;and&quot;</span><span class="s3">, </span><span class="s4">&quot;ad&quot;</span><span class="s3">, </span><span class="s4">&quot;m&quot;</span><span class="s3">, </span><span class="s4">&quot;t&quot;</span><span class="s3">, </span><span class="s4">&quot;of&quot;</span><span class="s3">,</span>
+            <span class="s4">&quot;st&quot;</span><span class="s3">, </span><span class="s4">&quot;nd&quot;</span><span class="s3">, </span><span class="s4">&quot;rd&quot;</span><span class="s3">, </span><span class="s4">&quot;th&quot;</span><span class="s1">]</span>
+
+    <span class="s1">WEEKDAYS = [(</span><span class="s4">&quot;Mon&quot;</span><span class="s3">, </span><span class="s4">&quot;Monday&quot;</span><span class="s1">)</span><span class="s3">,</span>
+                <span class="s1">(</span><span class="s4">&quot;Tue&quot;</span><span class="s3">, </span><span class="s4">&quot;Tuesday&quot;</span><span class="s1">)</span><span class="s3">,     </span><span class="s0"># TODO: &quot;Tues&quot;</span>
+                <span class="s1">(</span><span class="s4">&quot;Wed&quot;</span><span class="s3">, </span><span class="s4">&quot;Wednesday&quot;</span><span class="s1">)</span><span class="s3">,</span>
+                <span class="s1">(</span><span class="s4">&quot;Thu&quot;</span><span class="s3">, </span><span class="s4">&quot;Thursday&quot;</span><span class="s1">)</span><span class="s3">,    </span><span class="s0"># TODO: &quot;Thurs&quot;</span>
+                <span class="s1">(</span><span class="s4">&quot;Fri&quot;</span><span class="s3">, </span><span class="s4">&quot;Friday&quot;</span><span class="s1">)</span><span class="s3">,</span>
+                <span class="s1">(</span><span class="s4">&quot;Sat&quot;</span><span class="s3">, </span><span class="s4">&quot;Saturday&quot;</span><span class="s1">)</span><span class="s3">,</span>
+                <span class="s1">(</span><span class="s4">&quot;Sun&quot;</span><span class="s3">, </span><span class="s4">&quot;Sunday&quot;</span><span class="s1">)]</span>
+    <span class="s1">MONTHS = [(</span><span class="s4">&quot;Jan&quot;</span><span class="s3">, </span><span class="s4">&quot;January&quot;</span><span class="s1">)</span><span class="s3">,</span>
+              <span class="s1">(</span><span class="s4">&quot;Feb&quot;</span><span class="s3">, </span><span class="s4">&quot;February&quot;</span><span class="s1">)</span><span class="s3">,      </span><span class="s0"># TODO: &quot;Febr&quot;</span>
+              <span class="s1">(</span><span class="s4">&quot;Mar&quot;</span><span class="s3">, </span><span class="s4">&quot;March&quot;</span><span class="s1">)</span><span class="s3">,</span>
+              <span class="s1">(</span><span class="s4">&quot;Apr&quot;</span><span class="s3">, </span><span class="s4">&quot;April&quot;</span><span class="s1">)</span><span class="s3">,</span>
+              <span class="s1">(</span><span class="s4">&quot;May&quot;</span><span class="s3">, </span><span class="s4">&quot;May&quot;</span><span class="s1">)</span><span class="s3">,</span>
+              <span class="s1">(</span><span class="s4">&quot;Jun&quot;</span><span class="s3">, </span><span class="s4">&quot;June&quot;</span><span class="s1">)</span><span class="s3">,</span>
+              <span class="s1">(</span><span class="s4">&quot;Jul&quot;</span><span class="s3">, </span><span class="s4">&quot;July&quot;</span><span class="s1">)</span><span class="s3">,</span>
+              <span class="s1">(</span><span class="s4">&quot;Aug&quot;</span><span class="s3">, </span><span class="s4">&quot;August&quot;</span><span class="s1">)</span><span class="s3">,</span>
+              <span class="s1">(</span><span class="s4">&quot;Sep&quot;</span><span class="s3">, </span><span class="s4">&quot;Sept&quot;</span><span class="s3">, </span><span class="s4">&quot;September&quot;</span><span class="s1">)</span><span class="s3">,</span>
+              <span class="s1">(</span><span class="s4">&quot;Oct&quot;</span><span class="s3">, </span><span class="s4">&quot;October&quot;</span><span class="s1">)</span><span class="s3">,</span>
+              <span class="s1">(</span><span class="s4">&quot;Nov&quot;</span><span class="s3">, </span><span class="s4">&quot;November&quot;</span><span class="s1">)</span><span class="s3">,</span>
+              <span class="s1">(</span><span class="s4">&quot;Dec&quot;</span><span class="s3">, </span><span class="s4">&quot;December&quot;</span><span class="s1">)]</span>
+    <span class="s1">HMS = [(</span><span class="s4">&quot;h&quot;</span><span class="s3">, </span><span class="s4">&quot;hour&quot;</span><span class="s3">, </span><span class="s4">&quot;hours&quot;</span><span class="s1">)</span><span class="s3">,</span>
+           <span class="s1">(</span><span class="s4">&quot;m&quot;</span><span class="s3">, </span><span class="s4">&quot;minute&quot;</span><span class="s3">, </span><span class="s4">&quot;minutes&quot;</span><span class="s1">)</span><span class="s3">,</span>
+           <span class="s1">(</span><span class="s4">&quot;s&quot;</span><span class="s3">, </span><span class="s4">&quot;second&quot;</span><span class="s3">, </span><span class="s4">&quot;seconds&quot;</span><span class="s1">)]</span>
+    <span class="s1">AMPM = [(</span><span class="s4">&quot;am&quot;</span><span class="s3">, </span><span class="s4">&quot;a&quot;</span><span class="s1">)</span><span class="s3">,</span>
+            <span class="s1">(</span><span class="s4">&quot;pm&quot;</span><span class="s3">, </span><span class="s4">&quot;p&quot;</span><span class="s1">)]</span>
+    <span class="s1">UTCZONE = [</span><span class="s4">&quot;UTC&quot;</span><span class="s3">, </span><span class="s4">&quot;GMT&quot;</span><span class="s3">, </span><span class="s4">&quot;Z&quot;</span><span class="s3">, </span><span class="s4">&quot;z&quot;</span><span class="s1">]</span>
+    <span class="s1">PERTAIN = [</span><span class="s4">&quot;of&quot;</span><span class="s1">]</span>
+    <span class="s1">TZOFFSET = {}</span>
+    <span class="s0"># TODO: ERA = [&quot;AD&quot;, &quot;BC&quot;, &quot;CE&quot;, &quot;BCE&quot;, &quot;Stardate&quot;,</span>
+    <span class="s0">#              &quot;Anno Domini&quot;, &quot;Year of Our Lord&quot;]</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">dayfirst=</span><span class="s3">False, </span><span class="s1">yearfirst=</span><span class="s3">False</span><span class="s1">):</span>
+        <span class="s1">self._jump = self._convert(self.JUMP)</span>
+        <span class="s1">self._weekdays = self._convert(self.WEEKDAYS)</span>
+        <span class="s1">self._months = self._convert(self.MONTHS)</span>
+        <span class="s1">self._hms = self._convert(self.HMS)</span>
+        <span class="s1">self._ampm = self._convert(self.AMPM)</span>
+        <span class="s1">self._utczone = self._convert(self.UTCZONE)</span>
+        <span class="s1">self._pertain = self._convert(self.PERTAIN)</span>
+
+        <span class="s1">self.dayfirst = dayfirst</span>
+        <span class="s1">self.yearfirst = yearfirst</span>
+
+        <span class="s1">self._year = time.localtime().tm_year</span>
+        <span class="s1">self._century = self._year // </span><span class="s5">100 </span><span class="s1">* </span><span class="s5">100</span>
+
+    <span class="s3">def </span><span class="s1">_convert(self</span><span class="s3">, </span><span class="s1">lst):</span>
+        <span class="s1">dct = {}</span>
+        <span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">v </span><span class="s3">in </span><span class="s1">enumerate(lst):</span>
+            <span class="s3">if </span><span class="s1">isinstance(v</span><span class="s3">, </span><span class="s1">tuple):</span>
+                <span class="s3">for </span><span class="s1">v </span><span class="s3">in </span><span class="s1">v:</span>
+                    <span class="s1">dct[v.lower()] = i</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">dct[v.lower()] = i</span>
+        <span class="s3">return </span><span class="s1">dct</span>
+
+    <span class="s3">def </span><span class="s1">jump(self</span><span class="s3">, </span><span class="s1">name):</span>
+        <span class="s3">return </span><span class="s1">name.lower() </span><span class="s3">in </span><span class="s1">self._jump</span>
+
+    <span class="s3">def </span><span class="s1">weekday(self</span><span class="s3">, </span><span class="s1">name):</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">self._weekdays[name.lower()]</span>
+        <span class="s3">except </span><span class="s1">KeyError:</span>
+            <span class="s3">pass</span>
+        <span class="s3">return None</span>
+
+    <span class="s3">def </span><span class="s1">month(self</span><span class="s3">, </span><span class="s1">name):</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">self._months[name.lower()] + </span><span class="s5">1</span>
+        <span class="s3">except </span><span class="s1">KeyError:</span>
+            <span class="s3">pass</span>
+        <span class="s3">return None</span>
+
+    <span class="s3">def </span><span class="s1">hms(self</span><span class="s3">, </span><span class="s1">name):</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">self._hms[name.lower()]</span>
+        <span class="s3">except </span><span class="s1">KeyError:</span>
+            <span class="s3">return None</span>
+
+    <span class="s3">def </span><span class="s1">ampm(self</span><span class="s3">, </span><span class="s1">name):</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">self._ampm[name.lower()]</span>
+        <span class="s3">except </span><span class="s1">KeyError:</span>
+            <span class="s3">return None</span>
+
+    <span class="s3">def </span><span class="s1">pertain(self</span><span class="s3">, </span><span class="s1">name):</span>
+        <span class="s3">return </span><span class="s1">name.lower() </span><span class="s3">in </span><span class="s1">self._pertain</span>
+
+    <span class="s3">def </span><span class="s1">utczone(self</span><span class="s3">, </span><span class="s1">name):</span>
+        <span class="s3">return </span><span class="s1">name.lower() </span><span class="s3">in </span><span class="s1">self._utczone</span>
+
+    <span class="s3">def </span><span class="s1">tzoffset(self</span><span class="s3">, </span><span class="s1">name):</span>
+        <span class="s3">if </span><span class="s1">name </span><span class="s3">in </span><span class="s1">self._utczone:</span>
+            <span class="s3">return </span><span class="s5">0</span>
+
+        <span class="s3">return </span><span class="s1">self.TZOFFSET.get(name)</span>
+
+    <span class="s3">def </span><span class="s1">convertyear(self</span><span class="s3">, </span><span class="s1">year</span><span class="s3">, </span><span class="s1">century_specified=</span><span class="s3">False</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Converts two-digit years to year within [-50, 49] 
+        range of self._year (current local time) 
+        &quot;&quot;&quot;</span>
+
+        <span class="s0"># Function contract is that the year is always positive</span>
+        <span class="s3">assert </span><span class="s1">year &gt;= </span><span class="s5">0</span>
+
+        <span class="s3">if </span><span class="s1">year &lt; </span><span class="s5">100 </span><span class="s3">and not </span><span class="s1">century_specified:</span>
+            <span class="s0"># assume current century to start</span>
+            <span class="s1">year += self._century</span>
+
+            <span class="s3">if </span><span class="s1">year &gt;= self._year + </span><span class="s5">50</span><span class="s1">:  </span><span class="s0"># if too far in future</span>
+                <span class="s1">year -= </span><span class="s5">100</span>
+            <span class="s3">elif </span><span class="s1">year &lt; self._year - </span><span class="s5">50</span><span class="s1">:  </span><span class="s0"># if too far in past</span>
+                <span class="s1">year += </span><span class="s5">100</span>
+
+        <span class="s3">return </span><span class="s1">year</span>
+
+    <span class="s3">def </span><span class="s1">validate(self</span><span class="s3">, </span><span class="s1">res):</span>
+        <span class="s0"># move to info</span>
+        <span class="s3">if </span><span class="s1">res.year </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">res.year = self.convertyear(res.year</span><span class="s3">, </span><span class="s1">res.century_specified)</span>
+
+        <span class="s3">if </span><span class="s1">((res.tzoffset == </span><span class="s5">0 </span><span class="s3">and not </span><span class="s1">res.tzname) </span><span class="s3">or</span>
+             <span class="s1">(res.tzname == </span><span class="s4">'Z' </span><span class="s3">or </span><span class="s1">res.tzname == </span><span class="s4">'z'</span><span class="s1">)):</span>
+            <span class="s1">res.tzname = </span><span class="s4">&quot;UTC&quot;</span>
+            <span class="s1">res.tzoffset = </span><span class="s5">0</span>
+        <span class="s3">elif </span><span class="s1">res.tzoffset != </span><span class="s5">0 </span><span class="s3">and </span><span class="s1">res.tzname </span><span class="s3">and </span><span class="s1">self.utczone(res.tzname):</span>
+            <span class="s1">res.tzoffset = </span><span class="s5">0</span>
+        <span class="s3">return True</span>
+
+
+<span class="s3">class </span><span class="s1">_ymd(list):</span>
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">super(self.__class__</span><span class="s3">, </span><span class="s1">self).__init__(*args</span><span class="s3">, </span><span class="s1">**kwargs)</span>
+        <span class="s1">self.century_specified = </span><span class="s3">False</span>
+        <span class="s1">self.dstridx = </span><span class="s3">None</span>
+        <span class="s1">self.mstridx = </span><span class="s3">None</span>
+        <span class="s1">self.ystridx = </span><span class="s3">None</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">has_year(self):</span>
+        <span class="s3">return </span><span class="s1">self.ystridx </span><span class="s3">is not None</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">has_month(self):</span>
+        <span class="s3">return </span><span class="s1">self.mstridx </span><span class="s3">is not None</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">has_day(self):</span>
+        <span class="s3">return </span><span class="s1">self.dstridx </span><span class="s3">is not None</span>
+
+    <span class="s3">def </span><span class="s1">could_be_day(self</span><span class="s3">, </span><span class="s1">value):</span>
+        <span class="s3">if </span><span class="s1">self.has_day:</span>
+            <span class="s3">return False</span>
+        <span class="s3">elif not </span><span class="s1">self.has_month:</span>
+            <span class="s3">return </span><span class="s5">1 </span><span class="s1">&lt;= value &lt;= </span><span class="s5">31</span>
+        <span class="s3">elif not </span><span class="s1">self.has_year:</span>
+            <span class="s0"># Be permissive, assume leap year</span>
+            <span class="s1">month = self[self.mstridx]</span>
+            <span class="s3">return </span><span class="s5">1 </span><span class="s1">&lt;= value &lt;= monthrange(</span><span class="s5">2000</span><span class="s3">, </span><span class="s1">month)[</span><span class="s5">1</span><span class="s1">]</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">month = self[self.mstridx]</span>
+            <span class="s1">year = self[self.ystridx]</span>
+            <span class="s3">return </span><span class="s5">1 </span><span class="s1">&lt;= value &lt;= monthrange(year</span><span class="s3">, </span><span class="s1">month)[</span><span class="s5">1</span><span class="s1">]</span>
+
+    <span class="s3">def </span><span class="s1">append(self</span><span class="s3">, </span><span class="s1">val</span><span class="s3">, </span><span class="s1">label=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s3">if </span><span class="s1">hasattr(val</span><span class="s3">, </span><span class="s4">'__len__'</span><span class="s1">):</span>
+            <span class="s3">if </span><span class="s1">val.isdigit() </span><span class="s3">and </span><span class="s1">len(val) &gt; </span><span class="s5">2</span><span class="s1">:</span>
+                <span class="s1">self.century_specified = </span><span class="s3">True</span>
+                <span class="s3">if </span><span class="s1">label </span><span class="s3">not in </span><span class="s1">[</span><span class="s3">None, </span><span class="s4">'Y'</span><span class="s1">]:  </span><span class="s0"># pragma: no cover</span>
+                    <span class="s3">raise </span><span class="s1">ValueError(label)</span>
+                <span class="s1">label = </span><span class="s4">'Y'</span>
+        <span class="s3">elif </span><span class="s1">val &gt; </span><span class="s5">100</span><span class="s1">:</span>
+            <span class="s1">self.century_specified = </span><span class="s3">True</span>
+            <span class="s3">if </span><span class="s1">label </span><span class="s3">not in </span><span class="s1">[</span><span class="s3">None, </span><span class="s4">'Y'</span><span class="s1">]:  </span><span class="s0"># pragma: no cover</span>
+                <span class="s3">raise </span><span class="s1">ValueError(label)</span>
+            <span class="s1">label = </span><span class="s4">'Y'</span>
+
+        <span class="s1">super(self.__class__</span><span class="s3">, </span><span class="s1">self).append(int(val))</span>
+
+        <span class="s3">if </span><span class="s1">label == </span><span class="s4">'M'</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">self.has_month:</span>
+                <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">'Month is already set'</span><span class="s1">)</span>
+            <span class="s1">self.mstridx = len(self) - </span><span class="s5">1</span>
+        <span class="s3">elif </span><span class="s1">label == </span><span class="s4">'D'</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">self.has_day:</span>
+                <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">'Day is already set'</span><span class="s1">)</span>
+            <span class="s1">self.dstridx = len(self) - </span><span class="s5">1</span>
+        <span class="s3">elif </span><span class="s1">label == </span><span class="s4">'Y'</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">self.has_year:</span>
+                <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">'Year is already set'</span><span class="s1">)</span>
+            <span class="s1">self.ystridx = len(self) - </span><span class="s5">1</span>
+
+    <span class="s3">def </span><span class="s1">_resolve_from_stridxs(self</span><span class="s3">, </span><span class="s1">strids):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Try to resolve the identities of year/month/day elements using 
+        ystridx, mstridx, and dstridx, if enough of these are specified. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">len(self) == </span><span class="s5">3 </span><span class="s3">and </span><span class="s1">len(strids) == </span><span class="s5">2</span><span class="s1">:</span>
+            <span class="s0"># we can back out the remaining stridx value</span>
+            <span class="s1">missing = [x </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">range(</span><span class="s5">3</span><span class="s1">) </span><span class="s3">if </span><span class="s1">x </span><span class="s3">not in </span><span class="s1">strids.values()]</span>
+            <span class="s1">key = [x </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">[</span><span class="s4">'y'</span><span class="s3">, </span><span class="s4">'m'</span><span class="s3">, </span><span class="s4">'d'</span><span class="s1">] </span><span class="s3">if </span><span class="s1">x </span><span class="s3">not in </span><span class="s1">strids]</span>
+            <span class="s3">assert </span><span class="s1">len(missing) == len(key) == </span><span class="s5">1</span>
+            <span class="s1">key = key[</span><span class="s5">0</span><span class="s1">]</span>
+            <span class="s1">val = missing[</span><span class="s5">0</span><span class="s1">]</span>
+            <span class="s1">strids[key] = val</span>
+
+        <span class="s3">assert </span><span class="s1">len(self) == len(strids)  </span><span class="s0"># otherwise this should not be called</span>
+        <span class="s1">out = {key: self[strids[key]] </span><span class="s3">for </span><span class="s1">key </span><span class="s3">in </span><span class="s1">strids}</span>
+        <span class="s3">return </span><span class="s1">(out.get(</span><span class="s4">'y'</span><span class="s1">)</span><span class="s3">, </span><span class="s1">out.get(</span><span class="s4">'m'</span><span class="s1">)</span><span class="s3">, </span><span class="s1">out.get(</span><span class="s4">'d'</span><span class="s1">))</span>
+
+    <span class="s3">def </span><span class="s1">resolve_ymd(self</span><span class="s3">, </span><span class="s1">yearfirst</span><span class="s3">, </span><span class="s1">dayfirst):</span>
+        <span class="s1">len_ymd = len(self)</span>
+        <span class="s1">year</span><span class="s3">, </span><span class="s1">month</span><span class="s3">, </span><span class="s1">day = (</span><span class="s3">None, None, None</span><span class="s1">)</span>
+
+        <span class="s1">strids = ((</span><span class="s4">'y'</span><span class="s3">, </span><span class="s1">self.ystridx)</span><span class="s3">,</span>
+                  <span class="s1">(</span><span class="s4">'m'</span><span class="s3">, </span><span class="s1">self.mstridx)</span><span class="s3">,</span>
+                  <span class="s1">(</span><span class="s4">'d'</span><span class="s3">, </span><span class="s1">self.dstridx))</span>
+
+        <span class="s1">strids = {key: val </span><span class="s3">for </span><span class="s1">key</span><span class="s3">, </span><span class="s1">val </span><span class="s3">in </span><span class="s1">strids </span><span class="s3">if </span><span class="s1">val </span><span class="s3">is not None</span><span class="s1">}</span>
+        <span class="s3">if </span><span class="s1">(len(self) == len(strids) &gt; </span><span class="s5">0 </span><span class="s3">or</span>
+                <span class="s1">(len(self) == </span><span class="s5">3 </span><span class="s3">and </span><span class="s1">len(strids) == </span><span class="s5">2</span><span class="s1">)):</span>
+            <span class="s3">return </span><span class="s1">self._resolve_from_stridxs(strids)</span>
+
+        <span class="s1">mstridx = self.mstridx</span>
+
+        <span class="s3">if </span><span class="s1">len_ymd &gt; </span><span class="s5">3</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;More than three YMD values&quot;</span><span class="s1">)</span>
+        <span class="s3">elif </span><span class="s1">len_ymd == </span><span class="s5">1 </span><span class="s3">or </span><span class="s1">(mstridx </span><span class="s3">is not None and </span><span class="s1">len_ymd == </span><span class="s5">2</span><span class="s1">):</span>
+            <span class="s0"># One member, or two members with a month string</span>
+            <span class="s3">if </span><span class="s1">mstridx </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s1">month = self[mstridx]</span>
+                <span class="s0"># since mstridx is 0 or 1, self[mstridx-1] always</span>
+                <span class="s0"># looks up the other element</span>
+                <span class="s1">other = self[mstridx - </span><span class="s5">1</span><span class="s1">]</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">other = self[</span><span class="s5">0</span><span class="s1">]</span>
+
+            <span class="s3">if </span><span class="s1">len_ymd &gt; </span><span class="s5">1 </span><span class="s3">or </span><span class="s1">mstridx </span><span class="s3">is None</span><span class="s1">:</span>
+                <span class="s3">if </span><span class="s1">other &gt; </span><span class="s5">31</span><span class="s1">:</span>
+                    <span class="s1">year = other</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">day = other</span>
+
+        <span class="s3">elif </span><span class="s1">len_ymd == </span><span class="s5">2</span><span class="s1">:</span>
+            <span class="s0"># Two members with numbers</span>
+            <span class="s3">if </span><span class="s1">self[</span><span class="s5">0</span><span class="s1">] &gt; </span><span class="s5">31</span><span class="s1">:</span>
+                <span class="s0"># 99-01</span>
+                <span class="s1">year</span><span class="s3">, </span><span class="s1">month = self</span>
+            <span class="s3">elif </span><span class="s1">self[</span><span class="s5">1</span><span class="s1">] &gt; </span><span class="s5">31</span><span class="s1">:</span>
+                <span class="s0"># 01-99</span>
+                <span class="s1">month</span><span class="s3">, </span><span class="s1">year = self</span>
+            <span class="s3">elif </span><span class="s1">dayfirst </span><span class="s3">and </span><span class="s1">self[</span><span class="s5">1</span><span class="s1">] &lt;= </span><span class="s5">12</span><span class="s1">:</span>
+                <span class="s0"># 13-01</span>
+                <span class="s1">day</span><span class="s3">, </span><span class="s1">month = self</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s0"># 01-13</span>
+                <span class="s1">month</span><span class="s3">, </span><span class="s1">day = self</span>
+
+        <span class="s3">elif </span><span class="s1">len_ymd == </span><span class="s5">3</span><span class="s1">:</span>
+            <span class="s0"># Three members</span>
+            <span class="s3">if </span><span class="s1">mstridx == </span><span class="s5">0</span><span class="s1">:</span>
+                <span class="s3">if </span><span class="s1">self[</span><span class="s5">1</span><span class="s1">] &gt; </span><span class="s5">31</span><span class="s1">:</span>
+                    <span class="s0"># Apr-2003-25</span>
+                    <span class="s1">month</span><span class="s3">, </span><span class="s1">year</span><span class="s3">, </span><span class="s1">day = self</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">month</span><span class="s3">, </span><span class="s1">day</span><span class="s3">, </span><span class="s1">year = self</span>
+            <span class="s3">elif </span><span class="s1">mstridx == </span><span class="s5">1</span><span class="s1">:</span>
+                <span class="s3">if </span><span class="s1">self[</span><span class="s5">0</span><span class="s1">] &gt; </span><span class="s5">31 </span><span class="s3">or </span><span class="s1">(yearfirst </span><span class="s3">and </span><span class="s1">self[</span><span class="s5">2</span><span class="s1">] &lt;= </span><span class="s5">31</span><span class="s1">):</span>
+                    <span class="s0"># 99-Jan-01</span>
+                    <span class="s1">year</span><span class="s3">, </span><span class="s1">month</span><span class="s3">, </span><span class="s1">day = self</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s0"># 01-Jan-01</span>
+                    <span class="s0"># Give precedence to day-first, since</span>
+                    <span class="s0"># two-digit years is usually hand-written.</span>
+                    <span class="s1">day</span><span class="s3">, </span><span class="s1">month</span><span class="s3">, </span><span class="s1">year = self</span>
+
+            <span class="s3">elif </span><span class="s1">mstridx == </span><span class="s5">2</span><span class="s1">:</span>
+                <span class="s0"># WTF!?</span>
+                <span class="s3">if </span><span class="s1">self[</span><span class="s5">1</span><span class="s1">] &gt; </span><span class="s5">31</span><span class="s1">:</span>
+                    <span class="s0"># 01-99-Jan</span>
+                    <span class="s1">day</span><span class="s3">, </span><span class="s1">year</span><span class="s3">, </span><span class="s1">month = self</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s0"># 99-01-Jan</span>
+                    <span class="s1">year</span><span class="s3">, </span><span class="s1">day</span><span class="s3">, </span><span class="s1">month = self</span>
+
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s3">if </span><span class="s1">(self[</span><span class="s5">0</span><span class="s1">] &gt; </span><span class="s5">31 </span><span class="s3">or</span>
+                    <span class="s1">self.ystridx == </span><span class="s5">0 </span><span class="s3">or</span>
+                        <span class="s1">(yearfirst </span><span class="s3">and </span><span class="s1">self[</span><span class="s5">1</span><span class="s1">] &lt;= </span><span class="s5">12 </span><span class="s3">and </span><span class="s1">self[</span><span class="s5">2</span><span class="s1">] &lt;= </span><span class="s5">31</span><span class="s1">)):</span>
+                    <span class="s0"># 99-01-01</span>
+                    <span class="s3">if </span><span class="s1">dayfirst </span><span class="s3">and </span><span class="s1">self[</span><span class="s5">2</span><span class="s1">] &lt;= </span><span class="s5">12</span><span class="s1">:</span>
+                        <span class="s1">year</span><span class="s3">, </span><span class="s1">day</span><span class="s3">, </span><span class="s1">month = self</span>
+                    <span class="s3">else</span><span class="s1">:</span>
+                        <span class="s1">year</span><span class="s3">, </span><span class="s1">month</span><span class="s3">, </span><span class="s1">day = self</span>
+                <span class="s3">elif </span><span class="s1">self[</span><span class="s5">0</span><span class="s1">] &gt; </span><span class="s5">12 </span><span class="s3">or </span><span class="s1">(dayfirst </span><span class="s3">and </span><span class="s1">self[</span><span class="s5">1</span><span class="s1">] &lt;= </span><span class="s5">12</span><span class="s1">):</span>
+                    <span class="s0"># 13-01-01</span>
+                    <span class="s1">day</span><span class="s3">, </span><span class="s1">month</span><span class="s3">, </span><span class="s1">year = self</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s0"># 01-13-01</span>
+                    <span class="s1">month</span><span class="s3">, </span><span class="s1">day</span><span class="s3">, </span><span class="s1">year = self</span>
+
+        <span class="s3">return </span><span class="s1">year</span><span class="s3">, </span><span class="s1">month</span><span class="s3">, </span><span class="s1">day</span>
+
+
+<span class="s3">class </span><span class="s1">parser(object):</span>
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">info=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s1">self.info = info </span><span class="s3">or </span><span class="s1">parserinfo()</span>
+
+    <span class="s3">def </span><span class="s1">parse(self</span><span class="s3">, </span><span class="s1">timestr</span><span class="s3">, </span><span class="s1">default=</span><span class="s3">None,</span>
+              <span class="s1">ignoretz=</span><span class="s3">False, </span><span class="s1">tzinfos=</span><span class="s3">None, </span><span class="s1">**kwargs):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Parse the date/time string into a :class:`datetime.datetime` object. 
+ 
+        :param timestr: 
+            Any date/time string using the supported formats. 
+ 
+        :param default: 
+            The default datetime object, if this is a datetime object and not 
+            ``None``, elements specified in ``timestr`` replace elements in the 
+            default object. 
+ 
+        :param ignoretz: 
+            If set ``True``, time zones in parsed strings are ignored and a 
+            naive :class:`datetime.datetime` object is returned. 
+ 
+        :param tzinfos: 
+            Additional time zone names / aliases which may be present in the 
+            string. This argument maps time zone names (and optionally offsets 
+            from those time zones) to time zones. This parameter can be a 
+            dictionary with timezone aliases mapping time zone names to time 
+            zones or a function taking two parameters (``tzname`` and 
+            ``tzoffset``) and returning a time zone. 
+ 
+            The timezones to which the names are mapped can be an integer 
+            offset from UTC in seconds or a :class:`tzinfo` object. 
+ 
+            .. doctest:: 
+               :options: +NORMALIZE_WHITESPACE 
+ 
+                &gt;&gt;&gt; from dateutil.parser import parse 
+                &gt;&gt;&gt; from dateutil.tz import gettz 
+                &gt;&gt;&gt; tzinfos = {&quot;BRST&quot;: -7200, &quot;CST&quot;: gettz(&quot;America/Chicago&quot;)} 
+                &gt;&gt;&gt; parse(&quot;2012-01-19 17:21:00 BRST&quot;, tzinfos=tzinfos) 
+                datetime.datetime(2012, 1, 19, 17, 21, tzinfo=tzoffset(u'BRST', -7200)) 
+                &gt;&gt;&gt; parse(&quot;2012-01-19 17:21:00 CST&quot;, tzinfos=tzinfos) 
+                datetime.datetime(2012, 1, 19, 17, 21, 
+                                  tzinfo=tzfile('/usr/share/zoneinfo/America/Chicago')) 
+ 
+            This parameter is ignored if ``ignoretz`` is set. 
+ 
+        :param \\*\\*kwargs: 
+            Keyword arguments as passed to ``_parse()``. 
+ 
+        :return: 
+            Returns a :class:`datetime.datetime` object or, if the 
+            ``fuzzy_with_tokens`` option is ``True``, returns a tuple, the 
+            first element being a :class:`datetime.datetime` object, the second 
+            a tuple containing the fuzzy tokens. 
+ 
+        :raises ParserError: 
+            Raised for invalid or unknown string format, if the provided 
+            :class:`tzinfo` is not in a valid format, or if an invalid date 
+            would be created. 
+ 
+        :raises TypeError: 
+            Raised for non-string or character stream input. 
+ 
+        :raises OverflowError: 
+            Raised if the parsed date exceeds the largest valid C integer on 
+            your system. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s3">if </span><span class="s1">default </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">default = datetime.datetime.now().replace(hour=</span><span class="s5">0</span><span class="s3">, </span><span class="s1">minute=</span><span class="s5">0</span><span class="s3">,</span>
+                                                      <span class="s1">second=</span><span class="s5">0</span><span class="s3">, </span><span class="s1">microsecond=</span><span class="s5">0</span><span class="s1">)</span>
+
+        <span class="s1">res</span><span class="s3">, </span><span class="s1">skipped_tokens = self._parse(timestr</span><span class="s3">, </span><span class="s1">**kwargs)</span>
+
+        <span class="s3">if </span><span class="s1">res </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">ParserError(</span><span class="s4">&quot;Unknown string format: %s&quot;</span><span class="s3">, </span><span class="s1">timestr)</span>
+
+        <span class="s3">if </span><span class="s1">len(res) == </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">ParserError(</span><span class="s4">&quot;String does not contain a date: %s&quot;</span><span class="s3">, </span><span class="s1">timestr)</span>
+
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">ret = self._build_naive(res</span><span class="s3">, </span><span class="s1">default)</span>
+        <span class="s3">except </span><span class="s1">ValueError </span><span class="s3">as </span><span class="s1">e:</span>
+            <span class="s1">six.raise_from(ParserError(str(e) + </span><span class="s4">&quot;: %s&quot;</span><span class="s3">, </span><span class="s1">timestr)</span><span class="s3">, </span><span class="s1">e)</span>
+
+        <span class="s3">if not </span><span class="s1">ignoretz:</span>
+            <span class="s1">ret = self._build_tzaware(ret</span><span class="s3">, </span><span class="s1">res</span><span class="s3">, </span><span class="s1">tzinfos)</span>
+
+        <span class="s3">if </span><span class="s1">kwargs.get(</span><span class="s4">'fuzzy_with_tokens'</span><span class="s3">, False</span><span class="s1">):</span>
+            <span class="s3">return </span><span class="s1">ret</span><span class="s3">, </span><span class="s1">skipped_tokens</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">ret</span>
+
+    <span class="s3">class </span><span class="s1">_result(_resultbase):</span>
+        <span class="s1">__slots__ = [</span><span class="s4">&quot;year&quot;</span><span class="s3">, </span><span class="s4">&quot;month&quot;</span><span class="s3">, </span><span class="s4">&quot;day&quot;</span><span class="s3">, </span><span class="s4">&quot;weekday&quot;</span><span class="s3">,</span>
+                     <span class="s4">&quot;hour&quot;</span><span class="s3">, </span><span class="s4">&quot;minute&quot;</span><span class="s3">, </span><span class="s4">&quot;second&quot;</span><span class="s3">, </span><span class="s4">&quot;microsecond&quot;</span><span class="s3">,</span>
+                     <span class="s4">&quot;tzname&quot;</span><span class="s3">, </span><span class="s4">&quot;tzoffset&quot;</span><span class="s3">, </span><span class="s4">&quot;ampm&quot;</span><span class="s3">,</span><span class="s4">&quot;any_unused_tokens&quot;</span><span class="s1">]</span>
+
+    <span class="s3">def </span><span class="s1">_parse(self</span><span class="s3">, </span><span class="s1">timestr</span><span class="s3">, </span><span class="s1">dayfirst=</span><span class="s3">None, </span><span class="s1">yearfirst=</span><span class="s3">None, </span><span class="s1">fuzzy=</span><span class="s3">False,</span>
+               <span class="s1">fuzzy_with_tokens=</span><span class="s3">False</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Private method which performs the heavy lifting of parsing, called from 
+        ``parse()``, which passes on its ``kwargs`` to this function. 
+ 
+        :param timestr: 
+            The string to parse. 
+ 
+        :param dayfirst: 
+            Whether to interpret the first value in an ambiguous 3-integer date 
+            (e.g. 01/05/09) as the day (``True``) or month (``False``). If 
+            ``yearfirst`` is set to ``True``, this distinguishes between YDM 
+            and YMD. If set to ``None``, this value is retrieved from the 
+            current :class:`parserinfo` object (which itself defaults to 
+            ``False``). 
+ 
+        :param yearfirst: 
+            Whether to interpret the first value in an ambiguous 3-integer date 
+            (e.g. 01/05/09) as the year. If ``True``, the first number is taken 
+            to be the year, otherwise the last number is taken to be the year. 
+            If this is set to ``None``, the value is retrieved from the current 
+            :class:`parserinfo` object (which itself defaults to ``False``). 
+ 
+        :param fuzzy: 
+            Whether to allow fuzzy parsing, allowing for string like &quot;Today is 
+            January 1, 2047 at 8:21:00AM&quot;. 
+ 
+        :param fuzzy_with_tokens: 
+            If ``True``, ``fuzzy`` is automatically set to True, and the parser 
+            will return a tuple where the first element is the parsed 
+            :class:`datetime.datetime` datetimestamp and the second element is 
+            a tuple containing the portions of the string which were ignored: 
+ 
+            .. doctest:: 
+ 
+                &gt;&gt;&gt; from dateutil.parser import parse 
+                &gt;&gt;&gt; parse(&quot;Today is January 1, 2047 at 8:21:00AM&quot;, fuzzy_with_tokens=True) 
+                (datetime.datetime(2047, 1, 1, 8, 21), (u'Today is ', u' ', u'at ')) 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">fuzzy_with_tokens:</span>
+            <span class="s1">fuzzy = </span><span class="s3">True</span>
+
+        <span class="s1">info = self.info</span>
+
+        <span class="s3">if </span><span class="s1">dayfirst </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">dayfirst = info.dayfirst</span>
+
+        <span class="s3">if </span><span class="s1">yearfirst </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">yearfirst = info.yearfirst</span>
+
+        <span class="s1">res = self._result()</span>
+        <span class="s1">l = _timelex.split(timestr)         </span><span class="s0"># Splits the timestr into tokens</span>
+
+        <span class="s1">skipped_idxs = []</span>
+
+        <span class="s0"># year/month/day list</span>
+        <span class="s1">ymd = _ymd()</span>
+
+        <span class="s1">len_l = len(l)</span>
+        <span class="s1">i = </span><span class="s5">0</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s3">while </span><span class="s1">i &lt; len_l:</span>
+
+                <span class="s0"># Check if it's a number</span>
+                <span class="s1">value_repr = l[i]</span>
+                <span class="s3">try</span><span class="s1">:</span>
+                    <span class="s1">value = float(value_repr)</span>
+                <span class="s3">except </span><span class="s1">ValueError:</span>
+                    <span class="s1">value = </span><span class="s3">None</span>
+
+                <span class="s3">if </span><span class="s1">value </span><span class="s3">is not None</span><span class="s1">:</span>
+                    <span class="s0"># Numeric token</span>
+                    <span class="s1">i = self._parse_numeric_token(l</span><span class="s3">, </span><span class="s1">i</span><span class="s3">, </span><span class="s1">info</span><span class="s3">, </span><span class="s1">ymd</span><span class="s3">, </span><span class="s1">res</span><span class="s3">, </span><span class="s1">fuzzy)</span>
+
+                <span class="s0"># Check weekday</span>
+                <span class="s3">elif </span><span class="s1">info.weekday(l[i]) </span><span class="s3">is not None</span><span class="s1">:</span>
+                    <span class="s1">value = info.weekday(l[i])</span>
+                    <span class="s1">res.weekday = value</span>
+
+                <span class="s0"># Check month name</span>
+                <span class="s3">elif </span><span class="s1">info.month(l[i]) </span><span class="s3">is not None</span><span class="s1">:</span>
+                    <span class="s1">value = info.month(l[i])</span>
+                    <span class="s1">ymd.append(value</span><span class="s3">, </span><span class="s4">'M'</span><span class="s1">)</span>
+
+                    <span class="s3">if </span><span class="s1">i + </span><span class="s5">1 </span><span class="s1">&lt; len_l:</span>
+                        <span class="s3">if </span><span class="s1">l[i + </span><span class="s5">1</span><span class="s1">] </span><span class="s3">in </span><span class="s1">(</span><span class="s4">'-'</span><span class="s3">, </span><span class="s4">'/'</span><span class="s1">):</span>
+                            <span class="s0"># Jan-01[-99]</span>
+                            <span class="s1">sep = l[i + </span><span class="s5">1</span><span class="s1">]</span>
+                            <span class="s1">ymd.append(l[i + </span><span class="s5">2</span><span class="s1">])</span>
+
+                            <span class="s3">if </span><span class="s1">i + </span><span class="s5">3 </span><span class="s1">&lt; len_l </span><span class="s3">and </span><span class="s1">l[i + </span><span class="s5">3</span><span class="s1">] == sep:</span>
+                                <span class="s0"># Jan-01-99</span>
+                                <span class="s1">ymd.append(l[i + </span><span class="s5">4</span><span class="s1">])</span>
+                                <span class="s1">i += </span><span class="s5">2</span>
+
+                            <span class="s1">i += </span><span class="s5">2</span>
+
+                        <span class="s3">elif </span><span class="s1">(i + </span><span class="s5">4 </span><span class="s1">&lt; len_l </span><span class="s3">and </span><span class="s1">l[i + </span><span class="s5">1</span><span class="s1">] == l[i + </span><span class="s5">3</span><span class="s1">] == </span><span class="s4">' ' </span><span class="s3">and</span>
+                              <span class="s1">info.pertain(l[i + </span><span class="s5">2</span><span class="s1">])):</span>
+                            <span class="s0"># Jan of 01</span>
+                            <span class="s0"># In this case, 01 is clearly year</span>
+                            <span class="s3">if </span><span class="s1">l[i + </span><span class="s5">4</span><span class="s1">].isdigit():</span>
+                                <span class="s0"># Convert it here to become unambiguous</span>
+                                <span class="s1">value = int(l[i + </span><span class="s5">4</span><span class="s1">])</span>
+                                <span class="s1">year = str(info.convertyear(value))</span>
+                                <span class="s1">ymd.append(year</span><span class="s3">, </span><span class="s4">'Y'</span><span class="s1">)</span>
+                            <span class="s3">else</span><span class="s1">:</span>
+                                <span class="s0"># Wrong guess</span>
+                                <span class="s3">pass</span>
+                                <span class="s0"># TODO: not hit in tests</span>
+                            <span class="s1">i += </span><span class="s5">4</span>
+
+                <span class="s0"># Check am/pm</span>
+                <span class="s3">elif </span><span class="s1">info.ampm(l[i]) </span><span class="s3">is not None</span><span class="s1">:</span>
+                    <span class="s1">value = info.ampm(l[i])</span>
+                    <span class="s1">val_is_ampm = self._ampm_valid(res.hour</span><span class="s3">, </span><span class="s1">res.ampm</span><span class="s3">, </span><span class="s1">fuzzy)</span>
+
+                    <span class="s3">if </span><span class="s1">val_is_ampm:</span>
+                        <span class="s1">res.hour = self._adjust_ampm(res.hour</span><span class="s3">, </span><span class="s1">value)</span>
+                        <span class="s1">res.ampm = value</span>
+
+                    <span class="s3">elif </span><span class="s1">fuzzy:</span>
+                        <span class="s1">skipped_idxs.append(i)</span>
+
+                <span class="s0"># Check for a timezone name</span>
+                <span class="s3">elif </span><span class="s1">self._could_be_tzname(res.hour</span><span class="s3">, </span><span class="s1">res.tzname</span><span class="s3">, </span><span class="s1">res.tzoffset</span><span class="s3">, </span><span class="s1">l[i]):</span>
+                    <span class="s1">res.tzname = l[i]</span>
+                    <span class="s1">res.tzoffset = info.tzoffset(res.tzname)</span>
+
+                    <span class="s0"># Check for something like GMT+3, or BRST+3. Notice</span>
+                    <span class="s0"># that it doesn't mean &quot;I am 3 hours after GMT&quot;, but</span>
+                    <span class="s0"># &quot;my time +3 is GMT&quot;. If found, we reverse the</span>
+                    <span class="s0"># logic so that timezone parsing code will get it</span>
+                    <span class="s0"># right.</span>
+                    <span class="s3">if </span><span class="s1">i + </span><span class="s5">1 </span><span class="s1">&lt; len_l </span><span class="s3">and </span><span class="s1">l[i + </span><span class="s5">1</span><span class="s1">] </span><span class="s3">in </span><span class="s1">(</span><span class="s4">'+'</span><span class="s3">, </span><span class="s4">'-'</span><span class="s1">):</span>
+                        <span class="s1">l[i + </span><span class="s5">1</span><span class="s1">] = (</span><span class="s4">'+'</span><span class="s3">, </span><span class="s4">'-'</span><span class="s1">)[l[i + </span><span class="s5">1</span><span class="s1">] == </span><span class="s4">'+'</span><span class="s1">]</span>
+                        <span class="s1">res.tzoffset = </span><span class="s3">None</span>
+                        <span class="s3">if </span><span class="s1">info.utczone(res.tzname):</span>
+                            <span class="s0"># With something like GMT+3, the timezone</span>
+                            <span class="s0"># is *not* GMT.</span>
+                            <span class="s1">res.tzname = </span><span class="s3">None</span>
+
+                <span class="s0"># Check for a numbered timezone</span>
+                <span class="s3">elif </span><span class="s1">res.hour </span><span class="s3">is not None and </span><span class="s1">l[i] </span><span class="s3">in </span><span class="s1">(</span><span class="s4">'+'</span><span class="s3">, </span><span class="s4">'-'</span><span class="s1">):</span>
+                    <span class="s1">signal = (-</span><span class="s5">1</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)[l[i] == </span><span class="s4">'+'</span><span class="s1">]</span>
+                    <span class="s1">len_li = len(l[i + </span><span class="s5">1</span><span class="s1">])</span>
+
+                    <span class="s0"># TODO: check that l[i + 1] is integer?</span>
+                    <span class="s3">if </span><span class="s1">len_li == </span><span class="s5">4</span><span class="s1">:</span>
+                        <span class="s0"># -0300</span>
+                        <span class="s1">hour_offset = int(l[i + </span><span class="s5">1</span><span class="s1">][:</span><span class="s5">2</span><span class="s1">])</span>
+                        <span class="s1">min_offset = int(l[i + </span><span class="s5">1</span><span class="s1">][</span><span class="s5">2</span><span class="s1">:])</span>
+                    <span class="s3">elif </span><span class="s1">i + </span><span class="s5">2 </span><span class="s1">&lt; len_l </span><span class="s3">and </span><span class="s1">l[i + </span><span class="s5">2</span><span class="s1">] == </span><span class="s4">':'</span><span class="s1">:</span>
+                        <span class="s0"># -03:00</span>
+                        <span class="s1">hour_offset = int(l[i + </span><span class="s5">1</span><span class="s1">])</span>
+                        <span class="s1">min_offset = int(l[i + </span><span class="s5">3</span><span class="s1">])  </span><span class="s0"># TODO: Check that l[i+3] is minute-like?</span>
+                        <span class="s1">i += </span><span class="s5">2</span>
+                    <span class="s3">elif </span><span class="s1">len_li &lt;= </span><span class="s5">2</span><span class="s1">:</span>
+                        <span class="s0"># -[0]3</span>
+                        <span class="s1">hour_offset = int(l[i + </span><span class="s5">1</span><span class="s1">][:</span><span class="s5">2</span><span class="s1">])</span>
+                        <span class="s1">min_offset = </span><span class="s5">0</span>
+                    <span class="s3">else</span><span class="s1">:</span>
+                        <span class="s3">raise </span><span class="s1">ValueError(timestr)</span>
+
+                    <span class="s1">res.tzoffset = signal * (hour_offset * </span><span class="s5">3600 </span><span class="s1">+ min_offset * </span><span class="s5">60</span><span class="s1">)</span>
+
+                    <span class="s0"># Look for a timezone name between parenthesis</span>
+                    <span class="s3">if </span><span class="s1">(i + </span><span class="s5">5 </span><span class="s1">&lt; len_l </span><span class="s3">and</span>
+                            <span class="s1">info.jump(l[i + </span><span class="s5">2</span><span class="s1">]) </span><span class="s3">and </span><span class="s1">l[i + </span><span class="s5">3</span><span class="s1">] == </span><span class="s4">'(' </span><span class="s3">and</span>
+                            <span class="s1">l[i + </span><span class="s5">5</span><span class="s1">] == </span><span class="s4">')' </span><span class="s3">and</span>
+                            <span class="s5">3 </span><span class="s1">&lt;= len(l[i + </span><span class="s5">4</span><span class="s1">]) </span><span class="s3">and</span>
+                            <span class="s1">self._could_be_tzname(res.hour</span><span class="s3">, </span><span class="s1">res.tzname</span><span class="s3">,</span>
+                                                  <span class="s3">None, </span><span class="s1">l[i + </span><span class="s5">4</span><span class="s1">])):</span>
+                        <span class="s0"># -0300 (BRST)</span>
+                        <span class="s1">res.tzname = l[i + </span><span class="s5">4</span><span class="s1">]</span>
+                        <span class="s1">i += </span><span class="s5">4</span>
+
+                    <span class="s1">i += </span><span class="s5">1</span>
+
+                <span class="s0"># Check jumps</span>
+                <span class="s3">elif not </span><span class="s1">(info.jump(l[i]) </span><span class="s3">or </span><span class="s1">fuzzy):</span>
+                    <span class="s3">raise </span><span class="s1">ValueError(timestr)</span>
+
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">skipped_idxs.append(i)</span>
+                <span class="s1">i += </span><span class="s5">1</span>
+
+            <span class="s0"># Process year/month/day</span>
+            <span class="s1">year</span><span class="s3">, </span><span class="s1">month</span><span class="s3">, </span><span class="s1">day = ymd.resolve_ymd(yearfirst</span><span class="s3">, </span><span class="s1">dayfirst)</span>
+
+            <span class="s1">res.century_specified = ymd.century_specified</span>
+            <span class="s1">res.year = year</span>
+            <span class="s1">res.month = month</span>
+            <span class="s1">res.day = day</span>
+
+        <span class="s3">except </span><span class="s1">(IndexError</span><span class="s3">, </span><span class="s1">ValueError):</span>
+            <span class="s3">return None, None</span>
+
+        <span class="s3">if not </span><span class="s1">info.validate(res):</span>
+            <span class="s3">return None, None</span>
+
+        <span class="s3">if </span><span class="s1">fuzzy_with_tokens:</span>
+            <span class="s1">skipped_tokens = self._recombine_skipped(l</span><span class="s3">, </span><span class="s1">skipped_idxs)</span>
+            <span class="s3">return </span><span class="s1">res</span><span class="s3">, </span><span class="s1">tuple(skipped_tokens)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">res</span><span class="s3">, None</span>
+
+    <span class="s3">def </span><span class="s1">_parse_numeric_token(self</span><span class="s3">, </span><span class="s1">tokens</span><span class="s3">, </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">info</span><span class="s3">, </span><span class="s1">ymd</span><span class="s3">, </span><span class="s1">res</span><span class="s3">, </span><span class="s1">fuzzy):</span>
+        <span class="s0"># Token is a number</span>
+        <span class="s1">value_repr = tokens[idx]</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">value = self._to_decimal(value_repr)</span>
+        <span class="s3">except </span><span class="s1">Exception </span><span class="s3">as </span><span class="s1">e:</span>
+            <span class="s1">six.raise_from(ValueError(</span><span class="s4">'Unknown numeric token'</span><span class="s1">)</span><span class="s3">, </span><span class="s1">e)</span>
+
+        <span class="s1">len_li = len(value_repr)</span>
+
+        <span class="s1">len_l = len(tokens)</span>
+
+        <span class="s3">if </span><span class="s1">(len(ymd) == </span><span class="s5">3 </span><span class="s3">and </span><span class="s1">len_li </span><span class="s3">in </span><span class="s1">(</span><span class="s5">2</span><span class="s3">, </span><span class="s5">4</span><span class="s1">) </span><span class="s3">and</span>
+            <span class="s1">res.hour </span><span class="s3">is None and</span>
+            <span class="s1">(idx + </span><span class="s5">1 </span><span class="s1">&gt;= len_l </span><span class="s3">or</span>
+             <span class="s1">(tokens[idx + </span><span class="s5">1</span><span class="s1">] != </span><span class="s4">':' </span><span class="s3">and</span>
+              <span class="s1">info.hms(tokens[idx + </span><span class="s5">1</span><span class="s1">]) </span><span class="s3">is None</span><span class="s1">))):</span>
+            <span class="s0"># 19990101T23[59]</span>
+            <span class="s1">s = tokens[idx]</span>
+            <span class="s1">res.hour = int(s[:</span><span class="s5">2</span><span class="s1">])</span>
+
+            <span class="s3">if </span><span class="s1">len_li == </span><span class="s5">4</span><span class="s1">:</span>
+                <span class="s1">res.minute = int(s[</span><span class="s5">2</span><span class="s1">:])</span>
+
+        <span class="s3">elif </span><span class="s1">len_li == </span><span class="s5">6 </span><span class="s3">or </span><span class="s1">(len_li &gt; </span><span class="s5">6 </span><span class="s3">and </span><span class="s1">tokens[idx].find(</span><span class="s4">'.'</span><span class="s1">) == </span><span class="s5">6</span><span class="s1">):</span>
+            <span class="s0"># YYMMDD or HHMMSS[.ss]</span>
+            <span class="s1">s = tokens[idx]</span>
+
+            <span class="s3">if not </span><span class="s1">ymd </span><span class="s3">and </span><span class="s4">'.' </span><span class="s3">not in </span><span class="s1">tokens[idx]:</span>
+                <span class="s1">ymd.append(s[:</span><span class="s5">2</span><span class="s1">])</span>
+                <span class="s1">ymd.append(s[</span><span class="s5">2</span><span class="s1">:</span><span class="s5">4</span><span class="s1">])</span>
+                <span class="s1">ymd.append(s[</span><span class="s5">4</span><span class="s1">:])</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s0"># 19990101T235959[.59]</span>
+
+                <span class="s0"># TODO: Check if res attributes already set.</span>
+                <span class="s1">res.hour = int(s[:</span><span class="s5">2</span><span class="s1">])</span>
+                <span class="s1">res.minute = int(s[</span><span class="s5">2</span><span class="s1">:</span><span class="s5">4</span><span class="s1">])</span>
+                <span class="s1">res.second</span><span class="s3">, </span><span class="s1">res.microsecond = self._parsems(s[</span><span class="s5">4</span><span class="s1">:])</span>
+
+        <span class="s3">elif </span><span class="s1">len_li </span><span class="s3">in </span><span class="s1">(</span><span class="s5">8</span><span class="s3">, </span><span class="s5">12</span><span class="s3">, </span><span class="s5">14</span><span class="s1">):</span>
+            <span class="s0"># YYYYMMDD</span>
+            <span class="s1">s = tokens[idx]</span>
+            <span class="s1">ymd.append(s[:</span><span class="s5">4</span><span class="s1">]</span><span class="s3">, </span><span class="s4">'Y'</span><span class="s1">)</span>
+            <span class="s1">ymd.append(s[</span><span class="s5">4</span><span class="s1">:</span><span class="s5">6</span><span class="s1">])</span>
+            <span class="s1">ymd.append(s[</span><span class="s5">6</span><span class="s1">:</span><span class="s5">8</span><span class="s1">])</span>
+
+            <span class="s3">if </span><span class="s1">len_li &gt; </span><span class="s5">8</span><span class="s1">:</span>
+                <span class="s1">res.hour = int(s[</span><span class="s5">8</span><span class="s1">:</span><span class="s5">10</span><span class="s1">])</span>
+                <span class="s1">res.minute = int(s[</span><span class="s5">10</span><span class="s1">:</span><span class="s5">12</span><span class="s1">])</span>
+
+                <span class="s3">if </span><span class="s1">len_li &gt; </span><span class="s5">12</span><span class="s1">:</span>
+                    <span class="s1">res.second = int(s[</span><span class="s5">12</span><span class="s1">:])</span>
+
+        <span class="s3">elif </span><span class="s1">self._find_hms_idx(idx</span><span class="s3">, </span><span class="s1">tokens</span><span class="s3">, </span><span class="s1">info</span><span class="s3">, </span><span class="s1">allow_jump=</span><span class="s3">True</span><span class="s1">) </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s0"># HH[ ]h or MM[ ]m or SS[.ss][ ]s</span>
+            <span class="s1">hms_idx = self._find_hms_idx(idx</span><span class="s3">, </span><span class="s1">tokens</span><span class="s3">, </span><span class="s1">info</span><span class="s3">, </span><span class="s1">allow_jump=</span><span class="s3">True</span><span class="s1">)</span>
+            <span class="s1">(idx</span><span class="s3">, </span><span class="s1">hms) = self._parse_hms(idx</span><span class="s3">, </span><span class="s1">tokens</span><span class="s3">, </span><span class="s1">info</span><span class="s3">, </span><span class="s1">hms_idx)</span>
+            <span class="s3">if </span><span class="s1">hms </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s0"># TODO: checking that hour/minute/second are not</span>
+                <span class="s0"># already set?</span>
+                <span class="s1">self._assign_hms(res</span><span class="s3">, </span><span class="s1">value_repr</span><span class="s3">, </span><span class="s1">hms)</span>
+
+        <span class="s3">elif </span><span class="s1">idx + </span><span class="s5">2 </span><span class="s1">&lt; len_l </span><span class="s3">and </span><span class="s1">tokens[idx + </span><span class="s5">1</span><span class="s1">] == </span><span class="s4">':'</span><span class="s1">:</span>
+            <span class="s0"># HH:MM[:SS[.ss]]</span>
+            <span class="s1">res.hour = int(value)</span>
+            <span class="s1">value = self._to_decimal(tokens[idx + </span><span class="s5">2</span><span class="s1">])  </span><span class="s0"># TODO: try/except for this?</span>
+            <span class="s1">(res.minute</span><span class="s3">, </span><span class="s1">res.second) = self._parse_min_sec(value)</span>
+
+            <span class="s3">if </span><span class="s1">idx + </span><span class="s5">4 </span><span class="s1">&lt; len_l </span><span class="s3">and </span><span class="s1">tokens[idx + </span><span class="s5">3</span><span class="s1">] == </span><span class="s4">':'</span><span class="s1">:</span>
+                <span class="s1">res.second</span><span class="s3">, </span><span class="s1">res.microsecond = self._parsems(tokens[idx + </span><span class="s5">4</span><span class="s1">])</span>
+
+                <span class="s1">idx += </span><span class="s5">2</span>
+
+            <span class="s1">idx += </span><span class="s5">2</span>
+
+        <span class="s3">elif </span><span class="s1">idx + </span><span class="s5">1 </span><span class="s1">&lt; len_l </span><span class="s3">and </span><span class="s1">tokens[idx + </span><span class="s5">1</span><span class="s1">] </span><span class="s3">in </span><span class="s1">(</span><span class="s4">'-'</span><span class="s3">, </span><span class="s4">'/'</span><span class="s3">, </span><span class="s4">'.'</span><span class="s1">):</span>
+            <span class="s1">sep = tokens[idx + </span><span class="s5">1</span><span class="s1">]</span>
+            <span class="s1">ymd.append(value_repr)</span>
+
+            <span class="s3">if </span><span class="s1">idx + </span><span class="s5">2 </span><span class="s1">&lt; len_l </span><span class="s3">and not </span><span class="s1">info.jump(tokens[idx + </span><span class="s5">2</span><span class="s1">]):</span>
+                <span class="s3">if </span><span class="s1">tokens[idx + </span><span class="s5">2</span><span class="s1">].isdigit():</span>
+                    <span class="s0"># 01-01[-01]</span>
+                    <span class="s1">ymd.append(tokens[idx + </span><span class="s5">2</span><span class="s1">])</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s0"># 01-Jan[-01]</span>
+                    <span class="s1">value = info.month(tokens[idx + </span><span class="s5">2</span><span class="s1">])</span>
+
+                    <span class="s3">if </span><span class="s1">value </span><span class="s3">is not None</span><span class="s1">:</span>
+                        <span class="s1">ymd.append(value</span><span class="s3">, </span><span class="s4">'M'</span><span class="s1">)</span>
+                    <span class="s3">else</span><span class="s1">:</span>
+                        <span class="s3">raise </span><span class="s1">ValueError()</span>
+
+                <span class="s3">if </span><span class="s1">idx + </span><span class="s5">3 </span><span class="s1">&lt; len_l </span><span class="s3">and </span><span class="s1">tokens[idx + </span><span class="s5">3</span><span class="s1">] == sep:</span>
+                    <span class="s0"># We have three members</span>
+                    <span class="s1">value = info.month(tokens[idx + </span><span class="s5">4</span><span class="s1">])</span>
+
+                    <span class="s3">if </span><span class="s1">value </span><span class="s3">is not None</span><span class="s1">:</span>
+                        <span class="s1">ymd.append(value</span><span class="s3">, </span><span class="s4">'M'</span><span class="s1">)</span>
+                    <span class="s3">else</span><span class="s1">:</span>
+                        <span class="s1">ymd.append(tokens[idx + </span><span class="s5">4</span><span class="s1">])</span>
+                    <span class="s1">idx += </span><span class="s5">2</span>
+
+                <span class="s1">idx += </span><span class="s5">1</span>
+            <span class="s1">idx += </span><span class="s5">1</span>
+
+        <span class="s3">elif </span><span class="s1">idx + </span><span class="s5">1 </span><span class="s1">&gt;= len_l </span><span class="s3">or </span><span class="s1">info.jump(tokens[idx + </span><span class="s5">1</span><span class="s1">]):</span>
+            <span class="s3">if </span><span class="s1">idx + </span><span class="s5">2 </span><span class="s1">&lt; len_l </span><span class="s3">and </span><span class="s1">info.ampm(tokens[idx + </span><span class="s5">2</span><span class="s1">]) </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s0"># 12 am</span>
+                <span class="s1">hour = int(value)</span>
+                <span class="s1">res.hour = self._adjust_ampm(hour</span><span class="s3">, </span><span class="s1">info.ampm(tokens[idx + </span><span class="s5">2</span><span class="s1">]))</span>
+                <span class="s1">idx += </span><span class="s5">1</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s0"># Year, month or day</span>
+                <span class="s1">ymd.append(value)</span>
+            <span class="s1">idx += </span><span class="s5">1</span>
+
+        <span class="s3">elif </span><span class="s1">info.ampm(tokens[idx + </span><span class="s5">1</span><span class="s1">]) </span><span class="s3">is not None and </span><span class="s1">(</span><span class="s5">0 </span><span class="s1">&lt;= value &lt; </span><span class="s5">24</span><span class="s1">):</span>
+            <span class="s0"># 12am</span>
+            <span class="s1">hour = int(value)</span>
+            <span class="s1">res.hour = self._adjust_ampm(hour</span><span class="s3">, </span><span class="s1">info.ampm(tokens[idx + </span><span class="s5">1</span><span class="s1">]))</span>
+            <span class="s1">idx += </span><span class="s5">1</span>
+
+        <span class="s3">elif </span><span class="s1">ymd.could_be_day(value):</span>
+            <span class="s1">ymd.append(value)</span>
+
+        <span class="s3">elif not </span><span class="s1">fuzzy:</span>
+            <span class="s3">raise </span><span class="s1">ValueError()</span>
+
+        <span class="s3">return </span><span class="s1">idx</span>
+
+    <span class="s3">def </span><span class="s1">_find_hms_idx(self</span><span class="s3">, </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">tokens</span><span class="s3">, </span><span class="s1">info</span><span class="s3">, </span><span class="s1">allow_jump):</span>
+        <span class="s1">len_l = len(tokens)</span>
+
+        <span class="s3">if </span><span class="s1">idx+</span><span class="s5">1 </span><span class="s1">&lt; len_l </span><span class="s3">and </span><span class="s1">info.hms(tokens[idx+</span><span class="s5">1</span><span class="s1">]) </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s0"># There is an &quot;h&quot;, &quot;m&quot;, or &quot;s&quot; label following this token.  We take</span>
+            <span class="s0"># assign the upcoming label to the current token.</span>
+            <span class="s0"># e.g. the &quot;12&quot; in 12h&quot;</span>
+            <span class="s1">hms_idx = idx + </span><span class="s5">1</span>
+
+        <span class="s3">elif </span><span class="s1">(allow_jump </span><span class="s3">and </span><span class="s1">idx+</span><span class="s5">2 </span><span class="s1">&lt; len_l </span><span class="s3">and </span><span class="s1">tokens[idx+</span><span class="s5">1</span><span class="s1">] == </span><span class="s4">' ' </span><span class="s3">and</span>
+              <span class="s1">info.hms(tokens[idx+</span><span class="s5">2</span><span class="s1">]) </span><span class="s3">is not None</span><span class="s1">):</span>
+            <span class="s0"># There is a space and then an &quot;h&quot;, &quot;m&quot;, or &quot;s&quot; label.</span>
+            <span class="s0"># e.g. the &quot;12&quot; in &quot;12 h&quot;</span>
+            <span class="s1">hms_idx = idx + </span><span class="s5">2</span>
+
+        <span class="s3">elif </span><span class="s1">idx &gt; </span><span class="s5">0 </span><span class="s3">and </span><span class="s1">info.hms(tokens[idx-</span><span class="s5">1</span><span class="s1">]) </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s0"># There is a &quot;h&quot;, &quot;m&quot;, or &quot;s&quot; preceding this token.  Since neither</span>
+            <span class="s0"># of the previous cases was hit, there is no label following this</span>
+            <span class="s0"># token, so we use the previous label.</span>
+            <span class="s0"># e.g. the &quot;04&quot; in &quot;12h04&quot;</span>
+            <span class="s1">hms_idx = idx-</span><span class="s5">1</span>
+
+        <span class="s3">elif </span><span class="s1">(</span><span class="s5">1 </span><span class="s1">&lt; idx == len_l-</span><span class="s5">1 </span><span class="s3">and </span><span class="s1">tokens[idx-</span><span class="s5">1</span><span class="s1">] == </span><span class="s4">' ' </span><span class="s3">and</span>
+              <span class="s1">info.hms(tokens[idx-</span><span class="s5">2</span><span class="s1">]) </span><span class="s3">is not None</span><span class="s1">):</span>
+            <span class="s0"># If we are looking at the final token, we allow for a</span>
+            <span class="s0"># backward-looking check to skip over a space.</span>
+            <span class="s0"># TODO: Are we sure this is the right condition here?</span>
+            <span class="s1">hms_idx = idx - </span><span class="s5">2</span>
+
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">hms_idx = </span><span class="s3">None</span>
+
+        <span class="s3">return </span><span class="s1">hms_idx</span>
+
+    <span class="s3">def </span><span class="s1">_assign_hms(self</span><span class="s3">, </span><span class="s1">res</span><span class="s3">, </span><span class="s1">value_repr</span><span class="s3">, </span><span class="s1">hms):</span>
+        <span class="s0"># See GH issue #427, fixing float rounding</span>
+        <span class="s1">value = self._to_decimal(value_repr)</span>
+
+        <span class="s3">if </span><span class="s1">hms == </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s0"># Hour</span>
+            <span class="s1">res.hour = int(value)</span>
+            <span class="s3">if </span><span class="s1">value % </span><span class="s5">1</span><span class="s1">:</span>
+                <span class="s1">res.minute = int(</span><span class="s5">60</span><span class="s1">*(value % </span><span class="s5">1</span><span class="s1">))</span>
+
+        <span class="s3">elif </span><span class="s1">hms == </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s1">(res.minute</span><span class="s3">, </span><span class="s1">res.second) = self._parse_min_sec(value)</span>
+
+        <span class="s3">elif </span><span class="s1">hms == </span><span class="s5">2</span><span class="s1">:</span>
+            <span class="s1">(res.second</span><span class="s3">, </span><span class="s1">res.microsecond) = self._parsems(value_repr)</span>
+
+    <span class="s3">def </span><span class="s1">_could_be_tzname(self</span><span class="s3">, </span><span class="s1">hour</span><span class="s3">, </span><span class="s1">tzname</span><span class="s3">, </span><span class="s1">tzoffset</span><span class="s3">, </span><span class="s1">token):</span>
+        <span class="s3">return </span><span class="s1">(hour </span><span class="s3">is not None and</span>
+                <span class="s1">tzname </span><span class="s3">is None and</span>
+                <span class="s1">tzoffset </span><span class="s3">is None and</span>
+                <span class="s1">len(token) &lt;= </span><span class="s5">5 </span><span class="s3">and</span>
+                <span class="s1">(all(x </span><span class="s3">in </span><span class="s1">string.ascii_uppercase </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">token)</span>
+                 <span class="s3">or </span><span class="s1">token </span><span class="s3">in </span><span class="s1">self.info.UTCZONE))</span>
+
+    <span class="s3">def </span><span class="s1">_ampm_valid(self</span><span class="s3">, </span><span class="s1">hour</span><span class="s3">, </span><span class="s1">ampm</span><span class="s3">, </span><span class="s1">fuzzy):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        For fuzzy parsing, 'a' or 'am' (both valid English words) 
+        may erroneously trigger the AM/PM flag. Deal with that 
+        here. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">val_is_ampm = </span><span class="s3">True</span>
+
+        <span class="s0"># If there's already an AM/PM flag, this one isn't one.</span>
+        <span class="s3">if </span><span class="s1">fuzzy </span><span class="s3">and </span><span class="s1">ampm </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">val_is_ampm = </span><span class="s3">False</span>
+
+        <span class="s0"># If AM/PM is found and hour is not, raise a ValueError</span>
+        <span class="s3">if </span><span class="s1">hour </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s1">fuzzy:</span>
+                <span class="s1">val_is_ampm = </span><span class="s3">False</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">'No hour specified with AM or PM flag.'</span><span class="s1">)</span>
+        <span class="s3">elif not </span><span class="s5">0 </span><span class="s1">&lt;= hour &lt;= </span><span class="s5">12</span><span class="s1">:</span>
+            <span class="s0"># If AM/PM is found, it's a 12 hour clock, so raise</span>
+            <span class="s0"># an error for invalid range</span>
+            <span class="s3">if </span><span class="s1">fuzzy:</span>
+                <span class="s1">val_is_ampm = </span><span class="s3">False</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">'Invalid hour specified for 12-hour clock.'</span><span class="s1">)</span>
+
+        <span class="s3">return </span><span class="s1">val_is_ampm</span>
+
+    <span class="s3">def </span><span class="s1">_adjust_ampm(self</span><span class="s3">, </span><span class="s1">hour</span><span class="s3">, </span><span class="s1">ampm):</span>
+        <span class="s3">if </span><span class="s1">hour &lt; </span><span class="s5">12 </span><span class="s3">and </span><span class="s1">ampm == </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s1">hour += </span><span class="s5">12</span>
+        <span class="s3">elif </span><span class="s1">hour == </span><span class="s5">12 </span><span class="s3">and </span><span class="s1">ampm == </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s1">hour = </span><span class="s5">0</span>
+        <span class="s3">return </span><span class="s1">hour</span>
+
+    <span class="s3">def </span><span class="s1">_parse_min_sec(self</span><span class="s3">, </span><span class="s1">value):</span>
+        <span class="s0"># TODO: Every usage of this function sets res.second to the return</span>
+        <span class="s0"># value. Are there any cases where second will be returned as None and</span>
+        <span class="s0"># we *don't* want to set res.second = None?</span>
+        <span class="s1">minute = int(value)</span>
+        <span class="s1">second = </span><span class="s3">None</span>
+
+        <span class="s1">sec_remainder = value % </span><span class="s5">1</span>
+        <span class="s3">if </span><span class="s1">sec_remainder:</span>
+            <span class="s1">second = int(</span><span class="s5">60 </span><span class="s1">* sec_remainder)</span>
+        <span class="s3">return </span><span class="s1">(minute</span><span class="s3">, </span><span class="s1">second)</span>
+
+    <span class="s3">def </span><span class="s1">_parse_hms(self</span><span class="s3">, </span><span class="s1">idx</span><span class="s3">, </span><span class="s1">tokens</span><span class="s3">, </span><span class="s1">info</span><span class="s3">, </span><span class="s1">hms_idx):</span>
+        <span class="s0"># TODO: Is this going to admit a lot of false-positives for when we</span>
+        <span class="s0"># just happen to have digits and &quot;h&quot;, &quot;m&quot; or &quot;s&quot; characters in non-date</span>
+        <span class="s0"># text?  I guess hex hashes won't have that problem, but there's plenty</span>
+        <span class="s0"># of random junk out there.</span>
+        <span class="s3">if </span><span class="s1">hms_idx </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">hms = </span><span class="s3">None</span>
+            <span class="s1">new_idx = idx</span>
+        <span class="s3">elif </span><span class="s1">hms_idx &gt; idx:</span>
+            <span class="s1">hms = info.hms(tokens[hms_idx])</span>
+            <span class="s1">new_idx = hms_idx</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s0"># Looking backwards, increment one.</span>
+            <span class="s1">hms = info.hms(tokens[hms_idx]) + </span><span class="s5">1</span>
+            <span class="s1">new_idx = idx</span>
+
+        <span class="s3">return </span><span class="s1">(new_idx</span><span class="s3">, </span><span class="s1">hms)</span>
+
+    <span class="s0"># ------------------------------------------------------------------</span>
+    <span class="s0"># Handling for individual tokens.  These are kept as methods instead</span>
+    <span class="s0">#  of functions for the sake of customizability via subclassing.</span>
+
+    <span class="s3">def </span><span class="s1">_parsems(self</span><span class="s3">, </span><span class="s1">value):</span>
+        <span class="s2">&quot;&quot;&quot;Parse a I[.F] seconds value into (seconds, microseconds).&quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s4">&quot;.&quot; </span><span class="s3">not in </span><span class="s1">value:</span>
+            <span class="s3">return </span><span class="s1">int(value)</span><span class="s3">, </span><span class="s5">0</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">i</span><span class="s3">, </span><span class="s1">f = value.split(</span><span class="s4">&quot;.&quot;</span><span class="s1">)</span>
+            <span class="s3">return </span><span class="s1">int(i)</span><span class="s3">, </span><span class="s1">int(f.ljust(</span><span class="s5">6</span><span class="s3">, </span><span class="s4">&quot;0&quot;</span><span class="s1">)[:</span><span class="s5">6</span><span class="s1">])</span>
+
+    <span class="s3">def </span><span class="s1">_to_decimal(self</span><span class="s3">, </span><span class="s1">val):</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">decimal_value = Decimal(val)</span>
+            <span class="s0"># See GH 662, edge case, infinite value should not be converted</span>
+            <span class="s0">#  via `_to_decimal`</span>
+            <span class="s3">if not </span><span class="s1">decimal_value.is_finite():</span>
+                <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Converted decimal value is infinite or NaN&quot;</span><span class="s1">)</span>
+        <span class="s3">except </span><span class="s1">Exception </span><span class="s3">as </span><span class="s1">e:</span>
+            <span class="s1">msg = </span><span class="s4">&quot;Could not convert %s to decimal&quot; </span><span class="s1">% val</span>
+            <span class="s1">six.raise_from(ValueError(msg)</span><span class="s3">, </span><span class="s1">e)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">decimal_value</span>
+
+    <span class="s0"># ------------------------------------------------------------------</span>
+    <span class="s0"># Post-Parsing construction of datetime output.  These are kept as</span>
+    <span class="s0">#  methods instead of functions for the sake of customizability via</span>
+    <span class="s0">#  subclassing.</span>
+
+    <span class="s3">def </span><span class="s1">_build_tzinfo(self</span><span class="s3">, </span><span class="s1">tzinfos</span><span class="s3">, </span><span class="s1">tzname</span><span class="s3">, </span><span class="s1">tzoffset):</span>
+        <span class="s3">if </span><span class="s1">callable(tzinfos):</span>
+            <span class="s1">tzdata = tzinfos(tzname</span><span class="s3">, </span><span class="s1">tzoffset)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">tzdata = tzinfos.get(tzname)</span>
+        <span class="s0"># handle case where tzinfo is paased an options that returns None</span>
+        <span class="s0"># eg tzinfos = {'BRST' : None}</span>
+        <span class="s3">if </span><span class="s1">isinstance(tzdata</span><span class="s3">, </span><span class="s1">datetime.tzinfo) </span><span class="s3">or </span><span class="s1">tzdata </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">tzinfo = tzdata</span>
+        <span class="s3">elif </span><span class="s1">isinstance(tzdata</span><span class="s3">, </span><span class="s1">text_type):</span>
+            <span class="s1">tzinfo = tz.tzstr(tzdata)</span>
+        <span class="s3">elif </span><span class="s1">isinstance(tzdata</span><span class="s3">, </span><span class="s1">integer_types):</span>
+            <span class="s1">tzinfo = tz.tzoffset(tzname</span><span class="s3">, </span><span class="s1">tzdata)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s4">&quot;Offset must be tzinfo subclass, tz string, &quot;</span>
+                            <span class="s4">&quot;or int offset.&quot;</span><span class="s1">)</span>
+        <span class="s3">return </span><span class="s1">tzinfo</span>
+
+    <span class="s3">def </span><span class="s1">_build_tzaware(self</span><span class="s3">, </span><span class="s1">naive</span><span class="s3">, </span><span class="s1">res</span><span class="s3">, </span><span class="s1">tzinfos):</span>
+        <span class="s3">if </span><span class="s1">(callable(tzinfos) </span><span class="s3">or </span><span class="s1">(tzinfos </span><span class="s3">and </span><span class="s1">res.tzname </span><span class="s3">in </span><span class="s1">tzinfos)):</span>
+            <span class="s1">tzinfo = self._build_tzinfo(tzinfos</span><span class="s3">, </span><span class="s1">res.tzname</span><span class="s3">, </span><span class="s1">res.tzoffset)</span>
+            <span class="s1">aware = naive.replace(tzinfo=tzinfo)</span>
+            <span class="s1">aware = self._assign_tzname(aware</span><span class="s3">, </span><span class="s1">res.tzname)</span>
+
+        <span class="s3">elif </span><span class="s1">res.tzname </span><span class="s3">and </span><span class="s1">res.tzname </span><span class="s3">in </span><span class="s1">time.tzname:</span>
+            <span class="s1">aware = naive.replace(tzinfo=tz.tzlocal())</span>
+
+            <span class="s0"># Handle ambiguous local datetime</span>
+            <span class="s1">aware = self._assign_tzname(aware</span><span class="s3">, </span><span class="s1">res.tzname)</span>
+
+            <span class="s0"># This is mostly relevant for winter GMT zones parsed in the UK</span>
+            <span class="s3">if </span><span class="s1">(aware.tzname() != res.tzname </span><span class="s3">and</span>
+                    <span class="s1">res.tzname </span><span class="s3">in </span><span class="s1">self.info.UTCZONE):</span>
+                <span class="s1">aware = aware.replace(tzinfo=tz.UTC)</span>
+
+        <span class="s3">elif </span><span class="s1">res.tzoffset == </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s1">aware = naive.replace(tzinfo=tz.UTC)</span>
+
+        <span class="s3">elif </span><span class="s1">res.tzoffset:</span>
+            <span class="s1">aware = naive.replace(tzinfo=tz.tzoffset(res.tzname</span><span class="s3">, </span><span class="s1">res.tzoffset))</span>
+
+        <span class="s3">elif not </span><span class="s1">res.tzname </span><span class="s3">and not </span><span class="s1">res.tzoffset:</span>
+            <span class="s0"># i.e. no timezone information was found.</span>
+            <span class="s1">aware = naive</span>
+
+        <span class="s3">elif </span><span class="s1">res.tzname:</span>
+            <span class="s0"># tz-like string was parsed but we don't know what to do</span>
+            <span class="s0"># with it</span>
+            <span class="s1">warnings.warn(</span><span class="s4">&quot;tzname {tzname} identified but not understood.  &quot;</span>
+                          <span class="s4">&quot;Pass `tzinfos` argument in order to correctly &quot;</span>
+                          <span class="s4">&quot;return a timezone-aware datetime.  In a future &quot;</span>
+                          <span class="s4">&quot;version, this will raise an &quot;</span>
+                          <span class="s4">&quot;exception.&quot;</span><span class="s1">.format(tzname=res.tzname)</span><span class="s3">,</span>
+                          <span class="s1">category=UnknownTimezoneWarning)</span>
+            <span class="s1">aware = naive</span>
+
+        <span class="s3">return </span><span class="s1">aware</span>
+
+    <span class="s3">def </span><span class="s1">_build_naive(self</span><span class="s3">, </span><span class="s1">res</span><span class="s3">, </span><span class="s1">default):</span>
+        <span class="s1">repl = {}</span>
+        <span class="s3">for </span><span class="s1">attr </span><span class="s3">in </span><span class="s1">(</span><span class="s4">&quot;year&quot;</span><span class="s3">, </span><span class="s4">&quot;month&quot;</span><span class="s3">, </span><span class="s4">&quot;day&quot;</span><span class="s3">, </span><span class="s4">&quot;hour&quot;</span><span class="s3">,</span>
+                     <span class="s4">&quot;minute&quot;</span><span class="s3">, </span><span class="s4">&quot;second&quot;</span><span class="s3">, </span><span class="s4">&quot;microsecond&quot;</span><span class="s1">):</span>
+            <span class="s1">value = getattr(res</span><span class="s3">, </span><span class="s1">attr)</span>
+            <span class="s3">if </span><span class="s1">value </span><span class="s3">is not None</span><span class="s1">:</span>
+                <span class="s1">repl[attr] = value</span>
+
+        <span class="s3">if </span><span class="s4">'day' </span><span class="s3">not in </span><span class="s1">repl:</span>
+            <span class="s0"># If the default day exceeds the last day of the month, fall back</span>
+            <span class="s0"># to the end of the month.</span>
+            <span class="s1">cyear = default.year </span><span class="s3">if </span><span class="s1">res.year </span><span class="s3">is None else </span><span class="s1">res.year</span>
+            <span class="s1">cmonth = default.month </span><span class="s3">if </span><span class="s1">res.month </span><span class="s3">is None else </span><span class="s1">res.month</span>
+            <span class="s1">cday = default.day </span><span class="s3">if </span><span class="s1">res.day </span><span class="s3">is None else </span><span class="s1">res.day</span>
+
+            <span class="s3">if </span><span class="s1">cday &gt; monthrange(cyear</span><span class="s3">, </span><span class="s1">cmonth)[</span><span class="s5">1</span><span class="s1">]:</span>
+                <span class="s1">repl[</span><span class="s4">'day'</span><span class="s1">] = monthrange(cyear</span><span class="s3">, </span><span class="s1">cmonth)[</span><span class="s5">1</span><span class="s1">]</span>
+
+        <span class="s1">naive = default.replace(**repl)</span>
+
+        <span class="s3">if </span><span class="s1">res.weekday </span><span class="s3">is not None and not </span><span class="s1">res.day:</span>
+            <span class="s1">naive = naive + relativedelta.relativedelta(weekday=res.weekday)</span>
+
+        <span class="s3">return </span><span class="s1">naive</span>
+
+    <span class="s3">def </span><span class="s1">_assign_tzname(self</span><span class="s3">, </span><span class="s1">dt</span><span class="s3">, </span><span class="s1">tzname):</span>
+        <span class="s3">if </span><span class="s1">dt.tzname() != tzname:</span>
+            <span class="s1">new_dt = tz.enfold(dt</span><span class="s3">, </span><span class="s1">fold=</span><span class="s5">1</span><span class="s1">)</span>
+            <span class="s3">if </span><span class="s1">new_dt.tzname() == tzname:</span>
+                <span class="s3">return </span><span class="s1">new_dt</span>
+
+        <span class="s3">return </span><span class="s1">dt</span>
+
+    <span class="s3">def </span><span class="s1">_recombine_skipped(self</span><span class="s3">, </span><span class="s1">tokens</span><span class="s3">, </span><span class="s1">skipped_idxs):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        &gt;&gt;&gt; tokens = [&quot;foo&quot;, &quot; &quot;, &quot;bar&quot;, &quot; &quot;, &quot;19June2000&quot;, &quot;baz&quot;] 
+        &gt;&gt;&gt; skipped_idxs = [0, 1, 2, 5] 
+        &gt;&gt;&gt; _recombine_skipped(tokens, skipped_idxs) 
+        [&quot;foo bar&quot;, &quot;baz&quot;] 
+        &quot;&quot;&quot;</span>
+        <span class="s1">skipped_tokens = []</span>
+        <span class="s3">for </span><span class="s1">i</span><span class="s3">, </span><span class="s1">idx </span><span class="s3">in </span><span class="s1">enumerate(sorted(skipped_idxs)):</span>
+            <span class="s3">if </span><span class="s1">i &gt; </span><span class="s5">0 </span><span class="s3">and </span><span class="s1">idx - </span><span class="s5">1 </span><span class="s1">== skipped_idxs[i - </span><span class="s5">1</span><span class="s1">]:</span>
+                <span class="s1">skipped_tokens[-</span><span class="s5">1</span><span class="s1">] = skipped_tokens[-</span><span class="s5">1</span><span class="s1">] + tokens[idx]</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">skipped_tokens.append(tokens[idx])</span>
+
+        <span class="s3">return </span><span class="s1">skipped_tokens</span>
+
+
+<span class="s1">DEFAULTPARSER = parser()</span>
+
+
+<span class="s3">def </span><span class="s1">parse(timestr</span><span class="s3">, </span><span class="s1">parserinfo=</span><span class="s3">None, </span><span class="s1">**kwargs):</span>
+    <span class="s2">&quot;&quot;&quot; 
+ 
+    Parse a string in one of the supported formats, using the 
+    ``parserinfo`` parameters. 
+ 
+    :param timestr: 
+        A string containing a date/time stamp. 
+ 
+    :param parserinfo: 
+        A :class:`parserinfo` object containing parameters for the parser. 
+        If ``None``, the default arguments to the :class:`parserinfo` 
+        constructor are used. 
+ 
+    The ``**kwargs`` parameter takes the following keyword arguments: 
+ 
+    :param default: 
+        The default datetime object, if this is a datetime object and not 
+        ``None``, elements specified in ``timestr`` replace elements in the 
+        default object. 
+ 
+    :param ignoretz: 
+        If set ``True``, time zones in parsed strings are ignored and a naive 
+        :class:`datetime` object is returned. 
+ 
+    :param tzinfos: 
+        Additional time zone names / aliases which may be present in the 
+        string. This argument maps time zone names (and optionally offsets 
+        from those time zones) to time zones. This parameter can be a 
+        dictionary with timezone aliases mapping time zone names to time 
+        zones or a function taking two parameters (``tzname`` and 
+        ``tzoffset``) and returning a time zone. 
+ 
+        The timezones to which the names are mapped can be an integer 
+        offset from UTC in seconds or a :class:`tzinfo` object. 
+ 
+        .. doctest:: 
+           :options: +NORMALIZE_WHITESPACE 
+ 
+            &gt;&gt;&gt; from dateutil.parser import parse 
+            &gt;&gt;&gt; from dateutil.tz import gettz 
+            &gt;&gt;&gt; tzinfos = {&quot;BRST&quot;: -7200, &quot;CST&quot;: gettz(&quot;America/Chicago&quot;)} 
+            &gt;&gt;&gt; parse(&quot;2012-01-19 17:21:00 BRST&quot;, tzinfos=tzinfos) 
+            datetime.datetime(2012, 1, 19, 17, 21, tzinfo=tzoffset(u'BRST', -7200)) 
+            &gt;&gt;&gt; parse(&quot;2012-01-19 17:21:00 CST&quot;, tzinfos=tzinfos) 
+            datetime.datetime(2012, 1, 19, 17, 21, 
+                              tzinfo=tzfile('/usr/share/zoneinfo/America/Chicago')) 
+ 
+        This parameter is ignored if ``ignoretz`` is set. 
+ 
+    :param dayfirst: 
+        Whether to interpret the first value in an ambiguous 3-integer date 
+        (e.g. 01/05/09) as the day (``True``) or month (``False``). If 
+        ``yearfirst`` is set to ``True``, this distinguishes between YDM and 
+        YMD. If set to ``None``, this value is retrieved from the current 
+        :class:`parserinfo` object (which itself defaults to ``False``). 
+ 
+    :param yearfirst: 
+        Whether to interpret the first value in an ambiguous 3-integer date 
+        (e.g. 01/05/09) as the year. If ``True``, the first number is taken to 
+        be the year, otherwise the last number is taken to be the year. If 
+        this is set to ``None``, the value is retrieved from the current 
+        :class:`parserinfo` object (which itself defaults to ``False``). 
+ 
+    :param fuzzy: 
+        Whether to allow fuzzy parsing, allowing for string like &quot;Today is 
+        January 1, 2047 at 8:21:00AM&quot;. 
+ 
+    :param fuzzy_with_tokens: 
+        If ``True``, ``fuzzy`` is automatically set to True, and the parser 
+        will return a tuple where the first element is the parsed 
+        :class:`datetime.datetime` datetimestamp and the second element is 
+        a tuple containing the portions of the string which were ignored: 
+ 
+        .. doctest:: 
+ 
+            &gt;&gt;&gt; from dateutil.parser import parse 
+            &gt;&gt;&gt; parse(&quot;Today is January 1, 2047 at 8:21:00AM&quot;, fuzzy_with_tokens=True) 
+            (datetime.datetime(2047, 1, 1, 8, 21), (u'Today is ', u' ', u'at ')) 
+ 
+    :return: 
+        Returns a :class:`datetime.datetime` object or, if the 
+        ``fuzzy_with_tokens`` option is ``True``, returns a tuple, the 
+        first element being a :class:`datetime.datetime` object, the second 
+        a tuple containing the fuzzy tokens. 
+ 
+    :raises ParserError: 
+        Raised for invalid or unknown string formats, if the provided 
+        :class:`tzinfo` is not in a valid format, or if an invalid date would 
+        be created. 
+ 
+    :raises OverflowError: 
+        Raised if the parsed date exceeds the largest valid C integer on 
+        your system. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">if </span><span class="s1">parserinfo:</span>
+        <span class="s3">return </span><span class="s1">parser(parserinfo).parse(timestr</span><span class="s3">, </span><span class="s1">**kwargs)</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s1">DEFAULTPARSER.parse(timestr</span><span class="s3">, </span><span class="s1">**kwargs)</span>
+
+
+<span class="s3">class </span><span class="s1">_tzparser(object):</span>
+
+    <span class="s3">class </span><span class="s1">_result(_resultbase):</span>
+
+        <span class="s1">__slots__ = [</span><span class="s4">&quot;stdabbr&quot;</span><span class="s3">, </span><span class="s4">&quot;stdoffset&quot;</span><span class="s3">, </span><span class="s4">&quot;dstabbr&quot;</span><span class="s3">, </span><span class="s4">&quot;dstoffset&quot;</span><span class="s3">,</span>
+                     <span class="s4">&quot;start&quot;</span><span class="s3">, </span><span class="s4">&quot;end&quot;</span><span class="s1">]</span>
+
+        <span class="s3">class </span><span class="s1">_attr(_resultbase):</span>
+            <span class="s1">__slots__ = [</span><span class="s4">&quot;month&quot;</span><span class="s3">, </span><span class="s4">&quot;week&quot;</span><span class="s3">, </span><span class="s4">&quot;weekday&quot;</span><span class="s3">,</span>
+                         <span class="s4">&quot;yday&quot;</span><span class="s3">, </span><span class="s4">&quot;jyday&quot;</span><span class="s3">, </span><span class="s4">&quot;day&quot;</span><span class="s3">, </span><span class="s4">&quot;time&quot;</span><span class="s1">]</span>
+
+        <span class="s3">def </span><span class="s1">__repr__(self):</span>
+            <span class="s3">return </span><span class="s1">self._repr(</span><span class="s4">&quot;&quot;</span><span class="s1">)</span>
+
+        <span class="s3">def </span><span class="s1">__init__(self):</span>
+            <span class="s1">_resultbase.__init__(self)</span>
+            <span class="s1">self.start = self._attr()</span>
+            <span class="s1">self.end = self._attr()</span>
+
+    <span class="s3">def </span><span class="s1">parse(self</span><span class="s3">, </span><span class="s1">tzstr):</span>
+        <span class="s1">res = self._result()</span>
+        <span class="s1">l = [x </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">re.split(</span><span class="s4">r'([,:.]|[a-zA-Z]+|[0-9]+)'</span><span class="s3">,</span><span class="s1">tzstr) </span><span class="s3">if </span><span class="s1">x]</span>
+        <span class="s1">used_idxs = list()</span>
+        <span class="s3">try</span><span class="s1">:</span>
+
+            <span class="s1">len_l = len(l)</span>
+
+            <span class="s1">i = </span><span class="s5">0</span>
+            <span class="s3">while </span><span class="s1">i &lt; len_l:</span>
+                <span class="s0"># BRST+3[BRDT[+2]]</span>
+                <span class="s1">j = i</span>
+                <span class="s3">while </span><span class="s1">j &lt; len_l </span><span class="s3">and not </span><span class="s1">[x </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">l[j]</span>
+                                         <span class="s3">if </span><span class="s1">x </span><span class="s3">in </span><span class="s4">&quot;0123456789:,-+&quot;</span><span class="s1">]:</span>
+                    <span class="s1">j += </span><span class="s5">1</span>
+                <span class="s3">if </span><span class="s1">j != i:</span>
+                    <span class="s3">if not </span><span class="s1">res.stdabbr:</span>
+                        <span class="s1">offattr = </span><span class="s4">&quot;stdoffset&quot;</span>
+                        <span class="s1">res.stdabbr = </span><span class="s4">&quot;&quot;</span><span class="s1">.join(l[i:j])</span>
+                    <span class="s3">else</span><span class="s1">:</span>
+                        <span class="s1">offattr = </span><span class="s4">&quot;dstoffset&quot;</span>
+                        <span class="s1">res.dstabbr = </span><span class="s4">&quot;&quot;</span><span class="s1">.join(l[i:j])</span>
+
+                    <span class="s3">for </span><span class="s1">ii </span><span class="s3">in </span><span class="s1">range(j):</span>
+                        <span class="s1">used_idxs.append(ii)</span>
+                    <span class="s1">i = j</span>
+                    <span class="s3">if </span><span class="s1">(i &lt; len_l </span><span class="s3">and </span><span class="s1">(l[i] </span><span class="s3">in </span><span class="s1">(</span><span class="s4">'+'</span><span class="s3">, </span><span class="s4">'-'</span><span class="s1">) </span><span class="s3">or </span><span class="s1">l[i][</span><span class="s5">0</span><span class="s1">] </span><span class="s3">in</span>
+                                       <span class="s4">&quot;0123456789&quot;</span><span class="s1">)):</span>
+                        <span class="s3">if </span><span class="s1">l[i] </span><span class="s3">in </span><span class="s1">(</span><span class="s4">'+'</span><span class="s3">, </span><span class="s4">'-'</span><span class="s1">):</span>
+                            <span class="s0"># Yes, that's right.  See the TZ variable</span>
+                            <span class="s0"># documentation.</span>
+                            <span class="s1">signal = (</span><span class="s5">1</span><span class="s3">, </span><span class="s1">-</span><span class="s5">1</span><span class="s1">)[l[i] == </span><span class="s4">'+'</span><span class="s1">]</span>
+                            <span class="s1">used_idxs.append(i)</span>
+                            <span class="s1">i += </span><span class="s5">1</span>
+                        <span class="s3">else</span><span class="s1">:</span>
+                            <span class="s1">signal = -</span><span class="s5">1</span>
+                        <span class="s1">len_li = len(l[i])</span>
+                        <span class="s3">if </span><span class="s1">len_li == </span><span class="s5">4</span><span class="s1">:</span>
+                            <span class="s0"># -0300</span>
+                            <span class="s1">setattr(res</span><span class="s3">, </span><span class="s1">offattr</span><span class="s3">, </span><span class="s1">(int(l[i][:</span><span class="s5">2</span><span class="s1">]) * </span><span class="s5">3600 </span><span class="s1">+</span>
+                                                   <span class="s1">int(l[i][</span><span class="s5">2</span><span class="s1">:]) * </span><span class="s5">60</span><span class="s1">) * signal)</span>
+                        <span class="s3">elif </span><span class="s1">i + </span><span class="s5">1 </span><span class="s1">&lt; len_l </span><span class="s3">and </span><span class="s1">l[i + </span><span class="s5">1</span><span class="s1">] == </span><span class="s4">':'</span><span class="s1">:</span>
+                            <span class="s0"># -03:00</span>
+                            <span class="s1">setattr(res</span><span class="s3">, </span><span class="s1">offattr</span><span class="s3">,</span>
+                                    <span class="s1">(int(l[i]) * </span><span class="s5">3600 </span><span class="s1">+</span>
+                                     <span class="s1">int(l[i + </span><span class="s5">2</span><span class="s1">]) * </span><span class="s5">60</span><span class="s1">) * signal)</span>
+                            <span class="s1">used_idxs.append(i)</span>
+                            <span class="s1">i += </span><span class="s5">2</span>
+                        <span class="s3">elif </span><span class="s1">len_li &lt;= </span><span class="s5">2</span><span class="s1">:</span>
+                            <span class="s0"># -[0]3</span>
+                            <span class="s1">setattr(res</span><span class="s3">, </span><span class="s1">offattr</span><span class="s3">,</span>
+                                    <span class="s1">int(l[i][:</span><span class="s5">2</span><span class="s1">]) * </span><span class="s5">3600 </span><span class="s1">* signal)</span>
+                        <span class="s3">else</span><span class="s1">:</span>
+                            <span class="s3">return None</span>
+                        <span class="s1">used_idxs.append(i)</span>
+                        <span class="s1">i += </span><span class="s5">1</span>
+                    <span class="s3">if </span><span class="s1">res.dstabbr:</span>
+                        <span class="s3">break</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s3">break</span>
+
+
+            <span class="s3">if </span><span class="s1">i &lt; len_l:</span>
+                <span class="s3">for </span><span class="s1">j </span><span class="s3">in </span><span class="s1">range(i</span><span class="s3">, </span><span class="s1">len_l):</span>
+                    <span class="s3">if </span><span class="s1">l[j] == </span><span class="s4">';'</span><span class="s1">:</span>
+                        <span class="s1">l[j] = </span><span class="s4">','</span>
+
+                <span class="s3">assert </span><span class="s1">l[i] == </span><span class="s4">','</span>
+
+                <span class="s1">i += </span><span class="s5">1</span>
+
+            <span class="s3">if </span><span class="s1">i &gt;= len_l:</span>
+                <span class="s3">pass</span>
+            <span class="s3">elif </span><span class="s1">(</span><span class="s5">8 </span><span class="s1">&lt;= l.count(</span><span class="s4">','</span><span class="s1">) &lt;= </span><span class="s5">9 </span><span class="s3">and</span>
+                  <span class="s3">not </span><span class="s1">[y </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">l[i:] </span><span class="s3">if </span><span class="s1">x != </span><span class="s4">','</span>
+                       <span class="s3">for </span><span class="s1">y </span><span class="s3">in </span><span class="s1">x </span><span class="s3">if </span><span class="s1">y </span><span class="s3">not in </span><span class="s4">&quot;0123456789+-&quot;</span><span class="s1">]):</span>
+                <span class="s0"># GMT0BST,3,0,30,3600,10,0,26,7200[,3600]</span>
+                <span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">(res.start</span><span class="s3">, </span><span class="s1">res.end):</span>
+                    <span class="s1">x.month = int(l[i])</span>
+                    <span class="s1">used_idxs.append(i)</span>
+                    <span class="s1">i += </span><span class="s5">2</span>
+                    <span class="s3">if </span><span class="s1">l[i] == </span><span class="s4">'-'</span><span class="s1">:</span>
+                        <span class="s1">value = int(l[i + </span><span class="s5">1</span><span class="s1">]) * -</span><span class="s5">1</span>
+                        <span class="s1">used_idxs.append(i)</span>
+                        <span class="s1">i += </span><span class="s5">1</span>
+                    <span class="s3">else</span><span class="s1">:</span>
+                        <span class="s1">value = int(l[i])</span>
+                    <span class="s1">used_idxs.append(i)</span>
+                    <span class="s1">i += </span><span class="s5">2</span>
+                    <span class="s3">if </span><span class="s1">value:</span>
+                        <span class="s1">x.week = value</span>
+                        <span class="s1">x.weekday = (int(l[i]) - </span><span class="s5">1</span><span class="s1">) % </span><span class="s5">7</span>
+                    <span class="s3">else</span><span class="s1">:</span>
+                        <span class="s1">x.day = int(l[i])</span>
+                    <span class="s1">used_idxs.append(i)</span>
+                    <span class="s1">i += </span><span class="s5">2</span>
+                    <span class="s1">x.time = int(l[i])</span>
+                    <span class="s1">used_idxs.append(i)</span>
+                    <span class="s1">i += </span><span class="s5">2</span>
+                <span class="s3">if </span><span class="s1">i &lt; len_l:</span>
+                    <span class="s3">if </span><span class="s1">l[i] </span><span class="s3">in </span><span class="s1">(</span><span class="s4">'-'</span><span class="s3">, </span><span class="s4">'+'</span><span class="s1">):</span>
+                        <span class="s1">signal = (-</span><span class="s5">1</span><span class="s3">, </span><span class="s5">1</span><span class="s1">)[l[i] == </span><span class="s4">&quot;+&quot;</span><span class="s1">]</span>
+                        <span class="s1">used_idxs.append(i)</span>
+                        <span class="s1">i += </span><span class="s5">1</span>
+                    <span class="s3">else</span><span class="s1">:</span>
+                        <span class="s1">signal = </span><span class="s5">1</span>
+                    <span class="s1">used_idxs.append(i)</span>
+                    <span class="s1">res.dstoffset = (res.stdoffset + int(l[i]) * signal)</span>
+
+                <span class="s0"># This was a made-up format that is not in normal use</span>
+                <span class="s1">warn((</span><span class="s4">'Parsed time zone &quot;%s&quot;' </span><span class="s1">% tzstr) +</span>
+                     <span class="s4">'is in a non-standard dateutil-specific format, which ' </span><span class="s1">+</span>
+                     <span class="s4">'is now deprecated; support for parsing this format ' </span><span class="s1">+</span>
+                     <span class="s4">'will be removed in future versions. It is recommended ' </span><span class="s1">+</span>
+                     <span class="s4">'that you switch to a standard format like the GNU ' </span><span class="s1">+</span>
+                     <span class="s4">'TZ variable format.'</span><span class="s3">, </span><span class="s1">tz.DeprecatedTzFormatWarning)</span>
+            <span class="s3">elif </span><span class="s1">(l.count(</span><span class="s4">','</span><span class="s1">) == </span><span class="s5">2 </span><span class="s3">and </span><span class="s1">l[i:].count(</span><span class="s4">'/'</span><span class="s1">) &lt;= </span><span class="s5">2 </span><span class="s3">and</span>
+                  <span class="s3">not </span><span class="s1">[y </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">l[i:] </span><span class="s3">if </span><span class="s1">x </span><span class="s3">not in </span><span class="s1">(</span><span class="s4">','</span><span class="s3">, </span><span class="s4">'/'</span><span class="s3">, </span><span class="s4">'J'</span><span class="s3">, </span><span class="s4">'M'</span><span class="s3">,</span>
+                                                     <span class="s4">'.'</span><span class="s3">, </span><span class="s4">'-'</span><span class="s3">, </span><span class="s4">':'</span><span class="s1">)</span>
+                       <span class="s3">for </span><span class="s1">y </span><span class="s3">in </span><span class="s1">x </span><span class="s3">if </span><span class="s1">y </span><span class="s3">not in </span><span class="s4">&quot;0123456789&quot;</span><span class="s1">]):</span>
+                <span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">(res.start</span><span class="s3">, </span><span class="s1">res.end):</span>
+                    <span class="s3">if </span><span class="s1">l[i] == </span><span class="s4">'J'</span><span class="s1">:</span>
+                        <span class="s0"># non-leap year day (1 based)</span>
+                        <span class="s1">used_idxs.append(i)</span>
+                        <span class="s1">i += </span><span class="s5">1</span>
+                        <span class="s1">x.jyday = int(l[i])</span>
+                    <span class="s3">elif </span><span class="s1">l[i] == </span><span class="s4">'M'</span><span class="s1">:</span>
+                        <span class="s0"># month[-.]week[-.]weekday</span>
+                        <span class="s1">used_idxs.append(i)</span>
+                        <span class="s1">i += </span><span class="s5">1</span>
+                        <span class="s1">x.month = int(l[i])</span>
+                        <span class="s1">used_idxs.append(i)</span>
+                        <span class="s1">i += </span><span class="s5">1</span>
+                        <span class="s3">assert </span><span class="s1">l[i] </span><span class="s3">in </span><span class="s1">(</span><span class="s4">'-'</span><span class="s3">, </span><span class="s4">'.'</span><span class="s1">)</span>
+                        <span class="s1">used_idxs.append(i)</span>
+                        <span class="s1">i += </span><span class="s5">1</span>
+                        <span class="s1">x.week = int(l[i])</span>
+                        <span class="s3">if </span><span class="s1">x.week == </span><span class="s5">5</span><span class="s1">:</span>
+                            <span class="s1">x.week = -</span><span class="s5">1</span>
+                        <span class="s1">used_idxs.append(i)</span>
+                        <span class="s1">i += </span><span class="s5">1</span>
+                        <span class="s3">assert </span><span class="s1">l[i] </span><span class="s3">in </span><span class="s1">(</span><span class="s4">'-'</span><span class="s3">, </span><span class="s4">'.'</span><span class="s1">)</span>
+                        <span class="s1">used_idxs.append(i)</span>
+                        <span class="s1">i += </span><span class="s5">1</span>
+                        <span class="s1">x.weekday = (int(l[i]) - </span><span class="s5">1</span><span class="s1">) % </span><span class="s5">7</span>
+                    <span class="s3">else</span><span class="s1">:</span>
+                        <span class="s0"># year day (zero based)</span>
+                        <span class="s1">x.yday = int(l[i]) + </span><span class="s5">1</span>
+
+                    <span class="s1">used_idxs.append(i)</span>
+                    <span class="s1">i += </span><span class="s5">1</span>
+
+                    <span class="s3">if </span><span class="s1">i &lt; len_l </span><span class="s3">and </span><span class="s1">l[i] == </span><span class="s4">'/'</span><span class="s1">:</span>
+                        <span class="s1">used_idxs.append(i)</span>
+                        <span class="s1">i += </span><span class="s5">1</span>
+                        <span class="s0"># start time</span>
+                        <span class="s1">len_li = len(l[i])</span>
+                        <span class="s3">if </span><span class="s1">len_li == </span><span class="s5">4</span><span class="s1">:</span>
+                            <span class="s0"># -0300</span>
+                            <span class="s1">x.time = (int(l[i][:</span><span class="s5">2</span><span class="s1">]) * </span><span class="s5">3600 </span><span class="s1">+</span>
+                                      <span class="s1">int(l[i][</span><span class="s5">2</span><span class="s1">:]) * </span><span class="s5">60</span><span class="s1">)</span>
+                        <span class="s3">elif </span><span class="s1">i + </span><span class="s5">1 </span><span class="s1">&lt; len_l </span><span class="s3">and </span><span class="s1">l[i + </span><span class="s5">1</span><span class="s1">] == </span><span class="s4">':'</span><span class="s1">:</span>
+                            <span class="s0"># -03:00</span>
+                            <span class="s1">x.time = int(l[i]) * </span><span class="s5">3600 </span><span class="s1">+ int(l[i + </span><span class="s5">2</span><span class="s1">]) * </span><span class="s5">60</span>
+                            <span class="s1">used_idxs.append(i)</span>
+                            <span class="s1">i += </span><span class="s5">2</span>
+                            <span class="s3">if </span><span class="s1">i + </span><span class="s5">1 </span><span class="s1">&lt; len_l </span><span class="s3">and </span><span class="s1">l[i + </span><span class="s5">1</span><span class="s1">] == </span><span class="s4">':'</span><span class="s1">:</span>
+                                <span class="s1">used_idxs.append(i)</span>
+                                <span class="s1">i += </span><span class="s5">2</span>
+                                <span class="s1">x.time += int(l[i])</span>
+                        <span class="s3">elif </span><span class="s1">len_li &lt;= </span><span class="s5">2</span><span class="s1">:</span>
+                            <span class="s0"># -[0]3</span>
+                            <span class="s1">x.time = (int(l[i][:</span><span class="s5">2</span><span class="s1">]) * </span><span class="s5">3600</span><span class="s1">)</span>
+                        <span class="s3">else</span><span class="s1">:</span>
+                            <span class="s3">return None</span>
+                        <span class="s1">used_idxs.append(i)</span>
+                        <span class="s1">i += </span><span class="s5">1</span>
+
+                    <span class="s3">assert </span><span class="s1">i == len_l </span><span class="s3">or </span><span class="s1">l[i] == </span><span class="s4">','</span>
+
+                    <span class="s1">i += </span><span class="s5">1</span>
+
+                <span class="s3">assert </span><span class="s1">i &gt;= len_l</span>
+
+        <span class="s3">except </span><span class="s1">(IndexError</span><span class="s3">, </span><span class="s1">ValueError</span><span class="s3">, </span><span class="s1">AssertionError):</span>
+            <span class="s3">return None</span>
+
+        <span class="s1">unused_idxs = set(range(len_l)).difference(used_idxs)</span>
+        <span class="s1">res.any_unused_tokens = </span><span class="s3">not </span><span class="s1">{l[n] </span><span class="s3">for </span><span class="s1">n </span><span class="s3">in </span><span class="s1">unused_idxs}.issubset({</span><span class="s4">&quot;,&quot;</span><span class="s3">,</span><span class="s4">&quot;:&quot;</span><span class="s1">})</span>
+        <span class="s3">return </span><span class="s1">res</span>
+
+
+<span class="s1">DEFAULTTZPARSER = _tzparser()</span>
+
+
+<span class="s3">def </span><span class="s1">_parsetz(tzstr):</span>
+    <span class="s3">return </span><span class="s1">DEFAULTTZPARSER.parse(tzstr)</span>
+
+
+<span class="s3">class </span><span class="s1">ParserError(ValueError):</span>
+    <span class="s2">&quot;&quot;&quot;Exception subclass used for any failure to parse a datetime string. 
+ 
+    This is a subclass of :py:exc:`ValueError`, and should be raised any time 
+    earlier versions of ``dateutil`` would have raised ``ValueError``. 
+ 
+    .. versionadded:: 2.8.1 
+    &quot;&quot;&quot;</span>
+    <span class="s3">def </span><span class="s1">__str__(self):</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">self.args[</span><span class="s5">0</span><span class="s1">] % self.args[</span><span class="s5">1</span><span class="s1">:]</span>
+        <span class="s3">except </span><span class="s1">(TypeError</span><span class="s3">, </span><span class="s1">IndexError):</span>
+            <span class="s3">return </span><span class="s1">super(ParserError</span><span class="s3">, </span><span class="s1">self).__str__()</span>
+
+    <span class="s3">def </span><span class="s1">__repr__(self):</span>
+        <span class="s1">args = </span><span class="s4">&quot;, &quot;</span><span class="s1">.join(</span><span class="s4">&quot;'%s'&quot; </span><span class="s1">% arg </span><span class="s3">for </span><span class="s1">arg </span><span class="s3">in </span><span class="s1">self.args)</span>
+        <span class="s3">return </span><span class="s4">&quot;%s(%s)&quot; </span><span class="s1">% (self.__class__.__name__</span><span class="s3">, </span><span class="s1">args)</span>
+
+
+<span class="s3">class </span><span class="s1">UnknownTimezoneWarning(RuntimeWarning):</span>
+    <span class="s2">&quot;&quot;&quot;Raised when the parser finds a timezone it cannot parse into a tzinfo. 
+ 
+    .. versionadded:: 2.7.0 
+    &quot;&quot;&quot;</span>
+<span class="s0"># vim:ts=4:sw=4:et</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,171 @@
+<html>
+<head>
+<title>connection.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #629755; font-style: italic;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+connection.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">absolute_import</span>
+
+<span class="s0">import </span><span class="s1">socket</span>
+
+<span class="s0">from </span><span class="s1">..contrib </span><span class="s0">import </span><span class="s1">_appengine_environ</span>
+<span class="s0">from </span><span class="s1">..exceptions </span><span class="s0">import </span><span class="s1">LocationParseError</span>
+<span class="s0">from </span><span class="s1">..packages </span><span class="s0">import </span><span class="s1">six</span>
+<span class="s0">from </span><span class="s1">.wait </span><span class="s0">import </span><span class="s1">NoWayToWaitForSocketError</span><span class="s0">, </span><span class="s1">wait_for_read</span>
+
+
+<span class="s0">def </span><span class="s1">is_connection_dropped(conn):  </span><span class="s2"># Platform-specific</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Returns True if the connection is dropped and should be closed. 
+ 
+    :param conn: 
+        :class:`http.client.HTTPConnection` object. 
+ 
+    Note: For platforms like AppEngine, this will always return ``False`` to 
+    let the platform handle connection recycling transparently for us. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">sock = getattr(conn</span><span class="s0">, </span><span class="s4">&quot;sock&quot;</span><span class="s0">, False</span><span class="s1">)</span>
+    <span class="s0">if </span><span class="s1">sock </span><span class="s0">is False</span><span class="s1">:  </span><span class="s2"># Platform-specific: AppEngine</span>
+        <span class="s0">return False</span>
+    <span class="s0">if </span><span class="s1">sock </span><span class="s0">is None</span><span class="s1">:  </span><span class="s2"># Connection already closed (such as by httplib).</span>
+        <span class="s0">return True</span>
+    <span class="s0">try</span><span class="s1">:</span>
+        <span class="s2"># Returns True if readable, which here means it's been dropped</span>
+        <span class="s0">return </span><span class="s1">wait_for_read(sock</span><span class="s0">, </span><span class="s1">timeout=</span><span class="s5">0.0</span><span class="s1">)</span>
+    <span class="s0">except </span><span class="s1">NoWayToWaitForSocketError:  </span><span class="s2"># Platform-specific: AppEngine</span>
+        <span class="s0">return False</span>
+
+
+<span class="s2"># This function is copied from socket.py in the Python 2.7 standard</span>
+<span class="s2"># library test suite. Added to its signature is only `socket_options`.</span>
+<span class="s2"># One additional modification is that we avoid binding to IPv6 servers</span>
+<span class="s2"># discovered in DNS if the system doesn't have IPv6 functionality.</span>
+<span class="s0">def </span><span class="s1">create_connection(</span>
+    <span class="s1">address</span><span class="s0">,</span>
+    <span class="s1">timeout=socket._GLOBAL_DEFAULT_TIMEOUT</span><span class="s0">,</span>
+    <span class="s1">source_address=</span><span class="s0">None,</span>
+    <span class="s1">socket_options=</span><span class="s0">None,</span>
+<span class="s1">):</span>
+    <span class="s3">&quot;&quot;&quot;Connect to *address* and return the socket object. 
+ 
+    Convenience function.  Connect to *address* (a 2-tuple ``(host, 
+    port)``) and return the socket object.  Passing the optional 
+    *timeout* parameter will set the timeout on the socket instance 
+    before attempting to connect.  If no *timeout* is supplied, the 
+    global default timeout setting returned by :func:`socket.getdefaulttimeout` 
+    is used.  If *source_address* is set it must be a tuple of (host, port) 
+    for the socket to bind as a source address before making the connection. 
+    An host of '' or port 0 tells the OS to use the default. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">host</span><span class="s0">, </span><span class="s1">port = address</span>
+    <span class="s0">if </span><span class="s1">host.startswith(</span><span class="s4">&quot;[&quot;</span><span class="s1">):</span>
+        <span class="s1">host = host.strip(</span><span class="s4">&quot;[]&quot;</span><span class="s1">)</span>
+    <span class="s1">err = </span><span class="s0">None</span>
+
+    <span class="s2"># Using the value from allowed_gai_family() in the context of getaddrinfo lets</span>
+    <span class="s2"># us select whether to work with IPv4 DNS records, IPv6 records, or both.</span>
+    <span class="s2"># The original create_connection function always returns all records.</span>
+    <span class="s1">family = allowed_gai_family()</span>
+
+    <span class="s0">try</span><span class="s1">:</span>
+        <span class="s1">host.encode(</span><span class="s4">&quot;idna&quot;</span><span class="s1">)</span>
+    <span class="s0">except </span><span class="s1">UnicodeError:</span>
+        <span class="s0">return </span><span class="s1">six.raise_from(</span>
+            <span class="s1">LocationParseError(</span><span class="s4">u&quot;'%s', label empty or too long&quot; </span><span class="s1">% host)</span><span class="s0">, None</span>
+        <span class="s1">)</span>
+
+    <span class="s0">for </span><span class="s1">res </span><span class="s0">in </span><span class="s1">socket.getaddrinfo(host</span><span class="s0">, </span><span class="s1">port</span><span class="s0">, </span><span class="s1">family</span><span class="s0">, </span><span class="s1">socket.SOCK_STREAM):</span>
+        <span class="s1">af</span><span class="s0">, </span><span class="s1">socktype</span><span class="s0">, </span><span class="s1">proto</span><span class="s0">, </span><span class="s1">canonname</span><span class="s0">, </span><span class="s1">sa = res</span>
+        <span class="s1">sock = </span><span class="s0">None</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">sock = socket.socket(af</span><span class="s0">, </span><span class="s1">socktype</span><span class="s0">, </span><span class="s1">proto)</span>
+
+            <span class="s2"># If provided, set socket level options before connecting.</span>
+            <span class="s1">_set_socket_options(sock</span><span class="s0">, </span><span class="s1">socket_options)</span>
+
+            <span class="s0">if </span><span class="s1">timeout </span><span class="s0">is not </span><span class="s1">socket._GLOBAL_DEFAULT_TIMEOUT:</span>
+                <span class="s1">sock.settimeout(timeout)</span>
+            <span class="s0">if </span><span class="s1">source_address:</span>
+                <span class="s1">sock.bind(source_address)</span>
+            <span class="s1">sock.connect(sa)</span>
+            <span class="s0">return </span><span class="s1">sock</span>
+
+        <span class="s0">except </span><span class="s1">socket.error </span><span class="s0">as </span><span class="s1">e:</span>
+            <span class="s1">err = e</span>
+            <span class="s0">if </span><span class="s1">sock </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s1">sock.close()</span>
+                <span class="s1">sock = </span><span class="s0">None</span>
+
+    <span class="s0">if </span><span class="s1">err </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s0">raise </span><span class="s1">err</span>
+
+    <span class="s0">raise </span><span class="s1">socket.error(</span><span class="s4">&quot;getaddrinfo returns an empty list&quot;</span><span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">_set_socket_options(sock</span><span class="s0">, </span><span class="s1">options):</span>
+    <span class="s0">if </span><span class="s1">options </span><span class="s0">is None</span><span class="s1">:</span>
+        <span class="s0">return</span>
+
+    <span class="s0">for </span><span class="s1">opt </span><span class="s0">in </span><span class="s1">options:</span>
+        <span class="s1">sock.setsockopt(*opt)</span>
+
+
+<span class="s0">def </span><span class="s1">allowed_gai_family():</span>
+    <span class="s3">&quot;&quot;&quot;This function is designed to work in the context of 
+    getaddrinfo, where family=socket.AF_UNSPEC is the default and 
+    will perform a DNS search for both IPv6 and IPv4 records.&quot;&quot;&quot;</span>
+
+    <span class="s1">family = socket.AF_INET</span>
+    <span class="s0">if </span><span class="s1">HAS_IPV6:</span>
+        <span class="s1">family = socket.AF_UNSPEC</span>
+    <span class="s0">return </span><span class="s1">family</span>
+
+
+<span class="s0">def </span><span class="s1">_has_ipv6(host):</span>
+    <span class="s3">&quot;&quot;&quot;Returns True if the system can bind an IPv6 address.&quot;&quot;&quot;</span>
+    <span class="s1">sock = </span><span class="s0">None</span>
+    <span class="s1">has_ipv6 = </span><span class="s0">False</span>
+
+    <span class="s2"># App Engine doesn't support IPV6 sockets and actually has a quota on the</span>
+    <span class="s2"># number of sockets that can be used, so just early out here instead of</span>
+    <span class="s2"># creating a socket needlessly.</span>
+    <span class="s2"># See https://github.com/urllib3/urllib3/issues/1446</span>
+    <span class="s0">if </span><span class="s1">_appengine_environ.is_appengine_sandbox():</span>
+        <span class="s0">return False</span>
+
+    <span class="s0">if </span><span class="s1">socket.has_ipv6:</span>
+        <span class="s2"># has_ipv6 returns true if cPython was compiled with IPv6 support.</span>
+        <span class="s2"># It does not tell us if the system has IPv6 support enabled. To</span>
+        <span class="s2"># determine that we must bind to an IPv6 address.</span>
+        <span class="s2"># https://github.com/urllib3/urllib3/pull/611</span>
+        <span class="s2"># https://bugs.python.org/issue658327</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">sock = socket.socket(socket.AF_INET6)</span>
+            <span class="s1">sock.bind((host</span><span class="s0">, </span><span class="s5">0</span><span class="s1">))</span>
+            <span class="s1">has_ipv6 = </span><span class="s0">True</span>
+        <span class="s0">except </span><span class="s1">Exception:</span>
+            <span class="s0">pass</span>
+
+    <span class="s0">if </span><span class="s1">sock:</span>
+        <span class="s1">sock.close()</span>
+    <span class="s0">return </span><span class="s1">has_ipv6</span>
+
+
+<span class="s1">HAS_IPV6 = _has_ipv6(</span><span class="s4">&quot;::1&quot;</span><span class="s1">)</span>
+</pre>
+</body>
+</html>

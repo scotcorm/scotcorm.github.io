@@ -1,0 +1,306 @@
+<html>
+<head>
+<title>repr.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #808080;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+repr.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;Object representations for debugging purposes. Unlike the default 
+repr, these expose more information and produce HTML instead of ASCII. 
+ 
+Together with the CSS and JavaScript of the debugger this gives a 
+colorful and more compact output. 
+&quot;&quot;&quot;</span>
+<span class="s2">import </span><span class="s1">codecs</span>
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">typing </span><span class="s2">as </span><span class="s1">t</span>
+<span class="s2">from </span><span class="s1">collections </span><span class="s2">import </span><span class="s1">deque</span>
+<span class="s2">from </span><span class="s1">html </span><span class="s2">import </span><span class="s1">escape</span>
+<span class="s2">from </span><span class="s1">traceback </span><span class="s2">import </span><span class="s1">format_exception_only</span>
+
+<span class="s1">missing = object()</span>
+<span class="s1">_paragraph_re = re.compile(</span><span class="s3">r&quot;(?:\r\n|\r|\n){2,}&quot;</span><span class="s1">)</span>
+<span class="s1">RegexType = type(_paragraph_re)</span>
+
+<span class="s1">HELP_HTML = </span><span class="s3">&quot;&quot;&quot;</span><span class="s2">\ 
+</span><span class="s3">&lt;div class=box&gt; 
+  &lt;h3&gt;%(title)s&lt;/h3&gt; 
+  &lt;pre class=help&gt;%(text)s&lt;/pre&gt; 
+&lt;/div&gt;</span><span class="s2">\ 
+</span><span class="s3">&quot;&quot;&quot;</span>
+<span class="s1">OBJECT_DUMP_HTML = </span><span class="s3">&quot;&quot;&quot;</span><span class="s2">\ 
+</span><span class="s3">&lt;div class=box&gt; 
+  &lt;h3&gt;%(title)s&lt;/h3&gt; 
+  %(repr)s 
+  &lt;table&gt;%(items)s&lt;/table&gt; 
+&lt;/div&gt;</span><span class="s2">\ 
+</span><span class="s3">&quot;&quot;&quot;</span>
+
+
+<span class="s2">def </span><span class="s1">debug_repr(obj: object) -&gt; str:</span>
+    <span class="s0">&quot;&quot;&quot;Creates a debug repr of an object as HTML string.&quot;&quot;&quot;</span>
+    <span class="s2">return </span><span class="s1">DebugReprGenerator().repr(obj)</span>
+
+
+<span class="s2">def </span><span class="s1">dump(obj: object = missing) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+    <span class="s0">&quot;&quot;&quot;Print the object details to stdout._write (for the interactive 
+    console of the web debugger. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">gen = DebugReprGenerator()</span>
+    <span class="s2">if </span><span class="s1">obj </span><span class="s2">is </span><span class="s1">missing:</span>
+        <span class="s1">rv = gen.dump_locals(sys._getframe(</span><span class="s4">1</span><span class="s1">).f_locals)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">rv = gen.dump_object(obj)</span>
+    <span class="s1">sys.stdout._write(rv)  </span><span class="s5"># type: ignore</span>
+
+
+<span class="s2">class </span><span class="s1">_Helper:</span>
+    <span class="s0">&quot;&quot;&quot;Displays an HTML version of the normal help, for the interactive 
+    debugger only because it requires a patched sys.stdout. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self) -&gt; str:</span>
+        <span class="s2">return </span><span class="s3">&quot;Type help(object) for help about object.&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__call__(self</span><span class="s2">, </span><span class="s1">topic: t.Optional[t.Any] = </span><span class="s2">None</span><span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">topic </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">sys.stdout._write(</span><span class="s3">f&quot;&lt;span class=help&gt;</span><span class="s2">{</span><span class="s1">self</span><span class="s2">!r}</span><span class="s3">&lt;/span&gt;&quot;</span><span class="s1">)  </span><span class="s5"># type: ignore</span>
+            <span class="s2">return</span>
+        <span class="s2">import </span><span class="s1">pydoc</span>
+
+        <span class="s1">pydoc.help(topic)</span>
+        <span class="s1">rv = sys.stdout.reset()  </span><span class="s5"># type: ignore</span>
+        <span class="s2">if </span><span class="s1">isinstance(rv</span><span class="s2">, </span><span class="s1">bytes):</span>
+            <span class="s1">rv = rv.decode(</span><span class="s3">&quot;utf-8&quot;</span><span class="s2">, </span><span class="s3">&quot;ignore&quot;</span><span class="s1">)</span>
+        <span class="s1">paragraphs = _paragraph_re.split(rv)</span>
+        <span class="s2">if </span><span class="s1">len(paragraphs) &gt; </span><span class="s4">1</span><span class="s1">:</span>
+            <span class="s1">title = paragraphs[</span><span class="s4">0</span><span class="s1">]</span>
+            <span class="s1">text = </span><span class="s3">&quot;</span><span class="s2">\n\n</span><span class="s3">&quot;</span><span class="s1">.join(paragraphs[</span><span class="s4">1</span><span class="s1">:])</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">title = </span><span class="s3">&quot;Help&quot;</span>
+            <span class="s1">text = paragraphs[</span><span class="s4">0</span><span class="s1">]</span>
+        <span class="s1">sys.stdout._write(HELP_HTML % {</span><span class="s3">&quot;title&quot;</span><span class="s1">: title</span><span class="s2">, </span><span class="s3">&quot;text&quot;</span><span class="s1">: text})  </span><span class="s5"># type: ignore</span>
+
+
+<span class="s1">helper = _Helper()</span>
+
+
+<span class="s2">def </span><span class="s1">_add_subclass_info(</span>
+    <span class="s1">inner: str</span><span class="s2">, </span><span class="s1">obj: object</span><span class="s2">, </span><span class="s1">base: t.Union[t.Type</span><span class="s2">, </span><span class="s1">t.Tuple[t.Type</span><span class="s2">, </span><span class="s1">...]]</span>
+<span class="s1">) -&gt; str:</span>
+    <span class="s2">if </span><span class="s1">isinstance(base</span><span class="s2">, </span><span class="s1">tuple):</span>
+        <span class="s2">for </span><span class="s1">base </span><span class="s2">in </span><span class="s1">base:</span>
+            <span class="s2">if </span><span class="s1">type(obj) </span><span class="s2">is </span><span class="s1">base:</span>
+                <span class="s2">return </span><span class="s1">inner</span>
+    <span class="s2">elif </span><span class="s1">type(obj) </span><span class="s2">is </span><span class="s1">base:</span>
+        <span class="s2">return </span><span class="s1">inner</span>
+    <span class="s1">module = </span><span class="s3">&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">obj.__class__.__module__ </span><span class="s2">not in </span><span class="s1">(</span><span class="s3">&quot;__builtin__&quot;</span><span class="s2">, </span><span class="s3">&quot;exceptions&quot;</span><span class="s1">):</span>
+        <span class="s1">module = </span><span class="s3">f'&lt;span class=&quot;module&quot;&gt;</span><span class="s2">{</span><span class="s1">obj.__class__.__module__</span><span class="s2">}</span><span class="s3">.&lt;/span&gt;'</span>
+    <span class="s2">return </span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">module</span><span class="s2">}{</span><span class="s1">type(obj).__name__</span><span class="s2">}</span><span class="s3">(</span><span class="s2">{</span><span class="s1">inner</span><span class="s2">}</span><span class="s3">)&quot;</span>
+
+
+<span class="s2">def </span><span class="s1">_sequence_repr_maker(</span>
+    <span class="s1">left: str</span><span class="s2">, </span><span class="s1">right: str</span><span class="s2">, </span><span class="s1">base: t.Type</span><span class="s2">, </span><span class="s1">limit: int = </span><span class="s4">8</span>
+<span class="s1">) -&gt; t.Callable[[</span><span class="s3">&quot;DebugReprGenerator&quot;</span><span class="s2">, </span><span class="s1">t.Iterable</span><span class="s2">, </span><span class="s1">bool]</span><span class="s2">, </span><span class="s1">str]:</span>
+    <span class="s2">def </span><span class="s1">proxy(self: </span><span class="s3">&quot;DebugReprGenerator&quot;</span><span class="s2">, </span><span class="s1">obj: t.Iterable</span><span class="s2">, </span><span class="s1">recursive: bool) -&gt; str:</span>
+        <span class="s2">if </span><span class="s1">recursive:</span>
+            <span class="s2">return </span><span class="s1">_add_subclass_info(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">left</span><span class="s2">}</span><span class="s3">...</span><span class="s2">{</span><span class="s1">right</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s2">, </span><span class="s1">obj</span><span class="s2">, </span><span class="s1">base)</span>
+        <span class="s1">buf = [left]</span>
+        <span class="s1">have_extended_section = </span><span class="s2">False</span>
+        <span class="s2">for </span><span class="s1">idx</span><span class="s2">, </span><span class="s1">item </span><span class="s2">in </span><span class="s1">enumerate(obj):</span>
+            <span class="s2">if </span><span class="s1">idx:</span>
+                <span class="s1">buf.append(</span><span class="s3">&quot;, &quot;</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">idx == limit:</span>
+                <span class="s1">buf.append(</span><span class="s3">'&lt;span class=&quot;extended&quot;&gt;'</span><span class="s1">)</span>
+                <span class="s1">have_extended_section = </span><span class="s2">True</span>
+            <span class="s1">buf.append(self.repr(item))</span>
+        <span class="s2">if </span><span class="s1">have_extended_section:</span>
+            <span class="s1">buf.append(</span><span class="s3">&quot;&lt;/span&gt;&quot;</span><span class="s1">)</span>
+        <span class="s1">buf.append(right)</span>
+        <span class="s2">return </span><span class="s1">_add_subclass_info(</span><span class="s3">&quot;&quot;</span><span class="s1">.join(buf)</span><span class="s2">, </span><span class="s1">obj</span><span class="s2">, </span><span class="s1">base)</span>
+
+    <span class="s2">return </span><span class="s1">proxy</span>
+
+
+<span class="s2">class </span><span class="s1">DebugReprGenerator:</span>
+    <span class="s2">def </span><span class="s1">__init__(self) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self._stack: t.List[t.Any] = []</span>
+
+    <span class="s1">list_repr = _sequence_repr_maker(</span><span class="s3">&quot;[&quot;</span><span class="s2">, </span><span class="s3">&quot;]&quot;</span><span class="s2">, </span><span class="s1">list)</span>
+    <span class="s1">tuple_repr = _sequence_repr_maker(</span><span class="s3">&quot;(&quot;</span><span class="s2">, </span><span class="s3">&quot;)&quot;</span><span class="s2">, </span><span class="s1">tuple)</span>
+    <span class="s1">set_repr = _sequence_repr_maker(</span><span class="s3">&quot;set([&quot;</span><span class="s2">, </span><span class="s3">&quot;])&quot;</span><span class="s2">, </span><span class="s1">set)</span>
+    <span class="s1">frozenset_repr = _sequence_repr_maker(</span><span class="s3">&quot;frozenset([&quot;</span><span class="s2">, </span><span class="s3">&quot;])&quot;</span><span class="s2">, </span><span class="s1">frozenset)</span>
+    <span class="s1">deque_repr = _sequence_repr_maker(</span>
+        <span class="s3">'&lt;span class=&quot;module&quot;&gt;collections.&lt;/span&gt;deque(['</span><span class="s2">, </span><span class="s3">&quot;])&quot;</span><span class="s2">, </span><span class="s1">deque</span>
+    <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">regex_repr(self</span><span class="s2">, </span><span class="s1">obj: t.Pattern) -&gt; str:</span>
+        <span class="s1">pattern = repr(obj.pattern)</span>
+        <span class="s1">pattern = codecs.decode(pattern</span><span class="s2">, </span><span class="s3">&quot;unicode-escape&quot;</span><span class="s2">, </span><span class="s3">&quot;ignore&quot;</span><span class="s1">)  </span><span class="s5"># type: ignore</span>
+        <span class="s1">pattern = </span><span class="s3">f&quot;r</span><span class="s2">{</span><span class="s1">pattern</span><span class="s2">}</span><span class="s3">&quot;</span>
+        <span class="s2">return </span><span class="s3">f're.compile(&lt;span class=&quot;string regex&quot;&gt;</span><span class="s2">{</span><span class="s1">pattern</span><span class="s2">}</span><span class="s3">&lt;/span&gt;)'</span>
+
+    <span class="s2">def </span><span class="s1">string_repr(self</span><span class="s2">, </span><span class="s1">obj: t.Union[str</span><span class="s2">, </span><span class="s1">bytes]</span><span class="s2">, </span><span class="s1">limit: int = </span><span class="s4">70</span><span class="s1">) -&gt; str:</span>
+        <span class="s1">buf = [</span><span class="s3">'&lt;span class=&quot;string&quot;&gt;'</span><span class="s1">]</span>
+        <span class="s1">r = repr(obj)</span>
+
+        <span class="s5"># shorten the repr when the hidden part would be at least 3 chars</span>
+        <span class="s2">if </span><span class="s1">len(r) - limit &gt; </span><span class="s4">2</span><span class="s1">:</span>
+            <span class="s1">buf.extend(</span>
+                <span class="s1">(</span>
+                    <span class="s1">escape(r[:limit])</span><span class="s2">,</span>
+                    <span class="s3">'&lt;span class=&quot;extended&quot;&gt;'</span><span class="s2">,</span>
+                    <span class="s1">escape(r[limit:])</span><span class="s2">,</span>
+                    <span class="s3">&quot;&lt;/span&gt;&quot;</span><span class="s2">,</span>
+                <span class="s1">)</span>
+            <span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">buf.append(escape(r))</span>
+
+        <span class="s1">buf.append(</span><span class="s3">&quot;&lt;/span&gt;&quot;</span><span class="s1">)</span>
+        <span class="s1">out = </span><span class="s3">&quot;&quot;</span><span class="s1">.join(buf)</span>
+
+        <span class="s5"># if the repr looks like a standard string, add subclass info if needed</span>
+        <span class="s2">if </span><span class="s1">r[</span><span class="s4">0</span><span class="s1">] </span><span class="s2">in </span><span class="s3">&quot;'</span><span class="s2">\&quot;</span><span class="s3">&quot; </span><span class="s2">or </span><span class="s1">(r[</span><span class="s4">0</span><span class="s1">] == </span><span class="s3">&quot;b&quot; </span><span class="s2">and </span><span class="s1">r[</span><span class="s4">1</span><span class="s1">] </span><span class="s2">in </span><span class="s3">&quot;'</span><span class="s2">\&quot;</span><span class="s3">&quot;</span><span class="s1">):</span>
+            <span class="s2">return </span><span class="s1">_add_subclass_info(out</span><span class="s2">, </span><span class="s1">obj</span><span class="s2">, </span><span class="s1">(bytes</span><span class="s2">, </span><span class="s1">str))</span>
+
+        <span class="s5"># otherwise, assume the repr distinguishes the subclass already</span>
+        <span class="s2">return </span><span class="s1">out</span>
+
+    <span class="s2">def </span><span class="s1">dict_repr(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">d: t.Union[t.Dict[int</span><span class="s2">, None</span><span class="s1">]</span><span class="s2">, </span><span class="s1">t.Dict[str</span><span class="s2">, </span><span class="s1">int]</span><span class="s2">, </span><span class="s1">t.Dict[t.Union[str</span><span class="s2">, </span><span class="s1">int]</span><span class="s2">, </span><span class="s1">int]]</span><span class="s2">,</span>
+        <span class="s1">recursive: bool</span><span class="s2">,</span>
+        <span class="s1">limit: int = </span><span class="s4">5</span><span class="s2">,</span>
+    <span class="s1">) -&gt; str:</span>
+        <span class="s2">if </span><span class="s1">recursive:</span>
+            <span class="s2">return </span><span class="s1">_add_subclass_info(</span><span class="s3">&quot;{...}&quot;</span><span class="s2">, </span><span class="s1">d</span><span class="s2">, </span><span class="s1">dict)</span>
+        <span class="s1">buf = [</span><span class="s3">&quot;{&quot;</span><span class="s1">]</span>
+        <span class="s1">have_extended_section = </span><span class="s2">False</span>
+        <span class="s2">for </span><span class="s1">idx</span><span class="s2">, </span><span class="s1">(key</span><span class="s2">, </span><span class="s1">value) </span><span class="s2">in </span><span class="s1">enumerate(d.items()):</span>
+            <span class="s2">if </span><span class="s1">idx:</span>
+                <span class="s1">buf.append(</span><span class="s3">&quot;, &quot;</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">idx == limit - </span><span class="s4">1</span><span class="s1">:</span>
+                <span class="s1">buf.append(</span><span class="s3">'&lt;span class=&quot;extended&quot;&gt;'</span><span class="s1">)</span>
+                <span class="s1">have_extended_section = </span><span class="s2">True</span>
+            <span class="s1">buf.append(</span>
+                <span class="s3">f'&lt;span class=&quot;pair&quot;&gt;&lt;span class=&quot;key&quot;&gt;</span><span class="s2">{</span><span class="s1">self.repr(key)</span><span class="s2">}</span><span class="s3">&lt;/span&gt;:'</span>
+                <span class="s3">f' &lt;span class=&quot;value&quot;&gt;</span><span class="s2">{</span><span class="s1">self.repr(value)</span><span class="s2">}</span><span class="s3">&lt;/span&gt;&lt;/span&gt;'</span>
+            <span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">have_extended_section:</span>
+            <span class="s1">buf.append(</span><span class="s3">&quot;&lt;/span&gt;&quot;</span><span class="s1">)</span>
+        <span class="s1">buf.append(</span><span class="s3">&quot;}&quot;</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">_add_subclass_info(</span><span class="s3">&quot;&quot;</span><span class="s1">.join(buf)</span><span class="s2">, </span><span class="s1">d</span><span class="s2">, </span><span class="s1">dict)</span>
+
+    <span class="s2">def </span><span class="s1">object_repr(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">obj: t.Optional[t.Union[t.Type[dict]</span><span class="s2">, </span><span class="s1">t.Callable</span><span class="s2">, </span><span class="s1">t.Type[list]]]</span>
+    <span class="s1">) -&gt; str:</span>
+        <span class="s1">r = repr(obj)</span>
+        <span class="s2">return </span><span class="s3">f'&lt;span class=&quot;object&quot;&gt;</span><span class="s2">{</span><span class="s1">escape(r)</span><span class="s2">}</span><span class="s3">&lt;/span&gt;'</span>
+
+    <span class="s2">def </span><span class="s1">dispatch_repr(self</span><span class="s2">, </span><span class="s1">obj: t.Any</span><span class="s2">, </span><span class="s1">recursive: bool) -&gt; str:</span>
+        <span class="s2">if </span><span class="s1">obj </span><span class="s2">is </span><span class="s1">helper:</span>
+            <span class="s2">return </span><span class="s3">f'&lt;span class=&quot;help&quot;&gt;</span><span class="s2">{</span><span class="s1">helper</span><span class="s2">!r}</span><span class="s3">&lt;/span&gt;'</span>
+        <span class="s2">if </span><span class="s1">isinstance(obj</span><span class="s2">, </span><span class="s1">(int</span><span class="s2">, </span><span class="s1">float</span><span class="s2">, </span><span class="s1">complex)):</span>
+            <span class="s2">return </span><span class="s3">f'&lt;span class=&quot;number&quot;&gt;</span><span class="s2">{</span><span class="s1">obj</span><span class="s2">!r}</span><span class="s3">&lt;/span&gt;'</span>
+        <span class="s2">if </span><span class="s1">isinstance(obj</span><span class="s2">, </span><span class="s1">str) </span><span class="s2">or </span><span class="s1">isinstance(obj</span><span class="s2">, </span><span class="s1">bytes):</span>
+            <span class="s2">return </span><span class="s1">self.string_repr(obj)</span>
+        <span class="s2">if </span><span class="s1">isinstance(obj</span><span class="s2">, </span><span class="s1">RegexType):</span>
+            <span class="s2">return </span><span class="s1">self.regex_repr(obj)</span>
+        <span class="s2">if </span><span class="s1">isinstance(obj</span><span class="s2">, </span><span class="s1">list):</span>
+            <span class="s2">return </span><span class="s1">self.list_repr(obj</span><span class="s2">, </span><span class="s1">recursive)</span>
+        <span class="s2">if </span><span class="s1">isinstance(obj</span><span class="s2">, </span><span class="s1">tuple):</span>
+            <span class="s2">return </span><span class="s1">self.tuple_repr(obj</span><span class="s2">, </span><span class="s1">recursive)</span>
+        <span class="s2">if </span><span class="s1">isinstance(obj</span><span class="s2">, </span><span class="s1">set):</span>
+            <span class="s2">return </span><span class="s1">self.set_repr(obj</span><span class="s2">, </span><span class="s1">recursive)</span>
+        <span class="s2">if </span><span class="s1">isinstance(obj</span><span class="s2">, </span><span class="s1">frozenset):</span>
+            <span class="s2">return </span><span class="s1">self.frozenset_repr(obj</span><span class="s2">, </span><span class="s1">recursive)</span>
+        <span class="s2">if </span><span class="s1">isinstance(obj</span><span class="s2">, </span><span class="s1">dict):</span>
+            <span class="s2">return </span><span class="s1">self.dict_repr(obj</span><span class="s2">, </span><span class="s1">recursive)</span>
+        <span class="s2">if </span><span class="s1">isinstance(obj</span><span class="s2">, </span><span class="s1">deque):</span>
+            <span class="s2">return </span><span class="s1">self.deque_repr(obj</span><span class="s2">, </span><span class="s1">recursive)</span>
+        <span class="s2">return </span><span class="s1">self.object_repr(obj)</span>
+
+    <span class="s2">def </span><span class="s1">fallback_repr(self) -&gt; str:</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">info = </span><span class="s3">&quot;&quot;</span><span class="s1">.join(format_exception_only(*sys.exc_info()[:</span><span class="s4">2</span><span class="s1">]))</span>
+        <span class="s2">except </span><span class="s1">Exception:</span>
+            <span class="s1">info = </span><span class="s3">&quot;?&quot;</span>
+        <span class="s2">return </span><span class="s1">(</span>
+            <span class="s3">'&lt;span class=&quot;brokenrepr&quot;&gt;'</span>
+            <span class="s3">f&quot;&amp;lt;broken repr (</span><span class="s2">{</span><span class="s1">escape(info.strip())</span><span class="s2">}</span><span class="s3">)&amp;gt;&lt;/span&gt;&quot;</span>
+        <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">repr(self</span><span class="s2">, </span><span class="s1">obj: object) -&gt; str:</span>
+        <span class="s1">recursive = </span><span class="s2">False</span>
+        <span class="s2">for </span><span class="s1">item </span><span class="s2">in </span><span class="s1">self._stack:</span>
+            <span class="s2">if </span><span class="s1">item </span><span class="s2">is </span><span class="s1">obj:</span>
+                <span class="s1">recursive = </span><span class="s2">True</span>
+                <span class="s2">break</span>
+        <span class="s1">self._stack.append(obj)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">self.dispatch_repr(obj</span><span class="s2">, </span><span class="s1">recursive)</span>
+            <span class="s2">except </span><span class="s1">Exception:</span>
+                <span class="s2">return </span><span class="s1">self.fallback_repr()</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">self._stack.pop()</span>
+
+    <span class="s2">def </span><span class="s1">dump_object(self</span><span class="s2">, </span><span class="s1">obj: object) -&gt; str:</span>
+        <span class="s1">repr = </span><span class="s2">None</span>
+        <span class="s1">items: t.Optional[t.List[t.Tuple[str</span><span class="s2">, </span><span class="s1">str]]] = </span><span class="s2">None</span>
+
+        <span class="s2">if </span><span class="s1">isinstance(obj</span><span class="s2">, </span><span class="s1">dict):</span>
+            <span class="s1">title = </span><span class="s3">&quot;Contents of&quot;</span>
+            <span class="s1">items = []</span>
+            <span class="s2">for </span><span class="s1">key</span><span class="s2">, </span><span class="s1">value </span><span class="s2">in </span><span class="s1">obj.items():</span>
+                <span class="s2">if not </span><span class="s1">isinstance(key</span><span class="s2">, </span><span class="s1">str):</span>
+                    <span class="s1">items = </span><span class="s2">None</span>
+                    <span class="s2">break</span>
+                <span class="s1">items.append((key</span><span class="s2">, </span><span class="s1">self.repr(value)))</span>
+        <span class="s2">if </span><span class="s1">items </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">items = []</span>
+            <span class="s1">repr = self.repr(obj)</span>
+            <span class="s2">for </span><span class="s1">key </span><span class="s2">in </span><span class="s1">dir(obj):</span>
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s1">items.append((key</span><span class="s2">, </span><span class="s1">self.repr(getattr(obj</span><span class="s2">, </span><span class="s1">key))))</span>
+                <span class="s2">except </span><span class="s1">Exception:</span>
+                    <span class="s2">pass</span>
+            <span class="s1">title = </span><span class="s3">&quot;Details for&quot;</span>
+        <span class="s1">title += </span><span class="s3">f&quot; </span><span class="s2">{</span><span class="s1">object.__repr__(obj)[</span><span class="s4">1</span><span class="s1">:-</span><span class="s4">1</span><span class="s1">]</span><span class="s2">}</span><span class="s3">&quot;</span>
+        <span class="s2">return </span><span class="s1">self.render_object_dump(items</span><span class="s2">, </span><span class="s1">title</span><span class="s2">, </span><span class="s1">repr)</span>
+
+    <span class="s2">def </span><span class="s1">dump_locals(self</span><span class="s2">, </span><span class="s1">d: t.Dict[str</span><span class="s2">, </span><span class="s1">t.Any]) -&gt; str:</span>
+        <span class="s1">items = [(key</span><span class="s2">, </span><span class="s1">self.repr(value)) </span><span class="s2">for </span><span class="s1">key</span><span class="s2">, </span><span class="s1">value </span><span class="s2">in </span><span class="s1">d.items()]</span>
+        <span class="s2">return </span><span class="s1">self.render_object_dump(items</span><span class="s2">, </span><span class="s3">&quot;Local variables in frame&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">render_object_dump(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">items: t.List[t.Tuple[str</span><span class="s2">, </span><span class="s1">str]]</span><span class="s2">, </span><span class="s1">title: str</span><span class="s2">, </span><span class="s1">repr: t.Optional[str] = </span><span class="s2">None</span>
+    <span class="s1">) -&gt; str:</span>
+        <span class="s1">html_items = []</span>
+        <span class="s2">for </span><span class="s1">key</span><span class="s2">, </span><span class="s1">value </span><span class="s2">in </span><span class="s1">items:</span>
+            <span class="s1">html_items.append(</span><span class="s3">f&quot;&lt;tr&gt;&lt;th&gt;</span><span class="s2">{</span><span class="s1">escape(key)</span><span class="s2">}</span><span class="s3">&lt;td&gt;&lt;pre class=repr&gt;</span><span class="s2">{</span><span class="s1">value</span><span class="s2">}</span><span class="s3">&lt;/pre&gt;&quot;</span><span class="s1">)</span>
+        <span class="s2">if not </span><span class="s1">html_items:</span>
+            <span class="s1">html_items.append(</span><span class="s3">&quot;&lt;tr&gt;&lt;td&gt;&lt;em&gt;Nothing&lt;/em&gt;&quot;</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">OBJECT_DUMP_HTML % {</span>
+            <span class="s3">&quot;title&quot;</span><span class="s1">: escape(title)</span><span class="s2">,</span>
+            <span class="s3">&quot;repr&quot;</span><span class="s1">: </span><span class="s3">f&quot;&lt;pre class=repr&gt;</span><span class="s2">{</span><span class="s1">repr </span><span class="s2">if </span><span class="s1">repr </span><span class="s2">else </span><span class="s3">''</span><span class="s2">}</span><span class="s3">&lt;/pre&gt;&quot;</span><span class="s2">,</span>
+            <span class="s3">&quot;items&quot;</span><span class="s1">: </span><span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">&quot;</span><span class="s1">.join(html_items)</span><span class="s2">,</span>
+        <span class="s1">}</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,138 @@
+<html>
+<head>
+<title>categorical.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #808080;}
+.s4 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+categorical.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">numpy </span><span class="s0">as </span><span class="s1">np</span>
+
+<span class="s0">from </span><span class="s1">pandas.core.algorithms </span><span class="s0">import </span><span class="s1">unique1d</span>
+<span class="s0">from </span><span class="s1">pandas.core.arrays.categorical </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">Categorical</span><span class="s0">,</span>
+    <span class="s1">CategoricalDtype</span><span class="s0">,</span>
+    <span class="s1">recode_for_categories</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.core.indexes.api </span><span class="s0">import </span><span class="s1">CategoricalIndex</span>
+
+
+<span class="s0">def </span><span class="s1">recode_for_groupby(</span>
+    <span class="s1">c: Categorical</span><span class="s0">, </span><span class="s1">sort: bool</span><span class="s0">, </span><span class="s1">observed: bool</span>
+<span class="s1">) -&gt; tuple[Categorical</span><span class="s0">, </span><span class="s1">Categorical | </span><span class="s0">None</span><span class="s1">]:</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Code the categories to ensure we can groupby for categoricals. 
+ 
+    If observed=True, we return a new Categorical with the observed 
+    categories only. 
+ 
+    If sort=False, return a copy of self, coded with categories as 
+    returned by .unique(), followed by any categories not appearing in 
+    the data. If sort=True, return self. 
+ 
+    This method is needed solely to ensure the categorical index of the 
+    GroupBy result has categories in the order of appearance in the data 
+    (GH-8868). 
+ 
+    Parameters 
+    ---------- 
+    c : Categorical 
+    sort : bool 
+        The value of the sort parameter groupby was called with. 
+    observed : bool 
+        Account only for the observed values 
+ 
+    Returns 
+    ------- 
+    Categorical 
+        If sort=False, the new categories are set to the order of 
+        appearance in codes (unless ordered=True, in which case the 
+        original order is preserved), followed by any unrepresented 
+        categories in the original order. 
+    Categorical or None 
+        If we are observed, return the original categorical, otherwise None 
+    &quot;&quot;&quot;</span>
+    <span class="s3"># we only care about observed values</span>
+    <span class="s0">if </span><span class="s1">observed:</span>
+        <span class="s3"># In cases with c.ordered, this is equivalent to</span>
+        <span class="s3">#  return c.remove_unused_categories(), c</span>
+
+        <span class="s1">unique_codes = unique1d(c.codes)</span>
+
+        <span class="s1">take_codes = unique_codes[unique_codes != -</span><span class="s4">1</span><span class="s1">]</span>
+        <span class="s0">if </span><span class="s1">c.ordered:</span>
+            <span class="s1">take_codes = np.sort(take_codes)</span>
+
+        <span class="s3"># we recode according to the uniques</span>
+        <span class="s1">categories = c.categories.take(take_codes)</span>
+        <span class="s1">codes = recode_for_categories(c.codes</span><span class="s0">, </span><span class="s1">c.categories</span><span class="s0">, </span><span class="s1">categories)</span>
+
+        <span class="s3"># return a new categorical that maps our new codes</span>
+        <span class="s3"># and categories</span>
+        <span class="s1">dtype = CategoricalDtype(categories</span><span class="s0">, </span><span class="s1">ordered=c.ordered)</span>
+        <span class="s0">return </span><span class="s1">Categorical(codes</span><span class="s0">, </span><span class="s1">dtype=dtype</span><span class="s0">, </span><span class="s1">fastpath=</span><span class="s0">True</span><span class="s1">)</span><span class="s0">, </span><span class="s1">c</span>
+
+    <span class="s3"># Already sorted according to c.categories; all is fine</span>
+    <span class="s0">if </span><span class="s1">sort:</span>
+        <span class="s0">return </span><span class="s1">c</span><span class="s0">, None</span>
+
+    <span class="s3"># sort=False should order groups in as-encountered order (GH-8868)</span>
+    <span class="s1">cat = c.unique()</span>
+
+    <span class="s3"># See GH-38140 for block below</span>
+    <span class="s3"># exclude nan from indexer for categories</span>
+    <span class="s1">take_codes = cat.codes[cat.codes != -</span><span class="s4">1</span><span class="s1">]</span>
+    <span class="s0">if </span><span class="s1">cat.ordered:</span>
+        <span class="s1">take_codes = np.sort(take_codes)</span>
+    <span class="s1">cat = cat.set_categories(cat.categories.take(take_codes))</span>
+
+    <span class="s3"># But for groupby to work, all categories should be present,</span>
+    <span class="s3"># including those missing from the data (GH-13179), which .unique()</span>
+    <span class="s3"># above dropped</span>
+    <span class="s1">cat = cat.add_categories(c.categories[~c.categories.isin(cat.categories)])</span>
+
+    <span class="s0">return </span><span class="s1">c.reorder_categories(cat.categories)</span><span class="s0">, None</span>
+
+
+<span class="s0">def </span><span class="s1">recode_from_groupby(</span>
+    <span class="s1">c: Categorical</span><span class="s0">, </span><span class="s1">sort: bool</span><span class="s0">, </span><span class="s1">ci: CategoricalIndex</span>
+<span class="s1">) -&gt; CategoricalIndex:</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Reverse the codes_to_groupby to account for sort / observed. 
+ 
+    Parameters 
+    ---------- 
+    c : Categorical 
+    sort : bool 
+        The value of the sort parameter groupby was called with. 
+    ci : CategoricalIndex 
+        The codes / categories to recode 
+ 
+    Returns 
+    ------- 
+    CategoricalIndex 
+    &quot;&quot;&quot;</span>
+    <span class="s3"># we re-order to the original category orderings</span>
+    <span class="s0">if </span><span class="s1">sort:</span>
+        <span class="s3"># error: &quot;CategoricalIndex&quot; has no attribute &quot;set_categories&quot;</span>
+        <span class="s0">return </span><span class="s1">ci.set_categories(c.categories)  </span><span class="s3"># type: ignore[attr-defined]</span>
+
+    <span class="s3"># we are not sorting, so add unobserved to the end</span>
+    <span class="s1">new_cats = c.categories[~c.categories.isin(ci.categories)]</span>
+    <span class="s3"># error: &quot;CategoricalIndex&quot; has no attribute &quot;add_categories&quot;</span>
+    <span class="s0">return </span><span class="s1">ci.add_categories(new_cats)  </span><span class="s3"># type: ignore[attr-defined]</span>
+</pre>
+</body>
+</html>

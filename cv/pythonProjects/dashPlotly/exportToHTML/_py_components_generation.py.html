@@ -1,0 +1,684 @@
+<html>
+<head>
+<title>_py_components_generation.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #629755; font-style: italic;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_py_components_generation.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">collections </span><span class="s0">import </span><span class="s1">OrderedDict</span>
+<span class="s0">import </span><span class="s1">copy</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">from </span><span class="s1">textwrap </span><span class="s0">import </span><span class="s1">fill</span>
+
+<span class="s0">from </span><span class="s1">dash.development.base_component </span><span class="s0">import </span><span class="s1">_explicitize_args</span>
+<span class="s0">from </span><span class="s1">dash.exceptions </span><span class="s0">import </span><span class="s1">NonExistentEventException</span>
+<span class="s0">from </span><span class="s1">._all_keywords </span><span class="s0">import </span><span class="s1">python_keywords</span>
+<span class="s0">from </span><span class="s1">.base_component </span><span class="s0">import </span><span class="s1">Component</span>
+
+
+<span class="s2"># pylint: disable=unused-argument</span>
+<span class="s0">def </span><span class="s1">generate_class_string(</span>
+    <span class="s1">typename</span><span class="s0">, </span><span class="s1">props</span><span class="s0">, </span><span class="s1">description</span><span class="s0">, </span><span class="s1">namespace</span><span class="s0">, </span><span class="s1">prop_reorder_exceptions=</span><span class="s0">None</span>
+<span class="s1">):</span>
+    <span class="s3">&quot;&quot;&quot;Dynamically generate class strings to have nicely formatted docstrings, 
+    keyword arguments, and repr. 
+    Inspired by http://jameso.be/2013/08/06/namedtuple.html 
+    Parameters 
+    ---------- 
+    typename 
+    props 
+    description 
+    namespace 
+    prop_reorder_exceptions 
+    Returns 
+    ------- 
+    string 
+    &quot;&quot;&quot;</span>
+    <span class="s2"># TODO _prop_names, _type, _namespace, and available_properties</span>
+    <span class="s2"># can be modified by a Dash JS developer via setattr</span>
+    <span class="s2"># TODO - Tab out the repr for the repr of these components to make it</span>
+    <span class="s2"># look more like a hierarchical tree</span>
+    <span class="s2"># TODO - Include &quot;description&quot; &quot;defaultValue&quot; in the repr and docstring</span>
+    <span class="s2">#</span>
+    <span class="s2"># TODO - Handle &quot;required&quot;</span>
+    <span class="s2">#</span>
+    <span class="s2"># TODO - How to handle user-given `null` values? I want to include</span>
+    <span class="s2"># an expanded docstring like Dropdown(value=None, id=None)</span>
+    <span class="s2"># but by templating in those None values, I have no way of knowing</span>
+    <span class="s2"># whether a property is None because the user explicitly wanted</span>
+    <span class="s2"># it to be `null` or whether that was just the default value.</span>
+    <span class="s2"># The solution might be to deal with default values better although</span>
+    <span class="s2"># not all component authors will supply those.</span>
+    <span class="s1">c = </span><span class="s4">'''class {typename}(Component): 
+    &quot;&quot;&quot;{docstring}&quot;&quot;&quot; 
+    @_explicitize_args 
+    def __init__(self, {default_argtext}): 
+        self._prop_names = {list_of_valid_keys} 
+        self._type = '{typename}' 
+        self._namespace = '{namespace}' 
+        self._valid_wildcard_attributes =</span><span class="s0">\ 
+            </span><span class="s4">{list_of_valid_wildcard_attr_prefixes} 
+        self.available_properties = {list_of_valid_keys} 
+        self.available_wildcard_properties =</span><span class="s0">\ 
+            </span><span class="s4">{list_of_valid_wildcard_attr_prefixes} 
+        _explicit_args = kwargs.pop('_explicit_args') 
+        _locals = locals() 
+        _locals.update(kwargs)  # For wildcard attrs 
+        args = {{k: _locals[k] for k in _explicit_args if k != 'children'}} 
+        for k in {required_props}: 
+            if k not in args: 
+                raise TypeError( 
+                    'Required argument `' + k + '` was not specified.') 
+        super({typename}, self).__init__({argtext}) 
+'''</span>
+
+    <span class="s1">filtered_props = (</span>
+        <span class="s1">filter_props(props)</span>
+        <span class="s0">if </span><span class="s1">(prop_reorder_exceptions </span><span class="s0">is not None and </span><span class="s1">typename </span><span class="s0">in </span><span class="s1">prop_reorder_exceptions)</span>
+        <span class="s0">or </span><span class="s1">(prop_reorder_exceptions </span><span class="s0">is not None and </span><span class="s4">&quot;ALL&quot; </span><span class="s0">in </span><span class="s1">prop_reorder_exceptions)</span>
+        <span class="s0">else </span><span class="s1">reorder_props(filter_props(props))</span>
+    <span class="s1">)</span>
+    <span class="s1">wildcard_prefixes = repr(parse_wildcards(props))</span>
+    <span class="s1">list_of_valid_keys = repr(list(map(str</span><span class="s0">, </span><span class="s1">filtered_props.keys())))</span>
+    <span class="s1">docstring = create_docstring(</span>
+        <span class="s1">component_name=typename</span><span class="s0">,</span>
+        <span class="s1">props=filtered_props</span><span class="s0">,</span>
+        <span class="s1">description=description</span><span class="s0">,</span>
+        <span class="s1">prop_reorder_exceptions=prop_reorder_exceptions</span><span class="s0">,</span>
+    <span class="s1">).replace(</span><span class="s4">&quot;</span><span class="s0">\r\n</span><span class="s4">&quot;</span><span class="s0">, </span><span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s1">)</span>
+
+    <span class="s1">prohibit_events(props)</span>
+
+    <span class="s2"># pylint: disable=unused-variable</span>
+    <span class="s1">prop_keys = list(props.keys())</span>
+    <span class="s0">if </span><span class="s4">&quot;children&quot; </span><span class="s0">in </span><span class="s1">props:</span>
+        <span class="s1">prop_keys.remove(</span><span class="s4">&quot;children&quot;</span><span class="s1">)</span>
+        <span class="s1">default_argtext = </span><span class="s4">&quot;children=None, &quot;</span>
+        <span class="s1">argtext = </span><span class="s4">&quot;children=children, **args&quot;</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">default_argtext = </span><span class="s4">&quot;&quot;</span>
+        <span class="s1">argtext = </span><span class="s4">&quot;**args&quot;</span>
+    <span class="s1">default_argtext += </span><span class="s4">&quot;, &quot;</span><span class="s1">.join(</span>
+        <span class="s1">[</span>
+            <span class="s1">(</span>
+                <span class="s4">&quot;{:s}=Component.REQUIRED&quot;</span><span class="s1">.format(p)</span>
+                <span class="s0">if </span><span class="s1">props[p][</span><span class="s4">&quot;required&quot;</span><span class="s1">]</span>
+                <span class="s0">else </span><span class="s4">&quot;{:s}=Component.UNDEFINED&quot;</span><span class="s1">.format(p)</span>
+            <span class="s1">)</span>
+            <span class="s0">for </span><span class="s1">p </span><span class="s0">in </span><span class="s1">prop_keys</span>
+            <span class="s0">if not </span><span class="s1">p.endswith(</span><span class="s4">&quot;-*&quot;</span><span class="s1">) </span><span class="s0">and </span><span class="s1">p </span><span class="s0">not in </span><span class="s1">python_keywords </span><span class="s0">and </span><span class="s1">p != </span><span class="s4">&quot;setProps&quot;</span>
+        <span class="s1">]</span>
+        <span class="s1">+ [</span><span class="s4">&quot;**kwargs&quot;</span><span class="s1">]</span>
+    <span class="s1">)</span>
+    <span class="s1">required_args = required_props(props)</span>
+    <span class="s0">return </span><span class="s1">c.format(</span>
+        <span class="s1">typename=typename</span><span class="s0">,</span>
+        <span class="s1">namespace=namespace</span><span class="s0">,</span>
+        <span class="s1">filtered_props=filtered_props</span><span class="s0">,</span>
+        <span class="s1">list_of_valid_wildcard_attr_prefixes=wildcard_prefixes</span><span class="s0">,</span>
+        <span class="s1">list_of_valid_keys=list_of_valid_keys</span><span class="s0">,</span>
+        <span class="s1">docstring=docstring</span><span class="s0">,</span>
+        <span class="s1">default_argtext=default_argtext</span><span class="s0">,</span>
+        <span class="s1">argtext=argtext</span><span class="s0">,</span>
+        <span class="s1">required_props=required_args</span><span class="s0">,</span>
+    <span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">generate_class_file(</span>
+    <span class="s1">typename</span><span class="s0">, </span><span class="s1">props</span><span class="s0">, </span><span class="s1">description</span><span class="s0">, </span><span class="s1">namespace</span><span class="s0">, </span><span class="s1">prop_reorder_exceptions=</span><span class="s0">None</span>
+<span class="s1">):</span>
+    <span class="s3">&quot;&quot;&quot;Generate a Python class file (.py) given a class string. 
+    Parameters 
+    ---------- 
+    typename 
+    props 
+    description 
+    namespace 
+    prop_reorder_exceptions 
+    Returns 
+    ------- 
+    &quot;&quot;&quot;</span>
+    <span class="s1">import_string = (</span>
+        <span class="s4">&quot;# AUTO GENERATED FILE - DO NOT EDIT</span><span class="s0">\n\n</span><span class="s4">&quot;</span>
+        <span class="s1">+ </span><span class="s4">&quot;from dash.development.base_component import &quot;</span>
+        <span class="s1">+ </span><span class="s4">&quot;Component, _explicitize_args</span><span class="s0">\n\n\n</span><span class="s4">&quot;</span>
+    <span class="s1">)</span>
+
+    <span class="s1">class_string = generate_class_string(</span>
+        <span class="s1">typename</span><span class="s0">, </span><span class="s1">props</span><span class="s0">, </span><span class="s1">description</span><span class="s0">, </span><span class="s1">namespace</span><span class="s0">, </span><span class="s1">prop_reorder_exceptions</span>
+    <span class="s1">)</span>
+    <span class="s1">file_name = </span><span class="s4">&quot;{:s}.py&quot;</span><span class="s1">.format(typename)</span>
+
+    <span class="s1">file_path = os.path.join(namespace</span><span class="s0">, </span><span class="s1">file_name)</span>
+    <span class="s0">with </span><span class="s1">open(file_path</span><span class="s0">, </span><span class="s4">&quot;w&quot;</span><span class="s1">) </span><span class="s0">as </span><span class="s1">f:</span>
+        <span class="s1">f.write(import_string)</span>
+        <span class="s1">f.write(class_string)</span>
+
+    <span class="s1">print(</span><span class="s4">&quot;Generated {}&quot;</span><span class="s1">.format(file_name))</span>
+
+
+<span class="s0">def </span><span class="s1">generate_imports(project_shortname</span><span class="s0">, </span><span class="s1">components):</span>
+    <span class="s0">with </span><span class="s1">open(os.path.join(project_shortname</span><span class="s0">, </span><span class="s4">&quot;_imports_.py&quot;</span><span class="s1">)</span><span class="s0">, </span><span class="s4">&quot;w&quot;</span><span class="s1">) </span><span class="s0">as </span><span class="s1">f:</span>
+        <span class="s1">imports_string = </span><span class="s4">&quot;{}</span><span class="s0">\n\n</span><span class="s4">{}&quot;</span><span class="s1">.format(</span>
+            <span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s1">.join(</span><span class="s4">&quot;from .{0} import {0}&quot;</span><span class="s1">.format(x) </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">components)</span><span class="s0">,</span>
+            <span class="s4">&quot;__all__ = [</span><span class="s0">\n</span><span class="s4">{}</span><span class="s0">\n</span><span class="s4">]&quot;</span><span class="s1">.format(</span>
+                <span class="s4">&quot;,</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s1">.join(</span><span class="s4">'    &quot;{}&quot;'</span><span class="s1">.format(x) </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">components)</span>
+            <span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">)</span>
+
+        <span class="s1">f.write(imports_string)</span>
+
+
+<span class="s0">def </span><span class="s1">generate_classes_files(project_shortname</span><span class="s0">, </span><span class="s1">metadata</span><span class="s0">, </span><span class="s1">*component_generators):</span>
+    <span class="s1">components = []</span>
+    <span class="s0">for </span><span class="s1">component_path</span><span class="s0">, </span><span class="s1">component_data </span><span class="s0">in </span><span class="s1">metadata.items():</span>
+        <span class="s1">component_name = component_path.split(</span><span class="s4">&quot;/&quot;</span><span class="s1">)[-</span><span class="s5">1</span><span class="s1">].split(</span><span class="s4">&quot;.&quot;</span><span class="s1">)[</span><span class="s5">0</span><span class="s1">]</span>
+        <span class="s1">components.append(component_name)</span>
+
+        <span class="s0">for </span><span class="s1">generator </span><span class="s0">in </span><span class="s1">component_generators:</span>
+            <span class="s1">generator(</span>
+                <span class="s1">component_name</span><span class="s0">,</span>
+                <span class="s1">component_data[</span><span class="s4">&quot;props&quot;</span><span class="s1">]</span><span class="s0">,</span>
+                <span class="s1">component_data[</span><span class="s4">&quot;description&quot;</span><span class="s1">]</span><span class="s0">,</span>
+                <span class="s1">project_shortname</span><span class="s0">,</span>
+            <span class="s1">)</span>
+
+    <span class="s0">return </span><span class="s1">components</span>
+
+
+<span class="s0">def </span><span class="s1">generate_class(</span>
+    <span class="s1">typename</span><span class="s0">, </span><span class="s1">props</span><span class="s0">, </span><span class="s1">description</span><span class="s0">, </span><span class="s1">namespace</span><span class="s0">, </span><span class="s1">prop_reorder_exceptions=</span><span class="s0">None</span>
+<span class="s1">):</span>
+    <span class="s3">&quot;&quot;&quot;Generate a Python class object given a class string. 
+    Parameters 
+    ---------- 
+    typename 
+    props 
+    description 
+    namespace 
+    Returns 
+    ------- 
+    &quot;&quot;&quot;</span>
+    <span class="s1">string = generate_class_string(</span>
+        <span class="s1">typename</span><span class="s0">, </span><span class="s1">props</span><span class="s0">, </span><span class="s1">description</span><span class="s0">, </span><span class="s1">namespace</span><span class="s0">, </span><span class="s1">prop_reorder_exceptions</span>
+    <span class="s1">)</span>
+    <span class="s1">scope = {</span><span class="s4">&quot;Component&quot;</span><span class="s1">: Component</span><span class="s0">, </span><span class="s4">&quot;_explicitize_args&quot;</span><span class="s1">: _explicitize_args}</span>
+    <span class="s2"># pylint: disable=exec-used</span>
+    <span class="s1">exec(string</span><span class="s0">, </span><span class="s1">scope)</span>
+    <span class="s1">result = scope[typename]</span>
+    <span class="s0">return </span><span class="s1">result</span>
+
+
+<span class="s0">def </span><span class="s1">required_props(props):</span>
+    <span class="s3">&quot;&quot;&quot;Pull names of required props from the props object. 
+    Parameters 
+    ---------- 
+    props: dict 
+    Returns 
+    ------- 
+    list 
+        List of prop names (str) that are required for the Component 
+    &quot;&quot;&quot;</span>
+    <span class="s0">return </span><span class="s1">[prop_name </span><span class="s0">for </span><span class="s1">prop_name</span><span class="s0">, </span><span class="s1">prop </span><span class="s0">in </span><span class="s1">list(props.items()) </span><span class="s0">if </span><span class="s1">prop[</span><span class="s4">&quot;required&quot;</span><span class="s1">]]</span>
+
+
+<span class="s0">def </span><span class="s1">create_docstring(component_name</span><span class="s0">, </span><span class="s1">props</span><span class="s0">, </span><span class="s1">description</span><span class="s0">, </span><span class="s1">prop_reorder_exceptions=</span><span class="s0">None</span><span class="s1">):</span>
+    <span class="s3">&quot;&quot;&quot;Create the Dash component docstring. 
+    Parameters 
+    ---------- 
+    component_name: str 
+        Component name 
+    props: dict 
+        Dictionary with {propName: propMetadata} structure 
+    description: str 
+        Component description 
+    Returns 
+    ------- 
+    str 
+        Dash component docstring 
+    &quot;&quot;&quot;</span>
+    <span class="s2"># Ensure props are ordered with children first</span>
+    <span class="s1">props = (</span>
+        <span class="s1">props</span>
+        <span class="s0">if </span><span class="s1">(</span>
+            <span class="s1">prop_reorder_exceptions </span><span class="s0">is not None</span>
+            <span class="s0">and </span><span class="s1">component_name </span><span class="s0">in </span><span class="s1">prop_reorder_exceptions</span>
+        <span class="s1">)</span>
+        <span class="s0">or </span><span class="s1">(prop_reorder_exceptions </span><span class="s0">is not None and </span><span class="s4">&quot;ALL&quot; </span><span class="s0">in </span><span class="s1">prop_reorder_exceptions)</span>
+        <span class="s0">else </span><span class="s1">reorder_props(props)</span>
+    <span class="s1">)</span>
+
+    <span class="s0">return </span><span class="s1">(</span>
+        <span class="s4">&quot;A{n} {name} component.</span><span class="s0">\n</span><span class="s4">{description}</span><span class="s0">\n\n</span><span class="s4">Keyword arguments:</span><span class="s0">\n</span><span class="s4">{args}&quot;</span>
+    <span class="s1">).format(</span>
+        <span class="s1">n=</span><span class="s4">&quot;n&quot; </span><span class="s0">if </span><span class="s1">component_name[</span><span class="s5">0</span><span class="s1">].lower() </span><span class="s0">in </span><span class="s4">&quot;aeiou&quot; </span><span class="s0">else </span><span class="s4">&quot;&quot;</span><span class="s0">,</span>
+        <span class="s1">name=component_name</span><span class="s0">,</span>
+        <span class="s1">description=description</span><span class="s0">,</span>
+        <span class="s1">args=</span><span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s1">.join(</span>
+            <span class="s1">create_prop_docstring(</span>
+                <span class="s1">prop_name=p</span><span class="s0">,</span>
+                <span class="s1">type_object=prop[</span><span class="s4">&quot;type&quot;</span><span class="s1">] </span><span class="s0">if </span><span class="s4">&quot;type&quot; </span><span class="s0">in </span><span class="s1">prop </span><span class="s0">else </span><span class="s1">prop[</span><span class="s4">&quot;flowType&quot;</span><span class="s1">]</span><span class="s0">,</span>
+                <span class="s1">required=prop[</span><span class="s4">&quot;required&quot;</span><span class="s1">]</span><span class="s0">,</span>
+                <span class="s1">description=prop[</span><span class="s4">&quot;description&quot;</span><span class="s1">]</span><span class="s0">,</span>
+                <span class="s1">default=prop.get(</span><span class="s4">&quot;defaultValue&quot;</span><span class="s1">)</span><span class="s0">,</span>
+                <span class="s1">indent_num=</span><span class="s5">0</span><span class="s0">,</span>
+                <span class="s1">is_flow_type=</span><span class="s4">&quot;flowType&quot; </span><span class="s0">in </span><span class="s1">prop </span><span class="s0">and </span><span class="s4">&quot;type&quot; </span><span class="s0">not in </span><span class="s1">prop</span><span class="s0">,</span>
+            <span class="s1">)</span>
+            <span class="s0">for </span><span class="s1">p</span><span class="s0">, </span><span class="s1">prop </span><span class="s0">in </span><span class="s1">filter_props(props).items()</span>
+        <span class="s1">)</span><span class="s0">,</span>
+    <span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">prohibit_events(props):</span>
+    <span class="s3">&quot;&quot;&quot;Events have been removed. Raise an error if we see dashEvents or 
+    fireEvents. 
+    Parameters 
+    ---------- 
+    props: dict 
+        Dictionary with {propName: propMetadata} structure 
+    Raises 
+    ------- 
+    ? 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s4">&quot;dashEvents&quot; </span><span class="s0">in </span><span class="s1">props </span><span class="s0">or </span><span class="s4">&quot;fireEvents&quot; </span><span class="s0">in </span><span class="s1">props:</span>
+        <span class="s0">raise </span><span class="s1">NonExistentEventException(</span>
+            <span class="s4">&quot;Events are no longer supported by dash. Use properties instead, &quot;</span>
+            <span class="s4">&quot;eg `n_clicks` instead of a `click` event.&quot;</span>
+        <span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">parse_wildcards(props):</span>
+    <span class="s3">&quot;&quot;&quot;Pull out the wildcard attributes from the Component props. 
+    Parameters 
+    ---------- 
+    props: dict 
+        Dictionary with {propName: propMetadata} structure 
+    Returns 
+    ------- 
+    list 
+        List of Dash valid wildcard prefixes 
+    &quot;&quot;&quot;</span>
+    <span class="s1">list_of_valid_wildcard_attr_prefixes = []</span>
+    <span class="s0">for </span><span class="s1">wildcard_attr </span><span class="s0">in </span><span class="s1">[</span><span class="s4">&quot;data-*&quot;</span><span class="s0">, </span><span class="s4">&quot;aria-*&quot;</span><span class="s1">]:</span>
+        <span class="s0">if </span><span class="s1">wildcard_attr </span><span class="s0">in </span><span class="s1">props:</span>
+            <span class="s1">list_of_valid_wildcard_attr_prefixes.append(wildcard_attr[:-</span><span class="s5">1</span><span class="s1">])</span>
+    <span class="s0">return </span><span class="s1">list_of_valid_wildcard_attr_prefixes</span>
+
+
+<span class="s0">def </span><span class="s1">reorder_props(props):</span>
+    <span class="s3">&quot;&quot;&quot;If &quot;children&quot; is in props, then move it to the front to respect dash 
+    convention, then 'id', then the remaining props sorted by prop name 
+    Parameters 
+    ---------- 
+    props: dict 
+        Dictionary with {propName: propMetadata} structure 
+    Returns 
+    ------- 
+    dict 
+        Dictionary with {propName: propMetadata} structure 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2"># Constructing an OrderedDict with duplicate keys, you get the order</span>
+    <span class="s2"># from the first one but the value from the last.</span>
+    <span class="s2"># Doing this to avoid mutating props, which can cause confusion.</span>
+    <span class="s1">props1 = [(</span><span class="s4">&quot;children&quot;</span><span class="s0">, </span><span class="s4">&quot;&quot;</span><span class="s1">)] </span><span class="s0">if </span><span class="s4">&quot;children&quot; </span><span class="s0">in </span><span class="s1">props </span><span class="s0">else </span><span class="s1">[]</span>
+    <span class="s1">props2 = [(</span><span class="s4">&quot;id&quot;</span><span class="s0">, </span><span class="s4">&quot;&quot;</span><span class="s1">)] </span><span class="s0">if </span><span class="s4">&quot;id&quot; </span><span class="s0">in </span><span class="s1">props </span><span class="s0">else </span><span class="s1">[]</span>
+    <span class="s0">return </span><span class="s1">OrderedDict(props1 + props2 + sorted(list(props.items())))</span>
+
+
+<span class="s0">def </span><span class="s1">filter_props(props):</span>
+    <span class="s3">&quot;&quot;&quot;Filter props from the Component arguments to exclude: 
+        - Those without a &quot;type&quot; or a &quot;flowType&quot; field 
+        - Those with arg.type.name in {'func', 'symbol', 'instanceOf'} 
+    Parameters 
+    ---------- 
+    props: dict 
+        Dictionary with {propName: propMetadata} structure 
+    Returns 
+    ------- 
+    dict 
+        Filtered dictionary with {propName: propMetadata} structure 
+    Examples 
+    -------- 
+    ```python 
+    prop_args = { 
+        'prop1': { 
+            'type': {'name': 'bool'}, 
+            'required': False, 
+            'description': 'A description', 
+            'flowType': {}, 
+            'defaultValue': {'value': 'false', 'computed': False}, 
+        }, 
+        'prop2': {'description': 'A prop without a type'}, 
+        'prop3': { 
+            'type': {'name': 'func'}, 
+            'description': 'A function prop', 
+        }, 
+    } 
+    # filtered_prop_args is now 
+    # { 
+    #    'prop1': { 
+    #        'type': {'name': 'bool'}, 
+    #        'required': False, 
+    #        'description': 'A description', 
+    #        'flowType': {}, 
+    #        'defaultValue': {'value': 'false', 'computed': False}, 
+    #    }, 
+    # } 
+    filtered_prop_args = filter_props(prop_args) 
+    ``` 
+    &quot;&quot;&quot;</span>
+    <span class="s1">filtered_props = copy.deepcopy(props)</span>
+
+    <span class="s0">for </span><span class="s1">arg_name</span><span class="s0">, </span><span class="s1">arg </span><span class="s0">in </span><span class="s1">list(filtered_props.items()):</span>
+        <span class="s0">if </span><span class="s4">&quot;type&quot; </span><span class="s0">not in </span><span class="s1">arg </span><span class="s0">and </span><span class="s4">&quot;flowType&quot; </span><span class="s0">not in </span><span class="s1">arg:</span>
+            <span class="s1">filtered_props.pop(arg_name)</span>
+            <span class="s0">continue</span>
+
+        <span class="s2"># Filter out functions and instances --</span>
+        <span class="s2"># these cannot be passed from Python</span>
+        <span class="s0">if </span><span class="s4">&quot;type&quot; </span><span class="s0">in </span><span class="s1">arg:  </span><span class="s2"># These come from PropTypes</span>
+            <span class="s1">arg_type = arg[</span><span class="s4">&quot;type&quot;</span><span class="s1">][</span><span class="s4">&quot;name&quot;</span><span class="s1">]</span>
+            <span class="s0">if </span><span class="s1">arg_type </span><span class="s0">in </span><span class="s1">{</span><span class="s4">&quot;func&quot;</span><span class="s0">, </span><span class="s4">&quot;symbol&quot;</span><span class="s0">, </span><span class="s4">&quot;instanceOf&quot;</span><span class="s1">}:</span>
+                <span class="s1">filtered_props.pop(arg_name)</span>
+        <span class="s0">elif </span><span class="s4">&quot;flowType&quot; </span><span class="s0">in </span><span class="s1">arg:  </span><span class="s2"># These come from Flow &amp; handled differently</span>
+            <span class="s1">arg_type_name = arg[</span><span class="s4">&quot;flowType&quot;</span><span class="s1">][</span><span class="s4">&quot;name&quot;</span><span class="s1">]</span>
+            <span class="s0">if </span><span class="s1">arg_type_name == </span><span class="s4">&quot;signature&quot;</span><span class="s1">:</span>
+                <span class="s2"># This does the same as the PropTypes filter above, but &quot;func&quot;</span>
+                <span class="s2"># is under &quot;type&quot; if &quot;name&quot; is &quot;signature&quot; vs just in &quot;name&quot;</span>
+                <span class="s0">if </span><span class="s4">&quot;type&quot; </span><span class="s0">not in </span><span class="s1">arg[</span><span class="s4">&quot;flowType&quot;</span><span class="s1">] </span><span class="s0">or </span><span class="s1">arg[</span><span class="s4">&quot;flowType&quot;</span><span class="s1">][</span><span class="s4">&quot;type&quot;</span><span class="s1">] != </span><span class="s4">&quot;object&quot;</span><span class="s1">:</span>
+                    <span class="s1">filtered_props.pop(arg_name)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError</span>
+
+    <span class="s0">return </span><span class="s1">filtered_props</span>
+
+
+<span class="s0">def </span><span class="s1">fix_keywords(txt):</span>
+    <span class="s3">&quot;&quot;&quot; 
+    replaces javascript keywords true, false, null with Python keywords 
+    &quot;&quot;&quot;</span>
+    <span class="s1">fix_word = {</span><span class="s4">&quot;true&quot;</span><span class="s1">: </span><span class="s4">&quot;True&quot;</span><span class="s0">, </span><span class="s4">&quot;false&quot;</span><span class="s1">: </span><span class="s4">&quot;False&quot;</span><span class="s0">, </span><span class="s4">&quot;null&quot;</span><span class="s1">: </span><span class="s4">&quot;None&quot;</span><span class="s1">}</span>
+    <span class="s0">for </span><span class="s1">js_keyword</span><span class="s0">, </span><span class="s1">python_keyword </span><span class="s0">in </span><span class="s1">fix_word.items():</span>
+        <span class="s1">txt = txt.replace(js_keyword</span><span class="s0">, </span><span class="s1">python_keyword)</span>
+    <span class="s0">return </span><span class="s1">txt</span>
+
+
+<span class="s2"># pylint: disable=too-many-arguments</span>
+<span class="s2"># pylint: disable=too-many-locals</span>
+<span class="s0">def </span><span class="s1">create_prop_docstring(</span>
+    <span class="s1">prop_name</span><span class="s0">,</span>
+    <span class="s1">type_object</span><span class="s0">,</span>
+    <span class="s1">required</span><span class="s0">,</span>
+    <span class="s1">description</span><span class="s0">,</span>
+    <span class="s1">default</span><span class="s0">,</span>
+    <span class="s1">indent_num</span><span class="s0">,</span>
+    <span class="s1">is_flow_type=</span><span class="s0">False,</span>
+<span class="s1">):</span>
+    <span class="s3">&quot;&quot;&quot;Create the Dash component prop docstring. 
+    Parameters 
+    ---------- 
+    prop_name: str 
+        Name of the Dash component prop 
+    type_object: dict 
+        react-docgen-generated prop type dictionary 
+    required: bool 
+        Component is required? 
+    description: str 
+        Dash component description 
+    default: dict 
+        Either None if a default value is not defined, or 
+        dict containing the key 'value' that defines a 
+        default value for the prop 
+    indent_num: int 
+        Number of indents to use for the context block 
+        (creates 2 spaces for every indent) 
+    is_flow_type: bool 
+        Does the prop use Flow types? Otherwise, uses PropTypes 
+    Returns 
+    ------- 
+    str 
+        Dash component prop docstring 
+    &quot;&quot;&quot;</span>
+    <span class="s1">py_type_name = js_to_py_type(</span>
+        <span class="s1">type_object=type_object</span><span class="s0">, </span><span class="s1">is_flow_type=is_flow_type</span><span class="s0">, </span><span class="s1">indent_num=indent_num</span>
+    <span class="s1">)</span>
+    <span class="s1">indent_spacing = </span><span class="s4">&quot;  &quot; </span><span class="s1">* indent_num</span>
+
+    <span class="s1">default = default[</span><span class="s4">&quot;value&quot;</span><span class="s1">] </span><span class="s0">if </span><span class="s1">default </span><span class="s0">else </span><span class="s4">&quot;&quot;</span>
+    <span class="s1">default = fix_keywords(default)</span>
+
+    <span class="s1">is_required = </span><span class="s4">&quot;optional&quot;</span>
+    <span class="s0">if </span><span class="s1">required:</span>
+        <span class="s1">is_required = </span><span class="s4">&quot;required&quot;</span>
+    <span class="s0">elif </span><span class="s1">default </span><span class="s0">and </span><span class="s1">default </span><span class="s0">not in </span><span class="s1">[</span><span class="s4">&quot;None&quot;</span><span class="s0">, </span><span class="s4">&quot;{}&quot;</span><span class="s0">, </span><span class="s4">&quot;[]&quot;</span><span class="s1">]:</span>
+        <span class="s1">is_required = </span><span class="s4">&quot;default {}&quot;</span><span class="s1">.format(default.replace(</span><span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s0">, </span><span class="s4">&quot;&quot;</span><span class="s1">))</span>
+
+    <span class="s2"># formats description</span>
+    <span class="s1">period = </span><span class="s4">&quot;.&quot; </span><span class="s0">if </span><span class="s1">description </span><span class="s0">else </span><span class="s4">&quot;&quot;</span>
+    <span class="s1">description = description.strip().strip(</span><span class="s4">&quot;.&quot;</span><span class="s1">).replace(</span><span class="s4">'&quot;'</span><span class="s0">, </span><span class="s4">r&quot;\&quot;&quot;</span><span class="s1">) + period</span>
+    <span class="s1">desc_indent = indent_spacing + </span><span class="s4">&quot;    &quot;</span>
+    <span class="s1">description = fill(</span>
+        <span class="s1">description</span><span class="s0">,</span>
+        <span class="s1">initial_indent=desc_indent</span><span class="s0">,</span>
+        <span class="s1">subsequent_indent=desc_indent</span><span class="s0">,</span>
+        <span class="s1">break_long_words=</span><span class="s0">False,</span>
+        <span class="s1">break_on_hyphens=</span><span class="s0">False,</span>
+    <span class="s1">)</span>
+    <span class="s1">description = </span><span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">{}&quot;</span><span class="s1">.format(description) </span><span class="s0">if </span><span class="s1">description </span><span class="s0">else </span><span class="s4">&quot;&quot;</span>
+    <span class="s1">colon = </span><span class="s4">&quot;:&quot; </span><span class="s0">if </span><span class="s1">description </span><span class="s0">else </span><span class="s4">&quot;&quot;</span>
+    <span class="s1">description = fix_keywords(description)</span>
+
+    <span class="s0">if </span><span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">&quot; </span><span class="s0">in </span><span class="s1">py_type_name:</span>
+        <span class="s2"># corrects the type</span>
+        <span class="s1">dict_or_list = </span><span class="s4">&quot;list of dicts&quot; </span><span class="s0">if </span><span class="s1">py_type_name.startswith(</span><span class="s4">&quot;list&quot;</span><span class="s1">) </span><span class="s0">else </span><span class="s4">&quot;dict&quot;</span>
+
+        <span class="s2"># format and rewrite the intro to the nested dicts</span>
+        <span class="s1">intro1</span><span class="s0">, </span><span class="s1">intro2</span><span class="s0">, </span><span class="s1">dict_descr = py_type_name.partition(</span><span class="s4">&quot;with keys:&quot;</span><span class="s1">)</span>
+        <span class="s1">intro = </span><span class="s4">&quot;&quot;</span><span class="s1">.join([</span><span class="s4">&quot;`{}`&quot;</span><span class="s1">.format(prop_name)</span><span class="s0">, </span><span class="s4">&quot; is a &quot;</span><span class="s0">, </span><span class="s1">intro1</span><span class="s0">, </span><span class="s1">intro2])</span>
+        <span class="s1">intro = fill(</span>
+            <span class="s1">intro</span><span class="s0">,</span>
+            <span class="s1">initial_indent=desc_indent</span><span class="s0">,</span>
+            <span class="s1">subsequent_indent=desc_indent</span><span class="s0">,</span>
+            <span class="s1">break_long_words=</span><span class="s0">False,</span>
+            <span class="s1">break_on_hyphens=</span><span class="s0">False,</span>
+        <span class="s1">)</span>
+
+        <span class="s2"># captures optional nested dict description and puts the &quot;or&quot; condition on a new line</span>
+        <span class="s0">if </span><span class="s4">&quot;| dict with keys:&quot; </span><span class="s0">in </span><span class="s1">dict_descr:</span>
+            <span class="s1">dict_part1</span><span class="s0">, </span><span class="s1">dict_part2 = dict_descr.split(</span><span class="s4">&quot; |&quot;</span><span class="s0">, </span><span class="s5">1</span><span class="s1">)</span>
+            <span class="s1">dict_part2 = </span><span class="s4">&quot;&quot;</span><span class="s1">.join([desc_indent</span><span class="s0">, </span><span class="s4">&quot;Or&quot;</span><span class="s0">, </span><span class="s1">dict_part2])</span>
+            <span class="s1">dict_descr = </span><span class="s4">&quot;{}</span><span class="s0">\n\n  </span><span class="s4">{}&quot;</span><span class="s1">.format(dict_part1</span><span class="s0">, </span><span class="s1">dict_part2)</span>
+
+        <span class="s2"># ensures indent is correct if there is a second nested list of dicts</span>
+        <span class="s1">current_indent = dict_descr.lstrip(</span><span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s1">).find(</span><span class="s4">&quot;-&quot;</span><span class="s1">)</span>
+        <span class="s0">if </span><span class="s1">current_indent == len(indent_spacing):</span>
+            <span class="s1">dict_descr = </span><span class="s4">&quot;&quot;</span><span class="s1">.join(</span>
+                <span class="s4">&quot;</span><span class="s0">\n\n    </span><span class="s4">&quot; </span><span class="s1">+ line </span><span class="s0">for </span><span class="s1">line </span><span class="s0">in </span><span class="s1">dict_descr.splitlines() </span><span class="s0">if </span><span class="s1">line != </span><span class="s4">&quot;&quot;</span>
+            <span class="s1">)</span>
+
+        <span class="s0">return </span><span class="s1">(</span>
+            <span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">{indent_spacing}- {name} ({dict_or_list}; {is_required}){colon}&quot;</span>
+            <span class="s4">&quot;{description}&quot;</span>
+            <span class="s4">&quot;</span><span class="s0">\n\n</span><span class="s4">{intro}{dict_descr}&quot;</span><span class="s1">.format(</span>
+                <span class="s1">indent_spacing=indent_spacing</span><span class="s0">,</span>
+                <span class="s1">name=prop_name</span><span class="s0">,</span>
+                <span class="s1">colon=colon</span><span class="s0">,</span>
+                <span class="s1">description=description</span><span class="s0">,</span>
+                <span class="s1">intro=intro</span><span class="s0">,</span>
+                <span class="s1">dict_descr=dict_descr</span><span class="s0">,</span>
+                <span class="s1">dict_or_list=dict_or_list</span><span class="s0">,</span>
+                <span class="s1">is_required=is_required</span><span class="s0">,</span>
+            <span class="s1">)</span>
+        <span class="s1">)</span>
+    <span class="s0">return </span><span class="s1">(</span>
+        <span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">{indent_spacing}- {name} ({type}{is_required}){colon}&quot;</span>
+        <span class="s4">&quot;{description}&quot;</span><span class="s1">.format(</span>
+            <span class="s1">indent_spacing=indent_spacing</span><span class="s0">,</span>
+            <span class="s1">name=prop_name</span><span class="s0">,</span>
+            <span class="s1">type=</span><span class="s4">&quot;{}; &quot;</span><span class="s1">.format(py_type_name) </span><span class="s0">if </span><span class="s1">py_type_name </span><span class="s0">else </span><span class="s4">&quot;&quot;</span><span class="s0">,</span>
+            <span class="s1">colon=colon</span><span class="s0">,</span>
+            <span class="s1">description=description</span><span class="s0">,</span>
+            <span class="s1">is_required=is_required</span><span class="s0">,</span>
+        <span class="s1">)</span>
+    <span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">map_js_to_py_types_prop_types(type_object</span><span class="s0">, </span><span class="s1">indent_num):</span>
+    <span class="s3">&quot;&quot;&quot;Mapping from the PropTypes js type object to the Python type.&quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">shape_or_exact():</span>
+        <span class="s0">return </span><span class="s4">&quot;dict with keys:</span><span class="s0">\n</span><span class="s4">{}&quot;</span><span class="s1">.format(</span>
+            <span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s1">.join(</span>
+                <span class="s1">create_prop_docstring(</span>
+                    <span class="s1">prop_name=prop_name</span><span class="s0">,</span>
+                    <span class="s1">type_object=prop</span><span class="s0">,</span>
+                    <span class="s1">required=prop[</span><span class="s4">&quot;required&quot;</span><span class="s1">]</span><span class="s0">,</span>
+                    <span class="s1">description=prop.get(</span><span class="s4">&quot;description&quot;</span><span class="s0">, </span><span class="s4">&quot;&quot;</span><span class="s1">)</span><span class="s0">,</span>
+                    <span class="s1">default=prop.get(</span><span class="s4">&quot;defaultValue&quot;</span><span class="s1">)</span><span class="s0">,</span>
+                    <span class="s1">indent_num=indent_num + </span><span class="s5">2</span><span class="s0">,</span>
+                <span class="s1">)</span>
+                <span class="s0">for </span><span class="s1">prop_name</span><span class="s0">, </span><span class="s1">prop </span><span class="s0">in </span><span class="s1">sorted(list(type_object[</span><span class="s4">&quot;value&quot;</span><span class="s1">].items()))</span>
+            <span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">)</span>
+
+    <span class="s0">return </span><span class="s1">dict(</span>
+        <span class="s1">array=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s4">&quot;list&quot;</span><span class="s0">,</span>
+        <span class="s1">bool=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s4">&quot;boolean&quot;</span><span class="s0">,</span>
+        <span class="s1">number=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s4">&quot;number&quot;</span><span class="s0">,</span>
+        <span class="s1">string=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s4">&quot;string&quot;</span><span class="s0">,</span>
+        <span class="s1">object=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s4">&quot;dict&quot;</span><span class="s0">,</span>
+        <span class="s1">any=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s4">&quot;boolean | number | string | dict | list&quot;</span><span class="s0">,</span>
+        <span class="s1">element=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s4">&quot;dash component&quot;</span><span class="s0">,</span>
+        <span class="s1">node=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s4">&quot;a list of or a singular dash component, string or number&quot;</span><span class="s0">,</span>
+        <span class="s2"># React's PropTypes.oneOf</span>
+        <span class="s1">enum=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s4">&quot;a value equal to: {}&quot;</span><span class="s1">.format(</span>
+            <span class="s4">&quot;, &quot;</span><span class="s1">.join(</span><span class="s4">&quot;{}&quot;</span><span class="s1">.format(str(t[</span><span class="s4">&quot;value&quot;</span><span class="s1">])) </span><span class="s0">for </span><span class="s1">t </span><span class="s0">in </span><span class="s1">type_object[</span><span class="s4">&quot;value&quot;</span><span class="s1">])</span>
+        <span class="s1">)</span><span class="s0">,</span>
+        <span class="s2"># React's PropTypes.oneOfType</span>
+        <span class="s1">union=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s4">&quot;{}&quot;</span><span class="s1">.format(</span>
+            <span class="s4">&quot; | &quot;</span><span class="s1">.join(</span>
+                <span class="s4">&quot;{}&quot;</span><span class="s1">.format(js_to_py_type(subType))</span>
+                <span class="s0">for </span><span class="s1">subType </span><span class="s0">in </span><span class="s1">type_object[</span><span class="s4">&quot;value&quot;</span><span class="s1">]</span>
+                <span class="s0">if </span><span class="s1">js_to_py_type(subType) != </span><span class="s4">&quot;&quot;</span>
+            <span class="s1">)</span>
+        <span class="s1">)</span><span class="s0">,</span>
+        <span class="s2"># React's PropTypes.arrayOf</span>
+        <span class="s1">arrayOf=</span><span class="s0">lambda</span><span class="s1">: (</span>
+            <span class="s4">&quot;list&quot;</span>
+            <span class="s1">+ (</span>
+                <span class="s4">&quot; of {}&quot;</span><span class="s1">.format(</span>
+                    <span class="s1">js_to_py_type(type_object[</span><span class="s4">&quot;value&quot;</span><span class="s1">]) + </span><span class="s4">&quot;s&quot;</span>
+                    <span class="s0">if </span><span class="s1">js_to_py_type(type_object[</span><span class="s4">&quot;value&quot;</span><span class="s1">]).split(</span><span class="s4">&quot; &quot;</span><span class="s1">)[</span><span class="s5">0</span><span class="s1">] != </span><span class="s4">&quot;dict&quot;</span>
+                    <span class="s0">else </span><span class="s1">js_to_py_type(type_object[</span><span class="s4">&quot;value&quot;</span><span class="s1">]).replace(</span><span class="s4">&quot;dict&quot;</span><span class="s0">, </span><span class="s4">&quot;dicts&quot;</span><span class="s0">, </span><span class="s5">1</span><span class="s1">)</span>
+                <span class="s1">)</span>
+                <span class="s0">if </span><span class="s1">js_to_py_type(type_object[</span><span class="s4">&quot;value&quot;</span><span class="s1">]) != </span><span class="s4">&quot;&quot;</span>
+                <span class="s0">else </span><span class="s4">&quot;&quot;</span>
+            <span class="s1">)</span>
+        <span class="s1">)</span><span class="s0">,</span>
+        <span class="s2"># React's PropTypes.objectOf</span>
+        <span class="s1">objectOf=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s4">&quot;dict with strings as keys and values of type {}&quot;</span><span class="s1">.format(</span>
+            <span class="s1">js_to_py_type(type_object[</span><span class="s4">&quot;value&quot;</span><span class="s1">])</span>
+        <span class="s1">)</span><span class="s0">,</span>
+        <span class="s2"># React's PropTypes.shape</span>
+        <span class="s1">shape=shape_or_exact</span><span class="s0">,</span>
+        <span class="s2"># React's PropTypes.exact</span>
+        <span class="s1">exact=shape_or_exact</span><span class="s0">,</span>
+    <span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">map_js_to_py_types_flow_types(type_object):</span>
+    <span class="s3">&quot;&quot;&quot;Mapping from the Flow js types to the Python type.&quot;&quot;&quot;</span>
+    <span class="s0">return </span><span class="s1">dict(</span>
+        <span class="s1">array=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s4">&quot;list&quot;</span><span class="s0">,</span>
+        <span class="s1">boolean=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s4">&quot;boolean&quot;</span><span class="s0">,</span>
+        <span class="s1">number=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s4">&quot;number&quot;</span><span class="s0">,</span>
+        <span class="s1">string=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s4">&quot;string&quot;</span><span class="s0">,</span>
+        <span class="s1">Object=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s4">&quot;dict&quot;</span><span class="s0">,</span>
+        <span class="s1">any=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s4">&quot;bool | number | str | dict | list&quot;</span><span class="s0">,</span>
+        <span class="s1">Element=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s4">&quot;dash component&quot;</span><span class="s0">,</span>
+        <span class="s1">Node=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s4">&quot;a list of or a singular dash component, string or number&quot;</span><span class="s0">,</span>
+        <span class="s2"># React's PropTypes.oneOfType</span>
+        <span class="s1">union=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s4">&quot;{}&quot;</span><span class="s1">.format(</span>
+            <span class="s4">&quot; | &quot;</span><span class="s1">.join(</span>
+                <span class="s4">&quot;{}&quot;</span><span class="s1">.format(js_to_py_type(subType))</span>
+                <span class="s0">for </span><span class="s1">subType </span><span class="s0">in </span><span class="s1">type_object[</span><span class="s4">&quot;elements&quot;</span><span class="s1">]</span>
+                <span class="s0">if </span><span class="s1">js_to_py_type(subType) != </span><span class="s4">&quot;&quot;</span>
+            <span class="s1">)</span>
+        <span class="s1">)</span><span class="s0">,</span>
+        <span class="s2"># Flow's Array type</span>
+        <span class="s1">Array=</span><span class="s0">lambda</span><span class="s1">: </span><span class="s4">&quot;list{}&quot;</span><span class="s1">.format(</span>
+            <span class="s4">&quot; of {}s&quot;</span><span class="s1">.format(js_to_py_type(type_object[</span><span class="s4">&quot;elements&quot;</span><span class="s1">][</span><span class="s5">0</span><span class="s1">]))</span>
+            <span class="s0">if </span><span class="s1">js_to_py_type(type_object[</span><span class="s4">&quot;elements&quot;</span><span class="s1">][</span><span class="s5">0</span><span class="s1">]) != </span><span class="s4">&quot;&quot;</span>
+            <span class="s0">else </span><span class="s4">&quot;&quot;</span>
+        <span class="s1">)</span><span class="s0">,</span>
+        <span class="s2"># React's PropTypes.shape</span>
+        <span class="s1">signature=</span><span class="s0">lambda </span><span class="s1">indent_num: </span><span class="s4">&quot;dict with keys:</span><span class="s0">\n</span><span class="s4">{}&quot;</span><span class="s1">.format(</span>
+            <span class="s4">&quot;</span><span class="s0">\n</span><span class="s4">&quot;</span><span class="s1">.join(</span>
+                <span class="s1">create_prop_docstring(</span>
+                    <span class="s1">prop_name=prop[</span><span class="s4">&quot;key&quot;</span><span class="s1">]</span><span class="s0">,</span>
+                    <span class="s1">type_object=prop[</span><span class="s4">&quot;value&quot;</span><span class="s1">]</span><span class="s0">,</span>
+                    <span class="s1">required=prop[</span><span class="s4">&quot;value&quot;</span><span class="s1">][</span><span class="s4">&quot;required&quot;</span><span class="s1">]</span><span class="s0">,</span>
+                    <span class="s1">description=prop[</span><span class="s4">&quot;value&quot;</span><span class="s1">].get(</span><span class="s4">&quot;description&quot;</span><span class="s0">, </span><span class="s4">&quot;&quot;</span><span class="s1">)</span><span class="s0">,</span>
+                    <span class="s1">default=prop.get(</span><span class="s4">&quot;defaultValue&quot;</span><span class="s1">)</span><span class="s0">,</span>
+                    <span class="s1">indent_num=indent_num + </span><span class="s5">2</span><span class="s0">,</span>
+                    <span class="s1">is_flow_type=</span><span class="s0">True,</span>
+                <span class="s1">)</span>
+                <span class="s0">for </span><span class="s1">prop </span><span class="s0">in </span><span class="s1">type_object[</span><span class="s4">&quot;signature&quot;</span><span class="s1">][</span><span class="s4">&quot;properties&quot;</span><span class="s1">]</span>
+            <span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">)</span><span class="s0">,</span>
+    <span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">js_to_py_type(type_object</span><span class="s0">, </span><span class="s1">is_flow_type=</span><span class="s0">False, </span><span class="s1">indent_num=</span><span class="s5">0</span><span class="s1">):</span>
+    <span class="s3">&quot;&quot;&quot;Convert JS types to Python types for the component definition. 
+    Parameters 
+    ---------- 
+    type_object: dict 
+        react-docgen-generated prop type dictionary 
+    is_flow_type: bool 
+        Does the prop use Flow types? Otherwise, uses PropTypes 
+    indent_num: int 
+        Number of indents to use for the docstring for the prop 
+    Returns 
+    ------- 
+    str 
+        Python type string 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">js_type_name = type_object[</span><span class="s4">&quot;name&quot;</span><span class="s1">]</span>
+    <span class="s1">js_to_py_types = (</span>
+        <span class="s1">map_js_to_py_types_flow_types(type_object=type_object)</span>
+        <span class="s0">if </span><span class="s1">is_flow_type</span>
+        <span class="s0">else </span><span class="s1">map_js_to_py_types_prop_types(</span>
+            <span class="s1">type_object=type_object</span><span class="s0">, </span><span class="s1">indent_num=indent_num</span>
+        <span class="s1">)</span>
+    <span class="s1">)</span>
+
+    <span class="s0">if </span><span class="s1">(</span>
+        <span class="s4">&quot;computed&quot; </span><span class="s0">in </span><span class="s1">type_object</span>
+        <span class="s0">and </span><span class="s1">type_object[</span><span class="s4">&quot;computed&quot;</span><span class="s1">]</span>
+        <span class="s0">or </span><span class="s1">type_object.get(</span><span class="s4">&quot;type&quot;</span><span class="s0">, </span><span class="s4">&quot;&quot;</span><span class="s1">) == </span><span class="s4">&quot;function&quot;</span>
+    <span class="s1">):</span>
+        <span class="s0">return </span><span class="s4">&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">js_type_name </span><span class="s0">in </span><span class="s1">js_to_py_types:</span>
+        <span class="s0">if </span><span class="s1">js_type_name == </span><span class="s4">&quot;signature&quot;</span><span class="s1">:  </span><span class="s2"># This is a Flow object w/ signature</span>
+            <span class="s0">return </span><span class="s1">js_to_py_types[js_type_name](indent_num)</span>
+        <span class="s2"># All other types</span>
+        <span class="s0">return </span><span class="s1">js_to_py_types[js_type_name]()</span>
+    <span class="s0">return </span><span class="s4">&quot;&quot;</span>
+</pre>
+</body>
+</html>

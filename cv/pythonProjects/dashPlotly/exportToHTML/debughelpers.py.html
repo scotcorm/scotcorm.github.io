@@ -1,0 +1,194 @@
+<html>
+<head>
+<title>debughelpers.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #6a8759;}
+.s4 { color: #808080;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+debughelpers.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">typing </span><span class="s0">as </span><span class="s1">t</span>
+<span class="s0">from </span><span class="s1">warnings </span><span class="s0">import </span><span class="s1">warn</span>
+
+<span class="s0">from </span><span class="s1">.app </span><span class="s0">import </span><span class="s1">Flask</span>
+<span class="s0">from </span><span class="s1">.blueprints </span><span class="s0">import </span><span class="s1">Blueprint</span>
+<span class="s0">from </span><span class="s1">.globals </span><span class="s0">import </span><span class="s1">_request_ctx_stack</span>
+
+
+<span class="s0">class </span><span class="s1">UnexpectedUnicodeError(AssertionError</span><span class="s0">, </span><span class="s1">UnicodeError):</span>
+    <span class="s2">&quot;&quot;&quot;Raised in places where we want some better error reporting for 
+    unexpected unicode or binary data. 
+    &quot;&quot;&quot;</span>
+
+
+<span class="s0">class </span><span class="s1">DebugFilesKeyError(KeyError</span><span class="s0">, </span><span class="s1">AssertionError):</span>
+    <span class="s2">&quot;&quot;&quot;Raised from request.files during debugging.  The idea is that it can 
+    provide a better error message than just a generic KeyError/BadRequest. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">request</span><span class="s0">, </span><span class="s1">key):</span>
+        <span class="s1">form_matches = request.form.getlist(key)</span>
+        <span class="s1">buf = [</span>
+            <span class="s3">f&quot;You tried to access the file </span><span class="s0">{</span><span class="s1">key</span><span class="s0">!r} </span><span class="s3">in the request.files&quot;</span>
+            <span class="s3">&quot; dictionary but it does not exist. The mimetype for the&quot;</span>
+            <span class="s3">f&quot; request is </span><span class="s0">{</span><span class="s1">request.mimetype</span><span class="s0">!r} </span><span class="s3">instead of&quot;</span>
+            <span class="s3">&quot; 'multipart/form-data' which means that no file contents&quot;</span>
+            <span class="s3">&quot; were transmitted. To fix this error you should provide&quot;</span>
+            <span class="s3">' enctype=&quot;multipart/form-data&quot; in your form.'</span>
+        <span class="s1">]</span>
+        <span class="s0">if </span><span class="s1">form_matches:</span>
+            <span class="s1">names = </span><span class="s3">&quot;, &quot;</span><span class="s1">.join(repr(x) </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">form_matches)</span>
+            <span class="s1">buf.append(</span>
+                <span class="s3">&quot;</span><span class="s0">\n\n</span><span class="s3">The browser instead transmitted some file names. &quot;</span>
+                <span class="s3">f&quot;This was submitted: </span><span class="s0">{</span><span class="s1">names</span><span class="s0">}</span><span class="s3">&quot;</span>
+            <span class="s1">)</span>
+        <span class="s1">self.msg = </span><span class="s3">&quot;&quot;</span><span class="s1">.join(buf)</span>
+
+    <span class="s0">def </span><span class="s1">__str__(self):</span>
+        <span class="s0">return </span><span class="s1">self.msg</span>
+
+
+<span class="s0">class </span><span class="s1">FormDataRoutingRedirect(AssertionError):</span>
+    <span class="s2">&quot;&quot;&quot;This exception is raised by Flask in debug mode if it detects a 
+    redirect caused by the routing system when the request method is not 
+    GET, HEAD or OPTIONS.  Reasoning: form data will be dropped. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">request):</span>
+        <span class="s1">exc = request.routing_exception</span>
+        <span class="s1">buf = [</span>
+            <span class="s3">f&quot;A request was sent to this URL (</span><span class="s0">{</span><span class="s1">request.url</span><span class="s0">}</span><span class="s3">) but a&quot;</span>
+            <span class="s3">&quot; redirect was issued automatically by the routing system&quot;</span>
+            <span class="s3">f&quot; to </span><span class="s0">{</span><span class="s1">exc.new_url</span><span class="s0">!r}</span><span class="s3">.&quot;</span>
+        <span class="s1">]</span>
+
+        <span class="s4"># In case just a slash was appended we can be extra helpful</span>
+        <span class="s0">if </span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">request.base_url</span><span class="s0">}</span><span class="s3">/&quot; </span><span class="s1">== exc.new_url.split(</span><span class="s3">&quot;?&quot;</span><span class="s1">)[</span><span class="s5">0</span><span class="s1">]:</span>
+            <span class="s1">buf.append(</span>
+                <span class="s3">&quot;  The URL was defined with a trailing slash so Flask&quot;</span>
+                <span class="s3">&quot; will automatically redirect to the URL with the&quot;</span>
+                <span class="s3">&quot; trailing slash if it was accessed without one.&quot;</span>
+            <span class="s1">)</span>
+
+        <span class="s1">buf.append(</span>
+            <span class="s3">&quot;  Make sure to directly send your&quot;</span>
+            <span class="s3">f&quot; </span><span class="s0">{</span><span class="s1">request.method</span><span class="s0">}</span><span class="s3">-request to this URL since we can't make&quot;</span>
+            <span class="s3">&quot; browsers or HTTP clients redirect with form data reliably&quot;</span>
+            <span class="s3">&quot; or without user interaction.&quot;</span>
+        <span class="s1">)</span>
+        <span class="s1">buf.append(</span><span class="s3">&quot;</span><span class="s0">\n\n</span><span class="s3">Note: this exception is only raised in debug mode&quot;</span><span class="s1">)</span>
+        <span class="s1">AssertionError.__init__(self</span><span class="s0">, </span><span class="s3">&quot;&quot;</span><span class="s1">.join(buf).encode(</span><span class="s3">&quot;utf-8&quot;</span><span class="s1">))</span>
+
+
+<span class="s0">def </span><span class="s1">attach_enctype_error_multidict(request):</span>
+    <span class="s2">&quot;&quot;&quot;Since Flask 0.8 we're monkeypatching the files object in case a 
+    request is detected that does not use multipart form data but the files 
+    object is accessed. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">oldcls = request.files.__class__</span>
+
+    <span class="s0">class </span><span class="s1">newcls(oldcls):</span>
+        <span class="s0">def </span><span class="s1">__getitem__(self</span><span class="s0">, </span><span class="s1">key):</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s0">return </span><span class="s1">oldcls.__getitem__(self</span><span class="s0">, </span><span class="s1">key)</span>
+            <span class="s0">except </span><span class="s1">KeyError </span><span class="s0">as </span><span class="s1">e:</span>
+                <span class="s0">if </span><span class="s1">key </span><span class="s0">not in </span><span class="s1">request.form:</span>
+                    <span class="s0">raise</span>
+
+                <span class="s0">raise </span><span class="s1">DebugFilesKeyError(request</span><span class="s0">, </span><span class="s1">key) </span><span class="s0">from </span><span class="s1">e</span>
+
+    <span class="s1">newcls.__name__ = oldcls.__name__</span>
+    <span class="s1">newcls.__module__ = oldcls.__module__</span>
+    <span class="s1">request.files.__class__ = newcls</span>
+
+
+<span class="s0">def </span><span class="s1">_dump_loader_info(loader) -&gt; t.Generator:</span>
+    <span class="s0">yield </span><span class="s3">f&quot;class: </span><span class="s0">{</span><span class="s1">type(loader).__module__</span><span class="s0">}</span><span class="s3">.</span><span class="s0">{</span><span class="s1">type(loader).__name__</span><span class="s0">}</span><span class="s3">&quot;</span>
+    <span class="s0">for </span><span class="s1">key</span><span class="s0">, </span><span class="s1">value </span><span class="s0">in </span><span class="s1">sorted(loader.__dict__.items()):</span>
+        <span class="s0">if </span><span class="s1">key.startswith(</span><span class="s3">&quot;_&quot;</span><span class="s1">):</span>
+            <span class="s0">continue</span>
+        <span class="s0">if </span><span class="s1">isinstance(value</span><span class="s0">, </span><span class="s1">(tuple</span><span class="s0">, </span><span class="s1">list)):</span>
+            <span class="s0">if not </span><span class="s1">all(isinstance(x</span><span class="s0">, </span><span class="s1">str) </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">value):</span>
+                <span class="s0">continue</span>
+            <span class="s0">yield </span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">key</span><span class="s0">}</span><span class="s3">:&quot;</span>
+            <span class="s0">for </span><span class="s1">item </span><span class="s0">in </span><span class="s1">value:</span>
+                <span class="s0">yield </span><span class="s3">f&quot;  - </span><span class="s0">{</span><span class="s1">item</span><span class="s0">}</span><span class="s3">&quot;</span>
+            <span class="s0">continue</span>
+        <span class="s0">elif not </span><span class="s1">isinstance(value</span><span class="s0">, </span><span class="s1">(str</span><span class="s0">, </span><span class="s1">int</span><span class="s0">, </span><span class="s1">float</span><span class="s0">, </span><span class="s1">bool)):</span>
+            <span class="s0">continue</span>
+        <span class="s0">yield </span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">key</span><span class="s0">}</span><span class="s3">: </span><span class="s0">{</span><span class="s1">value</span><span class="s0">!r}</span><span class="s3">&quot;</span>
+
+
+<span class="s0">def </span><span class="s1">explain_template_loading_attempts(app: Flask</span><span class="s0">, </span><span class="s1">template</span><span class="s0">, </span><span class="s1">attempts) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+    <span class="s2">&quot;&quot;&quot;This should help developers understand what failed&quot;&quot;&quot;</span>
+    <span class="s1">info = [</span><span class="s3">f&quot;Locating template </span><span class="s0">{</span><span class="s1">template</span><span class="s0">!r}</span><span class="s3">:&quot;</span><span class="s1">]</span>
+    <span class="s1">total_found = </span><span class="s5">0</span>
+    <span class="s1">blueprint = </span><span class="s0">None</span>
+    <span class="s1">reqctx = _request_ctx_stack.top</span>
+    <span class="s0">if </span><span class="s1">reqctx </span><span class="s0">is not None and </span><span class="s1">reqctx.request.blueprint </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s1">blueprint = reqctx.request.blueprint</span>
+
+    <span class="s0">for </span><span class="s1">idx</span><span class="s0">, </span><span class="s1">(loader</span><span class="s0">, </span><span class="s1">srcobj</span><span class="s0">, </span><span class="s1">triple) </span><span class="s0">in </span><span class="s1">enumerate(attempts):</span>
+        <span class="s0">if </span><span class="s1">isinstance(srcobj</span><span class="s0">, </span><span class="s1">Flask):</span>
+            <span class="s1">src_info = </span><span class="s3">f&quot;application </span><span class="s0">{</span><span class="s1">srcobj.import_name</span><span class="s0">!r}</span><span class="s3">&quot;</span>
+        <span class="s0">elif </span><span class="s1">isinstance(srcobj</span><span class="s0">, </span><span class="s1">Blueprint):</span>
+            <span class="s1">src_info = </span><span class="s3">f&quot;blueprint </span><span class="s0">{</span><span class="s1">srcobj.name</span><span class="s0">!r} </span><span class="s3">(</span><span class="s0">{</span><span class="s1">srcobj.import_name</span><span class="s0">}</span><span class="s3">)&quot;</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">src_info = repr(srcobj)</span>
+
+        <span class="s1">info.append(</span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">idx + </span><span class="s5">1</span><span class="s0">:</span><span class="s3">5</span><span class="s0">}</span><span class="s3">: trying loader of </span><span class="s0">{</span><span class="s1">src_info</span><span class="s0">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+
+        <span class="s0">for </span><span class="s1">line </span><span class="s0">in </span><span class="s1">_dump_loader_info(loader):</span>
+            <span class="s1">info.append(</span><span class="s3">f&quot;       </span><span class="s0">{</span><span class="s1">line</span><span class="s0">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+
+        <span class="s0">if </span><span class="s1">triple </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">detail = </span><span class="s3">&quot;no match&quot;</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">detail = </span><span class="s3">f&quot;found (</span><span class="s0">{</span><span class="s1">triple[</span><span class="s5">1</span><span class="s1">] </span><span class="s0">or </span><span class="s3">'&lt;string&gt;'</span><span class="s0">!r}</span><span class="s3">)&quot;</span>
+            <span class="s1">total_found += </span><span class="s5">1</span>
+        <span class="s1">info.append(</span><span class="s3">f&quot;       -&gt; </span><span class="s0">{</span><span class="s1">detail</span><span class="s0">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+
+    <span class="s1">seems_fishy = </span><span class="s0">False</span>
+    <span class="s0">if </span><span class="s1">total_found == </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s1">info.append(</span><span class="s3">&quot;Error: the template could not be found.&quot;</span><span class="s1">)</span>
+        <span class="s1">seems_fishy = </span><span class="s0">True</span>
+    <span class="s0">elif </span><span class="s1">total_found &gt; </span><span class="s5">1</span><span class="s1">:</span>
+        <span class="s1">info.append(</span><span class="s3">&quot;Warning: multiple loaders returned a match for the template.&quot;</span><span class="s1">)</span>
+        <span class="s1">seems_fishy = </span><span class="s0">True</span>
+
+    <span class="s0">if </span><span class="s1">blueprint </span><span class="s0">is not None and </span><span class="s1">seems_fishy:</span>
+        <span class="s1">info.append(</span>
+            <span class="s3">&quot;  The template was looked up from an endpoint that belongs&quot;</span>
+            <span class="s3">f&quot; to the blueprint </span><span class="s0">{</span><span class="s1">blueprint</span><span class="s0">!r}</span><span class="s3">.&quot;</span>
+        <span class="s1">)</span>
+        <span class="s1">info.append(</span><span class="s3">&quot;  Maybe you did not place a template in the right folder?&quot;</span><span class="s1">)</span>
+        <span class="s1">info.append(</span><span class="s3">&quot;  See https://flask.palletsprojects.com/blueprints/#templates&quot;</span><span class="s1">)</span>
+
+    <span class="s1">app.logger.info(</span><span class="s3">&quot;</span><span class="s0">\n</span><span class="s3">&quot;</span><span class="s1">.join(info))</span>
+
+
+<span class="s0">def </span><span class="s1">explain_ignored_app_run() -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+    <span class="s0">if </span><span class="s1">os.environ.get(</span><span class="s3">&quot;WERKZEUG_RUN_MAIN&quot;</span><span class="s1">) != </span><span class="s3">&quot;true&quot;</span><span class="s1">:</span>
+        <span class="s1">warn(</span>
+            <span class="s1">Warning(</span>
+                <span class="s3">&quot;Silently ignoring app.run() because the application is&quot;</span>
+                <span class="s3">&quot; run from the flask command line executable. Consider&quot;</span>
+                <span class="s3">' putting app.run() behind an if __name__ == &quot;__main__&quot;'</span>
+                <span class="s3">&quot; guard to silence this warning.&quot;</span>
+            <span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">stacklevel=</span><span class="s5">3</span><span class="s0">,</span>
+        <span class="s1">)</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,772 @@
+<html>
+<head>
+<title>polyutils.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #808080;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+polyutils.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+Utility classes and functions for the polynomial modules. 
+ 
+This module provides: error and warning objects; a polynomial base class; 
+and some routines used in both the `polynomial` and `chebyshev` modules. 
+ 
+Warning objects 
+--------------- 
+ 
+.. autosummary:: 
+   :toctree: generated/ 
+ 
+   RankWarning  raised in least-squares fit for rank-deficient matrix. 
+ 
+Functions 
+--------- 
+ 
+.. autosummary:: 
+   :toctree: generated/ 
+ 
+   as_series    convert list of array_likes into 1-D arrays of common type. 
+   trimseq      remove trailing zeros. 
+   trimcoef     remove small trailing coefficients. 
+   getdomain    return the domain appropriate for a given set of abscissae. 
+   mapdomain    maps points between domains. 
+   mapparms     parameters of the linear map between domains. 
+ 
+&quot;&quot;&quot;</span>
+<span class="s2">import </span><span class="s1">operator</span>
+<span class="s2">import </span><span class="s1">functools</span>
+<span class="s2">import </span><span class="s1">warnings</span>
+
+<span class="s2">import </span><span class="s1">numpy </span><span class="s2">as </span><span class="s1">np</span>
+
+<span class="s1">__all__ = [</span>
+    <span class="s3">'RankWarning'</span><span class="s2">, </span><span class="s3">'as_series'</span><span class="s2">, </span><span class="s3">'trimseq'</span><span class="s2">,</span>
+    <span class="s3">'trimcoef'</span><span class="s2">, </span><span class="s3">'getdomain'</span><span class="s2">, </span><span class="s3">'mapdomain'</span><span class="s2">, </span><span class="s3">'mapparms'</span><span class="s1">]</span>
+
+<span class="s4">#</span>
+<span class="s4"># Warnings and Exceptions</span>
+<span class="s4">#</span>
+
+<span class="s2">class </span><span class="s1">RankWarning(UserWarning):</span>
+    <span class="s0">&quot;&quot;&quot;Issued by chebfit when the design matrix is rank deficient.&quot;&quot;&quot;</span>
+    <span class="s2">pass</span>
+
+<span class="s4">#</span>
+<span class="s4"># Helper functions to convert inputs to 1-D arrays</span>
+<span class="s4">#</span>
+<span class="s2">def </span><span class="s1">trimseq(seq):</span>
+    <span class="s0">&quot;&quot;&quot;Remove small Poly series coefficients. 
+ 
+    Parameters 
+    ---------- 
+    seq : sequence 
+        Sequence of Poly series coefficients. This routine fails for 
+        empty sequences. 
+ 
+    Returns 
+    ------- 
+    series : sequence 
+        Subsequence with trailing zeros removed. If the resulting sequence 
+        would be empty, return the first element. The returned sequence may 
+        or may not be a view. 
+ 
+    Notes 
+    ----- 
+    Do not lose the type info if the sequence contains unknown objects. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">len(seq) == </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">seq</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(len(seq) - </span><span class="s5">1</span><span class="s2">, </span><span class="s1">-</span><span class="s5">1</span><span class="s2">, </span><span class="s1">-</span><span class="s5">1</span><span class="s1">):</span>
+            <span class="s2">if </span><span class="s1">seq[i] != </span><span class="s5">0</span><span class="s1">:</span>
+                <span class="s2">break</span>
+        <span class="s2">return </span><span class="s1">seq[:i+</span><span class="s5">1</span><span class="s1">]</span>
+
+
+<span class="s2">def </span><span class="s1">as_series(alist</span><span class="s2">, </span><span class="s1">trim=</span><span class="s2">True</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Return argument as a list of 1-d arrays. 
+ 
+    The returned list contains array(s) of dtype double, complex double, or 
+    object.  A 1-d argument of shape ``(N,)`` is parsed into ``N`` arrays of 
+    size one; a 2-d argument of shape ``(M,N)`` is parsed into ``M`` arrays 
+    of size ``N`` (i.e., is &quot;parsed by row&quot;); and a higher dimensional array 
+    raises a Value Error if it is not first reshaped into either a 1-d or 2-d 
+    array. 
+ 
+    Parameters 
+    ---------- 
+    alist : array_like 
+        A 1- or 2-d array_like 
+    trim : boolean, optional 
+        When True, trailing zeros are removed from the inputs. 
+        When False, the inputs are passed through intact. 
+ 
+    Returns 
+    ------- 
+    [a1, a2,...] : list of 1-D arrays 
+        A copy of the input data as a list of 1-d arrays. 
+ 
+    Raises 
+    ------ 
+    ValueError 
+        Raised when `as_series` cannot convert its input to 1-d arrays, or at 
+        least one of the resulting arrays is empty. 
+ 
+    Examples 
+    -------- 
+    &gt;&gt;&gt; from numpy.polynomial import polyutils as pu 
+    &gt;&gt;&gt; a = np.arange(4) 
+    &gt;&gt;&gt; pu.as_series(a) 
+    [array([0.]), array([1.]), array([2.]), array([3.])] 
+    &gt;&gt;&gt; b = np.arange(6).reshape((2,3)) 
+    &gt;&gt;&gt; pu.as_series(b) 
+    [array([0., 1., 2.]), array([3., 4., 5.])] 
+ 
+    &gt;&gt;&gt; pu.as_series((1, np.arange(3), np.arange(2, dtype=np.float16))) 
+    [array([1.]), array([0., 1., 2.]), array([0., 1.])] 
+ 
+    &gt;&gt;&gt; pu.as_series([2, [1.1, 0.]]) 
+    [array([2.]), array([1.1])] 
+ 
+    &gt;&gt;&gt; pu.as_series([2, [1.1, 0.]], trim=False) 
+    [array([2.]), array([1.1, 0. ])] 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s1">arrays = [np.array(a</span><span class="s2">, </span><span class="s1">ndmin=</span><span class="s5">1</span><span class="s2">, </span><span class="s1">copy=</span><span class="s2">False</span><span class="s1">) </span><span class="s2">for </span><span class="s1">a </span><span class="s2">in </span><span class="s1">alist]</span>
+    <span class="s2">if </span><span class="s1">min([a.size </span><span class="s2">for </span><span class="s1">a </span><span class="s2">in </span><span class="s1">arrays]) == </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;Coefficient array is empty&quot;</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">any(a.ndim != </span><span class="s5">1 </span><span class="s2">for </span><span class="s1">a </span><span class="s2">in </span><span class="s1">arrays):</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;Coefficient array is not 1-d&quot;</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">trim:</span>
+        <span class="s1">arrays = [trimseq(a) </span><span class="s2">for </span><span class="s1">a </span><span class="s2">in </span><span class="s1">arrays]</span>
+
+    <span class="s2">if </span><span class="s1">any(a.dtype == np.dtype(object) </span><span class="s2">for </span><span class="s1">a </span><span class="s2">in </span><span class="s1">arrays):</span>
+        <span class="s1">ret = []</span>
+        <span class="s2">for </span><span class="s1">a </span><span class="s2">in </span><span class="s1">arrays:</span>
+            <span class="s2">if </span><span class="s1">a.dtype != np.dtype(object):</span>
+                <span class="s1">tmp = np.empty(len(a)</span><span class="s2">, </span><span class="s1">dtype=np.dtype(object))</span>
+                <span class="s1">tmp[:] = a[:]</span>
+                <span class="s1">ret.append(tmp)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">ret.append(a.copy())</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">dtype = np.common_type(*arrays)</span>
+        <span class="s2">except </span><span class="s1">Exception </span><span class="s2">as </span><span class="s1">e:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;Coefficient arrays have no common type&quot;</span><span class="s1">) </span><span class="s2">from </span><span class="s1">e</span>
+        <span class="s1">ret = [np.array(a</span><span class="s2">, </span><span class="s1">copy=</span><span class="s2">True, </span><span class="s1">dtype=dtype) </span><span class="s2">for </span><span class="s1">a </span><span class="s2">in </span><span class="s1">arrays]</span>
+    <span class="s2">return </span><span class="s1">ret</span>
+
+
+<span class="s2">def </span><span class="s1">trimcoef(c</span><span class="s2">, </span><span class="s1">tol=</span><span class="s5">0</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Remove &quot;small&quot; &quot;trailing&quot; coefficients from a polynomial. 
+ 
+    &quot;Small&quot; means &quot;small in absolute value&quot; and is controlled by the 
+    parameter `tol`; &quot;trailing&quot; means highest order coefficient(s), e.g., in 
+    ``[0, 1, 1, 0, 0]`` (which represents ``0 + x + x**2 + 0*x**3 + 0*x**4``) 
+    both the 3-rd and 4-th order coefficients would be &quot;trimmed.&quot; 
+ 
+    Parameters 
+    ---------- 
+    c : array_like 
+        1-d array of coefficients, ordered from lowest order to highest. 
+    tol : number, optional 
+        Trailing (i.e., highest order) elements with absolute value less 
+        than or equal to `tol` (default value is zero) are removed. 
+ 
+    Returns 
+    ------- 
+    trimmed : ndarray 
+        1-d array with trailing zeros removed.  If the resulting series 
+        would be empty, a series containing a single zero is returned. 
+ 
+    Raises 
+    ------ 
+    ValueError 
+        If `tol` &lt; 0 
+ 
+    See Also 
+    -------- 
+    trimseq 
+ 
+    Examples 
+    -------- 
+    &gt;&gt;&gt; from numpy.polynomial import polyutils as pu 
+    &gt;&gt;&gt; pu.trimcoef((0,0,3,0,5,0,0)) 
+    array([0.,  0.,  3.,  0.,  5.]) 
+    &gt;&gt;&gt; pu.trimcoef((0,0,1e-3,0,1e-5,0,0),1e-3) # item == tol is trimmed 
+    array([0.]) 
+    &gt;&gt;&gt; i = complex(0,1) # works for complex 
+    &gt;&gt;&gt; pu.trimcoef((3e-4,1e-3*(1-i),5e-4,2e-5*(1+i)), 1e-3) 
+    array([0.0003+0.j   , 0.001 -0.001j]) 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">tol &lt; </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;tol must be non-negative&quot;</span><span class="s1">)</span>
+
+    <span class="s1">[c] = as_series([c])</span>
+    <span class="s1">[ind] = np.nonzero(np.abs(c) &gt; tol)</span>
+    <span class="s2">if </span><span class="s1">len(ind) == </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">c[:</span><span class="s5">1</span><span class="s1">]*</span><span class="s5">0</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">c[:ind[-</span><span class="s5">1</span><span class="s1">] + </span><span class="s5">1</span><span class="s1">].copy()</span>
+
+<span class="s2">def </span><span class="s1">getdomain(x):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Return a domain suitable for given abscissae. 
+ 
+    Find a domain suitable for a polynomial or Chebyshev series 
+    defined at the values supplied. 
+ 
+    Parameters 
+    ---------- 
+    x : array_like 
+        1-d array of abscissae whose domain will be determined. 
+ 
+    Returns 
+    ------- 
+    domain : ndarray 
+        1-d array containing two values.  If the inputs are complex, then 
+        the two returned points are the lower left and upper right corners 
+        of the smallest rectangle (aligned with the axes) in the complex 
+        plane containing the points `x`. If the inputs are real, then the 
+        two points are the ends of the smallest interval containing the 
+        points `x`. 
+ 
+    See Also 
+    -------- 
+    mapparms, mapdomain 
+ 
+    Examples 
+    -------- 
+    &gt;&gt;&gt; from numpy.polynomial import polyutils as pu 
+    &gt;&gt;&gt; points = np.arange(4)**2 - 5; points 
+    array([-5, -4, -1,  4]) 
+    &gt;&gt;&gt; pu.getdomain(points) 
+    array([-5.,  4.]) 
+    &gt;&gt;&gt; c = np.exp(complex(0,1)*np.pi*np.arange(12)/6) # unit circle 
+    &gt;&gt;&gt; pu.getdomain(c) 
+    array([-1.-1.j,  1.+1.j]) 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s1">[x] = as_series([x]</span><span class="s2">, </span><span class="s1">trim=</span><span class="s2">False</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">x.dtype.char </span><span class="s2">in </span><span class="s1">np.typecodes[</span><span class="s3">'Complex'</span><span class="s1">]:</span>
+        <span class="s1">rmin</span><span class="s2">, </span><span class="s1">rmax = x.real.min()</span><span class="s2">, </span><span class="s1">x.real.max()</span>
+        <span class="s1">imin</span><span class="s2">, </span><span class="s1">imax = x.imag.min()</span><span class="s2">, </span><span class="s1">x.imag.max()</span>
+        <span class="s2">return </span><span class="s1">np.array((complex(rmin</span><span class="s2">, </span><span class="s1">imin)</span><span class="s2">, </span><span class="s1">complex(rmax</span><span class="s2">, </span><span class="s1">imax)))</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">np.array((x.min()</span><span class="s2">, </span><span class="s1">x.max()))</span>
+
+<span class="s2">def </span><span class="s1">mapparms(old</span><span class="s2">, </span><span class="s1">new):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Linear map parameters between domains. 
+ 
+    Return the parameters of the linear map ``offset + scale*x`` that maps 
+    `old` to `new` such that ``old[i] -&gt; new[i]``, ``i = 0, 1``. 
+ 
+    Parameters 
+    ---------- 
+    old, new : array_like 
+        Domains. Each domain must (successfully) convert to a 1-d array 
+        containing precisely two values. 
+ 
+    Returns 
+    ------- 
+    offset, scale : scalars 
+        The map ``L(x) = offset + scale*x`` maps the first domain to the 
+        second. 
+ 
+    See Also 
+    -------- 
+    getdomain, mapdomain 
+ 
+    Notes 
+    ----- 
+    Also works for complex numbers, and thus can be used to calculate the 
+    parameters required to map any line in the complex plane to any other 
+    line therein. 
+ 
+    Examples 
+    -------- 
+    &gt;&gt;&gt; from numpy.polynomial import polyutils as pu 
+    &gt;&gt;&gt; pu.mapparms((-1,1),(-1,1)) 
+    (0.0, 1.0) 
+    &gt;&gt;&gt; pu.mapparms((1,-1),(-1,1)) 
+    (-0.0, -1.0) 
+    &gt;&gt;&gt; i = complex(0,1) 
+    &gt;&gt;&gt; pu.mapparms((-i,-1),(1,i)) 
+    ((1+1j), (1-0j)) 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s1">oldlen = old[</span><span class="s5">1</span><span class="s1">] - old[</span><span class="s5">0</span><span class="s1">]</span>
+    <span class="s1">newlen = new[</span><span class="s5">1</span><span class="s1">] - new[</span><span class="s5">0</span><span class="s1">]</span>
+    <span class="s1">off = (old[</span><span class="s5">1</span><span class="s1">]*new[</span><span class="s5">0</span><span class="s1">] - old[</span><span class="s5">0</span><span class="s1">]*new[</span><span class="s5">1</span><span class="s1">])/oldlen</span>
+    <span class="s1">scl = newlen/oldlen</span>
+    <span class="s2">return </span><span class="s1">off</span><span class="s2">, </span><span class="s1">scl</span>
+
+<span class="s2">def </span><span class="s1">mapdomain(x</span><span class="s2">, </span><span class="s1">old</span><span class="s2">, </span><span class="s1">new):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Apply linear map to input points. 
+ 
+    The linear map ``offset + scale*x`` that maps the domain `old` to 
+    the domain `new` is applied to the points `x`. 
+ 
+    Parameters 
+    ---------- 
+    x : array_like 
+        Points to be mapped. If `x` is a subtype of ndarray the subtype 
+        will be preserved. 
+    old, new : array_like 
+        The two domains that determine the map.  Each must (successfully) 
+        convert to 1-d arrays containing precisely two values. 
+ 
+    Returns 
+    ------- 
+    x_out : ndarray 
+        Array of points of the same shape as `x`, after application of the 
+        linear map between the two domains. 
+ 
+    See Also 
+    -------- 
+    getdomain, mapparms 
+ 
+    Notes 
+    ----- 
+    Effectively, this implements: 
+ 
+    .. math:: 
+        x\\_out = new[0] + m(x - old[0]) 
+ 
+    where 
+ 
+    .. math:: 
+        m = \\frac{new[1]-new[0]}{old[1]-old[0]} 
+ 
+    Examples 
+    -------- 
+    &gt;&gt;&gt; from numpy.polynomial import polyutils as pu 
+    &gt;&gt;&gt; old_domain = (-1,1) 
+    &gt;&gt;&gt; new_domain = (0,2*np.pi) 
+    &gt;&gt;&gt; x = np.linspace(-1,1,6); x 
+    array([-1. , -0.6, -0.2,  0.2,  0.6,  1. ]) 
+    &gt;&gt;&gt; x_out = pu.mapdomain(x, old_domain, new_domain); x_out 
+    array([ 0.        ,  1.25663706,  2.51327412,  3.76991118,  5.02654825, # may vary 
+            6.28318531]) 
+    &gt;&gt;&gt; x - pu.mapdomain(x_out, new_domain, old_domain) 
+    array([0., 0., 0., 0., 0., 0.]) 
+ 
+    Also works for complex numbers (and thus can be used to map any line in 
+    the complex plane to any other line therein). 
+ 
+    &gt;&gt;&gt; i = complex(0,1) 
+    &gt;&gt;&gt; old = (-1 - i, 1 + i) 
+    &gt;&gt;&gt; new = (-1 + i, 1 - i) 
+    &gt;&gt;&gt; z = np.linspace(old[0], old[1], 6); z 
+    array([-1. -1.j , -0.6-0.6j, -0.2-0.2j,  0.2+0.2j,  0.6+0.6j,  1. +1.j ]) 
+    &gt;&gt;&gt; new_z = pu.mapdomain(z, old, new); new_z 
+    array([-1.0+1.j , -0.6+0.6j, -0.2+0.2j,  0.2-0.2j,  0.6-0.6j,  1.0-1.j ]) # may vary 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s1">x = np.asanyarray(x)</span>
+    <span class="s1">off</span><span class="s2">, </span><span class="s1">scl = mapparms(old</span><span class="s2">, </span><span class="s1">new)</span>
+    <span class="s2">return </span><span class="s1">off + scl*x</span>
+
+
+<span class="s2">def </span><span class="s1">_nth_slice(i</span><span class="s2">, </span><span class="s1">ndim):</span>
+    <span class="s1">sl = [np.newaxis] * ndim</span>
+    <span class="s1">sl[i] = slice(</span><span class="s2">None</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">tuple(sl)</span>
+
+
+<span class="s2">def </span><span class="s1">_vander_nd(vander_fs</span><span class="s2">, </span><span class="s1">points</span><span class="s2">, </span><span class="s1">degrees):</span>
+    <span class="s0">r&quot;&quot;&quot; 
+    A generalization of the Vandermonde matrix for N dimensions 
+ 
+    The result is built by combining the results of 1d Vandermonde matrices, 
+ 
+    .. math:: 
+        W[i_0, \ldots, i_M, j_0, \ldots, j_N] = \prod_{k=0}^N{V_k(x_k)[i_0, \ldots, i_M, j_k]} 
+ 
+    where 
+ 
+    .. math:: 
+        N &amp;= \texttt{len(points)} = \texttt{len(degrees)} = \texttt{len(vander\_fs)} \\ 
+        M &amp;= \texttt{points[k].ndim} \\ 
+        V_k &amp;= \texttt{vander\_fs[k]} \\ 
+        x_k &amp;= \texttt{points[k]} \\ 
+        0 \le j_k &amp;\le \texttt{degrees[k]} 
+ 
+    Expanding the one-dimensional :math:`V_k` functions gives: 
+ 
+    .. math:: 
+        W[i_0, \ldots, i_M, j_0, \ldots, j_N] = \prod_{k=0}^N{B_{k, j_k}(x_k[i_0, \ldots, i_M])} 
+ 
+    where :math:`B_{k,m}` is the m'th basis of the polynomial construction used along 
+    dimension :math:`k`. For a regular polynomial, :math:`B_{k, m}(x) = P_m(x) = x^m`. 
+ 
+    Parameters 
+    ---------- 
+    vander_fs : Sequence[function(array_like, int) -&gt; ndarray] 
+        The 1d vander function to use for each axis, such as ``polyvander`` 
+    points : Sequence[array_like] 
+        Arrays of point coordinates, all of the same shape. The dtypes 
+        will be converted to either float64 or complex128 depending on 
+        whether any of the elements are complex. Scalars are converted to 
+        1-D arrays. 
+        This must be the same length as `vander_fs`. 
+    degrees : Sequence[int] 
+        The maximum degree (inclusive) to use for each axis. 
+        This must be the same length as `vander_fs`. 
+ 
+    Returns 
+    ------- 
+    vander_nd : ndarray 
+        An array of shape ``points[0].shape + tuple(d + 1 for d in degrees)``. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">n_dims = len(vander_fs)</span>
+    <span class="s2">if </span><span class="s1">n_dims != len(points):</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span>
+            <span class="s3">f&quot;Expected </span><span class="s2">{</span><span class="s1">n_dims</span><span class="s2">} </span><span class="s3">dimensions of sample points, got </span><span class="s2">{</span><span class="s1">len(points)</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">n_dims != len(degrees):</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span>
+            <span class="s3">f&quot;Expected </span><span class="s2">{</span><span class="s1">n_dims</span><span class="s2">} </span><span class="s3">dimensions of degrees, got </span><span class="s2">{</span><span class="s1">len(degrees)</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">n_dims == </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;Unable to guess a dtype or shape when no points are given&quot;</span><span class="s1">)</span>
+
+    <span class="s4"># convert to the same shape and type</span>
+    <span class="s1">points = tuple(np.array(tuple(points)</span><span class="s2">, </span><span class="s1">copy=</span><span class="s2">False</span><span class="s1">) + </span><span class="s5">0.0</span><span class="s1">)</span>
+
+    <span class="s4"># produce the vandermonde matrix for each dimension, placing the last</span>
+    <span class="s4"># axis of each in an independent trailing axis of the output</span>
+    <span class="s1">vander_arrays = (</span>
+        <span class="s1">vander_fs[i](points[i]</span><span class="s2">, </span><span class="s1">degrees[i])[(...</span><span class="s2">,</span><span class="s1">) + _nth_slice(i</span><span class="s2">, </span><span class="s1">n_dims)]</span>
+        <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(n_dims)</span>
+    <span class="s1">)</span>
+
+    <span class="s4"># we checked this wasn't empty already, so no `initial` needed</span>
+    <span class="s2">return </span><span class="s1">functools.reduce(operator.mul</span><span class="s2">, </span><span class="s1">vander_arrays)</span>
+
+
+<span class="s2">def </span><span class="s1">_vander_nd_flat(vander_fs</span><span class="s2">, </span><span class="s1">points</span><span class="s2">, </span><span class="s1">degrees):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Like `_vander_nd`, but flattens the last ``len(degrees)`` axes into a single axis 
+ 
+    Used to implement the public ``&lt;type&gt;vander&lt;n&gt;d`` functions. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">v = _vander_nd(vander_fs</span><span class="s2">, </span><span class="s1">points</span><span class="s2">, </span><span class="s1">degrees)</span>
+    <span class="s2">return </span><span class="s1">v.reshape(v.shape[:-len(degrees)] + (-</span><span class="s5">1</span><span class="s2">,</span><span class="s1">))</span>
+
+
+<span class="s2">def </span><span class="s1">_fromroots(line_f</span><span class="s2">, </span><span class="s1">mul_f</span><span class="s2">, </span><span class="s1">roots):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Helper function used to implement the ``&lt;type&gt;fromroots`` functions. 
+ 
+    Parameters 
+    ---------- 
+    line_f : function(float, float) -&gt; ndarray 
+        The ``&lt;type&gt;line`` function, such as ``polyline`` 
+    mul_f : function(array_like, array_like) -&gt; ndarray 
+        The ``&lt;type&gt;mul`` function, such as ``polymul`` 
+    roots 
+        See the ``&lt;type&gt;fromroots`` functions for more detail 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">len(roots) == </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">np.ones(</span><span class="s5">1</span><span class="s1">)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">[roots] = as_series([roots]</span><span class="s2">, </span><span class="s1">trim=</span><span class="s2">False</span><span class="s1">)</span>
+        <span class="s1">roots.sort()</span>
+        <span class="s1">p = [line_f(-r</span><span class="s2">, </span><span class="s5">1</span><span class="s1">) </span><span class="s2">for </span><span class="s1">r </span><span class="s2">in </span><span class="s1">roots]</span>
+        <span class="s1">n = len(p)</span>
+        <span class="s2">while </span><span class="s1">n &gt; </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s1">m</span><span class="s2">, </span><span class="s1">r = divmod(n</span><span class="s2">, </span><span class="s5">2</span><span class="s1">)</span>
+            <span class="s1">tmp = [mul_f(p[i]</span><span class="s2">, </span><span class="s1">p[i+m]) </span><span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(m)]</span>
+            <span class="s2">if </span><span class="s1">r:</span>
+                <span class="s1">tmp[</span><span class="s5">0</span><span class="s1">] = mul_f(tmp[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">p[-</span><span class="s5">1</span><span class="s1">])</span>
+            <span class="s1">p = tmp</span>
+            <span class="s1">n = m</span>
+        <span class="s2">return </span><span class="s1">p[</span><span class="s5">0</span><span class="s1">]</span>
+
+
+<span class="s2">def </span><span class="s1">_valnd(val_f</span><span class="s2">, </span><span class="s1">c</span><span class="s2">, </span><span class="s1">*args):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Helper function used to implement the ``&lt;type&gt;val&lt;n&gt;d`` functions. 
+ 
+    Parameters 
+    ---------- 
+    val_f : function(array_like, array_like, tensor: bool) -&gt; array_like 
+        The ``&lt;type&gt;val`` function, such as ``polyval`` 
+    c, args 
+        See the ``&lt;type&gt;val&lt;n&gt;d`` functions for more detail 
+    &quot;&quot;&quot;</span>
+    <span class="s1">args = [np.asanyarray(a) </span><span class="s2">for </span><span class="s1">a </span><span class="s2">in </span><span class="s1">args]</span>
+    <span class="s1">shape0 = args[</span><span class="s5">0</span><span class="s1">].shape</span>
+    <span class="s2">if not </span><span class="s1">all((a.shape == shape0 </span><span class="s2">for </span><span class="s1">a </span><span class="s2">in </span><span class="s1">args[</span><span class="s5">1</span><span class="s1">:])):</span>
+        <span class="s2">if </span><span class="s1">len(args) == </span><span class="s5">3</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">'x, y, z are incompatible'</span><span class="s1">)</span>
+        <span class="s2">elif </span><span class="s1">len(args) == </span><span class="s5">2</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">'x, y are incompatible'</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">'ordinates are incompatible'</span><span class="s1">)</span>
+    <span class="s1">it = iter(args)</span>
+    <span class="s1">x0 = next(it)</span>
+
+    <span class="s4"># use tensor on only the first</span>
+    <span class="s1">c = val_f(x0</span><span class="s2">, </span><span class="s1">c)</span>
+    <span class="s2">for </span><span class="s1">xi </span><span class="s2">in </span><span class="s1">it:</span>
+        <span class="s1">c = val_f(xi</span><span class="s2">, </span><span class="s1">c</span><span class="s2">, </span><span class="s1">tensor=</span><span class="s2">False</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">c</span>
+
+
+<span class="s2">def </span><span class="s1">_gridnd(val_f</span><span class="s2">, </span><span class="s1">c</span><span class="s2">, </span><span class="s1">*args):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Helper function used to implement the ``&lt;type&gt;grid&lt;n&gt;d`` functions. 
+ 
+    Parameters 
+    ---------- 
+    val_f : function(array_like, array_like, tensor: bool) -&gt; array_like 
+        The ``&lt;type&gt;val`` function, such as ``polyval`` 
+    c, args 
+        See the ``&lt;type&gt;grid&lt;n&gt;d`` functions for more detail 
+    &quot;&quot;&quot;</span>
+    <span class="s2">for </span><span class="s1">xi </span><span class="s2">in </span><span class="s1">args:</span>
+        <span class="s1">c = val_f(xi</span><span class="s2">, </span><span class="s1">c)</span>
+    <span class="s2">return </span><span class="s1">c</span>
+
+
+<span class="s2">def </span><span class="s1">_div(mul_f</span><span class="s2">, </span><span class="s1">c1</span><span class="s2">, </span><span class="s1">c2):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Helper function used to implement the ``&lt;type&gt;div`` functions. 
+ 
+    Implementation uses repeated subtraction of c2 multiplied by the nth basis. 
+    For some polynomial types, a more efficient approach may be possible. 
+ 
+    Parameters 
+    ---------- 
+    mul_f : function(array_like, array_like) -&gt; array_like 
+        The ``&lt;type&gt;mul`` function, such as ``polymul`` 
+    c1, c2 
+        See the ``&lt;type&gt;div`` functions for more detail 
+    &quot;&quot;&quot;</span>
+    <span class="s4"># c1, c2 are trimmed copies</span>
+    <span class="s1">[c1</span><span class="s2">, </span><span class="s1">c2] = as_series([c1</span><span class="s2">, </span><span class="s1">c2])</span>
+    <span class="s2">if </span><span class="s1">c2[-</span><span class="s5">1</span><span class="s1">] == </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">ZeroDivisionError()</span>
+
+    <span class="s1">lc1 = len(c1)</span>
+    <span class="s1">lc2 = len(c2)</span>
+    <span class="s2">if </span><span class="s1">lc1 &lt; lc2:</span>
+        <span class="s2">return </span><span class="s1">c1[:</span><span class="s5">1</span><span class="s1">]*</span><span class="s5">0</span><span class="s2">, </span><span class="s1">c1</span>
+    <span class="s2">elif </span><span class="s1">lc2 == </span><span class="s5">1</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">c1/c2[-</span><span class="s5">1</span><span class="s1">]</span><span class="s2">, </span><span class="s1">c1[:</span><span class="s5">1</span><span class="s1">]*</span><span class="s5">0</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">quo = np.empty(lc1 - lc2 + </span><span class="s5">1</span><span class="s2">, </span><span class="s1">dtype=c1.dtype)</span>
+        <span class="s1">rem = c1</span>
+        <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(lc1 - lc2</span><span class="s2">, </span><span class="s1">- </span><span class="s5">1</span><span class="s2">, </span><span class="s1">-</span><span class="s5">1</span><span class="s1">):</span>
+            <span class="s1">p = mul_f([</span><span class="s5">0</span><span class="s1">]*i + [</span><span class="s5">1</span><span class="s1">]</span><span class="s2">, </span><span class="s1">c2)</span>
+            <span class="s1">q = rem[-</span><span class="s5">1</span><span class="s1">]/p[-</span><span class="s5">1</span><span class="s1">]</span>
+            <span class="s1">rem = rem[:-</span><span class="s5">1</span><span class="s1">] - q*p[:-</span><span class="s5">1</span><span class="s1">]</span>
+            <span class="s1">quo[i] = q</span>
+        <span class="s2">return </span><span class="s1">quo</span><span class="s2">, </span><span class="s1">trimseq(rem)</span>
+
+
+<span class="s2">def </span><span class="s1">_add(c1</span><span class="s2">, </span><span class="s1">c2):</span>
+    <span class="s0">&quot;&quot;&quot; Helper function used to implement the ``&lt;type&gt;add`` functions. &quot;&quot;&quot;</span>
+    <span class="s4"># c1, c2 are trimmed copies</span>
+    <span class="s1">[c1</span><span class="s2">, </span><span class="s1">c2] = as_series([c1</span><span class="s2">, </span><span class="s1">c2])</span>
+    <span class="s2">if </span><span class="s1">len(c1) &gt; len(c2):</span>
+        <span class="s1">c1[:c2.size] += c2</span>
+        <span class="s1">ret = c1</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">c2[:c1.size] += c1</span>
+        <span class="s1">ret = c2</span>
+    <span class="s2">return </span><span class="s1">trimseq(ret)</span>
+
+
+<span class="s2">def </span><span class="s1">_sub(c1</span><span class="s2">, </span><span class="s1">c2):</span>
+    <span class="s0">&quot;&quot;&quot; Helper function used to implement the ``&lt;type&gt;sub`` functions. &quot;&quot;&quot;</span>
+    <span class="s4"># c1, c2 are trimmed copies</span>
+    <span class="s1">[c1</span><span class="s2">, </span><span class="s1">c2] = as_series([c1</span><span class="s2">, </span><span class="s1">c2])</span>
+    <span class="s2">if </span><span class="s1">len(c1) &gt; len(c2):</span>
+        <span class="s1">c1[:c2.size] -= c2</span>
+        <span class="s1">ret = c1</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">c2 = -c2</span>
+        <span class="s1">c2[:c1.size] += c1</span>
+        <span class="s1">ret = c2</span>
+    <span class="s2">return </span><span class="s1">trimseq(ret)</span>
+
+
+<span class="s2">def </span><span class="s1">_fit(vander_f</span><span class="s2">, </span><span class="s1">x</span><span class="s2">, </span><span class="s1">y</span><span class="s2">, </span><span class="s1">deg</span><span class="s2">, </span><span class="s1">rcond=</span><span class="s2">None, </span><span class="s1">full=</span><span class="s2">False, </span><span class="s1">w=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Helper function used to implement the ``&lt;type&gt;fit`` functions. 
+ 
+    Parameters 
+    ---------- 
+    vander_f : function(array_like, int) -&gt; ndarray 
+        The 1d vander function, such as ``polyvander`` 
+    c1, c2 
+        See the ``&lt;type&gt;fit`` functions for more detail 
+    &quot;&quot;&quot;</span>
+    <span class="s1">x = np.asarray(x) + </span><span class="s5">0.0</span>
+    <span class="s1">y = np.asarray(y) + </span><span class="s5">0.0</span>
+    <span class="s1">deg = np.asarray(deg)</span>
+
+    <span class="s4"># check arguments.</span>
+    <span class="s2">if </span><span class="s1">deg.ndim &gt; </span><span class="s5">1 </span><span class="s2">or </span><span class="s1">deg.dtype.kind </span><span class="s2">not in </span><span class="s3">'iu' </span><span class="s2">or </span><span class="s1">deg.size == </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;deg must be an int or non-empty 1-D array of int&quot;</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">deg.min() &lt; </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;expected deg &gt;= 0&quot;</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">x.ndim != </span><span class="s5">1</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;expected 1D vector for x&quot;</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">x.size == </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;expected non-empty vector for x&quot;</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">y.ndim &lt; </span><span class="s5">1 </span><span class="s2">or </span><span class="s1">y.ndim &gt; </span><span class="s5">2</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;expected 1D or 2D array for y&quot;</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">len(x) != len(y):</span>
+        <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;expected x and y to have same length&quot;</span><span class="s1">)</span>
+
+    <span class="s2">if </span><span class="s1">deg.ndim == </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s1">lmax = deg</span>
+        <span class="s1">order = lmax + </span><span class="s5">1</span>
+        <span class="s1">van = vander_f(x</span><span class="s2">, </span><span class="s1">lmax)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">deg = np.sort(deg)</span>
+        <span class="s1">lmax = deg[-</span><span class="s5">1</span><span class="s1">]</span>
+        <span class="s1">order = len(deg)</span>
+        <span class="s1">van = vander_f(x</span><span class="s2">, </span><span class="s1">lmax)[:</span><span class="s2">, </span><span class="s1">deg]</span>
+
+    <span class="s4"># set up the least squares matrices in transposed form</span>
+    <span class="s1">lhs = van.T</span>
+    <span class="s1">rhs = y.T</span>
+    <span class="s2">if </span><span class="s1">w </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s1">w = np.asarray(w) + </span><span class="s5">0.0</span>
+        <span class="s2">if </span><span class="s1">w.ndim != </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;expected 1D vector for w&quot;</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">len(x) != len(w):</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;expected x and w to have same length&quot;</span><span class="s1">)</span>
+        <span class="s4"># apply weights. Don't use inplace operations as they</span>
+        <span class="s4"># can cause problems with NA.</span>
+        <span class="s1">lhs = lhs * w</span>
+        <span class="s1">rhs = rhs * w</span>
+
+    <span class="s4"># set rcond</span>
+    <span class="s2">if </span><span class="s1">rcond </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">rcond = len(x)*np.finfo(x.dtype).eps</span>
+
+    <span class="s4"># Determine the norms of the design matrix columns.</span>
+    <span class="s2">if </span><span class="s1">issubclass(lhs.dtype.type</span><span class="s2">, </span><span class="s1">np.complexfloating):</span>
+        <span class="s1">scl = np.sqrt((np.square(lhs.real) + np.square(lhs.imag)).sum(</span><span class="s5">1</span><span class="s1">))</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">scl = np.sqrt(np.square(lhs).sum(</span><span class="s5">1</span><span class="s1">))</span>
+    <span class="s1">scl[scl == </span><span class="s5">0</span><span class="s1">] = </span><span class="s5">1</span>
+
+    <span class="s4"># Solve the least squares problem.</span>
+    <span class="s1">c</span><span class="s2">, </span><span class="s1">resids</span><span class="s2">, </span><span class="s1">rank</span><span class="s2">, </span><span class="s1">s = np.linalg.lstsq(lhs.T/scl</span><span class="s2">, </span><span class="s1">rhs.T</span><span class="s2">, </span><span class="s1">rcond)</span>
+    <span class="s1">c = (c.T/scl).T</span>
+
+    <span class="s4"># Expand c to include non-fitted coefficients which are set to zero</span>
+    <span class="s2">if </span><span class="s1">deg.ndim &gt; </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">c.ndim == </span><span class="s5">2</span><span class="s1">:</span>
+            <span class="s1">cc = np.zeros((lmax+</span><span class="s5">1</span><span class="s2">, </span><span class="s1">c.shape[</span><span class="s5">1</span><span class="s1">])</span><span class="s2">, </span><span class="s1">dtype=c.dtype)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">cc = np.zeros(lmax+</span><span class="s5">1</span><span class="s2">, </span><span class="s1">dtype=c.dtype)</span>
+        <span class="s1">cc[deg] = c</span>
+        <span class="s1">c = cc</span>
+
+    <span class="s4"># warn on rank reduction</span>
+    <span class="s2">if </span><span class="s1">rank != order </span><span class="s2">and not </span><span class="s1">full:</span>
+        <span class="s1">msg = </span><span class="s3">&quot;The fit may be poorly conditioned&quot;</span>
+        <span class="s1">warnings.warn(msg</span><span class="s2">, </span><span class="s1">RankWarning</span><span class="s2">, </span><span class="s1">stacklevel=</span><span class="s5">2</span><span class="s1">)</span>
+
+    <span class="s2">if </span><span class="s1">full:</span>
+        <span class="s2">return </span><span class="s1">c</span><span class="s2">, </span><span class="s1">[resids</span><span class="s2">, </span><span class="s1">rank</span><span class="s2">, </span><span class="s1">s</span><span class="s2">, </span><span class="s1">rcond]</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">c</span>
+
+
+<span class="s2">def </span><span class="s1">_pow(mul_f</span><span class="s2">, </span><span class="s1">c</span><span class="s2">, </span><span class="s1">pow</span><span class="s2">, </span><span class="s1">maxpower):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Helper function used to implement the ``&lt;type&gt;pow`` functions. 
+ 
+    Parameters 
+    ---------- 
+    mul_f : function(array_like, array_like) -&gt; ndarray 
+        The ``&lt;type&gt;mul`` function, such as ``polymul`` 
+    c : array_like 
+        1-D array of array of series coefficients 
+    pow, maxpower 
+        See the ``&lt;type&gt;pow`` functions for more detail 
+    &quot;&quot;&quot;</span>
+    <span class="s4"># c is a trimmed copy</span>
+    <span class="s1">[c] = as_series([c])</span>
+    <span class="s1">power = int(pow)</span>
+    <span class="s2">if </span><span class="s1">power != pow </span><span class="s2">or </span><span class="s1">power &lt; </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;Power must be a non-negative integer.&quot;</span><span class="s1">)</span>
+    <span class="s2">elif </span><span class="s1">maxpower </span><span class="s2">is not None and </span><span class="s1">power &gt; maxpower:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;Power is too large&quot;</span><span class="s1">)</span>
+    <span class="s2">elif </span><span class="s1">power == </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">np.array([</span><span class="s5">1</span><span class="s1">]</span><span class="s2">, </span><span class="s1">dtype=c.dtype)</span>
+    <span class="s2">elif </span><span class="s1">power == </span><span class="s5">1</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">c</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s4"># This can be made more efficient by using powers of two</span>
+        <span class="s4"># in the usual way.</span>
+        <span class="s1">prd = c</span>
+        <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(</span><span class="s5">2</span><span class="s2">, </span><span class="s1">power + </span><span class="s5">1</span><span class="s1">):</span>
+            <span class="s1">prd = mul_f(prd</span><span class="s2">, </span><span class="s1">c)</span>
+        <span class="s2">return </span><span class="s1">prd</span>
+
+
+<span class="s2">def </span><span class="s1">_deprecate_as_int(x</span><span class="s2">, </span><span class="s1">desc):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Like `operator.index`, but emits a deprecation warning when passed a float 
+ 
+    Parameters 
+    ---------- 
+    x : int-like, or float with integral value 
+        Value to interpret as an integer 
+    desc : str 
+        description to include in any error message 
+ 
+    Raises 
+    ------ 
+    TypeError : if x is a non-integral float or non-numeric 
+    DeprecationWarning : if x is an integral float 
+    &quot;&quot;&quot;</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">operator.index(x)</span>
+    <span class="s2">except </span><span class="s1">TypeError </span><span class="s2">as </span><span class="s1">e:</span>
+        <span class="s4"># Numpy 1.17.0, 2019-03-11</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">ix = int(x)</span>
+        <span class="s2">except </span><span class="s1">TypeError:</span>
+            <span class="s2">pass</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">ix == x:</span>
+                <span class="s1">warnings.warn(</span>
+                    <span class="s3">f&quot;In future, this will raise TypeError, as </span><span class="s2">{</span><span class="s1">desc</span><span class="s2">} </span><span class="s3">will &quot;</span>
+                    <span class="s3">&quot;need to be an integer not just an integral float.&quot;</span><span class="s2">,</span>
+                    <span class="s1">DeprecationWarning</span><span class="s2">,</span>
+                    <span class="s1">stacklevel=</span><span class="s5">3</span>
+                <span class="s1">)</span>
+                <span class="s2">return </span><span class="s1">ix</span>
+
+        <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">desc</span><span class="s2">} </span><span class="s3">must be an integer&quot;</span><span class="s1">) </span><span class="s2">from </span><span class="s1">e</span>
+</pre>
+</body>
+</html>

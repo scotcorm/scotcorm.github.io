@@ -1,0 +1,426 @@
+<html>
+<head>
+<title>cygwinccompiler.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+.s6 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+cygwinccompiler.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;distutils.cygwinccompiler 
+ 
+Provides the CygwinCCompiler class, a subclass of UnixCCompiler that 
+handles the Cygwin port of the GNU C compiler to Windows.  It also contains 
+the Mingw32CCompiler class which handles the mingw32 port of GCC (same as 
+cygwin in no-cygwin mode). 
+&quot;&quot;&quot;</span>
+
+<span class="s2"># problems:</span>
+<span class="s2">#</span>
+<span class="s2"># * if you use a msvc compiled python version (1.5.2)</span>
+<span class="s2">#   1. you have to insert a __GNUC__ section in its config.h</span>
+<span class="s2">#   2. you have to generate an import library for its dll</span>
+<span class="s2">#      - create a def-file for python??.dll</span>
+<span class="s2">#      - create an import library using</span>
+<span class="s2">#             dlltool --dllname python15.dll --def python15.def \</span>
+<span class="s2">#                       --output-lib libpython15.a</span>
+<span class="s2">#</span>
+<span class="s2">#   see also http://starship.python.net/crew/kernr/mingw32/Notes.html</span>
+<span class="s2">#</span>
+<span class="s2"># * We put export_symbols in a def-file, and don't use</span>
+<span class="s2">#   --export-all-symbols because it doesn't worked reliable in some</span>
+<span class="s2">#   tested configurations. And because other windows compilers also</span>
+<span class="s2">#   need their symbols specified this no serious problem.</span>
+<span class="s2">#</span>
+<span class="s2"># tested configurations:</span>
+<span class="s2">#</span>
+<span class="s2"># * cygwin gcc 2.91.57/ld 2.9.4/dllwrap 0.2.4 works</span>
+<span class="s2">#   (after patching python's config.h and for C++ some other include files)</span>
+<span class="s2">#   see also http://starship.python.net/crew/kernr/mingw32/Notes.html</span>
+<span class="s2"># * mingw32 gcc 2.95.2/ld 2.9.4/dllwrap 0.2.4 works</span>
+<span class="s2">#   (ld doesn't support -shared, so we use dllwrap)</span>
+<span class="s2"># * cygwin gcc 2.95.2/ld 2.10.90/dllwrap 2.10.90 works now</span>
+<span class="s2">#   - its dllwrap doesn't work, there is a bug in binutils 2.10.90</span>
+<span class="s2">#     see also http://sources.redhat.com/ml/cygwin/2000-06/msg01274.html</span>
+<span class="s2">#   - using gcc -mdll instead dllwrap doesn't work without -static because</span>
+<span class="s2">#     it tries to link against dlls instead their import libraries. (If</span>
+<span class="s2">#     it finds the dll first.)</span>
+<span class="s2">#     By specifying -static we force ld to link against the import libraries,</span>
+<span class="s2">#     this is windows standard and there are normally not the necessary symbols</span>
+<span class="s2">#     in the dlls.</span>
+<span class="s2">#   *** only the version of June 2000 shows these problems</span>
+<span class="s2"># * cygwin gcc 3.2/ld 2.13.90 works</span>
+<span class="s2">#   (ld supports -shared)</span>
+<span class="s2"># * mingw gcc 3.2/ld 2.13 works</span>
+<span class="s2">#   (ld supports -shared)</span>
+
+<span class="s3">import </span><span class="s1">os</span>
+<span class="s3">import </span><span class="s1">sys</span>
+<span class="s3">import </span><span class="s1">copy</span>
+<span class="s3">from </span><span class="s1">subprocess </span><span class="s3">import </span><span class="s1">Popen</span><span class="s3">, </span><span class="s1">PIPE</span><span class="s3">, </span><span class="s1">check_output</span>
+<span class="s3">import </span><span class="s1">re</span>
+
+<span class="s3">from </span><span class="s1">distutils.unixccompiler </span><span class="s3">import </span><span class="s1">UnixCCompiler</span>
+<span class="s3">from </span><span class="s1">distutils.file_util </span><span class="s3">import </span><span class="s1">write_file</span>
+<span class="s3">from </span><span class="s1">distutils.errors </span><span class="s3">import </span><span class="s1">(DistutilsExecError</span><span class="s3">, </span><span class="s1">CCompilerError</span><span class="s3">,</span>
+        <span class="s1">CompileError</span><span class="s3">, </span><span class="s1">UnknownFileError)</span>
+<span class="s3">from </span><span class="s1">distutils.version </span><span class="s3">import </span><span class="s1">LooseVersion</span>
+<span class="s3">from </span><span class="s1">distutils.spawn </span><span class="s3">import </span><span class="s1">find_executable</span>
+
+<span class="s3">def </span><span class="s1">get_msvcr():</span>
+    <span class="s0">&quot;&quot;&quot;Include the appropriate MSVC runtime library if Python was built 
+    with MSVC 7.0 or later. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">msc_pos = sys.version.find(</span><span class="s4">'MSC v.'</span><span class="s1">)</span>
+    <span class="s3">if </span><span class="s1">msc_pos != -</span><span class="s5">1</span><span class="s1">:</span>
+        <span class="s1">msc_ver = sys.version[msc_pos+</span><span class="s5">6</span><span class="s1">:msc_pos+</span><span class="s5">10</span><span class="s1">]</span>
+        <span class="s3">if </span><span class="s1">msc_ver == </span><span class="s4">'1300'</span><span class="s1">:</span>
+            <span class="s2"># MSVC 7.0</span>
+            <span class="s3">return </span><span class="s1">[</span><span class="s4">'msvcr70'</span><span class="s1">]</span>
+        <span class="s3">elif </span><span class="s1">msc_ver == </span><span class="s4">'1310'</span><span class="s1">:</span>
+            <span class="s2"># MSVC 7.1</span>
+            <span class="s3">return </span><span class="s1">[</span><span class="s4">'msvcr71'</span><span class="s1">]</span>
+        <span class="s3">elif </span><span class="s1">msc_ver == </span><span class="s4">'1400'</span><span class="s1">:</span>
+            <span class="s2"># VS2005 / MSVC 8.0</span>
+            <span class="s3">return </span><span class="s1">[</span><span class="s4">'msvcr80'</span><span class="s1">]</span>
+        <span class="s3">elif </span><span class="s1">msc_ver == </span><span class="s4">'1500'</span><span class="s1">:</span>
+            <span class="s2"># VS2008 / MSVC 9.0</span>
+            <span class="s3">return </span><span class="s1">[</span><span class="s4">'msvcr90'</span><span class="s1">]</span>
+        <span class="s3">elif </span><span class="s1">msc_ver == </span><span class="s4">'1600'</span><span class="s1">:</span>
+            <span class="s2"># VS2010 / MSVC 10.0</span>
+            <span class="s3">return </span><span class="s1">[</span><span class="s4">'msvcr100'</span><span class="s1">]</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Unknown MS Compiler version %s &quot; </span><span class="s1">% msc_ver)</span>
+
+
+<span class="s3">class </span><span class="s1">CygwinCCompiler(UnixCCompiler):</span>
+    <span class="s0">&quot;&quot;&quot; Handles the Cygwin port of the GNU C compiler to Windows. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">compiler_type = </span><span class="s4">'cygwin'</span>
+    <span class="s1">obj_extension = </span><span class="s4">&quot;.o&quot;</span>
+    <span class="s1">static_lib_extension = </span><span class="s4">&quot;.a&quot;</span>
+    <span class="s1">shared_lib_extension = </span><span class="s4">&quot;.dll&quot;</span>
+    <span class="s1">static_lib_format = </span><span class="s4">&quot;lib%s%s&quot;</span>
+    <span class="s1">shared_lib_format = </span><span class="s4">&quot;%s%s&quot;</span>
+    <span class="s1">exe_extension = </span><span class="s4">&quot;.exe&quot;</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">verbose=</span><span class="s5">0</span><span class="s3">, </span><span class="s1">dry_run=</span><span class="s5">0</span><span class="s3">, </span><span class="s1">force=</span><span class="s5">0</span><span class="s1">):</span>
+
+        <span class="s1">UnixCCompiler.__init__(self</span><span class="s3">, </span><span class="s1">verbose</span><span class="s3">, </span><span class="s1">dry_run</span><span class="s3">, </span><span class="s1">force)</span>
+
+        <span class="s1">status</span><span class="s3">, </span><span class="s1">details = check_config_h()</span>
+        <span class="s1">self.debug_print(</span><span class="s4">&quot;Python's GCC status: %s (details: %s)&quot; </span><span class="s1">%</span>
+                         <span class="s1">(status</span><span class="s3">, </span><span class="s1">details))</span>
+        <span class="s3">if </span><span class="s1">status </span><span class="s3">is not </span><span class="s1">CONFIG_H_OK:</span>
+            <span class="s1">self.warn(</span>
+                <span class="s4">&quot;Python's pyconfig.h doesn't seem to support your compiler. &quot;</span>
+                <span class="s4">&quot;Reason: %s. &quot;</span>
+                <span class="s4">&quot;Compiling may fail because of undefined preprocessor macros.&quot;</span>
+                <span class="s1">% details)</span>
+
+        <span class="s1">self.gcc_version</span><span class="s3">, </span><span class="s1">self.ld_version</span><span class="s3">, </span><span class="s1">self.dllwrap_version = \</span>
+            <span class="s1">get_versions()</span>
+        <span class="s1">self.debug_print(self.compiler_type + </span><span class="s4">&quot;: gcc %s, ld %s, dllwrap %s</span><span class="s3">\n</span><span class="s4">&quot; </span><span class="s1">%</span>
+                         <span class="s1">(self.gcc_version</span><span class="s3">,</span>
+                          <span class="s1">self.ld_version</span><span class="s3">,</span>
+                          <span class="s1">self.dllwrap_version) )</span>
+
+        <span class="s2"># ld_version &gt;= &quot;2.10.90&quot; and &lt; &quot;2.13&quot; should also be able to use</span>
+        <span class="s2"># gcc -mdll instead of dllwrap</span>
+        <span class="s2"># Older dllwraps had own version numbers, newer ones use the</span>
+        <span class="s2"># same as the rest of binutils ( also ld )</span>
+        <span class="s2"># dllwrap 2.10.90 is buggy</span>
+        <span class="s3">if </span><span class="s1">self.ld_version &gt;= </span><span class="s4">&quot;2.10.90&quot;</span><span class="s1">:</span>
+            <span class="s1">self.linker_dll = </span><span class="s4">&quot;gcc&quot;</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">self.linker_dll = </span><span class="s4">&quot;dllwrap&quot;</span>
+
+        <span class="s2"># ld_version &gt;= &quot;2.13&quot; support -shared so use it instead of</span>
+        <span class="s2"># -mdll -static</span>
+        <span class="s3">if </span><span class="s1">self.ld_version &gt;= </span><span class="s4">&quot;2.13&quot;</span><span class="s1">:</span>
+            <span class="s1">shared_option = </span><span class="s4">&quot;-shared&quot;</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">shared_option = </span><span class="s4">&quot;-mdll -static&quot;</span>
+
+        <span class="s2"># Hard-code GCC because that's what this is all about.</span>
+        <span class="s2"># XXX optimization, warnings etc. should be customizable.</span>
+        <span class="s1">self.set_executables(compiler=</span><span class="s4">'gcc -mcygwin -O -Wall'</span><span class="s3">,</span>
+                             <span class="s1">compiler_so=</span><span class="s4">'gcc -mcygwin -mdll -O -Wall'</span><span class="s3">,</span>
+                             <span class="s1">compiler_cxx=</span><span class="s4">'g++ -mcygwin -O -Wall'</span><span class="s3">,</span>
+                             <span class="s1">linker_exe=</span><span class="s4">'gcc -mcygwin'</span><span class="s3">,</span>
+                             <span class="s1">linker_so=(</span><span class="s4">'%s -mcygwin %s' </span><span class="s1">%</span>
+                                        <span class="s1">(self.linker_dll</span><span class="s3">, </span><span class="s1">shared_option)))</span>
+
+        <span class="s2"># cygwin and mingw32 need different sets of libraries</span>
+        <span class="s3">if </span><span class="s1">self.gcc_version == </span><span class="s4">&quot;2.91.57&quot;</span><span class="s1">:</span>
+            <span class="s2"># cygwin shouldn't need msvcrt, but without the dlls will crash</span>
+            <span class="s2"># (gcc version 2.91.57) -- perhaps something about initialization</span>
+            <span class="s1">self.dll_libraries=[</span><span class="s4">&quot;msvcrt&quot;</span><span class="s1">]</span>
+            <span class="s1">self.warn(</span>
+                <span class="s4">&quot;Consider upgrading to a newer version of gcc&quot;</span><span class="s1">)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s2"># Include the appropriate MSVC runtime library if Python was built</span>
+            <span class="s2"># with MSVC 7.0 or later.</span>
+            <span class="s1">self.dll_libraries = get_msvcr()</span>
+
+    <span class="s3">def </span><span class="s1">_compile(self</span><span class="s3">, </span><span class="s1">obj</span><span class="s3">, </span><span class="s1">src</span><span class="s3">, </span><span class="s1">ext</span><span class="s3">, </span><span class="s1">cc_args</span><span class="s3">, </span><span class="s1">extra_postargs</span><span class="s3">, </span><span class="s1">pp_opts):</span>
+        <span class="s0">&quot;&quot;&quot;Compiles the source by spawning GCC and windres if needed.&quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">ext == </span><span class="s4">'.rc' </span><span class="s3">or </span><span class="s1">ext == </span><span class="s4">'.res'</span><span class="s1">:</span>
+            <span class="s2"># gcc needs '.res' and '.rc' compiled to object files !!!</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">self.spawn([</span><span class="s4">&quot;windres&quot;</span><span class="s3">, </span><span class="s4">&quot;-i&quot;</span><span class="s3">, </span><span class="s1">src</span><span class="s3">, </span><span class="s4">&quot;-o&quot;</span><span class="s3">, </span><span class="s1">obj])</span>
+            <span class="s3">except </span><span class="s1">DistutilsExecError </span><span class="s3">as </span><span class="s1">msg:</span>
+                <span class="s3">raise </span><span class="s1">CompileError(msg)</span>
+        <span class="s3">else</span><span class="s1">: </span><span class="s2"># for other files use the C-compiler</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">self.spawn(self.compiler_so + cc_args + [src</span><span class="s3">, </span><span class="s4">'-o'</span><span class="s3">, </span><span class="s1">obj] +</span>
+                           <span class="s1">extra_postargs)</span>
+            <span class="s3">except </span><span class="s1">DistutilsExecError </span><span class="s3">as </span><span class="s1">msg:</span>
+                <span class="s3">raise </span><span class="s1">CompileError(msg)</span>
+
+    <span class="s3">def </span><span class="s1">link(self</span><span class="s3">, </span><span class="s1">target_desc</span><span class="s3">, </span><span class="s1">objects</span><span class="s3">, </span><span class="s1">output_filename</span><span class="s3">, </span><span class="s1">output_dir=</span><span class="s3">None,</span>
+             <span class="s1">libraries=</span><span class="s3">None, </span><span class="s1">library_dirs=</span><span class="s3">None, </span><span class="s1">runtime_library_dirs=</span><span class="s3">None,</span>
+             <span class="s1">export_symbols=</span><span class="s3">None, </span><span class="s1">debug=</span><span class="s5">0</span><span class="s3">, </span><span class="s1">extra_preargs=</span><span class="s3">None,</span>
+             <span class="s1">extra_postargs=</span><span class="s3">None, </span><span class="s1">build_temp=</span><span class="s3">None, </span><span class="s1">target_lang=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Link the objects.&quot;&quot;&quot;</span>
+        <span class="s2"># use separate copies, so we can modify the lists</span>
+        <span class="s1">extra_preargs = copy.copy(extra_preargs </span><span class="s3">or </span><span class="s1">[])</span>
+        <span class="s1">libraries = copy.copy(libraries </span><span class="s3">or </span><span class="s1">[])</span>
+        <span class="s1">objects = copy.copy(objects </span><span class="s3">or </span><span class="s1">[])</span>
+
+        <span class="s2"># Additional libraries</span>
+        <span class="s1">libraries.extend(self.dll_libraries)</span>
+
+        <span class="s2"># handle export symbols by creating a def-file</span>
+        <span class="s2"># with executables this only works with gcc/ld as linker</span>
+        <span class="s3">if </span><span class="s1">((export_symbols </span><span class="s3">is not None</span><span class="s1">) </span><span class="s3">and</span>
+            <span class="s1">(target_desc != self.EXECUTABLE </span><span class="s3">or </span><span class="s1">self.linker_dll == </span><span class="s4">&quot;gcc&quot;</span><span class="s1">)):</span>
+            <span class="s2"># (The linker doesn't do anything if output is up-to-date.</span>
+            <span class="s2"># So it would probably better to check if we really need this,</span>
+            <span class="s2"># but for this we had to insert some unchanged parts of</span>
+            <span class="s2"># UnixCCompiler, and this is not what we want.)</span>
+
+            <span class="s2"># we want to put some files in the same directory as the</span>
+            <span class="s2"># object files are, build_temp doesn't help much</span>
+            <span class="s2"># where are the object files</span>
+            <span class="s1">temp_dir = os.path.dirname(objects[</span><span class="s5">0</span><span class="s1">])</span>
+            <span class="s2"># name of dll to give the helper files the same base name</span>
+            <span class="s1">(dll_name</span><span class="s3">, </span><span class="s1">dll_extension) = os.path.splitext(</span>
+                <span class="s1">os.path.basename(output_filename))</span>
+
+            <span class="s2"># generate the filenames for these files</span>
+            <span class="s1">def_file = os.path.join(temp_dir</span><span class="s3">, </span><span class="s1">dll_name + </span><span class="s4">&quot;.def&quot;</span><span class="s1">)</span>
+            <span class="s1">lib_file = os.path.join(temp_dir</span><span class="s3">, </span><span class="s4">'lib' </span><span class="s1">+ dll_name + </span><span class="s4">&quot;.a&quot;</span><span class="s1">)</span>
+
+            <span class="s2"># Generate .def file</span>
+            <span class="s1">contents = [</span>
+                <span class="s4">&quot;LIBRARY %s&quot; </span><span class="s1">% os.path.basename(output_filename)</span><span class="s3">,</span>
+                <span class="s4">&quot;EXPORTS&quot;</span><span class="s1">]</span>
+            <span class="s3">for </span><span class="s1">sym </span><span class="s3">in </span><span class="s1">export_symbols:</span>
+                <span class="s1">contents.append(sym)</span>
+            <span class="s1">self.execute(write_file</span><span class="s3">, </span><span class="s1">(def_file</span><span class="s3">, </span><span class="s1">contents)</span><span class="s3">,</span>
+                         <span class="s4">&quot;writing %s&quot; </span><span class="s1">% def_file)</span>
+
+            <span class="s2"># next add options for def-file and to creating import libraries</span>
+
+            <span class="s2"># dllwrap uses different options than gcc/ld</span>
+            <span class="s3">if </span><span class="s1">self.linker_dll == </span><span class="s4">&quot;dllwrap&quot;</span><span class="s1">:</span>
+                <span class="s1">extra_preargs.extend([</span><span class="s4">&quot;--output-lib&quot;</span><span class="s3">, </span><span class="s1">lib_file])</span>
+                <span class="s2"># for dllwrap we have to use a special option</span>
+                <span class="s1">extra_preargs.extend([</span><span class="s4">&quot;--def&quot;</span><span class="s3">, </span><span class="s1">def_file])</span>
+            <span class="s2"># we use gcc/ld here and can be sure ld is &gt;= 2.9.10</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s2"># doesn't work: bfd_close build\...\libfoo.a: Invalid operation</span>
+                <span class="s2">#extra_preargs.extend([&quot;-Wl,--out-implib,%s&quot; % lib_file])</span>
+                <span class="s2"># for gcc/ld the def-file is specified as any object files</span>
+                <span class="s1">objects.append(def_file)</span>
+
+        <span class="s2">#end: if ((export_symbols is not None) and</span>
+        <span class="s2">#        (target_desc != self.EXECUTABLE or self.linker_dll == &quot;gcc&quot;)):</span>
+
+        <span class="s2"># who wants symbols and a many times larger output file</span>
+        <span class="s2"># should explicitly switch the debug mode on</span>
+        <span class="s2"># otherwise we let dllwrap/ld strip the output file</span>
+        <span class="s2"># (On my machine: 10KiB &lt; stripped_file &lt; ??100KiB</span>
+        <span class="s2">#   unstripped_file = stripped_file + XXX KiB</span>
+        <span class="s2">#  ( XXX=254 for a typical python extension))</span>
+        <span class="s3">if not </span><span class="s1">debug:</span>
+            <span class="s1">extra_preargs.append(</span><span class="s4">&quot;-s&quot;</span><span class="s1">)</span>
+
+        <span class="s1">UnixCCompiler.link(self</span><span class="s3">, </span><span class="s1">target_desc</span><span class="s3">, </span><span class="s1">objects</span><span class="s3">, </span><span class="s1">output_filename</span><span class="s3">,</span>
+                           <span class="s1">output_dir</span><span class="s3">, </span><span class="s1">libraries</span><span class="s3">, </span><span class="s1">library_dirs</span><span class="s3">,</span>
+                           <span class="s1">runtime_library_dirs</span><span class="s3">,</span>
+                           <span class="s3">None, </span><span class="s2"># export_symbols, we do this in our def-file</span>
+                           <span class="s1">debug</span><span class="s3">, </span><span class="s1">extra_preargs</span><span class="s3">, </span><span class="s1">extra_postargs</span><span class="s3">, </span><span class="s1">build_temp</span><span class="s3">,</span>
+                           <span class="s1">target_lang)</span>
+
+    <span class="s2"># -- Miscellaneous methods -----------------------------------------</span>
+
+    <span class="s3">def </span><span class="s1">object_filenames(self</span><span class="s3">, </span><span class="s1">source_filenames</span><span class="s3">, </span><span class="s1">strip_dir=</span><span class="s5">0</span><span class="s3">, </span><span class="s1">output_dir=</span><span class="s4">''</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Adds supports for rc and res files.&quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">output_dir </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">output_dir = </span><span class="s4">''</span>
+        <span class="s1">obj_names = []</span>
+        <span class="s3">for </span><span class="s1">src_name </span><span class="s3">in </span><span class="s1">source_filenames:</span>
+            <span class="s2"># use normcase to make sure '.rc' is really '.rc' and not '.RC'</span>
+            <span class="s1">base</span><span class="s3">, </span><span class="s1">ext = os.path.splitext(os.path.normcase(src_name))</span>
+            <span class="s3">if </span><span class="s1">ext </span><span class="s3">not in </span><span class="s1">(self.src_extensions + [</span><span class="s4">'.rc'</span><span class="s3">,</span><span class="s4">'.res'</span><span class="s1">]):</span>
+                <span class="s3">raise </span><span class="s1">UnknownFileError(</span><span class="s4">&quot;unknown file type '%s' (from '%s')&quot; </span><span class="s1">% \</span>
+                      <span class="s1">(ext</span><span class="s3">, </span><span class="s1">src_name))</span>
+            <span class="s3">if </span><span class="s1">strip_dir:</span>
+                <span class="s1">base = os.path.basename (base)</span>
+            <span class="s3">if </span><span class="s1">ext </span><span class="s3">in </span><span class="s1">(</span><span class="s4">'.res'</span><span class="s3">, </span><span class="s4">'.rc'</span><span class="s1">):</span>
+                <span class="s2"># these need to be compiled to object files</span>
+                <span class="s1">obj_names.append (os.path.join(output_dir</span><span class="s3">,</span>
+                                              <span class="s1">base + ext + self.obj_extension))</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">obj_names.append (os.path.join(output_dir</span><span class="s3">,</span>
+                                               <span class="s1">base + self.obj_extension))</span>
+        <span class="s3">return </span><span class="s1">obj_names</span>
+
+<span class="s2"># the same as cygwin plus some additional parameters</span>
+<span class="s3">class </span><span class="s1">Mingw32CCompiler(CygwinCCompiler):</span>
+    <span class="s0">&quot;&quot;&quot; Handles the Mingw32 port of the GNU C compiler to Windows. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">compiler_type = </span><span class="s4">'mingw32'</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">verbose=</span><span class="s5">0</span><span class="s3">, </span><span class="s1">dry_run=</span><span class="s5">0</span><span class="s3">, </span><span class="s1">force=</span><span class="s5">0</span><span class="s1">):</span>
+
+        <span class="s1">CygwinCCompiler.__init__ (self</span><span class="s3">, </span><span class="s1">verbose</span><span class="s3">, </span><span class="s1">dry_run</span><span class="s3">, </span><span class="s1">force)</span>
+
+        <span class="s2"># ld_version &gt;= &quot;2.13&quot; support -shared so use it instead of</span>
+        <span class="s2"># -mdll -static</span>
+        <span class="s3">if </span><span class="s1">self.ld_version &gt;= </span><span class="s4">&quot;2.13&quot;</span><span class="s1">:</span>
+            <span class="s1">shared_option = </span><span class="s4">&quot;-shared&quot;</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">shared_option = </span><span class="s4">&quot;-mdll -static&quot;</span>
+
+        <span class="s2"># A real mingw32 doesn't need to specify a different entry point,</span>
+        <span class="s2"># but cygwin 2.91.57 in no-cygwin-mode needs it.</span>
+        <span class="s3">if </span><span class="s1">self.gcc_version &lt;= </span><span class="s4">&quot;2.91.57&quot;</span><span class="s1">:</span>
+            <span class="s1">entry_point = </span><span class="s4">'--entry _DllMain@12'</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">entry_point = </span><span class="s4">''</span>
+
+        <span class="s3">if </span><span class="s1">is_cygwingcc():</span>
+            <span class="s3">raise </span><span class="s1">CCompilerError(</span>
+                <span class="s4">'Cygwin gcc cannot be used with --compiler=mingw32'</span><span class="s1">)</span>
+
+        <span class="s1">self.set_executables(compiler=</span><span class="s4">'gcc -O -Wall'</span><span class="s3">,</span>
+                             <span class="s1">compiler_so=</span><span class="s4">'gcc -mdll -O -Wall'</span><span class="s3">,</span>
+                             <span class="s1">compiler_cxx=</span><span class="s4">'g++ -O -Wall'</span><span class="s3">,</span>
+                             <span class="s1">linker_exe=</span><span class="s4">'gcc'</span><span class="s3">,</span>
+                             <span class="s1">linker_so=</span><span class="s4">'%s %s %s'</span>
+                                        <span class="s1">% (self.linker_dll</span><span class="s3">, </span><span class="s1">shared_option</span><span class="s3">,</span>
+                                           <span class="s1">entry_point))</span>
+        <span class="s2"># Maybe we should also append -mthreads, but then the finished</span>
+        <span class="s2"># dlls need another dll (mingwm10.dll see Mingw32 docs)</span>
+        <span class="s2"># (-mthreads: Support thread-safe exception handling on `Mingw32')</span>
+
+        <span class="s2"># no additional libraries needed</span>
+        <span class="s1">self.dll_libraries=[]</span>
+
+        <span class="s2"># Include the appropriate MSVC runtime library if Python was built</span>
+        <span class="s2"># with MSVC 7.0 or later.</span>
+        <span class="s1">self.dll_libraries = get_msvcr()</span>
+
+<span class="s2"># Because these compilers aren't configured in Python's pyconfig.h file by</span>
+<span class="s2"># default, we should at least warn the user if he is using an unmodified</span>
+<span class="s2"># version.</span>
+
+<span class="s1">CONFIG_H_OK = </span><span class="s4">&quot;ok&quot;</span>
+<span class="s1">CONFIG_H_NOTOK = </span><span class="s4">&quot;not ok&quot;</span>
+<span class="s1">CONFIG_H_UNCERTAIN = </span><span class="s4">&quot;uncertain&quot;</span>
+
+<span class="s3">def </span><span class="s1">check_config_h():</span>
+    <span class="s0">&quot;&quot;&quot;Check if the current Python installation appears amenable to building 
+    extensions with GCC. 
+ 
+    Returns a tuple (status, details), where 'status' is one of the following 
+    constants: 
+ 
+    - CONFIG_H_OK: all is well, go ahead and compile 
+    - CONFIG_H_NOTOK: doesn't look good 
+    - CONFIG_H_UNCERTAIN: not sure -- unable to read pyconfig.h 
+ 
+    'details' is a human-readable string explaining the situation. 
+ 
+    Note there are two ways to conclude &quot;OK&quot;: either 'sys.version' contains 
+    the string &quot;GCC&quot; (implying that this Python was built with GCC), or the 
+    installed &quot;pyconfig.h&quot; contains the string &quot;__GNUC__&quot;. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2"># XXX since this function also checks sys.version, it's not strictly a</span>
+    <span class="s2"># &quot;pyconfig.h&quot; check -- should probably be renamed...</span>
+
+    <span class="s3">from </span><span class="s1">distutils </span><span class="s3">import </span><span class="s1">sysconfig</span>
+
+    <span class="s2"># if sys.version contains GCC then python was compiled with GCC, and the</span>
+    <span class="s2"># pyconfig.h file should be OK</span>
+    <span class="s3">if </span><span class="s4">&quot;GCC&quot; </span><span class="s3">in </span><span class="s1">sys.version:</span>
+        <span class="s3">return </span><span class="s1">CONFIG_H_OK</span><span class="s3">, </span><span class="s4">&quot;sys.version mentions 'GCC'&quot;</span>
+
+    <span class="s2"># let's see if __GNUC__ is mentioned in python.h</span>
+    <span class="s1">fn = sysconfig.get_config_h_filename()</span>
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s1">config_h = open(fn)</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s3">if </span><span class="s4">&quot;__GNUC__&quot; </span><span class="s3">in </span><span class="s1">config_h.read():</span>
+                <span class="s3">return </span><span class="s1">CONFIG_H_OK</span><span class="s3">, </span><span class="s4">&quot;'%s' mentions '__GNUC__'&quot; </span><span class="s1">% fn</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s3">return </span><span class="s1">CONFIG_H_NOTOK</span><span class="s3">, </span><span class="s4">&quot;'%s' does not mention '__GNUC__'&quot; </span><span class="s1">% fn</span>
+        <span class="s3">finally</span><span class="s1">:</span>
+            <span class="s1">config_h.close()</span>
+    <span class="s3">except </span><span class="s1">OSError </span><span class="s3">as </span><span class="s1">exc:</span>
+        <span class="s3">return </span><span class="s1">(CONFIG_H_UNCERTAIN</span><span class="s3">,</span>
+                <span class="s4">&quot;couldn't read '%s': %s&quot; </span><span class="s1">% (fn</span><span class="s3">, </span><span class="s1">exc.strerror))</span>
+
+<span class="s1">RE_VERSION = re.compile(</span><span class="s6">br'(\d+\.\d+(\.\d+)*)'</span><span class="s1">)</span>
+
+<span class="s3">def </span><span class="s1">_find_exe_version(cmd):</span>
+    <span class="s0">&quot;&quot;&quot;Find the version of an executable by running `cmd` in the shell. 
+ 
+    If the command is not found, or the output does not match 
+    `RE_VERSION`, returns None. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">executable = cmd.split()[</span><span class="s5">0</span><span class="s1">]</span>
+    <span class="s3">if </span><span class="s1">find_executable(executable) </span><span class="s3">is None</span><span class="s1">:</span>
+        <span class="s3">return None</span>
+    <span class="s1">out = Popen(cmd</span><span class="s3">, </span><span class="s1">shell=</span><span class="s3">True, </span><span class="s1">stdout=PIPE).stdout</span>
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s1">out_string = out.read()</span>
+    <span class="s3">finally</span><span class="s1">:</span>
+        <span class="s1">out.close()</span>
+    <span class="s1">result = RE_VERSION.search(out_string)</span>
+    <span class="s3">if </span><span class="s1">result </span><span class="s3">is None</span><span class="s1">:</span>
+        <span class="s3">return None</span>
+    <span class="s2"># LooseVersion works with strings</span>
+    <span class="s2"># so we need to decode our bytes</span>
+    <span class="s3">return </span><span class="s1">LooseVersion(result.group(</span><span class="s5">1</span><span class="s1">).decode())</span>
+
+<span class="s3">def </span><span class="s1">get_versions():</span>
+    <span class="s0">&quot;&quot;&quot; Try to find out the versions of gcc, ld and dllwrap. 
+ 
+    If not possible it returns None for it. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">commands = [</span><span class="s4">'gcc -dumpversion'</span><span class="s3">, </span><span class="s4">'ld -v'</span><span class="s3">, </span><span class="s4">'dllwrap --version'</span><span class="s1">]</span>
+    <span class="s3">return </span><span class="s1">tuple([_find_exe_version(cmd) </span><span class="s3">for </span><span class="s1">cmd </span><span class="s3">in </span><span class="s1">commands])</span>
+
+<span class="s3">def </span><span class="s1">is_cygwingcc():</span>
+    <span class="s0">'''Try to determine if the gcc that would be used is from cygwin.'''</span>
+    <span class="s1">out_string = check_output([</span><span class="s4">'gcc'</span><span class="s3">, </span><span class="s4">'-dumpmachine'</span><span class="s1">])</span>
+    <span class="s3">return </span><span class="s1">out_string.strip().endswith(</span><span class="s6">b'cygwin'</span><span class="s1">)</span>
+</pre>
+</body>
+</html>

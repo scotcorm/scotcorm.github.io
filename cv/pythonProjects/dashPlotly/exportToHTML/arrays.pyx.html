@@ -1,0 +1,200 @@
+<html>
+<head>
+<title>arrays.pyx</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+arrays.pyx</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;</span>
+<span class="s0">Cython implementations for internal ExtensionArrays.</span>
+<span class="s0">&quot;&quot;&quot;</span>
+<span class="s0">cimport cython</span>
+
+<span class="s0">import numpy as np</span>
+
+<span class="s0">cimport numpy as cnp</span>
+<span class="s0">from cpython cimport PyErr_Clear</span>
+<span class="s0">from numpy cimport ndarray</span>
+
+<span class="s0">cnp.import_array()</span>
+
+
+<span class="s0">@cython.freelist(16)</span>
+<span class="s0">cdef class NDArrayBacked:</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Implementing these methods in cython improves performance quite a bit.</span>
+
+    <span class="s0">import pandas as pd</span>
+
+    <span class="s0">from pandas._libs.arrays import NDArrayBacked as cls</span>
+
+    <span class="s0">dti = pd.date_range(&quot;2016-01-01&quot;, periods=3)</span>
+    <span class="s0">dta = dti._data</span>
+    <span class="s0">arr = dta._ndarray</span>
+
+    <span class="s0">obj = cls._simple_new(arr, arr.dtype)</span>
+
+    <span class="s0"># for foo in [arr, dta, obj]: ...</span>
+
+    <span class="s0">%timeit foo.copy()</span>
+    <span class="s0">299 ns ± 30 ns per loop     # &lt;-- arr underlying ndarray (for reference)</span>
+    <span class="s0">530 ns ± 9.24 ns per loop   # &lt;-- dta with cython NDArrayBacked</span>
+    <span class="s0">1.66 µs ± 46.3 ns per loop  # &lt;-- dta without cython NDArrayBacked</span>
+    <span class="s0">328 ns ± 5.29 ns per loop   # &lt;-- obj with NDArrayBacked.__cinit__</span>
+    <span class="s0">371 ns ± 6.97 ns per loop   # &lt;-- obj with NDArrayBacked._simple_new</span>
+
+    <span class="s0">%timeit foo.T</span>
+    <span class="s0">125 ns ± 6.27 ns per loop   # &lt;-- arr underlying ndarray (for reference)</span>
+    <span class="s0">226 ns ± 7.66 ns per loop   # &lt;-- dta with cython NDArrayBacked</span>
+    <span class="s0">911 ns ± 16.6 ns per loop   # &lt;-- dta without cython NDArrayBacked</span>
+    <span class="s0">215 ns ± 4.54 ns per loop   # &lt;-- obj with NDArrayBacked._simple_new</span>
+
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0"># TODO: implement take in terms of cnp.PyArray_TakeFrom</span>
+    <span class="s0"># TODO: implement concat_same_type in terms of cnp.PyArray_Concatenate</span>
+
+    <span class="s0"># cdef:</span>
+    <span class="s0">#    readonly ndarray _ndarray</span>
+    <span class="s0">#    readonly object _dtype</span>
+
+    <span class="s0">def __init__(self, ndarray values, object dtype):</span>
+        <span class="s0">self._ndarray = values</span>
+        <span class="s0">self._dtype = dtype</span>
+
+    <span class="s0">@classmethod</span>
+    <span class="s0">def _simple_new(cls, ndarray values, object dtype):</span>
+        <span class="s0">cdef:</span>
+            <span class="s0">NDArrayBacked obj</span>
+        <span class="s0">obj = NDArrayBacked.__new__(cls)</span>
+        <span class="s0">obj._ndarray = values</span>
+        <span class="s0">obj._dtype = dtype</span>
+        <span class="s0">return obj</span>
+
+    <span class="s0">cpdef NDArrayBacked _from_backing_data(self, ndarray values):</span>
+        <span class="s0">&quot;&quot;&quot;</span>
+        <span class="s0">Construct a new ExtensionArray `new_array` with `arr` as its _ndarray.</span>
+
+        <span class="s0">This should round-trip:</span>
+            <span class="s0">self == self._from_backing_data(self._ndarray)</span>
+        <span class="s0">&quot;&quot;&quot;</span>
+        <span class="s0"># TODO: re-reuse simple_new if/when it can be cpdef</span>
+        <span class="s0">cdef:</span>
+            <span class="s0">NDArrayBacked obj</span>
+        <span class="s0">obj = NDArrayBacked.__new__(type(self))</span>
+        <span class="s0">obj._ndarray = values</span>
+        <span class="s0">obj._dtype = self._dtype</span>
+        <span class="s0">return obj</span>
+
+    <span class="s0">cpdef __setstate__(self, state):</span>
+        <span class="s0">if isinstance(state, dict):</span>
+            <span class="s0">if &quot;_data&quot; in state:</span>
+                <span class="s0">data = state.pop(&quot;_data&quot;)</span>
+            <span class="s0">elif &quot;_ndarray&quot; in state:</span>
+                <span class="s0">data = state.pop(&quot;_ndarray&quot;)</span>
+            <span class="s0">else:</span>
+                <span class="s0">raise ValueError  # pragma: no cover</span>
+            <span class="s0">self._ndarray = data</span>
+            <span class="s0">self._dtype = state.pop(&quot;_dtype&quot;)</span>
+
+            <span class="s0">for key, val in state.items():</span>
+                <span class="s0">setattr(self, key, val)</span>
+        <span class="s0">elif isinstance(state, tuple):</span>
+            <span class="s0">if len(state) != 3:</span>
+                <span class="s0">if len(state) == 1 and isinstance(state[0], dict):</span>
+                    <span class="s0">self.__setstate__(state[0])</span>
+                    <span class="s0">return</span>
+                <span class="s0">raise NotImplementedError(state)  # pragma: no cover</span>
+
+            <span class="s0">data, dtype = state[:2]</span>
+            <span class="s0">if isinstance(dtype, np.ndarray):</span>
+                <span class="s0">dtype, data = data, dtype</span>
+            <span class="s0">self._ndarray = data</span>
+            <span class="s0">self._dtype = dtype</span>
+
+            <span class="s0">if isinstance(state[2], dict):</span>
+                <span class="s0">for key, val in state[2].items():</span>
+                    <span class="s0">setattr(self, key, val)</span>
+            <span class="s0">else:</span>
+                <span class="s0">raise NotImplementedError(state)  # pragma: no cover</span>
+        <span class="s0">else:</span>
+            <span class="s0">raise NotImplementedError(state)  # pragma: no cover</span>
+
+    <span class="s0">def __len__(self) -&gt; int:</span>
+        <span class="s0">return len(self._ndarray)</span>
+
+    <span class="s0">@property</span>
+    <span class="s0">def shape(self):</span>
+        <span class="s0"># object cast bc _ndarray.shape is npy_intp*</span>
+        <span class="s0">return (&lt;object&gt;(self._ndarray)).shape</span>
+
+    <span class="s0">@property</span>
+    <span class="s0">def ndim(self) -&gt; int:</span>
+        <span class="s0">return self._ndarray.ndim</span>
+
+    <span class="s0">@property</span>
+    <span class="s0">def size(self) -&gt; int:</span>
+        <span class="s0">return self._ndarray.size</span>
+
+    <span class="s0">@property</span>
+    <span class="s0">def nbytes(self) -&gt; int:</span>
+        <span class="s0">return self._ndarray.nbytes</span>
+
+    <span class="s0">def copy(self, order=&quot;C&quot;):</span>
+        <span class="s0">cdef:</span>
+            <span class="s0">cnp.NPY_ORDER order_code</span>
+            <span class="s0">int success</span>
+
+        <span class="s0">success = cnp.PyArray_OrderConverter(order, &amp;order_code)</span>
+        <span class="s0">if not success:</span>
+            <span class="s0"># clear exception so that we don't get a SystemError</span>
+            <span class="s0">PyErr_Clear()</span>
+            <span class="s0"># same message used by numpy</span>
+            <span class="s0">msg = f&quot;order must be one of 'C', 'F', 'A', or 'K' (got '{order}')&quot;</span>
+            <span class="s0">raise ValueError(msg)</span>
+
+        <span class="s0">res_values = cnp.PyArray_NewCopy(self._ndarray, order_code)</span>
+        <span class="s0">return self._from_backing_data(res_values)</span>
+
+    <span class="s0">def delete(self, loc, axis=0):</span>
+        <span class="s0">res_values = np.delete(self._ndarray, loc, axis=axis)</span>
+        <span class="s0">return self._from_backing_data(res_values)</span>
+
+    <span class="s0">def swapaxes(self, axis1, axis2):</span>
+        <span class="s0">res_values = cnp.PyArray_SwapAxes(self._ndarray, axis1, axis2)</span>
+        <span class="s0">return self._from_backing_data(res_values)</span>
+
+    <span class="s0"># TODO: pass NPY_MAXDIMS equiv to axis=None?</span>
+    <span class="s0">def repeat(self, repeats, axis: int = 0):</span>
+        <span class="s0">if axis is None:</span>
+            <span class="s0">axis = 0</span>
+        <span class="s0">res_values = cnp.PyArray_Repeat(self._ndarray, repeats, &lt;int&gt;axis)</span>
+        <span class="s0">return self._from_backing_data(res_values)</span>
+
+    <span class="s0">def reshape(self, *args, **kwargs):</span>
+        <span class="s0">res_values = self._ndarray.reshape(*args, **kwargs)</span>
+        <span class="s0">return self._from_backing_data(res_values)</span>
+
+    <span class="s0">def ravel(self, order=&quot;C&quot;):</span>
+        <span class="s0"># cnp.PyArray_OrderConverter(PyObject* obj, NPY_ORDER* order)</span>
+        <span class="s0"># res_values = cnp.PyArray_Ravel(self._ndarray, order)</span>
+        <span class="s0">res_values = self._ndarray.ravel(order)</span>
+        <span class="s0">return self._from_backing_data(res_values)</span>
+
+    <span class="s0">@property</span>
+    <span class="s0">def T(self):</span>
+        <span class="s0">res_values = self._ndarray.T</span>
+        <span class="s0">return self._from_backing_data(res_values)</span>
+
+    <span class="s0">def transpose(self, *axes):</span>
+        <span class="s0">res_values = self._ndarray.transpose(*axes)</span>
+        <span class="s0">return self._from_backing_data(res_values)</span>
+</pre>
+</body>
+</html>

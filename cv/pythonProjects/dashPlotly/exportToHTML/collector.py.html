@@ -1,0 +1,657 @@
+<html>
+<head>
+<title>collector.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #808080;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+collector.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+The main purpose of this module is to expose LinkCollector.collect_sources(). 
+&quot;&quot;&quot;</span>
+
+<span class="s2">import </span><span class="s1">cgi</span>
+<span class="s2">import </span><span class="s1">collections</span>
+<span class="s2">import </span><span class="s1">functools</span>
+<span class="s2">import </span><span class="s1">itertools</span>
+<span class="s2">import </span><span class="s1">logging</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">urllib.parse</span>
+<span class="s2">import </span><span class="s1">urllib.request</span>
+<span class="s2">import </span><span class="s1">xml.etree.ElementTree</span>
+<span class="s2">from </span><span class="s1">html.parser </span><span class="s2">import </span><span class="s1">HTMLParser</span>
+<span class="s2">from </span><span class="s1">optparse </span><span class="s2">import </span><span class="s1">Values</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">TYPE_CHECKING</span><span class="s2">,</span>
+    <span class="s1">Callable</span><span class="s2">,</span>
+    <span class="s1">Dict</span><span class="s2">,</span>
+    <span class="s1">Iterable</span><span class="s2">,</span>
+    <span class="s1">List</span><span class="s2">,</span>
+    <span class="s1">MutableMapping</span><span class="s2">,</span>
+    <span class="s1">NamedTuple</span><span class="s2">,</span>
+    <span class="s1">Optional</span><span class="s2">,</span>
+    <span class="s1">Sequence</span><span class="s2">,</span>
+    <span class="s1">Tuple</span><span class="s2">,</span>
+    <span class="s1">Union</span><span class="s2">,</span>
+<span class="s1">)</span>
+
+<span class="s2">from </span><span class="s1">pip._vendor </span><span class="s2">import </span><span class="s1">html5lib</span><span class="s2">, </span><span class="s1">requests</span>
+<span class="s2">from </span><span class="s1">pip._vendor.requests </span><span class="s2">import </span><span class="s1">Response</span>
+<span class="s2">from </span><span class="s1">pip._vendor.requests.exceptions </span><span class="s2">import </span><span class="s1">RetryError</span><span class="s2">, </span><span class="s1">SSLError</span>
+
+<span class="s2">from </span><span class="s1">pip._internal.exceptions </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">BadHTMLDoctypeDeclaration</span><span class="s2">,</span>
+    <span class="s1">MissingHTMLDoctypeDeclaration</span><span class="s2">,</span>
+    <span class="s1">NetworkConnectionError</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pip._internal.models.link </span><span class="s2">import </span><span class="s1">Link</span>
+<span class="s2">from </span><span class="s1">pip._internal.models.search_scope </span><span class="s2">import </span><span class="s1">SearchScope</span>
+<span class="s2">from </span><span class="s1">pip._internal.network.session </span><span class="s2">import </span><span class="s1">PipSession</span>
+<span class="s2">from </span><span class="s1">pip._internal.network.utils </span><span class="s2">import </span><span class="s1">raise_for_status</span>
+<span class="s2">from </span><span class="s1">pip._internal.utils.filetypes </span><span class="s2">import </span><span class="s1">is_archive_file</span>
+<span class="s2">from </span><span class="s1">pip._internal.utils.misc </span><span class="s2">import </span><span class="s1">pairwise</span><span class="s2">, </span><span class="s1">redact_auth_from_url</span>
+<span class="s2">from </span><span class="s1">pip._internal.vcs </span><span class="s2">import </span><span class="s1">vcs</span>
+
+<span class="s2">from </span><span class="s1">.sources </span><span class="s2">import </span><span class="s1">CandidatesFromPage</span><span class="s2">, </span><span class="s1">LinkSource</span><span class="s2">, </span><span class="s1">build_source</span>
+
+<span class="s2">if </span><span class="s1">TYPE_CHECKING:</span>
+    <span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Protocol</span>
+<span class="s2">else</span><span class="s1">:</span>
+    <span class="s1">Protocol = object</span>
+
+<span class="s1">logger = logging.getLogger(__name__)</span>
+
+<span class="s1">HTMLElement = xml.etree.ElementTree.Element</span>
+<span class="s1">ResponseHeaders = MutableMapping[str</span><span class="s2">, </span><span class="s1">str]</span>
+
+
+<span class="s2">def </span><span class="s1">_match_vcs_scheme(url: str) -&gt; Optional[str]:</span>
+    <span class="s0">&quot;&quot;&quot;Look for VCS schemes in the URL. 
+ 
+    Returns the matched VCS scheme, or None if there's no match. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">for </span><span class="s1">scheme </span><span class="s2">in </span><span class="s1">vcs.schemes:</span>
+        <span class="s2">if </span><span class="s1">url.lower().startswith(scheme) </span><span class="s2">and </span><span class="s1">url[len(scheme)] </span><span class="s2">in </span><span class="s3">&quot;+:&quot;</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">scheme</span>
+    <span class="s2">return None</span>
+
+
+<span class="s2">class </span><span class="s1">_NotHTML(Exception):</span>
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">content_type: str</span><span class="s2">, </span><span class="s1">request_desc: str) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">super().__init__(content_type</span><span class="s2">, </span><span class="s1">request_desc)</span>
+        <span class="s1">self.content_type = content_type</span>
+        <span class="s1">self.request_desc = request_desc</span>
+
+
+<span class="s2">def </span><span class="s1">_ensure_html_header(response: Response) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+    <span class="s0">&quot;&quot;&quot;Check the Content-Type header to ensure the response contains HTML. 
+ 
+    Raises `_NotHTML` if the content type is not text/html. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">content_type = response.headers.get(</span><span class="s3">&quot;Content-Type&quot;</span><span class="s2">, </span><span class="s3">&quot;&quot;</span><span class="s1">)</span>
+    <span class="s2">if not </span><span class="s1">content_type.lower().startswith(</span><span class="s3">&quot;text/html&quot;</span><span class="s1">):</span>
+        <span class="s2">raise </span><span class="s1">_NotHTML(content_type</span><span class="s2">, </span><span class="s1">response.request.method)</span>
+
+
+<span class="s2">class </span><span class="s1">_NotHTTP(Exception):</span>
+    <span class="s2">pass</span>
+
+
+<span class="s2">def </span><span class="s1">_ensure_html_response(url: str</span><span class="s2">, </span><span class="s1">session: PipSession) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+    <span class="s0">&quot;&quot;&quot;Send a HEAD request to the URL, and ensure the response contains HTML. 
+ 
+    Raises `_NotHTTP` if the URL is not available for a HEAD request, or 
+    `_NotHTML` if the content type is not text/html. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">scheme</span><span class="s2">, </span><span class="s1">netloc</span><span class="s2">, </span><span class="s1">path</span><span class="s2">, </span><span class="s1">query</span><span class="s2">, </span><span class="s1">fragment = urllib.parse.urlsplit(url)</span>
+    <span class="s2">if </span><span class="s1">scheme </span><span class="s2">not in </span><span class="s1">{</span><span class="s3">&quot;http&quot;</span><span class="s2">, </span><span class="s3">&quot;https&quot;</span><span class="s1">}:</span>
+        <span class="s2">raise </span><span class="s1">_NotHTTP()</span>
+
+    <span class="s1">resp = session.head(url</span><span class="s2">, </span><span class="s1">allow_redirects=</span><span class="s2">True</span><span class="s1">)</span>
+    <span class="s1">raise_for_status(resp)</span>
+
+    <span class="s1">_ensure_html_header(resp)</span>
+
+
+<span class="s2">def </span><span class="s1">_get_html_response(url: str</span><span class="s2">, </span><span class="s1">session: PipSession) -&gt; Response:</span>
+    <span class="s0">&quot;&quot;&quot;Access an HTML page with GET, and return the response. 
+ 
+    This consists of three parts: 
+ 
+    1. If the URL looks suspiciously like an archive, send a HEAD first to 
+       check the Content-Type is HTML, to avoid downloading a large file. 
+       Raise `_NotHTTP` if the content type cannot be determined, or 
+       `_NotHTML` if it is not HTML. 
+    2. Actually perform the request. Raise HTTP exceptions on network failures. 
+    3. Check the Content-Type header to make sure we got HTML, and raise 
+       `_NotHTML` otherwise. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">is_archive_file(Link(url).filename):</span>
+        <span class="s1">_ensure_html_response(url</span><span class="s2">, </span><span class="s1">session=session)</span>
+
+    <span class="s1">logger.debug(</span><span class="s3">&quot;Getting page %s&quot;</span><span class="s2">, </span><span class="s1">redact_auth_from_url(url))</span>
+
+    <span class="s1">resp = session.get(</span>
+        <span class="s1">url</span><span class="s2">,</span>
+        <span class="s1">headers={</span>
+            <span class="s3">&quot;Accept&quot;</span><span class="s1">: </span><span class="s3">&quot;text/html&quot;</span><span class="s2">,</span>
+            <span class="s4"># We don't want to blindly returned cached data for</span>
+            <span class="s4"># /simple/, because authors generally expecting that</span>
+            <span class="s4"># twine upload &amp;&amp; pip install will function, but if</span>
+            <span class="s4"># they've done a pip install in the last ~10 minutes</span>
+            <span class="s4"># it won't. Thus by setting this to zero we will not</span>
+            <span class="s4"># blindly use any cached data, however the benefit of</span>
+            <span class="s4"># using max-age=0 instead of no-cache, is that we will</span>
+            <span class="s4"># still support conditional requests, so we will still</span>
+            <span class="s4"># minimize traffic sent in cases where the page hasn't</span>
+            <span class="s4"># changed at all, we will just always incur the round</span>
+            <span class="s4"># trip for the conditional GET now instead of only</span>
+            <span class="s4"># once per 10 minutes.</span>
+            <span class="s4"># For more information, please see pypa/pip#5670.</span>
+            <span class="s3">&quot;Cache-Control&quot;</span><span class="s1">: </span><span class="s3">&quot;max-age=0&quot;</span><span class="s2">,</span>
+        <span class="s1">}</span><span class="s2">,</span>
+    <span class="s1">)</span>
+    <span class="s1">raise_for_status(resp)</span>
+
+    <span class="s4"># The check for archives above only works if the url ends with</span>
+    <span class="s4"># something that looks like an archive. However that is not a</span>
+    <span class="s4"># requirement of an url. Unless we issue a HEAD request on every</span>
+    <span class="s4"># url we cannot know ahead of time for sure if something is HTML</span>
+    <span class="s4"># or not. However we can check after we've downloaded it.</span>
+    <span class="s1">_ensure_html_header(resp)</span>
+
+    <span class="s2">return </span><span class="s1">resp</span>
+
+
+<span class="s2">def </span><span class="s1">_get_encoding_from_headers(headers: ResponseHeaders) -&gt; Optional[str]:</span>
+    <span class="s0">&quot;&quot;&quot;Determine if we have any encoding information in our headers.&quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">headers </span><span class="s2">and </span><span class="s3">&quot;Content-Type&quot; </span><span class="s2">in </span><span class="s1">headers:</span>
+        <span class="s1">content_type</span><span class="s2">, </span><span class="s1">params = cgi.parse_header(headers[</span><span class="s3">&quot;Content-Type&quot;</span><span class="s1">])</span>
+        <span class="s2">if </span><span class="s3">&quot;charset&quot; </span><span class="s2">in </span><span class="s1">params:</span>
+            <span class="s2">return </span><span class="s1">params[</span><span class="s3">&quot;charset&quot;</span><span class="s1">]</span>
+    <span class="s2">return None</span>
+
+
+<span class="s2">def </span><span class="s1">_determine_base_url(document: HTMLElement</span><span class="s2">, </span><span class="s1">page_url: str) -&gt; str:</span>
+    <span class="s0">&quot;&quot;&quot;Determine the HTML document's base URL. 
+ 
+    This looks for a ``&lt;base&gt;`` tag in the HTML document. If present, its href 
+    attribute denotes the base URL of anchor tags in the document. If there is 
+    no such tag (or if it does not have a valid href attribute), the HTML 
+    file's URL is used as the base URL. 
+ 
+    :param document: An HTML document representation. The current 
+        implementation expects the result of ``html5lib.parse()``. 
+    :param page_url: The URL of the HTML document. 
+ 
+    TODO: Remove when `html5lib` is dropped. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">for </span><span class="s1">base </span><span class="s2">in </span><span class="s1">document.findall(</span><span class="s3">&quot;.//base&quot;</span><span class="s1">):</span>
+        <span class="s1">href = base.get(</span><span class="s3">&quot;href&quot;</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">href </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">href</span>
+    <span class="s2">return </span><span class="s1">page_url</span>
+
+
+<span class="s2">def </span><span class="s1">_clean_url_path_part(part: str) -&gt; str:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Clean a &quot;part&quot; of a URL path (i.e. after splitting on &quot;@&quot; characters). 
+    &quot;&quot;&quot;</span>
+    <span class="s4"># We unquote prior to quoting to make sure nothing is double quoted.</span>
+    <span class="s2">return </span><span class="s1">urllib.parse.quote(urllib.parse.unquote(part))</span>
+
+
+<span class="s2">def </span><span class="s1">_clean_file_url_path(part: str) -&gt; str:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Clean the first part of a URL path that corresponds to a local 
+    filesystem path (i.e. the first part after splitting on &quot;@&quot; characters). 
+    &quot;&quot;&quot;</span>
+    <span class="s4"># We unquote prior to quoting to make sure nothing is double quoted.</span>
+    <span class="s4"># Also, on Windows the path part might contain a drive letter which</span>
+    <span class="s4"># should not be quoted. On Linux where drive letters do not</span>
+    <span class="s4"># exist, the colon should be quoted. We rely on urllib.request</span>
+    <span class="s4"># to do the right thing here.</span>
+    <span class="s2">return </span><span class="s1">urllib.request.pathname2url(urllib.request.url2pathname(part))</span>
+
+
+<span class="s4"># percent-encoded:                   /</span>
+<span class="s1">_reserved_chars_re = re.compile(</span><span class="s3">&quot;(@|%2F)&quot;</span><span class="s2">, </span><span class="s1">re.IGNORECASE)</span>
+
+
+<span class="s2">def </span><span class="s1">_clean_url_path(path: str</span><span class="s2">, </span><span class="s1">is_local_path: bool) -&gt; str:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Clean the path portion of a URL. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">is_local_path:</span>
+        <span class="s1">clean_func = _clean_file_url_path</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">clean_func = _clean_url_path_part</span>
+
+    <span class="s4"># Split on the reserved characters prior to cleaning so that</span>
+    <span class="s4"># revision strings in VCS URLs are properly preserved.</span>
+    <span class="s1">parts = _reserved_chars_re.split(path)</span>
+
+    <span class="s1">cleaned_parts = []</span>
+    <span class="s2">for </span><span class="s1">to_clean</span><span class="s2">, </span><span class="s1">reserved </span><span class="s2">in </span><span class="s1">pairwise(itertools.chain(parts</span><span class="s2">, </span><span class="s1">[</span><span class="s3">&quot;&quot;</span><span class="s1">])):</span>
+        <span class="s1">cleaned_parts.append(clean_func(to_clean))</span>
+        <span class="s4"># Normalize %xx escapes (e.g. %2f -&gt; %2F)</span>
+        <span class="s1">cleaned_parts.append(reserved.upper())</span>
+
+    <span class="s2">return </span><span class="s3">&quot;&quot;</span><span class="s1">.join(cleaned_parts)</span>
+
+
+<span class="s2">def </span><span class="s1">_clean_link(url: str) -&gt; str:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Make sure a link is fully quoted. 
+    For example, if ' ' occurs in the URL, it will be replaced with &quot;%20&quot;, 
+    and without double-quoting other characters. 
+    &quot;&quot;&quot;</span>
+    <span class="s4"># Split the URL into parts according to the general structure</span>
+    <span class="s4"># `scheme://netloc/path;parameters?query#fragment`.</span>
+    <span class="s1">result = urllib.parse.urlparse(url)</span>
+    <span class="s4"># If the netloc is empty, then the URL refers to a local filesystem path.</span>
+    <span class="s1">is_local_path = </span><span class="s2">not </span><span class="s1">result.netloc</span>
+    <span class="s1">path = _clean_url_path(result.path</span><span class="s2">, </span><span class="s1">is_local_path=is_local_path)</span>
+    <span class="s2">return </span><span class="s1">urllib.parse.urlunparse(result._replace(path=path))</span>
+
+
+<span class="s2">def </span><span class="s1">_create_link_from_element(</span>
+    <span class="s1">element_attribs: Dict[str</span><span class="s2">, </span><span class="s1">Optional[str]]</span><span class="s2">,</span>
+    <span class="s1">page_url: str</span><span class="s2">,</span>
+    <span class="s1">base_url: str</span><span class="s2">,</span>
+<span class="s1">) -&gt; Optional[Link]:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Convert an anchor element's attributes in a simple repository page to a Link. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">href = element_attribs.get(</span><span class="s3">&quot;href&quot;</span><span class="s1">)</span>
+    <span class="s2">if not </span><span class="s1">href:</span>
+        <span class="s2">return None</span>
+
+    <span class="s1">url = _clean_link(urllib.parse.urljoin(base_url</span><span class="s2">, </span><span class="s1">href))</span>
+    <span class="s1">pyrequire = element_attribs.get(</span><span class="s3">&quot;data-requires-python&quot;</span><span class="s1">)</span>
+    <span class="s1">yanked_reason = element_attribs.get(</span><span class="s3">&quot;data-yanked&quot;</span><span class="s1">)</span>
+
+    <span class="s1">link = Link(</span>
+        <span class="s1">url</span><span class="s2">,</span>
+        <span class="s1">comes_from=page_url</span><span class="s2">,</span>
+        <span class="s1">requires_python=pyrequire</span><span class="s2">,</span>
+        <span class="s1">yanked_reason=yanked_reason</span><span class="s2">,</span>
+    <span class="s1">)</span>
+
+    <span class="s2">return </span><span class="s1">link</span>
+
+
+<span class="s2">class </span><span class="s1">CacheablePageContent:</span>
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">page: </span><span class="s3">&quot;HTMLPage&quot;</span><span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">assert </span><span class="s1">page.cache_link_parsing</span>
+        <span class="s1">self.page = page</span>
+
+    <span class="s2">def </span><span class="s1">__eq__(self</span><span class="s2">, </span><span class="s1">other: object) -&gt; bool:</span>
+        <span class="s2">return </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">type(self)) </span><span class="s2">and </span><span class="s1">self.page.url == other.page.url</span>
+
+    <span class="s2">def </span><span class="s1">__hash__(self) -&gt; int:</span>
+        <span class="s2">return </span><span class="s1">hash(self.page.url)</span>
+
+
+<span class="s2">class </span><span class="s1">ParseLinks(Protocol):</span>
+    <span class="s2">def </span><span class="s1">__call__(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">page: </span><span class="s3">&quot;HTMLPage&quot;</span><span class="s2">, </span><span class="s1">use_deprecated_html5lib: bool</span>
+    <span class="s1">) -&gt; Iterable[Link]:</span>
+        <span class="s1">...</span>
+
+
+<span class="s2">def </span><span class="s1">with_cached_html_pages(fn: ParseLinks) -&gt; ParseLinks:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Given a function that parses an Iterable[Link] from an HTMLPage, cache the 
+    function's result (keyed by CacheablePageContent), unless the HTMLPage 
+    `page` has `page.cache_link_parsing == False`. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">@functools.lru_cache(maxsize=</span><span class="s2">None</span><span class="s1">)</span>
+    <span class="s2">def </span><span class="s1">wrapper(</span>
+        <span class="s1">cacheable_page: CacheablePageContent</span><span class="s2">, </span><span class="s1">use_deprecated_html5lib: bool</span>
+    <span class="s1">) -&gt; List[Link]:</span>
+        <span class="s2">return </span><span class="s1">list(fn(cacheable_page.page</span><span class="s2">, </span><span class="s1">use_deprecated_html5lib))</span>
+
+    <span class="s1">@functools.wraps(fn)</span>
+    <span class="s2">def </span><span class="s1">wrapper_wrapper(page: </span><span class="s3">&quot;HTMLPage&quot;</span><span class="s2">, </span><span class="s1">use_deprecated_html5lib: bool) -&gt; List[Link]:</span>
+        <span class="s2">if </span><span class="s1">page.cache_link_parsing:</span>
+            <span class="s2">return </span><span class="s1">wrapper(CacheablePageContent(page)</span><span class="s2">, </span><span class="s1">use_deprecated_html5lib)</span>
+        <span class="s2">return </span><span class="s1">list(fn(page</span><span class="s2">, </span><span class="s1">use_deprecated_html5lib))</span>
+
+    <span class="s2">return </span><span class="s1">wrapper_wrapper</span>
+
+
+<span class="s2">def </span><span class="s1">_parse_links_html5lib(page: </span><span class="s3">&quot;HTMLPage&quot;</span><span class="s1">) -&gt; Iterable[Link]:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Parse an HTML document, and yield its anchor elements as Link objects. 
+ 
+    TODO: Remove when `html5lib` is dropped. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">document = html5lib.parse(</span>
+        <span class="s1">page.content</span><span class="s2">,</span>
+        <span class="s1">transport_encoding=page.encoding</span><span class="s2">,</span>
+        <span class="s1">namespaceHTMLElements=</span><span class="s2">False,</span>
+    <span class="s1">)</span>
+
+    <span class="s1">url = page.url</span>
+    <span class="s1">base_url = _determine_base_url(document</span><span class="s2">, </span><span class="s1">url)</span>
+    <span class="s2">for </span><span class="s1">anchor </span><span class="s2">in </span><span class="s1">document.findall(</span><span class="s3">&quot;.//a&quot;</span><span class="s1">):</span>
+        <span class="s1">link = _create_link_from_element(</span>
+            <span class="s1">anchor.attrib</span><span class="s2">,</span>
+            <span class="s1">page_url=url</span><span class="s2">,</span>
+            <span class="s1">base_url=base_url</span><span class="s2">,</span>
+        <span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">link </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">continue</span>
+        <span class="s2">yield </span><span class="s1">link</span>
+
+
+<span class="s1">@with_cached_html_pages</span>
+<span class="s2">def </span><span class="s1">parse_links(page: </span><span class="s3">&quot;HTMLPage&quot;</span><span class="s2">, </span><span class="s1">use_deprecated_html5lib: bool) -&gt; Iterable[Link]:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Parse an HTML document, and yield its anchor elements as Link objects. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">if </span><span class="s1">use_deprecated_html5lib:</span>
+        <span class="s2">yield from </span><span class="s1">_parse_links_html5lib(page)</span>
+        <span class="s2">return</span>
+
+    <span class="s1">parser = HTMLLinkParser(page.url)</span>
+    <span class="s1">encoding = page.encoding </span><span class="s2">or </span><span class="s3">&quot;utf-8&quot;</span>
+    <span class="s1">parser.feed(page.content.decode(encoding))</span>
+
+    <span class="s1">url = page.url</span>
+    <span class="s1">base_url = parser.base_url </span><span class="s2">or </span><span class="s1">url</span>
+    <span class="s2">for </span><span class="s1">anchor </span><span class="s2">in </span><span class="s1">parser.anchors:</span>
+        <span class="s1">link = _create_link_from_element(</span>
+            <span class="s1">anchor</span><span class="s2">,</span>
+            <span class="s1">page_url=url</span><span class="s2">,</span>
+            <span class="s1">base_url=base_url</span><span class="s2">,</span>
+        <span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">link </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">continue</span>
+        <span class="s2">yield </span><span class="s1">link</span>
+
+
+<span class="s2">class </span><span class="s1">HTMLPage:</span>
+    <span class="s0">&quot;&quot;&quot;Represents one page, along with its URL&quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">content: bytes</span><span class="s2">,</span>
+        <span class="s1">encoding: Optional[str]</span><span class="s2">,</span>
+        <span class="s1">url: str</span><span class="s2">,</span>
+        <span class="s1">cache_link_parsing: bool = </span><span class="s2">True,</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot; 
+        :param encoding: the encoding to decode the given content. 
+        :param url: the URL from which the HTML was downloaded. 
+        :param cache_link_parsing: whether links parsed from this page's url 
+                                   should be cached. PyPI index urls should 
+                                   have this set to False, for example. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.content = content</span>
+        <span class="s1">self.encoding = encoding</span>
+        <span class="s1">self.url = url</span>
+        <span class="s1">self.cache_link_parsing = cache_link_parsing</span>
+
+    <span class="s2">def </span><span class="s1">__str__(self) -&gt; str:</span>
+        <span class="s2">return </span><span class="s1">redact_auth_from_url(self.url)</span>
+
+
+<span class="s2">class </span><span class="s1">HTMLLinkParser(HTMLParser):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    HTMLParser that keeps the first base HREF and a list of all anchor 
+    elements' attributes. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">url: str) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">super().__init__(convert_charrefs=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s1">self._dealt_with_doctype_issues = </span><span class="s2">False</span>
+
+        <span class="s1">self.url: str = url</span>
+        <span class="s1">self.base_url: Optional[str] = </span><span class="s2">None</span>
+        <span class="s1">self.anchors: List[Dict[str</span><span class="s2">, </span><span class="s1">Optional[str]]] = []</span>
+
+    <span class="s2">def </span><span class="s1">handle_decl(self</span><span class="s2">, </span><span class="s1">decl: str) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self._dealt_with_doctype_issues = </span><span class="s2">True</span>
+        <span class="s1">match = re.match(</span>
+            <span class="s3">r&quot;&quot;&quot;doctype\s+html\s*(?:SYSTEM\s+([&quot;'])about:legacy-compat\1)?\s*$&quot;&quot;&quot;</span><span class="s2">,</span>
+            <span class="s1">decl</span><span class="s2">,</span>
+            <span class="s1">re.IGNORECASE</span><span class="s2">,</span>
+        <span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">match </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">logger.warning(</span>
+                <span class="s3">&quot;[present-diagnostic] %s&quot;</span><span class="s2">,</span>
+                <span class="s1">BadHTMLDoctypeDeclaration(url=self.url)</span><span class="s2">,</span>
+            <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">handle_starttag(self</span><span class="s2">, </span><span class="s1">tag: str</span><span class="s2">, </span><span class="s1">attrs: List[Tuple[str</span><span class="s2">, </span><span class="s1">Optional[str]]]) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">if not </span><span class="s1">self._dealt_with_doctype_issues:</span>
+            <span class="s1">logger.warning(</span>
+                <span class="s3">&quot;[present-diagnostic] %s&quot;</span><span class="s2">,</span>
+                <span class="s1">MissingHTMLDoctypeDeclaration(url=self.url)</span><span class="s2">,</span>
+            <span class="s1">)</span>
+            <span class="s1">self._dealt_with_doctype_issues = </span><span class="s2">True</span>
+
+        <span class="s2">if </span><span class="s1">tag == </span><span class="s3">&quot;base&quot; </span><span class="s2">and </span><span class="s1">self.base_url </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">href = self.get_href(attrs)</span>
+            <span class="s2">if </span><span class="s1">href </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s1">self.base_url = href</span>
+        <span class="s2">elif </span><span class="s1">tag == </span><span class="s3">&quot;a&quot;</span><span class="s1">:</span>
+            <span class="s1">self.anchors.append(dict(attrs))</span>
+
+    <span class="s2">def </span><span class="s1">get_href(self</span><span class="s2">, </span><span class="s1">attrs: List[Tuple[str</span><span class="s2">, </span><span class="s1">Optional[str]]]) -&gt; Optional[str]:</span>
+        <span class="s2">for </span><span class="s1">name</span><span class="s2">, </span><span class="s1">value </span><span class="s2">in </span><span class="s1">attrs:</span>
+            <span class="s2">if </span><span class="s1">name == </span><span class="s3">&quot;href&quot;</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">value</span>
+        <span class="s2">return None</span>
+
+
+<span class="s2">def </span><span class="s1">_handle_get_page_fail(</span>
+    <span class="s1">link: Link</span><span class="s2">,</span>
+    <span class="s1">reason: Union[str</span><span class="s2">, </span><span class="s1">Exception]</span><span class="s2">,</span>
+    <span class="s1">meth: Optional[Callable[...</span><span class="s2">, None</span><span class="s1">]] = </span><span class="s2">None,</span>
+<span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+    <span class="s2">if </span><span class="s1">meth </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">meth = logger.debug</span>
+    <span class="s1">meth(</span><span class="s3">&quot;Could not fetch URL %s: %s - skipping&quot;</span><span class="s2">, </span><span class="s1">link</span><span class="s2">, </span><span class="s1">reason)</span>
+
+
+<span class="s2">def </span><span class="s1">_make_html_page(response: Response</span><span class="s2">, </span><span class="s1">cache_link_parsing: bool = </span><span class="s2">True</span><span class="s1">) -&gt; HTMLPage:</span>
+    <span class="s1">encoding = _get_encoding_from_headers(response.headers)</span>
+    <span class="s2">return </span><span class="s1">HTMLPage(</span>
+        <span class="s1">response.content</span><span class="s2">,</span>
+        <span class="s1">encoding=encoding</span><span class="s2">,</span>
+        <span class="s1">url=response.url</span><span class="s2">,</span>
+        <span class="s1">cache_link_parsing=cache_link_parsing</span><span class="s2">,</span>
+    <span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">_get_html_page(</span>
+    <span class="s1">link: Link</span><span class="s2">, </span><span class="s1">session: Optional[PipSession] = </span><span class="s2">None</span>
+<span class="s1">) -&gt; Optional[</span><span class="s3">&quot;HTMLPage&quot;</span><span class="s1">]:</span>
+    <span class="s2">if </span><span class="s1">session </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">TypeError(</span>
+            <span class="s3">&quot;_get_html_page() missing 1 required keyword argument: 'session'&quot;</span>
+        <span class="s1">)</span>
+
+    <span class="s1">url = link.url.split(</span><span class="s3">&quot;#&quot;</span><span class="s2">, </span><span class="s5">1</span><span class="s1">)[</span><span class="s5">0</span><span class="s1">]</span>
+
+    <span class="s4"># Check for VCS schemes that do not support lookup as web pages.</span>
+    <span class="s1">vcs_scheme = _match_vcs_scheme(url)</span>
+    <span class="s2">if </span><span class="s1">vcs_scheme:</span>
+        <span class="s1">logger.warning(</span>
+            <span class="s3">&quot;Cannot look at %s URL %s because it does not support lookup as web pages.&quot;</span><span class="s2">,</span>
+            <span class="s1">vcs_scheme</span><span class="s2">,</span>
+            <span class="s1">link</span><span class="s2">,</span>
+        <span class="s1">)</span>
+        <span class="s2">return None</span>
+
+    <span class="s4"># Tack index.html onto file:// URLs that point to directories</span>
+    <span class="s1">scheme</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">path</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">_ = urllib.parse.urlparse(url)</span>
+    <span class="s2">if </span><span class="s1">scheme == </span><span class="s3">&quot;file&quot; </span><span class="s2">and </span><span class="s1">os.path.isdir(urllib.request.url2pathname(path)):</span>
+        <span class="s4"># add trailing slash if not present so urljoin doesn't trim</span>
+        <span class="s4"># final segment</span>
+        <span class="s2">if not </span><span class="s1">url.endswith(</span><span class="s3">&quot;/&quot;</span><span class="s1">):</span>
+            <span class="s1">url += </span><span class="s3">&quot;/&quot;</span>
+        <span class="s1">url = urllib.parse.urljoin(url</span><span class="s2">, </span><span class="s3">&quot;index.html&quot;</span><span class="s1">)</span>
+        <span class="s1">logger.debug(</span><span class="s3">&quot; file: URL is directory, getting %s&quot;</span><span class="s2">, </span><span class="s1">url)</span>
+
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">resp = _get_html_response(url</span><span class="s2">, </span><span class="s1">session=session)</span>
+    <span class="s2">except </span><span class="s1">_NotHTTP:</span>
+        <span class="s1">logger.warning(</span>
+            <span class="s3">&quot;Skipping page %s because it looks like an archive, and cannot &quot;</span>
+            <span class="s3">&quot;be checked by a HTTP HEAD request.&quot;</span><span class="s2">,</span>
+            <span class="s1">link</span><span class="s2">,</span>
+        <span class="s1">)</span>
+    <span class="s2">except </span><span class="s1">_NotHTML </span><span class="s2">as </span><span class="s1">exc:</span>
+        <span class="s1">logger.warning(</span>
+            <span class="s3">&quot;Skipping page %s because the %s request got Content-Type: %s.&quot;</span>
+            <span class="s3">&quot;The only supported Content-Type is text/html&quot;</span><span class="s2">,</span>
+            <span class="s1">link</span><span class="s2">,</span>
+            <span class="s1">exc.request_desc</span><span class="s2">,</span>
+            <span class="s1">exc.content_type</span><span class="s2">,</span>
+        <span class="s1">)</span>
+    <span class="s2">except </span><span class="s1">NetworkConnectionError </span><span class="s2">as </span><span class="s1">exc:</span>
+        <span class="s1">_handle_get_page_fail(link</span><span class="s2">, </span><span class="s1">exc)</span>
+    <span class="s2">except </span><span class="s1">RetryError </span><span class="s2">as </span><span class="s1">exc:</span>
+        <span class="s1">_handle_get_page_fail(link</span><span class="s2">, </span><span class="s1">exc)</span>
+    <span class="s2">except </span><span class="s1">SSLError </span><span class="s2">as </span><span class="s1">exc:</span>
+        <span class="s1">reason = </span><span class="s3">&quot;There was a problem confirming the ssl certificate: &quot;</span>
+        <span class="s1">reason += str(exc)</span>
+        <span class="s1">_handle_get_page_fail(link</span><span class="s2">, </span><span class="s1">reason</span><span class="s2">, </span><span class="s1">meth=logger.info)</span>
+    <span class="s2">except </span><span class="s1">requests.ConnectionError </span><span class="s2">as </span><span class="s1">exc:</span>
+        <span class="s1">_handle_get_page_fail(link</span><span class="s2">, </span><span class="s3">f&quot;connection error: </span><span class="s2">{</span><span class="s1">exc</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+    <span class="s2">except </span><span class="s1">requests.Timeout:</span>
+        <span class="s1">_handle_get_page_fail(link</span><span class="s2">, </span><span class="s3">&quot;timed out&quot;</span><span class="s1">)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">_make_html_page(resp</span><span class="s2">, </span><span class="s1">cache_link_parsing=link.cache_link_parsing)</span>
+    <span class="s2">return None</span>
+
+
+<span class="s2">class </span><span class="s1">CollectedSources(NamedTuple):</span>
+    <span class="s1">find_links: Sequence[Optional[LinkSource]]</span>
+    <span class="s1">index_urls: Sequence[Optional[LinkSource]]</span>
+
+
+<span class="s2">class </span><span class="s1">LinkCollector:</span>
+
+    <span class="s0">&quot;&quot;&quot; 
+    Responsible for collecting Link objects from all configured locations, 
+    making network requests as needed. 
+ 
+    The class's main method is its collect_sources() method. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">session: PipSession</span><span class="s2">,</span>
+        <span class="s1">search_scope: SearchScope</span><span class="s2">,</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.search_scope = search_scope</span>
+        <span class="s1">self.session = session</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">create(</span>
+        <span class="s1">cls</span><span class="s2">,</span>
+        <span class="s1">session: PipSession</span><span class="s2">,</span>
+        <span class="s1">options: Values</span><span class="s2">,</span>
+        <span class="s1">suppress_no_index: bool = </span><span class="s2">False,</span>
+    <span class="s1">) -&gt; </span><span class="s3">&quot;LinkCollector&quot;</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot; 
+        :param session: The Session to use to make requests. 
+        :param suppress_no_index: Whether to ignore the --no-index option 
+            when constructing the SearchScope object. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">index_urls = [options.index_url] + options.extra_index_urls</span>
+        <span class="s2">if </span><span class="s1">options.no_index </span><span class="s2">and not </span><span class="s1">suppress_no_index:</span>
+            <span class="s1">logger.debug(</span>
+                <span class="s3">&quot;Ignoring indexes: %s&quot;</span><span class="s2">,</span>
+                <span class="s3">&quot;,&quot;</span><span class="s1">.join(redact_auth_from_url(url) </span><span class="s2">for </span><span class="s1">url </span><span class="s2">in </span><span class="s1">index_urls)</span><span class="s2">,</span>
+            <span class="s1">)</span>
+            <span class="s1">index_urls = []</span>
+
+        <span class="s4"># Make sure find_links is a list before passing to create().</span>
+        <span class="s1">find_links = options.find_links </span><span class="s2">or </span><span class="s1">[]</span>
+
+        <span class="s1">search_scope = SearchScope.create(</span>
+            <span class="s1">find_links=find_links</span><span class="s2">,</span>
+            <span class="s1">index_urls=index_urls</span><span class="s2">,</span>
+        <span class="s1">)</span>
+        <span class="s1">link_collector = LinkCollector(</span>
+            <span class="s1">session=session</span><span class="s2">,</span>
+            <span class="s1">search_scope=search_scope</span><span class="s2">,</span>
+        <span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">link_collector</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">find_links(self) -&gt; List[str]:</span>
+        <span class="s2">return </span><span class="s1">self.search_scope.find_links</span>
+
+    <span class="s2">def </span><span class="s1">fetch_page(self</span><span class="s2">, </span><span class="s1">location: Link) -&gt; Optional[HTMLPage]:</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Fetch an HTML page containing package links. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">_get_html_page(location</span><span class="s2">, </span><span class="s1">session=self.session)</span>
+
+    <span class="s2">def </span><span class="s1">collect_sources(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">project_name: str</span><span class="s2">,</span>
+        <span class="s1">candidates_from_page: CandidatesFromPage</span><span class="s2">,</span>
+    <span class="s1">) -&gt; CollectedSources:</span>
+        <span class="s4"># The OrderedDict calls deduplicate sources by URL.</span>
+        <span class="s1">index_url_sources = collections.OrderedDict(</span>
+            <span class="s1">build_source(</span>
+                <span class="s1">loc</span><span class="s2">,</span>
+                <span class="s1">candidates_from_page=candidates_from_page</span><span class="s2">,</span>
+                <span class="s1">page_validator=self.session.is_secure_origin</span><span class="s2">,</span>
+                <span class="s1">expand_dir=</span><span class="s2">False,</span>
+                <span class="s1">cache_link_parsing=</span><span class="s2">False,</span>
+            <span class="s1">)</span>
+            <span class="s2">for </span><span class="s1">loc </span><span class="s2">in </span><span class="s1">self.search_scope.get_index_urls_locations(project_name)</span>
+        <span class="s1">).values()</span>
+        <span class="s1">find_links_sources = collections.OrderedDict(</span>
+            <span class="s1">build_source(</span>
+                <span class="s1">loc</span><span class="s2">,</span>
+                <span class="s1">candidates_from_page=candidates_from_page</span><span class="s2">,</span>
+                <span class="s1">page_validator=self.session.is_secure_origin</span><span class="s2">,</span>
+                <span class="s1">expand_dir=</span><span class="s2">True,</span>
+                <span class="s1">cache_link_parsing=</span><span class="s2">True,</span>
+            <span class="s1">)</span>
+            <span class="s2">for </span><span class="s1">loc </span><span class="s2">in </span><span class="s1">self.find_links</span>
+        <span class="s1">).values()</span>
+
+        <span class="s2">if </span><span class="s1">logger.isEnabledFor(logging.DEBUG):</span>
+            <span class="s1">lines = [</span>
+                <span class="s3">f&quot;* </span><span class="s2">{</span><span class="s1">s.link</span><span class="s2">}</span><span class="s3">&quot;</span>
+                <span class="s2">for </span><span class="s1">s </span><span class="s2">in </span><span class="s1">itertools.chain(find_links_sources</span><span class="s2">, </span><span class="s1">index_url_sources)</span>
+                <span class="s2">if </span><span class="s1">s </span><span class="s2">is not None and </span><span class="s1">s.link </span><span class="s2">is not None</span>
+            <span class="s1">]</span>
+            <span class="s1">lines = [</span>
+                <span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">len(lines)</span><span class="s2">} </span><span class="s3">location(s) to search &quot;</span>
+                <span class="s3">f&quot;for versions of </span><span class="s2">{</span><span class="s1">project_name</span><span class="s2">}</span><span class="s3">:&quot;</span>
+            <span class="s1">] + lines</span>
+            <span class="s1">logger.debug(</span><span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">&quot;</span><span class="s1">.join(lines))</span>
+
+        <span class="s2">return </span><span class="s1">CollectedSources(</span>
+            <span class="s1">find_links=list(find_links_sources)</span><span class="s2">,</span>
+            <span class="s1">index_urls=list(index_url_sources)</span><span class="s2">,</span>
+        <span class="s1">)</span>
+</pre>
+</body>
+</html>

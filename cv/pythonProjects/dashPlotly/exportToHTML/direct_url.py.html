@@ -1,0 +1,241 @@
+<html>
+<head>
+<title>direct_url.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+direct_url.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; PEP 610 &quot;&quot;&quot;</span>
+<span class="s2">import </span><span class="s1">json</span>
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">urllib.parse</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Any</span><span class="s2">, </span><span class="s1">Dict</span><span class="s2">, </span><span class="s1">Iterable</span><span class="s2">, </span><span class="s1">Optional</span><span class="s2">, </span><span class="s1">Type</span><span class="s2">, </span><span class="s1">TypeVar</span><span class="s2">, </span><span class="s1">Union</span>
+
+<span class="s1">__all__ = [</span>
+    <span class="s3">&quot;DirectUrl&quot;</span><span class="s2">,</span>
+    <span class="s3">&quot;DirectUrlValidationError&quot;</span><span class="s2">,</span>
+    <span class="s3">&quot;DirInfo&quot;</span><span class="s2">,</span>
+    <span class="s3">&quot;ArchiveInfo&quot;</span><span class="s2">,</span>
+    <span class="s3">&quot;VcsInfo&quot;</span><span class="s2">,</span>
+<span class="s1">]</span>
+
+<span class="s1">T = TypeVar(</span><span class="s3">&quot;T&quot;</span><span class="s1">)</span>
+
+<span class="s1">DIRECT_URL_METADATA_NAME = </span><span class="s3">&quot;direct_url.json&quot;</span>
+<span class="s1">ENV_VAR_RE = re.compile(</span><span class="s3">r&quot;^\$\{[A-Za-z0-9-_]+\}(:\$\{[A-Za-z0-9-_]+\})?$&quot;</span><span class="s1">)</span>
+
+
+<span class="s2">class </span><span class="s1">DirectUrlValidationError(Exception):</span>
+    <span class="s2">pass</span>
+
+
+<span class="s2">def </span><span class="s1">_get(</span>
+    <span class="s1">d: Dict[str</span><span class="s2">, </span><span class="s1">Any]</span><span class="s2">, </span><span class="s1">expected_type: Type[T]</span><span class="s2">, </span><span class="s1">key: str</span><span class="s2">, </span><span class="s1">default: Optional[T] = </span><span class="s2">None</span>
+<span class="s1">) -&gt; Optional[T]:</span>
+    <span class="s0">&quot;&quot;&quot;Get value from dictionary and verify expected type.&quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">key </span><span class="s2">not in </span><span class="s1">d:</span>
+        <span class="s2">return </span><span class="s1">default</span>
+    <span class="s1">value = d[key]</span>
+    <span class="s2">if not </span><span class="s1">isinstance(value</span><span class="s2">, </span><span class="s1">expected_type):</span>
+        <span class="s2">raise </span><span class="s1">DirectUrlValidationError(</span>
+            <span class="s3">&quot;{!r} has unexpected type for {} (expected {})&quot;</span><span class="s1">.format(</span>
+                <span class="s1">value</span><span class="s2">, </span><span class="s1">key</span><span class="s2">, </span><span class="s1">expected_type</span>
+            <span class="s1">)</span>
+        <span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">value</span>
+
+
+<span class="s2">def </span><span class="s1">_get_required(</span>
+    <span class="s1">d: Dict[str</span><span class="s2">, </span><span class="s1">Any]</span><span class="s2">, </span><span class="s1">expected_type: Type[T]</span><span class="s2">, </span><span class="s1">key: str</span><span class="s2">, </span><span class="s1">default: Optional[T] = </span><span class="s2">None</span>
+<span class="s1">) -&gt; T:</span>
+    <span class="s1">value = _get(d</span><span class="s2">, </span><span class="s1">expected_type</span><span class="s2">, </span><span class="s1">key</span><span class="s2">, </span><span class="s1">default)</span>
+    <span class="s2">if </span><span class="s1">value </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">DirectUrlValidationError(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">key</span><span class="s2">} </span><span class="s3">must have a value&quot;</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">value</span>
+
+
+<span class="s2">def </span><span class="s1">_exactly_one_of(infos: Iterable[Optional[</span><span class="s3">&quot;InfoType&quot;</span><span class="s1">]]) -&gt; </span><span class="s3">&quot;InfoType&quot;</span><span class="s1">:</span>
+    <span class="s1">infos = [info </span><span class="s2">for </span><span class="s1">info </span><span class="s2">in </span><span class="s1">infos </span><span class="s2">if </span><span class="s1">info </span><span class="s2">is not None</span><span class="s1">]</span>
+    <span class="s2">if not </span><span class="s1">infos:</span>
+        <span class="s2">raise </span><span class="s1">DirectUrlValidationError(</span>
+            <span class="s3">&quot;missing one of archive_info, dir_info, vcs_info&quot;</span>
+        <span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">len(infos) &gt; </span><span class="s4">1</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">DirectUrlValidationError(</span>
+            <span class="s3">&quot;more than one of archive_info, dir_info, vcs_info&quot;</span>
+        <span class="s1">)</span>
+    <span class="s2">assert </span><span class="s1">infos[</span><span class="s4">0</span><span class="s1">] </span><span class="s2">is not None</span>
+    <span class="s2">return </span><span class="s1">infos[</span><span class="s4">0</span><span class="s1">]</span>
+
+
+<span class="s2">def </span><span class="s1">_filter_none(**kwargs: Any) -&gt; Dict[str</span><span class="s2">, </span><span class="s1">Any]:</span>
+    <span class="s0">&quot;&quot;&quot;Make dict excluding None values.&quot;&quot;&quot;</span>
+    <span class="s2">return </span><span class="s1">{k: v </span><span class="s2">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">kwargs.items() </span><span class="s2">if </span><span class="s1">v </span><span class="s2">is not None</span><span class="s1">}</span>
+
+
+<span class="s2">class </span><span class="s1">VcsInfo:</span>
+    <span class="s1">name = </span><span class="s3">&quot;vcs_info&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">vcs: str</span><span class="s2">,</span>
+        <span class="s1">commit_id: str</span><span class="s2">,</span>
+        <span class="s1">requested_revision: Optional[str] = </span><span class="s2">None,</span>
+        <span class="s1">resolved_revision: Optional[str] = </span><span class="s2">None,</span>
+        <span class="s1">resolved_revision_type: Optional[str] = </span><span class="s2">None,</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.vcs = vcs</span>
+        <span class="s1">self.requested_revision = requested_revision</span>
+        <span class="s1">self.commit_id = commit_id</span>
+        <span class="s1">self.resolved_revision = resolved_revision</span>
+        <span class="s1">self.resolved_revision_type = resolved_revision_type</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">_from_dict(cls</span><span class="s2">, </span><span class="s1">d: Optional[Dict[str</span><span class="s2">, </span><span class="s1">Any]]) -&gt; Optional[</span><span class="s3">&quot;VcsInfo&quot;</span><span class="s1">]:</span>
+        <span class="s2">if </span><span class="s1">d </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return None</span>
+        <span class="s2">return </span><span class="s1">cls(</span>
+            <span class="s1">vcs=_get_required(d</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s3">&quot;vcs&quot;</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s1">commit_id=_get_required(d</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s3">&quot;commit_id&quot;</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s1">requested_revision=_get(d</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s3">&quot;requested_revision&quot;</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s1">resolved_revision=_get(d</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s3">&quot;resolved_revision&quot;</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s1">resolved_revision_type=_get(d</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s3">&quot;resolved_revision_type&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">_to_dict(self) -&gt; Dict[str</span><span class="s2">, </span><span class="s1">Any]:</span>
+        <span class="s2">return </span><span class="s1">_filter_none(</span>
+            <span class="s1">vcs=self.vcs</span><span class="s2">,</span>
+            <span class="s1">requested_revision=self.requested_revision</span><span class="s2">,</span>
+            <span class="s1">commit_id=self.commit_id</span><span class="s2">,</span>
+            <span class="s1">resolved_revision=self.resolved_revision</span><span class="s2">,</span>
+            <span class="s1">resolved_revision_type=self.resolved_revision_type</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+
+<span class="s2">class </span><span class="s1">ArchiveInfo:</span>
+    <span class="s1">name = </span><span class="s3">&quot;archive_info&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">hash: Optional[str] = </span><span class="s2">None,</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.hash = hash</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">_from_dict(cls</span><span class="s2">, </span><span class="s1">d: Optional[Dict[str</span><span class="s2">, </span><span class="s1">Any]]) -&gt; Optional[</span><span class="s3">&quot;ArchiveInfo&quot;</span><span class="s1">]:</span>
+        <span class="s2">if </span><span class="s1">d </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return None</span>
+        <span class="s2">return </span><span class="s1">cls(hash=_get(d</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s3">&quot;hash&quot;</span><span class="s1">))</span>
+
+    <span class="s2">def </span><span class="s1">_to_dict(self) -&gt; Dict[str</span><span class="s2">, </span><span class="s1">Any]:</span>
+        <span class="s2">return </span><span class="s1">_filter_none(hash=self.hash)</span>
+
+
+<span class="s2">class </span><span class="s1">DirInfo:</span>
+    <span class="s1">name = </span><span class="s3">&quot;dir_info&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">editable: bool = </span><span class="s2">False,</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.editable = editable</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">_from_dict(cls</span><span class="s2">, </span><span class="s1">d: Optional[Dict[str</span><span class="s2">, </span><span class="s1">Any]]) -&gt; Optional[</span><span class="s3">&quot;DirInfo&quot;</span><span class="s1">]:</span>
+        <span class="s2">if </span><span class="s1">d </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return None</span>
+        <span class="s2">return </span><span class="s1">cls(editable=_get_required(d</span><span class="s2">, </span><span class="s1">bool</span><span class="s2">, </span><span class="s3">&quot;editable&quot;</span><span class="s2">, </span><span class="s1">default=</span><span class="s2">False</span><span class="s1">))</span>
+
+    <span class="s2">def </span><span class="s1">_to_dict(self) -&gt; Dict[str</span><span class="s2">, </span><span class="s1">Any]:</span>
+        <span class="s2">return </span><span class="s1">_filter_none(editable=self.editable </span><span class="s2">or None</span><span class="s1">)</span>
+
+
+<span class="s1">InfoType = Union[ArchiveInfo</span><span class="s2">, </span><span class="s1">DirInfo</span><span class="s2">, </span><span class="s1">VcsInfo]</span>
+
+
+<span class="s2">class </span><span class="s1">DirectUrl:</span>
+    <span class="s2">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">url: str</span><span class="s2">,</span>
+        <span class="s1">info: InfoType</span><span class="s2">,</span>
+        <span class="s1">subdirectory: Optional[str] = </span><span class="s2">None,</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.url = url</span>
+        <span class="s1">self.info = info</span>
+        <span class="s1">self.subdirectory = subdirectory</span>
+
+    <span class="s2">def </span><span class="s1">_remove_auth_from_netloc(self</span><span class="s2">, </span><span class="s1">netloc: str) -&gt; str:</span>
+        <span class="s2">if </span><span class="s3">&quot;@&quot; </span><span class="s2">not in </span><span class="s1">netloc:</span>
+            <span class="s2">return </span><span class="s1">netloc</span>
+        <span class="s1">user_pass</span><span class="s2">, </span><span class="s1">netloc_no_user_pass = netloc.split(</span><span class="s3">&quot;@&quot;</span><span class="s2">, </span><span class="s4">1</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">(</span>
+            <span class="s1">isinstance(self.info</span><span class="s2">, </span><span class="s1">VcsInfo)</span>
+            <span class="s2">and </span><span class="s1">self.info.vcs == </span><span class="s3">&quot;git&quot;</span>
+            <span class="s2">and </span><span class="s1">user_pass == </span><span class="s3">&quot;git&quot;</span>
+        <span class="s1">):</span>
+            <span class="s2">return </span><span class="s1">netloc</span>
+        <span class="s2">if </span><span class="s1">ENV_VAR_RE.match(user_pass):</span>
+            <span class="s2">return </span><span class="s1">netloc</span>
+        <span class="s2">return </span><span class="s1">netloc_no_user_pass</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">redacted_url(self) -&gt; str:</span>
+        <span class="s0">&quot;&quot;&quot;url with user:password part removed unless it is formed with 
+        environment variables as specified in PEP 610, or it is ``git`` 
+        in the case of a git URL. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">purl = urllib.parse.urlsplit(self.url)</span>
+        <span class="s1">netloc = self._remove_auth_from_netloc(purl.netloc)</span>
+        <span class="s1">surl = urllib.parse.urlunsplit(</span>
+            <span class="s1">(purl.scheme</span><span class="s2">, </span><span class="s1">netloc</span><span class="s2">, </span><span class="s1">purl.path</span><span class="s2">, </span><span class="s1">purl.query</span><span class="s2">, </span><span class="s1">purl.fragment)</span>
+        <span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">surl</span>
+
+    <span class="s2">def </span><span class="s1">validate(self) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.from_dict(self.to_dict())</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">from_dict(cls</span><span class="s2">, </span><span class="s1">d: Dict[str</span><span class="s2">, </span><span class="s1">Any]) -&gt; </span><span class="s3">&quot;DirectUrl&quot;</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">DirectUrl(</span>
+            <span class="s1">url=_get_required(d</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s3">&quot;url&quot;</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s1">subdirectory=_get(d</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s3">&quot;subdirectory&quot;</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s1">info=_exactly_one_of(</span>
+                <span class="s1">[</span>
+                    <span class="s1">ArchiveInfo._from_dict(_get(d</span><span class="s2">, </span><span class="s1">dict</span><span class="s2">, </span><span class="s3">&quot;archive_info&quot;</span><span class="s1">))</span><span class="s2">,</span>
+                    <span class="s1">DirInfo._from_dict(_get(d</span><span class="s2">, </span><span class="s1">dict</span><span class="s2">, </span><span class="s3">&quot;dir_info&quot;</span><span class="s1">))</span><span class="s2">,</span>
+                    <span class="s1">VcsInfo._from_dict(_get(d</span><span class="s2">, </span><span class="s1">dict</span><span class="s2">, </span><span class="s3">&quot;vcs_info&quot;</span><span class="s1">))</span><span class="s2">,</span>
+                <span class="s1">]</span>
+            <span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">to_dict(self) -&gt; Dict[str</span><span class="s2">, </span><span class="s1">Any]:</span>
+        <span class="s1">res = _filter_none(</span>
+            <span class="s1">url=self.redacted_url</span><span class="s2">,</span>
+            <span class="s1">subdirectory=self.subdirectory</span><span class="s2">,</span>
+        <span class="s1">)</span>
+        <span class="s1">res[self.info.name] = self.info._to_dict()</span>
+        <span class="s2">return </span><span class="s1">res</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">from_json(cls</span><span class="s2">, </span><span class="s1">s: str) -&gt; </span><span class="s3">&quot;DirectUrl&quot;</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">cls.from_dict(json.loads(s))</span>
+
+    <span class="s2">def </span><span class="s1">to_json(self) -&gt; str:</span>
+        <span class="s2">return </span><span class="s1">json.dumps(self.to_dict()</span><span class="s2">, </span><span class="s1">sort_keys=</span><span class="s2">True</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">is_local_editable(self) -&gt; bool:</span>
+        <span class="s2">return </span><span class="s1">isinstance(self.info</span><span class="s2">, </span><span class="s1">DirInfo) </span><span class="s2">and </span><span class="s1">self.info.editable</span>
+</pre>
+</body>
+</html>

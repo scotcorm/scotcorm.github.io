@@ -1,0 +1,454 @@
+<html>
+<head>
+<title>parameterized.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #808080;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+parameterized.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+tl;dr: all code code is licensed under simplified BSD, unless stated otherwise. 
+ 
+Unless stated otherwise in the source files, all code is copyright 2010 David 
+Wolever &lt;david@wolever.net&gt;. All rights reserved. 
+ 
+Redistribution and use in source and binary forms, with or without 
+modification, are permitted provided that the following conditions are met: 
+ 
+   1. Redistributions of source code must retain the above copyright notice, 
+   this list of conditions and the following disclaimer. 
+ 
+   2. Redistributions in binary form must reproduce the above copyright notice, 
+   this list of conditions and the following disclaimer in the documentation 
+   and/or other materials provided with the distribution. 
+ 
+THIS SOFTWARE IS PROVIDED BY &lt;COPYRIGHT HOLDER&gt; ``AS IS'' AND ANY EXPRESS OR 
+IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF 
+MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO 
+EVENT SHALL &lt;COPYRIGHT HOLDER&gt; OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, 
+INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, 
+BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, 
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF 
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE 
+OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF 
+ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. 
+ 
+The views and conclusions contained in the software and documentation are those 
+of the authors and should not be interpreted as representing official policies, 
+either expressed or implied, of David Wolever. 
+ 
+&quot;&quot;&quot;</span>
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">inspect</span>
+<span class="s2">import </span><span class="s1">warnings</span>
+<span class="s2">from </span><span class="s1">functools </span><span class="s2">import </span><span class="s1">wraps</span>
+<span class="s2">from </span><span class="s1">types </span><span class="s2">import </span><span class="s1">MethodType</span>
+<span class="s2">from </span><span class="s1">collections </span><span class="s2">import </span><span class="s1">namedtuple</span>
+
+<span class="s2">from </span><span class="s1">unittest </span><span class="s2">import </span><span class="s1">TestCase</span>
+
+<span class="s1">_param = namedtuple(</span><span class="s3">&quot;param&quot;</span><span class="s2">, </span><span class="s3">&quot;args kwargs&quot;</span><span class="s1">)</span>
+
+<span class="s2">class </span><span class="s1">param(_param):</span>
+    <span class="s0">&quot;&quot;&quot; Represents a single parameter to a test case. 
+ 
+        For example:: 
+ 
+            &gt;&gt;&gt; p = param(&quot;foo&quot;, bar=16) 
+            &gt;&gt;&gt; p 
+            param(&quot;foo&quot;, bar=16) 
+            &gt;&gt;&gt; p.args 
+            ('foo', ) 
+            &gt;&gt;&gt; p.kwargs 
+            {'bar': 16} 
+ 
+        Intended to be used as an argument to ``@parameterized``:: 
+ 
+            @parameterized([ 
+                param(&quot;foo&quot;, bar=16), 
+            ]) 
+            def test_stuff(foo, bar=16): 
+                pass 
+        &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__new__(cls</span><span class="s2">, </span><span class="s1">*args </span><span class="s2">, </span><span class="s1">**kwargs):</span>
+        <span class="s2">return </span><span class="s1">_param.__new__(cls</span><span class="s2">, </span><span class="s1">args</span><span class="s2">, </span><span class="s1">kwargs)</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">explicit(cls</span><span class="s2">, </span><span class="s1">args=</span><span class="s2">None, </span><span class="s1">kwargs=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot; Creates a ``param`` by explicitly specifying ``args`` and 
+            ``kwargs``:: 
+ 
+                &gt;&gt;&gt; param.explicit([1,2,3]) 
+                param(*(1, 2, 3)) 
+                &gt;&gt;&gt; param.explicit(kwargs={&quot;foo&quot;: 42}) 
+                param(*(), **{&quot;foo&quot;: &quot;42&quot;}) 
+            &quot;&quot;&quot;</span>
+        <span class="s1">args = args </span><span class="s2">or </span><span class="s1">()</span>
+        <span class="s1">kwargs = kwargs </span><span class="s2">or </span><span class="s1">{}</span>
+        <span class="s2">return </span><span class="s1">cls(*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">from_decorator(cls</span><span class="s2">, </span><span class="s1">args):</span>
+        <span class="s0">&quot;&quot;&quot; Returns an instance of ``param()`` for ``@parameterized`` argument 
+            ``args``:: 
+ 
+                &gt;&gt;&gt; param.from_decorator((42, )) 
+                param(args=(42, ), kwargs={}) 
+                &gt;&gt;&gt; param.from_decorator(&quot;foo&quot;) 
+                param(args=(&quot;foo&quot;, ), kwargs={}) 
+            &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">isinstance(args</span><span class="s2">, </span><span class="s1">param):</span>
+            <span class="s2">return </span><span class="s1">args</span>
+        <span class="s2">elif </span><span class="s1">isinstance(args</span><span class="s2">, </span><span class="s1">(str</span><span class="s2">,</span><span class="s1">)):</span>
+            <span class="s1">args = (args</span><span class="s2">, </span><span class="s1">)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">cls(*args)</span>
+        <span class="s2">except </span><span class="s1">TypeError </span><span class="s2">as </span><span class="s1">e:</span>
+            <span class="s2">if </span><span class="s3">&quot;after * must be&quot; </span><span class="s2">not in </span><span class="s1">str(e):</span>
+                <span class="s2">raise</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span>
+                <span class="s3">&quot;Parameters must be tuples, but %r is not (hint: use '(%r, )')&quot;</span>
+                <span class="s1">%(args</span><span class="s2">, </span><span class="s1">args)</span><span class="s2">,</span>
+            <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s2">return </span><span class="s3">&quot;param(*%r, **%r)&quot; </span><span class="s1">%self</span>
+
+
+<span class="s2">def </span><span class="s1">parameterized_argument_value_pairs(func</span><span class="s2">, </span><span class="s1">p):</span>
+    <span class="s0">&quot;&quot;&quot;Return tuples of parameterized arguments and their values. 
+ 
+        This is useful if you are writing your own doc_func 
+        function and need to know the values for each parameter name:: 
+ 
+            &gt;&gt;&gt; def func(a, foo=None, bar=42, **kwargs): pass 
+            &gt;&gt;&gt; p = param(1, foo=7, extra=99) 
+            &gt;&gt;&gt; parameterized_argument_value_pairs(func, p) 
+            [(&quot;a&quot;, 1), (&quot;foo&quot;, 7), (&quot;bar&quot;, 42), (&quot;**kwargs&quot;, {&quot;extra&quot;: 99})] 
+ 
+        If the function's first argument is named ``self`` then it will be 
+        ignored:: 
+ 
+            &gt;&gt;&gt; def func(self, a): pass 
+            &gt;&gt;&gt; p = param(1) 
+            &gt;&gt;&gt; parameterized_argument_value_pairs(func, p) 
+            [(&quot;a&quot;, 1)] 
+ 
+        Additionally, empty ``*args`` or ``**kwargs`` will be ignored:: 
+ 
+            &gt;&gt;&gt; def func(foo, *args): pass 
+            &gt;&gt;&gt; p = param(1) 
+            &gt;&gt;&gt; parameterized_argument_value_pairs(func, p) 
+            [(&quot;foo&quot;, 1)] 
+            &gt;&gt;&gt; p = param(1, 16) 
+            &gt;&gt;&gt; parameterized_argument_value_pairs(func, p) 
+            [(&quot;foo&quot;, 1), (&quot;*args&quot;, (16, ))] 
+    &quot;&quot;&quot;</span>
+    <span class="s1">argspec = inspect.getargspec(func)</span>
+    <span class="s1">arg_offset = </span><span class="s4">1 </span><span class="s2">if </span><span class="s1">argspec.args[:</span><span class="s4">1</span><span class="s1">] == [</span><span class="s3">&quot;self&quot;</span><span class="s1">] </span><span class="s2">else </span><span class="s4">0</span>
+
+    <span class="s1">named_args = argspec.args[arg_offset:]</span>
+
+    <span class="s1">result = list(zip(named_args</span><span class="s2">, </span><span class="s1">p.args))</span>
+    <span class="s1">named_args = argspec.args[len(result) + arg_offset:]</span>
+    <span class="s1">varargs = p.args[len(result):]</span>
+
+    <span class="s1">result.extend([</span>
+        <span class="s1">(name</span><span class="s2">, </span><span class="s1">p.kwargs.get(name</span><span class="s2">, </span><span class="s1">default))</span>
+        <span class="s2">for </span><span class="s1">(name</span><span class="s2">, </span><span class="s1">default)</span>
+        <span class="s2">in </span><span class="s1">zip(named_args</span><span class="s2">, </span><span class="s1">argspec.defaults </span><span class="s2">or </span><span class="s1">[])</span>
+    <span class="s1">])</span>
+
+    <span class="s1">seen_arg_names = {n </span><span class="s2">for </span><span class="s1">(n</span><span class="s2">, </span><span class="s1">_) </span><span class="s2">in </span><span class="s1">result}</span>
+    <span class="s1">keywords = dict(sorted([</span>
+        <span class="s1">(name</span><span class="s2">, </span><span class="s1">p.kwargs[name])</span>
+        <span class="s2">for </span><span class="s1">name </span><span class="s2">in </span><span class="s1">p.kwargs</span>
+        <span class="s2">if </span><span class="s1">name </span><span class="s2">not in </span><span class="s1">seen_arg_names</span>
+    <span class="s1">]))</span>
+
+    <span class="s2">if </span><span class="s1">varargs:</span>
+        <span class="s1">result.append((</span><span class="s3">&quot;*%s&quot; </span><span class="s1">%(argspec.varargs</span><span class="s2">, </span><span class="s1">)</span><span class="s2">, </span><span class="s1">tuple(varargs)))</span>
+
+    <span class="s2">if </span><span class="s1">keywords:</span>
+        <span class="s1">result.append((</span><span class="s3">&quot;**%s&quot; </span><span class="s1">%(argspec.keywords</span><span class="s2">, </span><span class="s1">)</span><span class="s2">, </span><span class="s1">keywords))</span>
+
+    <span class="s2">return </span><span class="s1">result</span>
+
+<span class="s2">def </span><span class="s1">short_repr(x</span><span class="s2">, </span><span class="s1">n=</span><span class="s4">64</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot; A shortened repr of ``x`` which is guaranteed to be ``unicode``:: 
+ 
+            &gt;&gt;&gt; short_repr(&quot;foo&quot;) 
+            u&quot;foo&quot; 
+            &gt;&gt;&gt; short_repr(&quot;123456789&quot;, n=4) 
+            u&quot;12...89&quot; 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">x_repr = repr(x)</span>
+    <span class="s2">if </span><span class="s1">isinstance(x_repr</span><span class="s2">, </span><span class="s1">bytes):</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">x_repr = str(x_repr</span><span class="s2">, </span><span class="s3">&quot;utf-8&quot;</span><span class="s1">)</span>
+        <span class="s2">except </span><span class="s1">UnicodeDecodeError:</span>
+            <span class="s1">x_repr = str(x_repr</span><span class="s2">, </span><span class="s3">&quot;latin1&quot;</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">len(x_repr) &gt; n:</span>
+        <span class="s1">x_repr = x_repr[:n//</span><span class="s4">2</span><span class="s1">] + </span><span class="s3">&quot;...&quot; </span><span class="s1">+ x_repr[len(x_repr) - n//</span><span class="s4">2</span><span class="s1">:]</span>
+    <span class="s2">return </span><span class="s1">x_repr</span>
+
+<span class="s2">def </span><span class="s1">default_doc_func(func</span><span class="s2">, </span><span class="s1">num</span><span class="s2">, </span><span class="s1">p):</span>
+    <span class="s2">if </span><span class="s1">func.__doc__ </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">return None</span>
+
+    <span class="s1">all_args_with_values = parameterized_argument_value_pairs(func</span><span class="s2">, </span><span class="s1">p)</span>
+
+    <span class="s5"># Assumes that the function passed is a bound method.</span>
+    <span class="s1">descs = [</span><span class="s3">f'</span><span class="s2">{</span><span class="s1">n</span><span class="s2">}</span><span class="s3">=</span><span class="s2">{</span><span class="s1">short_repr(v)</span><span class="s2">}</span><span class="s3">' </span><span class="s2">for </span><span class="s1">n</span><span class="s2">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">all_args_with_values]</span>
+
+    <span class="s5"># The documentation might be a multiline string, so split it</span>
+    <span class="s5"># and just work with the first string, ignoring the period</span>
+    <span class="s5"># at the end if there is one.</span>
+    <span class="s1">first</span><span class="s2">, </span><span class="s1">nl</span><span class="s2">, </span><span class="s1">rest = func.__doc__.lstrip().partition(</span><span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">&quot;</span><span class="s1">)</span>
+    <span class="s1">suffix = </span><span class="s3">&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">first.endswith(</span><span class="s3">&quot;.&quot;</span><span class="s1">):</span>
+        <span class="s1">suffix = </span><span class="s3">&quot;.&quot;</span>
+        <span class="s1">first = first[:-</span><span class="s4">1</span><span class="s1">]</span>
+    <span class="s1">args = </span><span class="s3">&quot;%s[with %s]&quot; </span><span class="s1">%(len(first) </span><span class="s2">and </span><span class="s3">&quot; &quot; </span><span class="s2">or </span><span class="s3">&quot;&quot;</span><span class="s2">, </span><span class="s3">&quot;, &quot;</span><span class="s1">.join(descs))</span>
+    <span class="s2">return </span><span class="s3">&quot;&quot;</span><span class="s1">.join([first.rstrip()</span><span class="s2">, </span><span class="s1">args</span><span class="s2">, </span><span class="s1">suffix</span><span class="s2">, </span><span class="s1">nl</span><span class="s2">, </span><span class="s1">rest])</span>
+
+<span class="s2">def </span><span class="s1">default_name_func(func</span><span class="s2">, </span><span class="s1">num</span><span class="s2">, </span><span class="s1">p):</span>
+    <span class="s1">base_name = func.__name__</span>
+    <span class="s1">name_suffix = </span><span class="s3">&quot;_%s&quot; </span><span class="s1">%(num</span><span class="s2">, </span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">len(p.args) &gt; </span><span class="s4">0 </span><span class="s2">and </span><span class="s1">isinstance(p.args[</span><span class="s4">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">(str</span><span class="s2">,</span><span class="s1">)):</span>
+        <span class="s1">name_suffix += </span><span class="s3">&quot;_&quot; </span><span class="s1">+ parameterized.to_safe_name(p.args[</span><span class="s4">0</span><span class="s1">])</span>
+    <span class="s2">return </span><span class="s1">base_name + name_suffix</span>
+
+
+<span class="s5"># force nose for numpy purposes.</span>
+<span class="s1">_test_runner_override = </span><span class="s3">'nose'</span>
+<span class="s1">_test_runner_guess = </span><span class="s2">False</span>
+<span class="s1">_test_runners = set([</span><span class="s3">&quot;unittest&quot;</span><span class="s2">, </span><span class="s3">&quot;unittest2&quot;</span><span class="s2">, </span><span class="s3">&quot;nose&quot;</span><span class="s2">, </span><span class="s3">&quot;nose2&quot;</span><span class="s2">, </span><span class="s3">&quot;pytest&quot;</span><span class="s1">])</span>
+<span class="s1">_test_runner_aliases = {</span>
+    <span class="s3">&quot;_pytest&quot;</span><span class="s1">: </span><span class="s3">&quot;pytest&quot;</span><span class="s2">,</span>
+<span class="s1">}</span>
+
+<span class="s2">def </span><span class="s1">set_test_runner(name):</span>
+    <span class="s2">global </span><span class="s1">_test_runner_override</span>
+    <span class="s2">if </span><span class="s1">name </span><span class="s2">not in </span><span class="s1">_test_runners:</span>
+        <span class="s2">raise </span><span class="s1">TypeError(</span>
+            <span class="s3">&quot;Invalid test runner: %r (must be one of: %s)&quot;</span>
+            <span class="s1">%(name</span><span class="s2">, </span><span class="s3">&quot;, &quot;</span><span class="s1">.join(_test_runners))</span><span class="s2">,</span>
+        <span class="s1">)</span>
+    <span class="s1">_test_runner_override = name</span>
+
+<span class="s2">def </span><span class="s1">detect_runner():</span>
+    <span class="s0">&quot;&quot;&quot; Guess which test runner we're using by traversing the stack and looking 
+        for the first matching module. This *should* be reasonably safe, as 
+        it's done during test discovery where the test runner should be the 
+        stack frame immediately outside. &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">_test_runner_override </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">_test_runner_override</span>
+    <span class="s2">global </span><span class="s1">_test_runner_guess</span>
+    <span class="s2">if </span><span class="s1">_test_runner_guess </span><span class="s2">is False</span><span class="s1">:</span>
+        <span class="s1">stack = inspect.stack()</span>
+        <span class="s2">for </span><span class="s1">record </span><span class="s2">in </span><span class="s1">reversed(stack):</span>
+            <span class="s1">frame = record[</span><span class="s4">0</span><span class="s1">]</span>
+            <span class="s1">module = frame.f_globals.get(</span><span class="s3">&quot;__name__&quot;</span><span class="s1">).partition(</span><span class="s3">&quot;.&quot;</span><span class="s1">)[</span><span class="s4">0</span><span class="s1">]</span>
+            <span class="s2">if </span><span class="s1">module </span><span class="s2">in </span><span class="s1">_test_runner_aliases:</span>
+                <span class="s1">module = _test_runner_aliases[module]</span>
+            <span class="s2">if </span><span class="s1">module </span><span class="s2">in </span><span class="s1">_test_runners:</span>
+                <span class="s1">_test_runner_guess = module</span>
+                <span class="s2">break</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">_test_runner_guess = </span><span class="s2">None</span>
+    <span class="s2">return </span><span class="s1">_test_runner_guess</span>
+
+<span class="s2">class </span><span class="s1">parameterized:</span>
+    <span class="s0">&quot;&quot;&quot; Parameterize a test case:: 
+ 
+            class TestInt: 
+                @parameterized([ 
+                    (&quot;A&quot;, 10), 
+                    (&quot;F&quot;, 15), 
+                    param(&quot;10&quot;, 42, base=42) 
+                ]) 
+                def test_int(self, input, expected, base=16): 
+                    actual = int(input, base=base) 
+                    assert_equal(actual, expected) 
+ 
+            @parameterized([ 
+                (2, 3, 5) 
+                (3, 5, 8), 
+            ]) 
+            def test_add(a, b, expected): 
+                assert_equal(a + b, expected) 
+        &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">input</span><span class="s2">, </span><span class="s1">doc_func=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s1">self.get_input = self.input_as_callable(input)</span>
+        <span class="s1">self.doc_func = doc_func </span><span class="s2">or </span><span class="s1">default_doc_func</span>
+
+    <span class="s2">def </span><span class="s1">__call__(self</span><span class="s2">, </span><span class="s1">test_func):</span>
+        <span class="s1">self.assert_not_in_testcase_subclass()</span>
+
+        <span class="s1">@wraps(test_func)</span>
+        <span class="s2">def </span><span class="s1">wrapper(test_self=</span><span class="s2">None</span><span class="s1">):</span>
+            <span class="s1">test_cls = test_self </span><span class="s2">and </span><span class="s1">type(test_self)</span>
+
+            <span class="s1">original_doc = wrapper.__doc__</span>
+            <span class="s2">for </span><span class="s1">num</span><span class="s2">, </span><span class="s1">args </span><span class="s2">in </span><span class="s1">enumerate(wrapper.parameterized_input):</span>
+                <span class="s1">p = param.from_decorator(args)</span>
+                <span class="s1">unbound_func</span><span class="s2">, </span><span class="s1">nose_tuple = self.param_as_nose_tuple(test_self</span><span class="s2">, </span><span class="s1">test_func</span><span class="s2">, </span><span class="s1">num</span><span class="s2">, </span><span class="s1">p)</span>
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s1">wrapper.__doc__ = nose_tuple[</span><span class="s4">0</span><span class="s1">].__doc__</span>
+                    <span class="s5"># Nose uses `getattr(instance, test_func.__name__)` to get</span>
+                    <span class="s5"># a method bound to the test instance (as opposed to a</span>
+                    <span class="s5"># method bound to the instance of the class created when</span>
+                    <span class="s5"># tests were being enumerated). Set a value here to make</span>
+                    <span class="s5"># sure nose can get the correct test method.</span>
+                    <span class="s2">if </span><span class="s1">test_self </span><span class="s2">is not None</span><span class="s1">:</span>
+                        <span class="s1">setattr(test_cls</span><span class="s2">, </span><span class="s1">test_func.__name__</span><span class="s2">, </span><span class="s1">unbound_func)</span>
+                    <span class="s2">yield </span><span class="s1">nose_tuple</span>
+                <span class="s2">finally</span><span class="s1">:</span>
+                    <span class="s2">if </span><span class="s1">test_self </span><span class="s2">is not None</span><span class="s1">:</span>
+                        <span class="s1">delattr(test_cls</span><span class="s2">, </span><span class="s1">test_func.__name__)</span>
+                    <span class="s1">wrapper.__doc__ = original_doc</span>
+        <span class="s1">wrapper.parameterized_input = self.get_input()</span>
+        <span class="s1">wrapper.parameterized_func = test_func</span>
+        <span class="s1">test_func.__name__ = </span><span class="s3">&quot;_parameterized_original_%s&quot; </span><span class="s1">%(test_func.__name__</span><span class="s2">, </span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">wrapper</span>
+
+    <span class="s2">def </span><span class="s1">param_as_nose_tuple(self</span><span class="s2">, </span><span class="s1">test_self</span><span class="s2">, </span><span class="s1">func</span><span class="s2">, </span><span class="s1">num</span><span class="s2">, </span><span class="s1">p):</span>
+        <span class="s1">nose_func = wraps(func)(</span><span class="s2">lambda </span><span class="s1">*args: func(*args[:-</span><span class="s4">1</span><span class="s1">]</span><span class="s2">, </span><span class="s1">**args[-</span><span class="s4">1</span><span class="s1">]))</span>
+        <span class="s1">nose_func.__doc__ = self.doc_func(func</span><span class="s2">, </span><span class="s1">num</span><span class="s2">, </span><span class="s1">p)</span>
+        <span class="s5"># Track the unbound function because we need to setattr the unbound</span>
+        <span class="s5"># function onto the class for nose to work (see comments above), and</span>
+        <span class="s5"># Python 3 doesn't let us pull the function out of a bound method.</span>
+        <span class="s1">unbound_func = nose_func</span>
+        <span class="s2">if </span><span class="s1">test_self </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">nose_func = MethodType(nose_func</span><span class="s2">, </span><span class="s1">test_self)</span>
+        <span class="s2">return </span><span class="s1">unbound_func</span><span class="s2">, </span><span class="s1">(nose_func</span><span class="s2">, </span><span class="s1">) + p.args + (p.kwargs </span><span class="s2">or </span><span class="s1">{}</span><span class="s2">, </span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">assert_not_in_testcase_subclass(self):</span>
+        <span class="s1">parent_classes = self._terrible_magic_get_defining_classes()</span>
+        <span class="s2">if </span><span class="s1">any(issubclass(cls</span><span class="s2">, </span><span class="s1">TestCase) </span><span class="s2">for </span><span class="s1">cls </span><span class="s2">in </span><span class="s1">parent_classes):</span>
+            <span class="s2">raise </span><span class="s1">Exception(</span><span class="s3">&quot;Warning: '@parameterized' tests won't work &quot;</span>
+                            <span class="s3">&quot;inside subclasses of 'TestCase' - use &quot;</span>
+                            <span class="s3">&quot;'@parameterized.expand' instead.&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">_terrible_magic_get_defining_classes(self):</span>
+        <span class="s0">&quot;&quot;&quot; Returns the list of parent classes of the class currently being defined. 
+            Will likely only work if called from the ``parameterized`` decorator. 
+            This function is entirely @brandon_rhodes's fault, as he suggested 
+            the implementation: http://stackoverflow.com/a/8793684/71522 
+            &quot;&quot;&quot;</span>
+        <span class="s1">stack = inspect.stack()</span>
+        <span class="s2">if </span><span class="s1">len(stack) &lt;= </span><span class="s4">4</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">[]</span>
+        <span class="s1">frame = stack[</span><span class="s4">4</span><span class="s1">]</span>
+        <span class="s1">code_context = frame[</span><span class="s4">4</span><span class="s1">] </span><span class="s2">and </span><span class="s1">frame[</span><span class="s4">4</span><span class="s1">][</span><span class="s4">0</span><span class="s1">].strip()</span>
+        <span class="s2">if not </span><span class="s1">(code_context </span><span class="s2">and </span><span class="s1">code_context.startswith(</span><span class="s3">&quot;class &quot;</span><span class="s1">)):</span>
+            <span class="s2">return </span><span class="s1">[]</span>
+        <span class="s1">_</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">parents = code_context.partition(</span><span class="s3">&quot;(&quot;</span><span class="s1">)</span>
+        <span class="s1">parents</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">_ = parents.partition(</span><span class="s3">&quot;)&quot;</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">eval(</span><span class="s3">&quot;[&quot; </span><span class="s1">+ parents + </span><span class="s3">&quot;]&quot;</span><span class="s2">, </span><span class="s1">frame[</span><span class="s4">0</span><span class="s1">].f_globals</span><span class="s2">, </span><span class="s1">frame[</span><span class="s4">0</span><span class="s1">].f_locals)</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">input_as_callable(cls</span><span class="s2">, </span><span class="s1">input):</span>
+        <span class="s2">if </span><span class="s1">callable(input):</span>
+            <span class="s2">return lambda</span><span class="s1">: cls.check_input_values(input())</span>
+        <span class="s1">input_values = cls.check_input_values(input)</span>
+        <span class="s2">return lambda</span><span class="s1">: input_values</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">check_input_values(cls</span><span class="s2">, </span><span class="s1">input_values):</span>
+        <span class="s5"># Explicitly convert non-list inputs to a list so that:</span>
+        <span class="s5"># 1. A helpful exception will be raised if they aren't iterable, and</span>
+        <span class="s5"># 2. Generators are unwrapped exactly once (otherwise `nosetests</span>
+        <span class="s5">#    --processes=n` has issues; see:</span>
+        <span class="s5">#    https://github.com/wolever/nose-parameterized/pull/31)</span>
+        <span class="s2">if not </span><span class="s1">isinstance(input_values</span><span class="s2">, </span><span class="s1">list):</span>
+            <span class="s1">input_values = list(input_values)</span>
+        <span class="s2">return </span><span class="s1">[ param.from_decorator(p) </span><span class="s2">for </span><span class="s1">p </span><span class="s2">in </span><span class="s1">input_values ]</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">expand(cls</span><span class="s2">, </span><span class="s1">input</span><span class="s2">, </span><span class="s1">name_func=</span><span class="s2">None, </span><span class="s1">doc_func=</span><span class="s2">None, </span><span class="s1">**legacy):</span>
+        <span class="s0">&quot;&quot;&quot; A &quot;brute force&quot; method of parameterizing test cases. Creates new 
+            test cases and injects them into the namespace that the wrapped 
+            function is being defined in. Useful for parameterizing tests in 
+            subclasses of 'UnitTest', where Nose test generators don't work. 
+ 
+            &gt;&gt;&gt; @parameterized.expand([(&quot;foo&quot;, 1, 2)]) 
+            ... def test_add1(name, input, expected): 
+            ...     actual = add1(input) 
+            ...     assert_equal(actual, expected) 
+            ... 
+            &gt;&gt;&gt; locals() 
+            ... 'test_add1_foo_0': &lt;function ...&gt; ... 
+            &gt;&gt;&gt; 
+            &quot;&quot;&quot;</span>
+
+        <span class="s2">if </span><span class="s3">&quot;testcase_func_name&quot; </span><span class="s2">in </span><span class="s1">legacy:</span>
+            <span class="s1">warnings.warn(</span><span class="s3">&quot;testcase_func_name= is deprecated; use name_func=&quot;</span><span class="s2">,</span>
+                          <span class="s1">DeprecationWarning</span><span class="s2">, </span><span class="s1">stacklevel=</span><span class="s4">2</span><span class="s1">)</span>
+            <span class="s2">if not </span><span class="s1">name_func:</span>
+                <span class="s1">name_func = legacy[</span><span class="s3">&quot;testcase_func_name&quot;</span><span class="s1">]</span>
+
+        <span class="s2">if </span><span class="s3">&quot;testcase_func_doc&quot; </span><span class="s2">in </span><span class="s1">legacy:</span>
+            <span class="s1">warnings.warn(</span><span class="s3">&quot;testcase_func_doc= is deprecated; use doc_func=&quot;</span><span class="s2">,</span>
+                          <span class="s1">DeprecationWarning</span><span class="s2">, </span><span class="s1">stacklevel=</span><span class="s4">2</span><span class="s1">)</span>
+            <span class="s2">if not </span><span class="s1">doc_func:</span>
+                <span class="s1">doc_func = legacy[</span><span class="s3">&quot;testcase_func_doc&quot;</span><span class="s1">]</span>
+
+        <span class="s1">doc_func = doc_func </span><span class="s2">or </span><span class="s1">default_doc_func</span>
+        <span class="s1">name_func = name_func </span><span class="s2">or </span><span class="s1">default_name_func</span>
+
+        <span class="s2">def </span><span class="s1">parameterized_expand_wrapper(f</span><span class="s2">, </span><span class="s1">instance=</span><span class="s2">None</span><span class="s1">):</span>
+            <span class="s1">stack = inspect.stack()</span>
+            <span class="s1">frame = stack[</span><span class="s4">1</span><span class="s1">]</span>
+            <span class="s1">frame_locals = frame[</span><span class="s4">0</span><span class="s1">].f_locals</span>
+
+            <span class="s1">parameters = cls.input_as_callable(input)()</span>
+            <span class="s2">for </span><span class="s1">num</span><span class="s2">, </span><span class="s1">p </span><span class="s2">in </span><span class="s1">enumerate(parameters):</span>
+                <span class="s1">name = name_func(f</span><span class="s2">, </span><span class="s1">num</span><span class="s2">, </span><span class="s1">p)</span>
+                <span class="s1">frame_locals[name] = cls.param_as_standalone_func(p</span><span class="s2">, </span><span class="s1">f</span><span class="s2">, </span><span class="s1">name)</span>
+                <span class="s1">frame_locals[name].__doc__ = doc_func(f</span><span class="s2">, </span><span class="s1">num</span><span class="s2">, </span><span class="s1">p)</span>
+
+            <span class="s1">f.__test__ = </span><span class="s2">False</span>
+        <span class="s2">return </span><span class="s1">parameterized_expand_wrapper</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">param_as_standalone_func(cls</span><span class="s2">, </span><span class="s1">p</span><span class="s2">, </span><span class="s1">func</span><span class="s2">, </span><span class="s1">name):</span>
+        <span class="s1">@wraps(func)</span>
+        <span class="s2">def </span><span class="s1">standalone_func(*a):</span>
+            <span class="s2">return </span><span class="s1">func(*(a + p.args)</span><span class="s2">, </span><span class="s1">**p.kwargs)</span>
+        <span class="s1">standalone_func.__name__ = name</span>
+
+        <span class="s5"># place_as is used by py.test to determine what source file should be</span>
+        <span class="s5"># used for this test.</span>
+        <span class="s1">standalone_func.place_as = func</span>
+
+        <span class="s5"># Remove __wrapped__ because py.test will try to look at __wrapped__</span>
+        <span class="s5"># to determine which parameters should be used with this test case,</span>
+        <span class="s5"># and obviously we don't need it to do any parameterization.</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">del </span><span class="s1">standalone_func.__wrapped__</span>
+        <span class="s2">except </span><span class="s1">AttributeError:</span>
+            <span class="s2">pass</span>
+        <span class="s2">return </span><span class="s1">standalone_func</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">to_safe_name(cls</span><span class="s2">, </span><span class="s1">s):</span>
+        <span class="s2">return </span><span class="s1">str(re.sub(</span><span class="s3">&quot;[^a-zA-Z0-9_]+&quot;</span><span class="s2">, </span><span class="s3">&quot;_&quot;</span><span class="s2">, </span><span class="s1">s))</span>
+</pre>
+</body>
+</html>

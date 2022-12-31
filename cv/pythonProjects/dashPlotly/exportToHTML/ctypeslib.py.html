@@ -1,0 +1,570 @@
+<html>
+<head>
+<title>ctypeslib.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6a8759;}
+.s3 { color: #cc7832;}
+.s4 { color: #808080;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+ctypeslib.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+============================ 
+``ctypes`` Utility Functions 
+============================ 
+ 
+See Also 
+-------- 
+load_library : Load a C library. 
+ndpointer : Array restype/argtype with verification. 
+as_ctypes : Create a ctypes array from an ndarray. 
+as_array : Create an ndarray from a ctypes array. 
+ 
+References 
+---------- 
+.. [1] &quot;SciPy Cookbook: ctypes&quot;, https://scipy-cookbook.readthedocs.io/items/Ctypes.html 
+ 
+Examples 
+-------- 
+Load the C library: 
+ 
+&gt;&gt;&gt; _lib = np.ctypeslib.load_library('libmystuff', '.')     #doctest: +SKIP 
+ 
+Our result type, an ndarray that must be of type double, be 1-dimensional 
+and is C-contiguous in memory: 
+ 
+&gt;&gt;&gt; array_1d_double = np.ctypeslib.ndpointer( 
+...                          dtype=np.double, 
+...                          ndim=1, flags='CONTIGUOUS')    #doctest: +SKIP 
+ 
+Our C-function typically takes an array and updates its values 
+in-place.  For example:: 
+ 
+    void foo_func(double* x, int length) 
+    { 
+        int i; 
+        for (i = 0; i &lt; length; i++) { 
+            x[i] = i*i; 
+        } 
+    } 
+ 
+We wrap it using: 
+ 
+&gt;&gt;&gt; _lib.foo_func.restype = None                      #doctest: +SKIP 
+&gt;&gt;&gt; _lib.foo_func.argtypes = [array_1d_double, c_int] #doctest: +SKIP 
+ 
+Then, we're ready to call ``foo_func``: 
+ 
+&gt;&gt;&gt; out = np.empty(15, dtype=np.double) 
+&gt;&gt;&gt; _lib.foo_func(out, len(out))                #doctest: +SKIP 
+ 
+&quot;&quot;&quot;</span>
+<span class="s1">__all__ = [</span><span class="s2">'load_library'</span><span class="s3">, </span><span class="s2">'ndpointer'</span><span class="s3">, </span><span class="s2">'c_intp'</span><span class="s3">, </span><span class="s2">'as_ctypes'</span><span class="s3">, </span><span class="s2">'as_array'</span><span class="s3">,</span>
+           <span class="s2">'as_ctypes_type'</span><span class="s1">]</span>
+
+<span class="s3">import </span><span class="s1">os</span>
+<span class="s3">from </span><span class="s1">numpy </span><span class="s3">import </span><span class="s1">(</span>
+    <span class="s1">integer</span><span class="s3">, </span><span class="s1">ndarray</span><span class="s3">, </span><span class="s1">dtype </span><span class="s3">as </span><span class="s1">_dtype</span><span class="s3">, </span><span class="s1">asarray</span><span class="s3">, </span><span class="s1">frombuffer</span>
+<span class="s1">)</span>
+<span class="s3">from </span><span class="s1">numpy.core.multiarray </span><span class="s3">import </span><span class="s1">_flagdict</span><span class="s3">, </span><span class="s1">flagsobj</span>
+
+<span class="s3">try</span><span class="s1">:</span>
+    <span class="s3">import </span><span class="s1">ctypes</span>
+<span class="s3">except </span><span class="s1">ImportError:</span>
+    <span class="s1">ctypes = </span><span class="s3">None</span>
+
+<span class="s3">if </span><span class="s1">ctypes </span><span class="s3">is None</span><span class="s1">:</span>
+    <span class="s3">def </span><span class="s1">_dummy(*args</span><span class="s3">, </span><span class="s1">**kwds):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Dummy object that raises an ImportError if ctypes is not available. 
+ 
+        Raises 
+        ------ 
+        ImportError 
+            If ctypes is not available. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s3">raise </span><span class="s1">ImportError(</span><span class="s2">&quot;ctypes is not available.&quot;</span><span class="s1">)</span>
+    <span class="s1">load_library = _dummy</span>
+    <span class="s1">as_ctypes = _dummy</span>
+    <span class="s1">as_array = _dummy</span>
+    <span class="s3">from </span><span class="s1">numpy </span><span class="s3">import </span><span class="s1">intp </span><span class="s3">as </span><span class="s1">c_intp</span>
+    <span class="s1">_ndptr_base = object</span>
+<span class="s3">else</span><span class="s1">:</span>
+    <span class="s3">import </span><span class="s1">numpy.core._internal </span><span class="s3">as </span><span class="s1">nic</span>
+    <span class="s1">c_intp = nic._getintp_ctype()</span>
+    <span class="s3">del </span><span class="s1">nic</span>
+    <span class="s1">_ndptr_base = ctypes.c_void_p</span>
+
+    <span class="s4"># Adapted from Albert Strasheim</span>
+    <span class="s3">def </span><span class="s1">load_library(libname</span><span class="s3">, </span><span class="s1">loader_path):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        It is possible to load a library using 
+ 
+        &gt;&gt;&gt; lib = ctypes.cdll[&lt;full_path_name&gt;] # doctest: +SKIP 
+ 
+        But there are cross-platform considerations, such as library file extensions, 
+        plus the fact Windows will just load the first library it finds with that name. 
+        NumPy supplies the load_library function as a convenience. 
+ 
+        .. versionchanged:: 1.20.0 
+            Allow libname and loader_path to take any 
+            :term:`python:path-like object`. 
+ 
+        Parameters 
+        ---------- 
+        libname : path-like 
+            Name of the library, which can have 'lib' as a prefix, 
+            but without an extension. 
+        loader_path : path-like 
+            Where the library can be found. 
+ 
+        Returns 
+        ------- 
+        ctypes.cdll[libpath] : library object 
+           A ctypes library object 
+ 
+        Raises 
+        ------ 
+        OSError 
+            If there is no library with the expected extension, or the 
+            library is defective and cannot be loaded. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">ctypes.__version__ &lt; </span><span class="s2">'1.0.1'</span><span class="s1">:</span>
+            <span class="s3">import </span><span class="s1">warnings</span>
+            <span class="s1">warnings.warn(</span><span class="s2">&quot;All features of ctypes interface may not work &quot;</span>
+                          <span class="s2">&quot;with ctypes &lt; 1.0.1&quot;</span><span class="s3">, </span><span class="s1">stacklevel=</span><span class="s5">2</span><span class="s1">)</span>
+
+        <span class="s4"># Convert path-like objects into strings</span>
+        <span class="s1">libname = os.fsdecode(libname)</span>
+        <span class="s1">loader_path = os.fsdecode(loader_path)</span>
+
+        <span class="s1">ext = os.path.splitext(libname)[</span><span class="s5">1</span><span class="s1">]</span>
+        <span class="s3">if not </span><span class="s1">ext:</span>
+            <span class="s4"># Try to load library with platform-specific name, otherwise</span>
+            <span class="s4"># default to libname.[so|pyd].  Sometimes, these files are built</span>
+            <span class="s4"># erroneously on non-linux platforms.</span>
+            <span class="s3">from </span><span class="s1">numpy.distutils.misc_util </span><span class="s3">import </span><span class="s1">get_shared_lib_extension</span>
+            <span class="s1">so_ext = get_shared_lib_extension()</span>
+            <span class="s1">libname_ext = [libname + so_ext]</span>
+            <span class="s4"># mac, windows and linux &gt;= py3.2 shared library and loadable</span>
+            <span class="s4"># module have different extensions so try both</span>
+            <span class="s1">so_ext2 = get_shared_lib_extension(is_python_ext=</span><span class="s3">True</span><span class="s1">)</span>
+            <span class="s3">if not </span><span class="s1">so_ext2 == so_ext:</span>
+                <span class="s1">libname_ext.insert(</span><span class="s5">0</span><span class="s3">, </span><span class="s1">libname + so_ext2)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">libname_ext = [libname]</span>
+
+        <span class="s1">loader_path = os.path.abspath(loader_path)</span>
+        <span class="s3">if not </span><span class="s1">os.path.isdir(loader_path):</span>
+            <span class="s1">libdir = os.path.dirname(loader_path)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">libdir = loader_path</span>
+
+        <span class="s3">for </span><span class="s1">ln </span><span class="s3">in </span><span class="s1">libname_ext:</span>
+            <span class="s1">libpath = os.path.join(libdir</span><span class="s3">, </span><span class="s1">ln)</span>
+            <span class="s3">if </span><span class="s1">os.path.exists(libpath):</span>
+                <span class="s3">try</span><span class="s1">:</span>
+                    <span class="s3">return </span><span class="s1">ctypes.cdll[libpath]</span>
+                <span class="s3">except </span><span class="s1">OSError:</span>
+                    <span class="s4">## defective lib file</span>
+                    <span class="s3">raise</span>
+        <span class="s4">## if no successful return in the libname_ext loop:</span>
+        <span class="s3">raise </span><span class="s1">OSError(</span><span class="s2">&quot;no file with expected extension&quot;</span><span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">_num_fromflags(flaglist):</span>
+    <span class="s1">num = </span><span class="s5">0</span>
+    <span class="s3">for </span><span class="s1">val </span><span class="s3">in </span><span class="s1">flaglist:</span>
+        <span class="s1">num += _flagdict[val]</span>
+    <span class="s3">return </span><span class="s1">num</span>
+
+<span class="s1">_flagnames = [</span><span class="s2">'C_CONTIGUOUS'</span><span class="s3">, </span><span class="s2">'F_CONTIGUOUS'</span><span class="s3">, </span><span class="s2">'ALIGNED'</span><span class="s3">, </span><span class="s2">'WRITEABLE'</span><span class="s3">,</span>
+              <span class="s2">'OWNDATA'</span><span class="s3">, </span><span class="s2">'UPDATEIFCOPY'</span><span class="s3">, </span><span class="s2">'WRITEBACKIFCOPY'</span><span class="s1">]</span>
+<span class="s3">def </span><span class="s1">_flags_fromnum(num):</span>
+    <span class="s1">res = []</span>
+    <span class="s3">for </span><span class="s1">key </span><span class="s3">in </span><span class="s1">_flagnames:</span>
+        <span class="s1">value = _flagdict[key]</span>
+        <span class="s3">if </span><span class="s1">(num &amp; value):</span>
+            <span class="s1">res.append(key)</span>
+    <span class="s3">return </span><span class="s1">res</span>
+
+
+<span class="s3">class </span><span class="s1">_ndptr(_ndptr_base):</span>
+    <span class="s1">@classmethod</span>
+    <span class="s3">def </span><span class="s1">from_param(cls</span><span class="s3">, </span><span class="s1">obj):</span>
+        <span class="s3">if not </span><span class="s1">isinstance(obj</span><span class="s3">, </span><span class="s1">ndarray):</span>
+            <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s2">&quot;argument must be an ndarray&quot;</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">cls._dtype_ </span><span class="s3">is not None </span><span class="s1">\</span>
+               <span class="s3">and </span><span class="s1">obj.dtype != cls._dtype_:</span>
+            <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s2">&quot;array must have data type %s&quot; </span><span class="s1">% cls._dtype_)</span>
+        <span class="s3">if </span><span class="s1">cls._ndim_ </span><span class="s3">is not None </span><span class="s1">\</span>
+               <span class="s3">and </span><span class="s1">obj.ndim != cls._ndim_:</span>
+            <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s2">&quot;array must have %d dimension(s)&quot; </span><span class="s1">% cls._ndim_)</span>
+        <span class="s3">if </span><span class="s1">cls._shape_ </span><span class="s3">is not None </span><span class="s1">\</span>
+               <span class="s3">and </span><span class="s1">obj.shape != cls._shape_:</span>
+            <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s2">&quot;array must have shape %s&quot; </span><span class="s1">% str(cls._shape_))</span>
+        <span class="s3">if </span><span class="s1">cls._flags_ </span><span class="s3">is not None </span><span class="s1">\</span>
+               <span class="s3">and </span><span class="s1">((obj.flags.num &amp; cls._flags_) != cls._flags_):</span>
+            <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s2">&quot;array must have flags %s&quot; </span><span class="s1">%</span>
+                    <span class="s1">_flags_fromnum(cls._flags_))</span>
+        <span class="s3">return </span><span class="s1">obj.ctypes</span>
+
+
+<span class="s3">class </span><span class="s1">_concrete_ndptr(_ndptr):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Like _ndptr, but with `_shape_` and `_dtype_` specified. 
+ 
+    Notably, this means the pointer has enough information to reconstruct 
+    the array, which is not generally true. 
+    &quot;&quot;&quot;</span>
+    <span class="s3">def </span><span class="s1">_check_retval_(self):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        This method is called when this class is used as the .restype 
+        attribute for a shared-library function, to automatically wrap the 
+        pointer into an array. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">self.contents</span>
+
+    <span class="s1">@property</span>
+    <span class="s3">def </span><span class="s1">contents(self):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Get an ndarray viewing the data pointed to by this pointer. 
+ 
+        This mirrors the `contents` attribute of a normal ctypes pointer 
+        &quot;&quot;&quot;</span>
+        <span class="s1">full_dtype = _dtype((self._dtype_</span><span class="s3">, </span><span class="s1">self._shape_))</span>
+        <span class="s1">full_ctype = ctypes.c_char * full_dtype.itemsize</span>
+        <span class="s1">buffer = ctypes.cast(self</span><span class="s3">, </span><span class="s1">ctypes.POINTER(full_ctype)).contents</span>
+        <span class="s3">return </span><span class="s1">frombuffer(buffer</span><span class="s3">, </span><span class="s1">dtype=full_dtype).squeeze(axis=</span><span class="s5">0</span><span class="s1">)</span>
+
+
+<span class="s4"># Factory for an array-checking class with from_param defined for</span>
+<span class="s4">#  use with ctypes argtypes mechanism</span>
+<span class="s1">_pointer_type_cache = {}</span>
+<span class="s3">def </span><span class="s1">ndpointer(dtype=</span><span class="s3">None, </span><span class="s1">ndim=</span><span class="s3">None, </span><span class="s1">shape=</span><span class="s3">None, </span><span class="s1">flags=</span><span class="s3">None</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Array-checking restype/argtypes. 
+ 
+    An ndpointer instance is used to describe an ndarray in restypes 
+    and argtypes specifications.  This approach is more flexible than 
+    using, for example, ``POINTER(c_double)``, since several restrictions 
+    can be specified, which are verified upon calling the ctypes function. 
+    These include data type, number of dimensions, shape and flags.  If a 
+    given array does not satisfy the specified restrictions, 
+    a ``TypeError`` is raised. 
+ 
+    Parameters 
+    ---------- 
+    dtype : data-type, optional 
+        Array data-type. 
+    ndim : int, optional 
+        Number of array dimensions. 
+    shape : tuple of ints, optional 
+        Array shape. 
+    flags : str or tuple of str 
+        Array flags; may be one or more of: 
+ 
+          - C_CONTIGUOUS / C / CONTIGUOUS 
+          - F_CONTIGUOUS / F / FORTRAN 
+          - OWNDATA / O 
+          - WRITEABLE / W 
+          - ALIGNED / A 
+          - WRITEBACKIFCOPY / X 
+          - UPDATEIFCOPY / U 
+ 
+    Returns 
+    ------- 
+    klass : ndpointer type object 
+        A type object, which is an ``_ndtpr`` instance containing 
+        dtype, ndim, shape and flags information. 
+ 
+    Raises 
+    ------ 
+    TypeError 
+        If a given array does not satisfy the specified restrictions. 
+ 
+    Examples 
+    -------- 
+    &gt;&gt;&gt; clib.somefunc.argtypes = [np.ctypeslib.ndpointer(dtype=np.float64, 
+    ...                                                  ndim=1, 
+    ...                                                  flags='C_CONTIGUOUS')] 
+    ... #doctest: +SKIP 
+    &gt;&gt;&gt; clib.somefunc(np.array([1, 2, 3], dtype=np.float64)) 
+    ... #doctest: +SKIP 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s4"># normalize dtype to an Optional[dtype]</span>
+    <span class="s3">if </span><span class="s1">dtype </span><span class="s3">is not None</span><span class="s1">:</span>
+        <span class="s1">dtype = _dtype(dtype)</span>
+
+    <span class="s4"># normalize flags to an Optional[int]</span>
+    <span class="s1">num = </span><span class="s3">None</span>
+    <span class="s3">if </span><span class="s1">flags </span><span class="s3">is not None</span><span class="s1">:</span>
+        <span class="s3">if </span><span class="s1">isinstance(flags</span><span class="s3">, </span><span class="s1">str):</span>
+            <span class="s1">flags = flags.split(</span><span class="s2">','</span><span class="s1">)</span>
+        <span class="s3">elif </span><span class="s1">isinstance(flags</span><span class="s3">, </span><span class="s1">(int</span><span class="s3">, </span><span class="s1">integer)):</span>
+            <span class="s1">num = flags</span>
+            <span class="s1">flags = _flags_fromnum(num)</span>
+        <span class="s3">elif </span><span class="s1">isinstance(flags</span><span class="s3">, </span><span class="s1">flagsobj):</span>
+            <span class="s1">num = flags.num</span>
+            <span class="s1">flags = _flags_fromnum(num)</span>
+        <span class="s3">if </span><span class="s1">num </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s3">try</span><span class="s1">:</span>
+                <span class="s1">flags = [x.strip().upper() </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">flags]</span>
+            <span class="s3">except </span><span class="s1">Exception </span><span class="s3">as </span><span class="s1">e:</span>
+                <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s2">&quot;invalid flags specification&quot;</span><span class="s1">) </span><span class="s3">from </span><span class="s1">e</span>
+            <span class="s1">num = _num_fromflags(flags)</span>
+
+    <span class="s4"># normalize shape to an Optional[tuple]</span>
+    <span class="s3">if </span><span class="s1">shape </span><span class="s3">is not None</span><span class="s1">:</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">shape = tuple(shape)</span>
+        <span class="s3">except </span><span class="s1">TypeError:</span>
+            <span class="s4"># single integer -&gt; 1-tuple</span>
+            <span class="s1">shape = (shape</span><span class="s3">,</span><span class="s1">)</span>
+
+    <span class="s1">cache_key = (dtype</span><span class="s3">, </span><span class="s1">ndim</span><span class="s3">, </span><span class="s1">shape</span><span class="s3">, </span><span class="s1">num)</span>
+
+    <span class="s3">try</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s1">_pointer_type_cache[cache_key]</span>
+    <span class="s3">except </span><span class="s1">KeyError:</span>
+        <span class="s3">pass</span>
+
+    <span class="s4"># produce a name for the new type</span>
+    <span class="s3">if </span><span class="s1">dtype </span><span class="s3">is None</span><span class="s1">:</span>
+        <span class="s1">name = </span><span class="s2">'any'</span>
+    <span class="s3">elif </span><span class="s1">dtype.names </span><span class="s3">is not None</span><span class="s1">:</span>
+        <span class="s1">name = str(id(dtype))</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">name = dtype.str</span>
+    <span class="s3">if </span><span class="s1">ndim </span><span class="s3">is not None</span><span class="s1">:</span>
+        <span class="s1">name += </span><span class="s2">&quot;_%dd&quot; </span><span class="s1">% ndim</span>
+    <span class="s3">if </span><span class="s1">shape </span><span class="s3">is not None</span><span class="s1">:</span>
+        <span class="s1">name += </span><span class="s2">&quot;_&quot;</span><span class="s1">+</span><span class="s2">&quot;x&quot;</span><span class="s1">.join(str(x) </span><span class="s3">for </span><span class="s1">x </span><span class="s3">in </span><span class="s1">shape)</span>
+    <span class="s3">if </span><span class="s1">flags </span><span class="s3">is not None</span><span class="s1">:</span>
+        <span class="s1">name += </span><span class="s2">&quot;_&quot;</span><span class="s1">+</span><span class="s2">&quot;_&quot;</span><span class="s1">.join(flags)</span>
+
+    <span class="s3">if </span><span class="s1">dtype </span><span class="s3">is not None and </span><span class="s1">shape </span><span class="s3">is not None</span><span class="s1">:</span>
+        <span class="s1">base = _concrete_ndptr</span>
+    <span class="s3">else</span><span class="s1">:</span>
+        <span class="s1">base = _ndptr</span>
+
+    <span class="s1">klass = type(</span><span class="s2">&quot;ndpointer_%s&quot;</span><span class="s1">%name</span><span class="s3">, </span><span class="s1">(base</span><span class="s3">,</span><span class="s1">)</span><span class="s3">,</span>
+                 <span class="s1">{</span><span class="s2">&quot;_dtype_&quot;</span><span class="s1">: dtype</span><span class="s3">,</span>
+                  <span class="s2">&quot;_shape_&quot; </span><span class="s1">: shape</span><span class="s3">,</span>
+                  <span class="s2">&quot;_ndim_&quot; </span><span class="s1">: ndim</span><span class="s3">,</span>
+                  <span class="s2">&quot;_flags_&quot; </span><span class="s1">: num})</span>
+    <span class="s1">_pointer_type_cache[cache_key] = klass</span>
+    <span class="s3">return </span><span class="s1">klass</span>
+
+
+<span class="s3">if </span><span class="s1">ctypes </span><span class="s3">is not None</span><span class="s1">:</span>
+    <span class="s3">def </span><span class="s1">_ctype_ndarray(element_type</span><span class="s3">, </span><span class="s1">shape):</span>
+        <span class="s0">&quot;&quot;&quot; Create an ndarray of the given element type and shape &quot;&quot;&quot;</span>
+        <span class="s3">for </span><span class="s1">dim </span><span class="s3">in </span><span class="s1">shape[::-</span><span class="s5">1</span><span class="s1">]:</span>
+            <span class="s1">element_type = dim * element_type</span>
+            <span class="s4"># prevent the type name include np.ctypeslib</span>
+            <span class="s1">element_type.__module__ = </span><span class="s3">None</span>
+        <span class="s3">return </span><span class="s1">element_type</span>
+
+
+    <span class="s3">def </span><span class="s1">_get_scalar_type_map():</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Return a dictionary mapping native endian scalar dtype to ctypes types 
+        &quot;&quot;&quot;</span>
+        <span class="s1">ct = ctypes</span>
+        <span class="s1">simple_types = [</span>
+            <span class="s1">ct.c_byte</span><span class="s3">, </span><span class="s1">ct.c_short</span><span class="s3">, </span><span class="s1">ct.c_int</span><span class="s3">, </span><span class="s1">ct.c_long</span><span class="s3">, </span><span class="s1">ct.c_longlong</span><span class="s3">,</span>
+            <span class="s1">ct.c_ubyte</span><span class="s3">, </span><span class="s1">ct.c_ushort</span><span class="s3">, </span><span class="s1">ct.c_uint</span><span class="s3">, </span><span class="s1">ct.c_ulong</span><span class="s3">, </span><span class="s1">ct.c_ulonglong</span><span class="s3">,</span>
+            <span class="s1">ct.c_float</span><span class="s3">, </span><span class="s1">ct.c_double</span><span class="s3">,</span>
+            <span class="s1">ct.c_bool</span><span class="s3">,</span>
+        <span class="s1">]</span>
+        <span class="s3">return </span><span class="s1">{_dtype(ctype): ctype </span><span class="s3">for </span><span class="s1">ctype </span><span class="s3">in </span><span class="s1">simple_types}</span>
+
+
+    <span class="s1">_scalar_type_map = _get_scalar_type_map()</span>
+
+
+    <span class="s3">def </span><span class="s1">_ctype_from_dtype_scalar(dtype):</span>
+        <span class="s4"># swapping twice ensure that `=` is promoted to &lt;, &gt;, or |</span>
+        <span class="s1">dtype_with_endian = dtype.newbyteorder(</span><span class="s2">'S'</span><span class="s1">).newbyteorder(</span><span class="s2">'S'</span><span class="s1">)</span>
+        <span class="s1">dtype_native = dtype.newbyteorder(</span><span class="s2">'='</span><span class="s1">)</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">ctype = _scalar_type_map[dtype_native]</span>
+        <span class="s3">except </span><span class="s1">KeyError </span><span class="s3">as </span><span class="s1">e:</span>
+            <span class="s3">raise </span><span class="s1">NotImplementedError(</span>
+                <span class="s2">&quot;Converting {!r} to a ctypes type&quot;</span><span class="s1">.format(dtype)</span>
+            <span class="s1">) </span><span class="s3">from None</span>
+
+        <span class="s3">if </span><span class="s1">dtype_with_endian.byteorder == </span><span class="s2">'&gt;'</span><span class="s1">:</span>
+            <span class="s1">ctype = ctype.__ctype_be__</span>
+        <span class="s3">elif </span><span class="s1">dtype_with_endian.byteorder == </span><span class="s2">'&lt;'</span><span class="s1">:</span>
+            <span class="s1">ctype = ctype.__ctype_le__</span>
+
+        <span class="s3">return </span><span class="s1">ctype</span>
+
+
+    <span class="s3">def </span><span class="s1">_ctype_from_dtype_subarray(dtype):</span>
+        <span class="s1">element_dtype</span><span class="s3">, </span><span class="s1">shape = dtype.subdtype</span>
+        <span class="s1">ctype = _ctype_from_dtype(element_dtype)</span>
+        <span class="s3">return </span><span class="s1">_ctype_ndarray(ctype</span><span class="s3">, </span><span class="s1">shape)</span>
+
+
+    <span class="s3">def </span><span class="s1">_ctype_from_dtype_structured(dtype):</span>
+        <span class="s4"># extract offsets of each field</span>
+        <span class="s1">field_data = []</span>
+        <span class="s3">for </span><span class="s1">name </span><span class="s3">in </span><span class="s1">dtype.names:</span>
+            <span class="s1">field_dtype</span><span class="s3">, </span><span class="s1">offset = dtype.fields[name][:</span><span class="s5">2</span><span class="s1">]</span>
+            <span class="s1">field_data.append((offset</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">_ctype_from_dtype(field_dtype)))</span>
+
+        <span class="s4"># ctypes doesn't care about field order</span>
+        <span class="s1">field_data = sorted(field_data</span><span class="s3">, </span><span class="s1">key=</span><span class="s3">lambda </span><span class="s1">f: f[</span><span class="s5">0</span><span class="s1">])</span>
+
+        <span class="s3">if </span><span class="s1">len(field_data) &gt; </span><span class="s5">1 </span><span class="s3">and </span><span class="s1">all(offset == </span><span class="s5">0 </span><span class="s3">for </span><span class="s1">offset</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">ctype </span><span class="s3">in </span><span class="s1">field_data):</span>
+            <span class="s4"># union, if multiple fields all at address 0</span>
+            <span class="s1">size = </span><span class="s5">0</span>
+            <span class="s1">_fields_ = []</span>
+            <span class="s3">for </span><span class="s1">offset</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">ctype </span><span class="s3">in </span><span class="s1">field_data:</span>
+                <span class="s1">_fields_.append((name</span><span class="s3">, </span><span class="s1">ctype))</span>
+                <span class="s1">size = max(size</span><span class="s3">, </span><span class="s1">ctypes.sizeof(ctype))</span>
+
+            <span class="s4"># pad to the right size</span>
+            <span class="s3">if </span><span class="s1">dtype.itemsize != size:</span>
+                <span class="s1">_fields_.append((</span><span class="s2">''</span><span class="s3">, </span><span class="s1">ctypes.c_char * dtype.itemsize))</span>
+
+            <span class="s4"># we inserted manual padding, so always `_pack_`</span>
+            <span class="s3">return </span><span class="s1">type(</span><span class="s2">'union'</span><span class="s3">, </span><span class="s1">(ctypes.Union</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, </span><span class="s1">dict(</span>
+                <span class="s1">_fields_=_fields_</span><span class="s3">,</span>
+                <span class="s1">_pack_=</span><span class="s5">1</span><span class="s3">,</span>
+                <span class="s1">__module__=</span><span class="s3">None,</span>
+            <span class="s1">))</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">last_offset = </span><span class="s5">0</span>
+            <span class="s1">_fields_ = []</span>
+            <span class="s3">for </span><span class="s1">offset</span><span class="s3">, </span><span class="s1">name</span><span class="s3">, </span><span class="s1">ctype </span><span class="s3">in </span><span class="s1">field_data:</span>
+                <span class="s1">padding = offset - last_offset</span>
+                <span class="s3">if </span><span class="s1">padding &lt; </span><span class="s5">0</span><span class="s1">:</span>
+                    <span class="s3">raise </span><span class="s1">NotImplementedError(</span><span class="s2">&quot;Overlapping fields&quot;</span><span class="s1">)</span>
+                <span class="s3">if </span><span class="s1">padding &gt; </span><span class="s5">0</span><span class="s1">:</span>
+                    <span class="s1">_fields_.append((</span><span class="s2">''</span><span class="s3">, </span><span class="s1">ctypes.c_char * padding))</span>
+
+                <span class="s1">_fields_.append((name</span><span class="s3">, </span><span class="s1">ctype))</span>
+                <span class="s1">last_offset = offset + ctypes.sizeof(ctype)</span>
+
+
+            <span class="s1">padding = dtype.itemsize - last_offset</span>
+            <span class="s3">if </span><span class="s1">padding &gt; </span><span class="s5">0</span><span class="s1">:</span>
+                <span class="s1">_fields_.append((</span><span class="s2">''</span><span class="s3">, </span><span class="s1">ctypes.c_char * padding))</span>
+
+            <span class="s4"># we inserted manual padding, so always `_pack_`</span>
+            <span class="s3">return </span><span class="s1">type(</span><span class="s2">'struct'</span><span class="s3">, </span><span class="s1">(ctypes.Structure</span><span class="s3">,</span><span class="s1">)</span><span class="s3">, </span><span class="s1">dict(</span>
+                <span class="s1">_fields_=_fields_</span><span class="s3">,</span>
+                <span class="s1">_pack_=</span><span class="s5">1</span><span class="s3">,</span>
+                <span class="s1">__module__=</span><span class="s3">None,</span>
+            <span class="s1">))</span>
+
+
+    <span class="s3">def </span><span class="s1">_ctype_from_dtype(dtype):</span>
+        <span class="s3">if </span><span class="s1">dtype.fields </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">_ctype_from_dtype_structured(dtype)</span>
+        <span class="s3">elif </span><span class="s1">dtype.subdtype </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">_ctype_from_dtype_subarray(dtype)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">return </span><span class="s1">_ctype_from_dtype_scalar(dtype)</span>
+
+
+    <span class="s3">def </span><span class="s1">as_ctypes_type(dtype):</span>
+        <span class="s0">r&quot;&quot;&quot; 
+        Convert a dtype into a ctypes type. 
+ 
+        Parameters 
+        ---------- 
+        dtype : dtype 
+            The dtype to convert 
+ 
+        Returns 
+        ------- 
+        ctype 
+            A ctype scalar, union, array, or struct 
+ 
+        Raises 
+        ------ 
+        NotImplementedError 
+            If the conversion is not possible 
+ 
+        Notes 
+        ----- 
+        This function does not losslessly round-trip in either direction. 
+ 
+        ``np.dtype(as_ctypes_type(dt))`` will: 
+ 
+         - insert padding fields 
+         - reorder fields to be sorted by offset 
+         - discard field titles 
+ 
+        ``as_ctypes_type(np.dtype(ctype))`` will: 
+ 
+         - discard the class names of `ctypes.Structure`\ s and 
+           `ctypes.Union`\ s 
+         - convert single-element `ctypes.Union`\ s into single-element 
+           `ctypes.Structure`\ s 
+         - insert padding fields 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s3">return </span><span class="s1">_ctype_from_dtype(_dtype(dtype))</span>
+
+
+    <span class="s3">def </span><span class="s1">as_array(obj</span><span class="s3">, </span><span class="s1">shape=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Create a numpy array from a ctypes array or POINTER. 
+ 
+        The numpy array shares the memory with the ctypes object. 
+ 
+        The shape parameter must be given if converting from a ctypes POINTER. 
+        The shape parameter is ignored if converting from a ctypes array 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">isinstance(obj</span><span class="s3">, </span><span class="s1">ctypes._Pointer):</span>
+            <span class="s4"># convert pointers to an array of the desired shape</span>
+            <span class="s3">if </span><span class="s1">shape </span><span class="s3">is None</span><span class="s1">:</span>
+                <span class="s3">raise </span><span class="s1">TypeError(</span>
+                    <span class="s2">'as_array() requires a shape argument when called on a '</span>
+                    <span class="s2">'pointer'</span><span class="s1">)</span>
+            <span class="s1">p_arr_type = ctypes.POINTER(_ctype_ndarray(obj._type_</span><span class="s3">, </span><span class="s1">shape))</span>
+            <span class="s1">obj = ctypes.cast(obj</span><span class="s3">, </span><span class="s1">p_arr_type).contents</span>
+
+        <span class="s3">return </span><span class="s1">asarray(obj)</span>
+
+
+    <span class="s3">def </span><span class="s1">as_ctypes(obj):</span>
+        <span class="s0">&quot;&quot;&quot;Create and return a ctypes object from a numpy array.  Actually 
+        anything that exposes the __array_interface__ is accepted.&quot;&quot;&quot;</span>
+        <span class="s1">ai = obj.__array_interface__</span>
+        <span class="s3">if </span><span class="s1">ai[</span><span class="s2">&quot;strides&quot;</span><span class="s1">]:</span>
+            <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s2">&quot;strided arrays not supported&quot;</span><span class="s1">)</span>
+        <span class="s3">if </span><span class="s1">ai[</span><span class="s2">&quot;version&quot;</span><span class="s1">] != </span><span class="s5">3</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s2">&quot;only __array_interface__ version 3 supported&quot;</span><span class="s1">)</span>
+        <span class="s1">addr</span><span class="s3">, </span><span class="s1">readonly = ai[</span><span class="s2">&quot;data&quot;</span><span class="s1">]</span>
+        <span class="s3">if </span><span class="s1">readonly:</span>
+            <span class="s3">raise </span><span class="s1">TypeError(</span><span class="s2">&quot;readonly arrays unsupported&quot;</span><span class="s1">)</span>
+
+        <span class="s4"># can't use `_dtype((ai[&quot;typestr&quot;], ai[&quot;shape&quot;]))` here, as it overflows</span>
+        <span class="s4"># dtype.itemsize (gh-14214)</span>
+        <span class="s1">ctype_scalar = as_ctypes_type(ai[</span><span class="s2">&quot;typestr&quot;</span><span class="s1">])</span>
+        <span class="s1">result_type = _ctype_ndarray(ctype_scalar</span><span class="s3">, </span><span class="s1">ai[</span><span class="s2">&quot;shape&quot;</span><span class="s1">])</span>
+        <span class="s1">result = result_type.from_address(addr)</span>
+        <span class="s1">result.__keep = obj</span>
+        <span class="s3">return </span><span class="s1">result</span>
+</pre>
+</body>
+</html>

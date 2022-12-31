@@ -1,0 +1,199 @@
+<html>
+<head>
+<title>hashtable.pyx</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+hashtable.pyx</font>
+</center></td></tr></table>
+<pre><span class="s0">cimport cython</span>
+<span class="s0">from cpython.mem cimport (</span>
+    <span class="s0">PyMem_Free,</span>
+    <span class="s0">PyMem_Malloc,</span>
+<span class="s0">)</span>
+<span class="s0">from cpython.ref cimport (</span>
+    <span class="s0">Py_INCREF,</span>
+    <span class="s0">PyObject,</span>
+<span class="s0">)</span>
+<span class="s0">from libc.stdlib cimport (</span>
+    <span class="s0">free,</span>
+    <span class="s0">malloc,</span>
+<span class="s0">)</span>
+
+<span class="s0">import numpy as np</span>
+
+<span class="s0">cimport numpy as cnp</span>
+<span class="s0">from numpy cimport (</span>
+    <span class="s0">float64_t,</span>
+    <span class="s0">ndarray,</span>
+    <span class="s0">uint8_t,</span>
+    <span class="s0">uint32_t,</span>
+<span class="s0">)</span>
+<span class="s0">from numpy.math cimport NAN</span>
+
+<span class="s0">cnp.import_array()</span>
+
+
+<span class="s0">from pandas._libs cimport util</span>
+<span class="s0">from pandas._libs.khash cimport (</span>
+    <span class="s0">KHASH_TRACE_DOMAIN,</span>
+    <span class="s0">are_equivalent_float32_t,</span>
+    <span class="s0">are_equivalent_float64_t,</span>
+    <span class="s0">are_equivalent_khcomplex64_t,</span>
+    <span class="s0">are_equivalent_khcomplex128_t,</span>
+    <span class="s0">kh_needed_n_buckets,</span>
+    <span class="s0">kh_python_hash_equal,</span>
+    <span class="s0">kh_python_hash_func,</span>
+    <span class="s0">kh_str_t,</span>
+    <span class="s0">khcomplex64_t,</span>
+    <span class="s0">khcomplex128_t,</span>
+    <span class="s0">khiter_t,</span>
+<span class="s0">)</span>
+<span class="s0">from pandas._libs.missing cimport checknull</span>
+
+
+<span class="s0">def get_hashtable_trace_domain():</span>
+    <span class="s0">return KHASH_TRACE_DOMAIN</span>
+
+
+<span class="s0">def object_hash(obj):</span>
+    <span class="s0">return kh_python_hash_func(obj)</span>
+
+
+<span class="s0">def objects_are_equal(a, b):</span>
+    <span class="s0">return kh_python_hash_equal(a, b)</span>
+
+
+<span class="s0">cdef int64_t NPY_NAT = util.get_nat()</span>
+<span class="s0">SIZE_HINT_LIMIT = (1 &lt;&lt; 20) + 7</span>
+
+
+<span class="s0">cdef Py_ssize_t _INIT_VEC_CAP = 128</span>
+
+<span class="s0">include &quot;hashtable_class_helper.pxi&quot;</span>
+<span class="s0">include &quot;hashtable_func_helper.pxi&quot;</span>
+
+
+<span class="s0"># map derived hash-map types onto basic hash-map types:</span>
+<span class="s0">if np.dtype(np.intp) == np.dtype(np.int64):</span>
+    <span class="s0">IntpHashTable = Int64HashTable</span>
+    <span class="s0">unique_label_indices = _unique_label_indices_int64</span>
+<span class="s0">elif np.dtype(np.intp) == np.dtype(np.int32):</span>
+    <span class="s0">IntpHashTable = Int32HashTable</span>
+    <span class="s0">unique_label_indices = _unique_label_indices_int32</span>
+<span class="s0">else:</span>
+    <span class="s0">raise ValueError(np.dtype(np.intp))</span>
+
+
+<span class="s0">cdef class Factorizer:</span>
+    <span class="s0">cdef readonly:</span>
+        <span class="s0">Py_ssize_t count</span>
+
+    <span class="s0">def __cinit__(self, size_hint: int):</span>
+        <span class="s0">self.count = 0</span>
+
+    <span class="s0">def get_count(self) -&gt; int:</span>
+        <span class="s0">return self.count</span>
+
+
+<span class="s0">cdef class ObjectFactorizer(Factorizer):</span>
+    <span class="s0">cdef public:</span>
+        <span class="s0">PyObjectHashTable table</span>
+        <span class="s0">ObjectVector uniques</span>
+
+    <span class="s0">def __cinit__(self, size_hint: int):</span>
+        <span class="s0">self.table = PyObjectHashTable(size_hint)</span>
+        <span class="s0">self.uniques = ObjectVector()</span>
+
+    <span class="s0">def factorize(</span>
+        <span class="s0">self, ndarray[object] values, sort=False, na_sentinel=-1, na_value=None</span>
+    <span class="s0">) -&gt; np.ndarray:</span>
+        <span class="s0">&quot;&quot;&quot;</span>
+
+        <span class="s0">Returns</span>
+        <span class="s0">-------</span>
+        <span class="s0">np.ndarray[np.intp]</span>
+
+        <span class="s0">Examples</span>
+        <span class="s0">--------</span>
+        <span class="s0">Factorize values with nans replaced by na_sentinel</span>
+
+        <span class="s0">&gt;&gt;&gt; fac = ObjectFactorizer(3)</span>
+        <span class="s0">&gt;&gt;&gt; fac.factorize(np.array([1,2,np.nan], dtype='O'), na_sentinel=20)</span>
+        <span class="s0">array([ 0,  1, 20])</span>
+        <span class="s0">&quot;&quot;&quot;</span>
+        <span class="s0">cdef:</span>
+            <span class="s0">ndarray[intp_t] labels</span>
+
+        <span class="s0">if self.uniques.external_view_exists:</span>
+            <span class="s0">uniques = ObjectVector()</span>
+            <span class="s0">uniques.extend(self.uniques.to_array())</span>
+            <span class="s0">self.uniques = uniques</span>
+        <span class="s0">labels = self.table.get_labels(values, self.uniques,</span>
+                                       <span class="s0">self.count, na_sentinel, na_value)</span>
+        <span class="s0">mask = (labels == na_sentinel)</span>
+        <span class="s0"># sort on</span>
+        <span class="s0">if sort:</span>
+            <span class="s0">sorter = self.uniques.to_array().argsort()</span>
+            <span class="s0">reverse_indexer = np.empty(len(sorter), dtype=np.intp)</span>
+            <span class="s0">reverse_indexer.put(sorter, np.arange(len(sorter)))</span>
+            <span class="s0">labels = reverse_indexer.take(labels, mode='clip')</span>
+            <span class="s0">labels[mask] = na_sentinel</span>
+        <span class="s0">self.count = len(self.uniques)</span>
+        <span class="s0">return labels</span>
+
+
+<span class="s0">cdef class Int64Factorizer(Factorizer):</span>
+    <span class="s0">cdef public:</span>
+        <span class="s0">Int64HashTable table</span>
+        <span class="s0">Int64Vector uniques</span>
+
+    <span class="s0">def __cinit__(self, size_hint: int):</span>
+        <span class="s0">self.table = Int64HashTable(size_hint)</span>
+        <span class="s0">self.uniques = Int64Vector()</span>
+
+    <span class="s0">def factorize(self, const int64_t[:] values, sort=False,</span>
+                  <span class="s0">na_sentinel=-1, na_value=None) -&gt; np.ndarray:</span>
+        <span class="s0">&quot;&quot;&quot;</span>
+        <span class="s0">Returns</span>
+        <span class="s0">-------</span>
+        <span class="s0">ndarray[intp_t]</span>
+
+        <span class="s0">Examples</span>
+        <span class="s0">--------</span>
+        <span class="s0">Factorize values with nans replaced by na_sentinel</span>
+
+        <span class="s0">&gt;&gt;&gt; fac = Int64Factorizer(3)</span>
+        <span class="s0">&gt;&gt;&gt; fac.factorize(np.array([1,2,3]), na_sentinel=20)</span>
+        <span class="s0">array([0, 1, 2])</span>
+        <span class="s0">&quot;&quot;&quot;</span>
+        <span class="s0">cdef:</span>
+            <span class="s0">ndarray[intp_t] labels</span>
+
+        <span class="s0">if self.uniques.external_view_exists:</span>
+            <span class="s0">uniques = Int64Vector()</span>
+            <span class="s0">uniques.extend(self.uniques.to_array())</span>
+            <span class="s0">self.uniques = uniques</span>
+        <span class="s0">labels = self.table.get_labels(values, self.uniques,</span>
+                                       <span class="s0">self.count, na_sentinel,</span>
+                                       <span class="s0">na_value=na_value)</span>
+
+        <span class="s0"># sort on</span>
+        <span class="s0">if sort:</span>
+            <span class="s0">sorter = self.uniques.to_array().argsort()</span>
+            <span class="s0">reverse_indexer = np.empty(len(sorter), dtype=np.intp)</span>
+            <span class="s0">reverse_indexer.put(sorter, np.arange(len(sorter)))</span>
+
+            <span class="s0">labels = reverse_indexer.take(labels)</span>
+
+        <span class="s0">self.count = len(self.uniques)</span>
+        <span class="s0">return labels</span>
+</pre>
+</body>
+</html>

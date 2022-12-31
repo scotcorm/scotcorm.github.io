@@ -1,0 +1,666 @@
+<html>
+<head>
+<title>test_stride_tricks.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #6897bb;}
+.s4 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test_stride_tricks.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">numpy </span><span class="s0">as </span><span class="s1">np</span>
+<span class="s0">from </span><span class="s1">numpy.core._rational_tests </span><span class="s0">import </span><span class="s1">rational</span>
+<span class="s0">from </span><span class="s1">numpy.testing </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">assert_equal</span><span class="s0">, </span><span class="s1">assert_array_equal</span><span class="s0">, </span><span class="s1">assert_raises</span><span class="s0">, </span><span class="s1">assert_</span><span class="s0">,</span>
+    <span class="s1">assert_raises_regex</span><span class="s0">, </span><span class="s1">assert_warns</span><span class="s0">,</span>
+    <span class="s1">)</span>
+<span class="s0">from </span><span class="s1">numpy.lib.stride_tricks </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">as_strided</span><span class="s0">, </span><span class="s1">broadcast_arrays</span><span class="s0">, </span><span class="s1">_broadcast_shape</span><span class="s0">, </span><span class="s1">broadcast_to</span><span class="s0">,</span>
+    <span class="s1">broadcast_shapes</span><span class="s0">, </span><span class="s1">sliding_window_view</span><span class="s0">,</span>
+    <span class="s1">)</span>
+<span class="s0">import </span><span class="s1">pytest</span>
+
+
+<span class="s0">def </span><span class="s1">assert_shapes_correct(input_shapes</span><span class="s0">, </span><span class="s1">expected_shape):</span>
+    <span class="s2"># Broadcast a list of arrays with the given input shapes and check the</span>
+    <span class="s2"># common output shape.</span>
+
+    <span class="s1">inarrays = [np.zeros(s) </span><span class="s0">for </span><span class="s1">s </span><span class="s0">in </span><span class="s1">input_shapes]</span>
+    <span class="s1">outarrays = broadcast_arrays(*inarrays)</span>
+    <span class="s1">outshapes = [a.shape </span><span class="s0">for </span><span class="s1">a </span><span class="s0">in </span><span class="s1">outarrays]</span>
+    <span class="s1">expected = [expected_shape] * len(inarrays)</span>
+    <span class="s1">assert_equal(outshapes</span><span class="s0">, </span><span class="s1">expected)</span>
+
+
+<span class="s0">def </span><span class="s1">assert_incompatible_shapes_raise(input_shapes):</span>
+    <span class="s2"># Broadcast a list of arrays with the given (incompatible) input shapes</span>
+    <span class="s2"># and check that they raise a ValueError.</span>
+
+    <span class="s1">inarrays = [np.zeros(s) </span><span class="s0">for </span><span class="s1">s </span><span class="s0">in </span><span class="s1">input_shapes]</span>
+    <span class="s1">assert_raises(ValueError</span><span class="s0">, </span><span class="s1">broadcast_arrays</span><span class="s0">, </span><span class="s1">*inarrays)</span>
+
+
+<span class="s0">def </span><span class="s1">assert_same_as_ufunc(shape0</span><span class="s0">, </span><span class="s1">shape1</span><span class="s0">, </span><span class="s1">transposed=</span><span class="s0">False, </span><span class="s1">flipped=</span><span class="s0">False</span><span class="s1">):</span>
+    <span class="s2"># Broadcast two shapes against each other and check that the data layout</span>
+    <span class="s2"># is the same as if a ufunc did the broadcasting.</span>
+
+    <span class="s1">x0 = np.zeros(shape0</span><span class="s0">, </span><span class="s1">dtype=int)</span>
+    <span class="s2"># Note that multiply.reduce's identity element is 1.0, so when shape1==(),</span>
+    <span class="s2"># this gives the desired n==1.</span>
+    <span class="s1">n = int(np.multiply.reduce(shape1))</span>
+    <span class="s1">x1 = np.arange(n).reshape(shape1)</span>
+    <span class="s0">if </span><span class="s1">transposed:</span>
+        <span class="s1">x0 = x0.T</span>
+        <span class="s1">x1 = x1.T</span>
+    <span class="s0">if </span><span class="s1">flipped:</span>
+        <span class="s1">x0 = x0[::-</span><span class="s3">1</span><span class="s1">]</span>
+        <span class="s1">x1 = x1[::-</span><span class="s3">1</span><span class="s1">]</span>
+    <span class="s2"># Use the add ufunc to do the broadcasting. Since we're adding 0s to x1, the</span>
+    <span class="s2"># result should be exactly the same as the broadcasted view of x1.</span>
+    <span class="s1">y = x0 + x1</span>
+    <span class="s1">b0</span><span class="s0">, </span><span class="s1">b1 = broadcast_arrays(x0</span><span class="s0">, </span><span class="s1">x1)</span>
+    <span class="s1">assert_array_equal(y</span><span class="s0">, </span><span class="s1">b1)</span>
+
+
+<span class="s0">def </span><span class="s1">test_same():</span>
+    <span class="s1">x = np.arange(</span><span class="s3">10</span><span class="s1">)</span>
+    <span class="s1">y = np.arange(</span><span class="s3">10</span><span class="s1">)</span>
+    <span class="s1">bx</span><span class="s0">, </span><span class="s1">by = broadcast_arrays(x</span><span class="s0">, </span><span class="s1">y)</span>
+    <span class="s1">assert_array_equal(x</span><span class="s0">, </span><span class="s1">bx)</span>
+    <span class="s1">assert_array_equal(y</span><span class="s0">, </span><span class="s1">by)</span>
+
+<span class="s0">def </span><span class="s1">test_broadcast_kwargs():</span>
+    <span class="s2"># ensure that a TypeError is appropriately raised when</span>
+    <span class="s2"># np.broadcast_arrays() is called with any keyword</span>
+    <span class="s2"># argument other than 'subok'</span>
+    <span class="s1">x = np.arange(</span><span class="s3">10</span><span class="s1">)</span>
+    <span class="s1">y = np.arange(</span><span class="s3">10</span><span class="s1">)</span>
+
+    <span class="s0">with </span><span class="s1">assert_raises_regex(TypeError</span><span class="s0">, </span><span class="s4">'got an unexpected keyword'</span><span class="s1">):</span>
+        <span class="s1">broadcast_arrays(x</span><span class="s0">, </span><span class="s1">y</span><span class="s0">, </span><span class="s1">dtype=</span><span class="s4">'float64'</span><span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">test_one_off():</span>
+    <span class="s1">x = np.array([[</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s1">]])</span>
+    <span class="s1">y = np.array([[</span><span class="s3">1</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s3">2</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s3">3</span><span class="s1">]])</span>
+    <span class="s1">bx</span><span class="s0">, </span><span class="s1">by = broadcast_arrays(x</span><span class="s0">, </span><span class="s1">y)</span>
+    <span class="s1">bx0 = np.array([[</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s1">]])</span>
+    <span class="s1">by0 = bx0.T</span>
+    <span class="s1">assert_array_equal(bx0</span><span class="s0">, </span><span class="s1">bx)</span>
+    <span class="s1">assert_array_equal(by0</span><span class="s0">, </span><span class="s1">by)</span>
+
+
+<span class="s0">def </span><span class="s1">test_same_input_shapes():</span>
+    <span class="s2"># Check that the final shape is just the input shape.</span>
+
+    <span class="s1">data = [</span>
+        <span class="s1">()</span><span class="s0">,</span>
+        <span class="s1">(</span><span class="s3">1</span><span class="s0">,</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)</span><span class="s0">,</span>
+    <span class="s1">]</span>
+    <span class="s0">for </span><span class="s1">shape </span><span class="s0">in </span><span class="s1">data:</span>
+        <span class="s1">input_shapes = [shape]</span>
+        <span class="s2"># Single input.</span>
+        <span class="s1">assert_shapes_correct(input_shapes</span><span class="s0">, </span><span class="s1">shape)</span>
+        <span class="s2"># Double input.</span>
+        <span class="s1">input_shapes2 = [shape</span><span class="s0">, </span><span class="s1">shape]</span>
+        <span class="s1">assert_shapes_correct(input_shapes2</span><span class="s0">, </span><span class="s1">shape)</span>
+        <span class="s2"># Triple input.</span>
+        <span class="s1">input_shapes3 = [shape</span><span class="s0">, </span><span class="s1">shape</span><span class="s0">, </span><span class="s1">shape]</span>
+        <span class="s1">assert_shapes_correct(input_shapes3</span><span class="s0">, </span><span class="s1">shape)</span>
+
+
+<span class="s0">def </span><span class="s1">test_two_compatible_by_ones_input_shapes():</span>
+    <span class="s2"># Check that two different input shapes of the same length, but some have</span>
+    <span class="s2"># ones, broadcast to the correct shape.</span>
+
+    <span class="s1">data = [</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">,</span>
+    <span class="s1">]</span>
+    <span class="s0">for </span><span class="s1">input_shapes</span><span class="s0">, </span><span class="s1">expected_shape </span><span class="s0">in </span><span class="s1">data:</span>
+        <span class="s1">assert_shapes_correct(input_shapes</span><span class="s0">, </span><span class="s1">expected_shape)</span>
+        <span class="s2"># Reverse the input shapes since broadcasting should be symmetric.</span>
+        <span class="s1">assert_shapes_correct(input_shapes[::-</span><span class="s3">1</span><span class="s1">]</span><span class="s0">, </span><span class="s1">expected_shape)</span>
+
+
+<span class="s0">def </span><span class="s1">test_two_compatible_by_prepending_ones_input_shapes():</span>
+    <span class="s2"># Check that two different input shapes (of different lengths) broadcast</span>
+    <span class="s2"># to the correct shape.</span>
+
+    <span class="s1">data = [</span>
+        <span class="s1">[[()</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[()</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[()</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[()</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[()</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">0</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">0</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[()</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[()</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[()</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">,</span>
+    <span class="s1">]</span>
+    <span class="s0">for </span><span class="s1">input_shapes</span><span class="s0">, </span><span class="s1">expected_shape </span><span class="s0">in </span><span class="s1">data:</span>
+        <span class="s1">assert_shapes_correct(input_shapes</span><span class="s0">, </span><span class="s1">expected_shape)</span>
+        <span class="s2"># Reverse the input shapes since broadcasting should be symmetric.</span>
+        <span class="s1">assert_shapes_correct(input_shapes[::-</span><span class="s3">1</span><span class="s1">]</span><span class="s0">, </span><span class="s1">expected_shape)</span>
+
+
+<span class="s0">def </span><span class="s1">test_incompatible_shapes_raise_valueerror():</span>
+    <span class="s2"># Check that a ValueError is raised for incompatible shapes.</span>
+
+    <span class="s1">data = [</span>
+        <span class="s1">[(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">4</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[(</span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">2</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">4</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">3</span><span class="s0">, </span><span class="s3">4</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+    <span class="s1">]</span>
+    <span class="s0">for </span><span class="s1">input_shapes </span><span class="s0">in </span><span class="s1">data:</span>
+        <span class="s1">assert_incompatible_shapes_raise(input_shapes)</span>
+        <span class="s2"># Reverse the input shapes since broadcasting should be symmetric.</span>
+        <span class="s1">assert_incompatible_shapes_raise(input_shapes[::-</span><span class="s3">1</span><span class="s1">])</span>
+
+
+<span class="s0">def </span><span class="s1">test_same_as_ufunc():</span>
+    <span class="s2"># Check that the data layout is the same as if a ufunc did the operation.</span>
+
+    <span class="s1">data = [</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[()</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[()</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[()</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[()</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[()</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">0</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">0</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[()</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[()</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[()</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">,</span>
+    <span class="s1">]</span>
+    <span class="s0">for </span><span class="s1">input_shapes</span><span class="s0">, </span><span class="s1">expected_shape </span><span class="s0">in </span><span class="s1">data:</span>
+        <span class="s1">assert_same_as_ufunc(input_shapes[</span><span class="s3">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">input_shapes[</span><span class="s3">1</span><span class="s1">]</span><span class="s0">,</span>
+                             <span class="s4">&quot;Shapes: %s %s&quot; </span><span class="s1">% (input_shapes[</span><span class="s3">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">input_shapes[</span><span class="s3">1</span><span class="s1">]))</span>
+        <span class="s2"># Reverse the input shapes since broadcasting should be symmetric.</span>
+        <span class="s1">assert_same_as_ufunc(input_shapes[</span><span class="s3">1</span><span class="s1">]</span><span class="s0">, </span><span class="s1">input_shapes[</span><span class="s3">0</span><span class="s1">])</span>
+        <span class="s2"># Try them transposed, too.</span>
+        <span class="s1">assert_same_as_ufunc(input_shapes[</span><span class="s3">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">input_shapes[</span><span class="s3">1</span><span class="s1">]</span><span class="s0">, True</span><span class="s1">)</span>
+        <span class="s2"># ... and flipped for non-rank-0 inputs in order to test negative</span>
+        <span class="s2"># strides.</span>
+        <span class="s0">if </span><span class="s1">() </span><span class="s0">not in </span><span class="s1">input_shapes:</span>
+            <span class="s1">assert_same_as_ufunc(input_shapes[</span><span class="s3">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">input_shapes[</span><span class="s3">1</span><span class="s1">]</span><span class="s0">, False, True</span><span class="s1">)</span>
+            <span class="s1">assert_same_as_ufunc(input_shapes[</span><span class="s3">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">input_shapes[</span><span class="s3">1</span><span class="s1">]</span><span class="s0">, True, True</span><span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">test_broadcast_to_succeeds():</span>
+    <span class="s1">data = [</span>
+        <span class="s1">[np.array(</span><span class="s3">0</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">np.array(</span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[np.array(</span><span class="s3">0</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">np.zeros(</span><span class="s3">1</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[np.array(</span><span class="s3">0</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">np.zeros(</span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[np.ones(</span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">np.ones(</span><span class="s3">1</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[np.ones(</span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">2</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">np.ones(</span><span class="s3">2</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[np.ones(</span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)</span><span class="s0">, </span><span class="s1">np.ones((</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s1">))]</span><span class="s0">,</span>
+        <span class="s1">[np.arange(</span><span class="s3">3</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">np.arange(</span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[np.arange(</span><span class="s3">3</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)</span><span class="s0">, </span><span class="s1">np.arange(</span><span class="s3">3</span><span class="s1">).reshape(</span><span class="s3">1</span><span class="s0">, </span><span class="s1">-</span><span class="s3">1</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[np.arange(</span><span class="s3">3</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)</span><span class="s0">, </span><span class="s1">np.array([[</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s1">]])]</span><span class="s0">,</span>
+        <span class="s2"># test if shape is not a tuple</span>
+        <span class="s1">[np.ones(</span><span class="s3">0</span><span class="s1">)</span><span class="s0">, </span><span class="s3">0</span><span class="s0">, </span><span class="s1">np.ones(</span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[np.ones(</span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s3">1</span><span class="s0">, </span><span class="s1">np.ones(</span><span class="s3">1</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[np.ones(</span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s3">2</span><span class="s0">, </span><span class="s1">np.ones(</span><span class="s3">2</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s2"># these cases with size 0 are strange, but they reproduce the behavior</span>
+        <span class="s2"># of broadcasting with ufuncs (see test_same_as_ufunc above)</span>
+        <span class="s1">[np.ones(</span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">np.ones(</span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[np.ones((</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s1">))</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">2</span><span class="s1">)</span><span class="s0">, </span><span class="s1">np.ones((</span><span class="s3">0</span><span class="s0">, </span><span class="s3">2</span><span class="s1">))]</span><span class="s0">,</span>
+        <span class="s1">[np.ones((</span><span class="s3">2</span><span class="s0">, </span><span class="s3">1</span><span class="s1">))</span><span class="s0">, </span><span class="s1">(</span><span class="s3">2</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)</span><span class="s0">, </span><span class="s1">np.ones((</span><span class="s3">2</span><span class="s0">, </span><span class="s3">0</span><span class="s1">))]</span><span class="s0">,</span>
+    <span class="s1">]</span>
+    <span class="s0">for </span><span class="s1">input_array</span><span class="s0">, </span><span class="s1">shape</span><span class="s0">, </span><span class="s1">expected </span><span class="s0">in </span><span class="s1">data:</span>
+        <span class="s1">actual = broadcast_to(input_array</span><span class="s0">, </span><span class="s1">shape)</span>
+        <span class="s1">assert_array_equal(expected</span><span class="s0">, </span><span class="s1">actual)</span>
+
+
+<span class="s0">def </span><span class="s1">test_broadcast_to_raises():</span>
+    <span class="s1">data = [</span>
+        <span class="s1">[(</span><span class="s3">0</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">()]</span><span class="s0">,</span>
+        <span class="s1">[(</span><span class="s3">1</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">()]</span><span class="s0">,</span>
+        <span class="s1">[(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">()]</span><span class="s0">,</span>
+        <span class="s1">[(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">2</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">4</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">2</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[(</span><span class="s3">1</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">-</span><span class="s3">1</span><span class="s1">]</span><span class="s0">,</span>
+        <span class="s1">[(</span><span class="s3">1</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(-</span><span class="s3">1</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(-</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s1">)]</span><span class="s0">,</span>
+    <span class="s1">]</span>
+    <span class="s0">for </span><span class="s1">orig_shape</span><span class="s0">, </span><span class="s1">target_shape </span><span class="s0">in </span><span class="s1">data:</span>
+        <span class="s1">arr = np.zeros(orig_shape)</span>
+        <span class="s1">assert_raises(ValueError</span><span class="s0">, lambda</span><span class="s1">: broadcast_to(arr</span><span class="s0">, </span><span class="s1">target_shape))</span>
+
+
+<span class="s0">def </span><span class="s1">test_broadcast_shape():</span>
+    <span class="s2"># tests internal _broadcast_shape</span>
+    <span class="s2"># _broadcast_shape is already exercised indirectly by broadcast_arrays</span>
+    <span class="s2"># _broadcast_shape is also exercised by the public broadcast_shapes function</span>
+    <span class="s1">assert_equal(_broadcast_shape()</span><span class="s0">, </span><span class="s1">())</span>
+    <span class="s1">assert_equal(_broadcast_shape([</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s1">])</span><span class="s0">, </span><span class="s1">(</span><span class="s3">2</span><span class="s0">,</span><span class="s1">))</span>
+    <span class="s1">assert_equal(_broadcast_shape(np.ones((</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)))</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">))</span>
+    <span class="s1">assert_equal(_broadcast_shape(np.ones((</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">))</span><span class="s0">, </span><span class="s1">np.ones((</span><span class="s3">3</span><span class="s0">, </span><span class="s3">4</span><span class="s1">)))</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">4</span><span class="s1">))</span>
+    <span class="s1">assert_equal(_broadcast_shape(*([np.ones((</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s1">))] * </span><span class="s3">32</span><span class="s1">))</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s1">))</span>
+    <span class="s1">assert_equal(_broadcast_shape(*([np.ones((</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s1">))] * </span><span class="s3">100</span><span class="s1">))</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s1">))</span>
+
+    <span class="s2"># regression tests for gh-5862</span>
+    <span class="s1">assert_equal(_broadcast_shape(*([np.ones(</span><span class="s3">2</span><span class="s1">)] * </span><span class="s3">32 </span><span class="s1">+ [</span><span class="s3">1</span><span class="s1">]))</span><span class="s0">, </span><span class="s1">(</span><span class="s3">2</span><span class="s0">,</span><span class="s1">))</span>
+    <span class="s1">bad_args = [np.ones(</span><span class="s3">2</span><span class="s1">)] * </span><span class="s3">32 </span><span class="s1">+ [np.ones(</span><span class="s3">3</span><span class="s1">)] * </span><span class="s3">32</span>
+    <span class="s1">assert_raises(ValueError</span><span class="s0">, lambda</span><span class="s1">: _broadcast_shape(*bad_args))</span>
+
+
+<span class="s0">def </span><span class="s1">test_broadcast_shapes_succeeds():</span>
+    <span class="s2"># tests public broadcast_shapes</span>
+    <span class="s1">data = [</span>
+        <span class="s1">[[]</span><span class="s0">, </span><span class="s1">()]</span><span class="s0">,</span>
+        <span class="s1">[[()]</span><span class="s0">, </span><span class="s1">()]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">7</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">7</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">2</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">4</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">4</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">6</span><span class="s0">, </span><span class="s3">7</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">5</span><span class="s0">, </span><span class="s3">6</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">7</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">5</span><span class="s0">, </span><span class="s3">1</span><span class="s0">, </span><span class="s3">7</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">5</span><span class="s0">, </span><span class="s3">6</span><span class="s0">, </span><span class="s3">7</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">5</span><span class="s0">, </span><span class="s3">6</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">5</span><span class="s0">, </span><span class="s3">6</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[()</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">0</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">0</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[()</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[()</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[()</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[(</span><span class="s3">1</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[[</span><span class="s3">2</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">2</span><span class="s1">)]</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">2</span><span class="s1">)]</span><span class="s0">,</span>
+    <span class="s1">]</span>
+    <span class="s0">for </span><span class="s1">input_shapes</span><span class="s0">, </span><span class="s1">target_shape </span><span class="s0">in </span><span class="s1">data:</span>
+        <span class="s1">assert_equal(broadcast_shapes(*input_shapes)</span><span class="s0">, </span><span class="s1">target_shape)</span>
+
+    <span class="s1">assert_equal(broadcast_shapes(*([(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s1">)] * </span><span class="s3">32</span><span class="s1">))</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s1">))</span>
+    <span class="s1">assert_equal(broadcast_shapes(*([(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s1">)] * </span><span class="s3">100</span><span class="s1">))</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s1">))</span>
+
+    <span class="s2"># regression tests for gh-5862</span>
+    <span class="s1">assert_equal(broadcast_shapes(*([(</span><span class="s3">2</span><span class="s0">,</span><span class="s1">)] * </span><span class="s3">32</span><span class="s1">))</span><span class="s0">, </span><span class="s1">(</span><span class="s3">2</span><span class="s0">,</span><span class="s1">))</span>
+
+
+<span class="s0">def </span><span class="s1">test_broadcast_shapes_raises():</span>
+    <span class="s2"># tests public broadcast_shapes</span>
+    <span class="s1">data = [</span>
+        <span class="s1">[(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">4</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[(</span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">2</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">4</span><span class="s0">,</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">3</span><span class="s0">, </span><span class="s3">4</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">,</span><span class="s3">1</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">,</span><span class="s3">2</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">10</span><span class="s0">, </span><span class="s3">5</span><span class="s1">)]</span><span class="s0">,</span>
+        <span class="s1">[</span><span class="s3">2</span><span class="s0">, </span><span class="s1">(</span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)]</span><span class="s0">,</span>
+    <span class="s1">]</span>
+    <span class="s0">for </span><span class="s1">input_shapes </span><span class="s0">in </span><span class="s1">data:</span>
+        <span class="s1">assert_raises(ValueError</span><span class="s0">, lambda</span><span class="s1">: broadcast_shapes(*input_shapes))</span>
+
+    <span class="s1">bad_args = [(</span><span class="s3">2</span><span class="s0">,</span><span class="s1">)] * </span><span class="s3">32 </span><span class="s1">+ [(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">)] * </span><span class="s3">32</span>
+    <span class="s1">assert_raises(ValueError</span><span class="s0">, lambda</span><span class="s1">: broadcast_shapes(*bad_args))</span>
+
+
+<span class="s0">def </span><span class="s1">test_as_strided():</span>
+    <span class="s1">a = np.array([</span><span class="s0">None</span><span class="s1">])</span>
+    <span class="s1">a_view = as_strided(a)</span>
+    <span class="s1">expected = np.array([</span><span class="s0">None</span><span class="s1">])</span>
+    <span class="s1">assert_array_equal(a_view</span><span class="s0">, </span><span class="s1">np.array([</span><span class="s0">None</span><span class="s1">]))</span>
+
+    <span class="s1">a = np.array([</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s0">, </span><span class="s3">4</span><span class="s1">])</span>
+    <span class="s1">a_view = as_strided(a</span><span class="s0">, </span><span class="s1">shape=(</span><span class="s3">2</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">strides=(</span><span class="s3">2 </span><span class="s1">* a.itemsize</span><span class="s0">,</span><span class="s1">))</span>
+    <span class="s1">expected = np.array([</span><span class="s3">1</span><span class="s0">, </span><span class="s3">3</span><span class="s1">])</span>
+    <span class="s1">assert_array_equal(a_view</span><span class="s0">, </span><span class="s1">expected)</span>
+
+    <span class="s1">a = np.array([</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s0">, </span><span class="s3">4</span><span class="s1">])</span>
+    <span class="s1">a_view = as_strided(a</span><span class="s0">, </span><span class="s1">shape=(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">4</span><span class="s1">)</span><span class="s0">, </span><span class="s1">strides=(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1 </span><span class="s1">* a.itemsize))</span>
+    <span class="s1">expected = np.array([[</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s0">, </span><span class="s3">4</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s0">, </span><span class="s3">4</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s0">, </span><span class="s3">4</span><span class="s1">]])</span>
+    <span class="s1">assert_array_equal(a_view</span><span class="s0">, </span><span class="s1">expected)</span>
+
+    <span class="s2"># Regression test for gh-5081</span>
+    <span class="s1">dt = np.dtype([(</span><span class="s4">'num'</span><span class="s0">, </span><span class="s4">'i4'</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s4">'obj'</span><span class="s0">, </span><span class="s4">'O'</span><span class="s1">)])</span>
+    <span class="s1">a = np.empty((</span><span class="s3">4</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">dtype=dt)</span>
+    <span class="s1">a[</span><span class="s4">'num'</span><span class="s1">] = np.arange(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">5</span><span class="s1">)</span>
+    <span class="s1">a_view = as_strided(a</span><span class="s0">, </span><span class="s1">shape=(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">4</span><span class="s1">)</span><span class="s0">, </span><span class="s1">strides=(</span><span class="s3">0</span><span class="s0">, </span><span class="s1">a.itemsize))</span>
+    <span class="s1">expected_num = [[</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s0">, </span><span class="s3">4</span><span class="s1">]] * </span><span class="s3">3</span>
+    <span class="s1">expected_obj = [[</span><span class="s0">None</span><span class="s1">]*</span><span class="s3">4</span><span class="s1">]*</span><span class="s3">3</span>
+    <span class="s1">assert_equal(a_view.dtype</span><span class="s0">, </span><span class="s1">dt)</span>
+    <span class="s1">assert_array_equal(expected_num</span><span class="s0">, </span><span class="s1">a_view[</span><span class="s4">'num'</span><span class="s1">])</span>
+    <span class="s1">assert_array_equal(expected_obj</span><span class="s0">, </span><span class="s1">a_view[</span><span class="s4">'obj'</span><span class="s1">])</span>
+
+    <span class="s2"># Make sure that void types without fields are kept unchanged</span>
+    <span class="s1">a = np.empty((</span><span class="s3">4</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">dtype=</span><span class="s4">'V4'</span><span class="s1">)</span>
+    <span class="s1">a_view = as_strided(a</span><span class="s0">, </span><span class="s1">shape=(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">4</span><span class="s1">)</span><span class="s0">, </span><span class="s1">strides=(</span><span class="s3">0</span><span class="s0">, </span><span class="s1">a.itemsize))</span>
+    <span class="s1">assert_equal(a.dtype</span><span class="s0">, </span><span class="s1">a_view.dtype)</span>
+
+    <span class="s2"># Make sure that the only type that could fail is properly handled</span>
+    <span class="s1">dt = np.dtype({</span><span class="s4">'names'</span><span class="s1">: [</span><span class="s4">''</span><span class="s1">]</span><span class="s0">, </span><span class="s4">'formats'</span><span class="s1">: [</span><span class="s4">'V4'</span><span class="s1">]})</span>
+    <span class="s1">a = np.empty((</span><span class="s3">4</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">dtype=dt)</span>
+    <span class="s1">a_view = as_strided(a</span><span class="s0">, </span><span class="s1">shape=(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">4</span><span class="s1">)</span><span class="s0">, </span><span class="s1">strides=(</span><span class="s3">0</span><span class="s0">, </span><span class="s1">a.itemsize))</span>
+    <span class="s1">assert_equal(a.dtype</span><span class="s0">, </span><span class="s1">a_view.dtype)</span>
+
+    <span class="s2"># Custom dtypes should not be lost (gh-9161)</span>
+    <span class="s1">r = [rational(i) </span><span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">range(</span><span class="s3">4</span><span class="s1">)]</span>
+    <span class="s1">a = np.array(r</span><span class="s0">, </span><span class="s1">dtype=rational)</span>
+    <span class="s1">a_view = as_strided(a</span><span class="s0">, </span><span class="s1">shape=(</span><span class="s3">3</span><span class="s0">, </span><span class="s3">4</span><span class="s1">)</span><span class="s0">, </span><span class="s1">strides=(</span><span class="s3">0</span><span class="s0">, </span><span class="s1">a.itemsize))</span>
+    <span class="s1">assert_equal(a.dtype</span><span class="s0">, </span><span class="s1">a_view.dtype)</span>
+    <span class="s1">assert_array_equal([r] * </span><span class="s3">3</span><span class="s0">, </span><span class="s1">a_view)</span>
+
+
+<span class="s0">class </span><span class="s1">TestSlidingWindowView:</span>
+    <span class="s0">def </span><span class="s1">test_1d(self):</span>
+        <span class="s1">arr = np.arange(</span><span class="s3">5</span><span class="s1">)</span>
+        <span class="s1">arr_view = sliding_window_view(arr</span><span class="s0">, </span><span class="s3">2</span><span class="s1">)</span>
+        <span class="s1">expected = np.array([[</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">]</span><span class="s0">,</span>
+                             <span class="s1">[</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s1">]</span><span class="s0">,</span>
+                             <span class="s1">[</span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s1">]</span><span class="s0">,</span>
+                             <span class="s1">[</span><span class="s3">3</span><span class="s0">, </span><span class="s3">4</span><span class="s1">]])</span>
+        <span class="s1">assert_array_equal(arr_view</span><span class="s0">, </span><span class="s1">expected)</span>
+
+    <span class="s0">def </span><span class="s1">test_2d(self):</span>
+        <span class="s1">i</span><span class="s0">, </span><span class="s1">j = np.ogrid[:</span><span class="s3">3</span><span class="s0">, </span><span class="s1">:</span><span class="s3">4</span><span class="s1">]</span>
+        <span class="s1">arr = </span><span class="s3">10</span><span class="s1">*i + j</span>
+        <span class="s1">shape = (</span><span class="s3">2</span><span class="s0">, </span><span class="s3">2</span><span class="s1">)</span>
+        <span class="s1">arr_view = sliding_window_view(arr</span><span class="s0">, </span><span class="s1">shape)</span>
+        <span class="s1">expected = np.array([[[[</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s3">10</span><span class="s0">, </span><span class="s3">11</span><span class="s1">]]</span><span class="s0">,</span>
+                              <span class="s1">[[</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s3">11</span><span class="s0">, </span><span class="s3">12</span><span class="s1">]]</span><span class="s0">,</span>
+                              <span class="s1">[[</span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s3">12</span><span class="s0">, </span><span class="s3">13</span><span class="s1">]]]</span><span class="s0">,</span>
+                             <span class="s1">[[[</span><span class="s3">10</span><span class="s0">, </span><span class="s3">11</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s3">20</span><span class="s0">, </span><span class="s3">21</span><span class="s1">]]</span><span class="s0">,</span>
+                              <span class="s1">[[</span><span class="s3">11</span><span class="s0">, </span><span class="s3">12</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s3">21</span><span class="s0">, </span><span class="s3">22</span><span class="s1">]]</span><span class="s0">,</span>
+                              <span class="s1">[[</span><span class="s3">12</span><span class="s0">, </span><span class="s3">13</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s3">22</span><span class="s0">, </span><span class="s3">23</span><span class="s1">]]]])</span>
+        <span class="s1">assert_array_equal(arr_view</span><span class="s0">, </span><span class="s1">expected)</span>
+
+    <span class="s0">def </span><span class="s1">test_2d_with_axis(self):</span>
+        <span class="s1">i</span><span class="s0">, </span><span class="s1">j = np.ogrid[:</span><span class="s3">3</span><span class="s0">, </span><span class="s1">:</span><span class="s3">4</span><span class="s1">]</span>
+        <span class="s1">arr = </span><span class="s3">10</span><span class="s1">*i + j</span>
+        <span class="s1">arr_view = sliding_window_view(arr</span><span class="s0">, </span><span class="s3">3</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)</span>
+        <span class="s1">expected = np.array([[[</span><span class="s3">0</span><span class="s0">, </span><span class="s3">10</span><span class="s0">, </span><span class="s3">20</span><span class="s1">]</span><span class="s0">,</span>
+                              <span class="s1">[</span><span class="s3">1</span><span class="s0">, </span><span class="s3">11</span><span class="s0">, </span><span class="s3">21</span><span class="s1">]</span><span class="s0">,</span>
+                              <span class="s1">[</span><span class="s3">2</span><span class="s0">, </span><span class="s3">12</span><span class="s0">, </span><span class="s3">22</span><span class="s1">]</span><span class="s0">,</span>
+                              <span class="s1">[</span><span class="s3">3</span><span class="s0">, </span><span class="s3">13</span><span class="s0">, </span><span class="s3">23</span><span class="s1">]]])</span>
+        <span class="s1">assert_array_equal(arr_view</span><span class="s0">, </span><span class="s1">expected)</span>
+
+    <span class="s0">def </span><span class="s1">test_2d_repeated_axis(self):</span>
+        <span class="s1">i</span><span class="s0">, </span><span class="s1">j = np.ogrid[:</span><span class="s3">3</span><span class="s0">, </span><span class="s1">:</span><span class="s3">4</span><span class="s1">]</span>
+        <span class="s1">arr = </span><span class="s3">10</span><span class="s1">*i + j</span>
+        <span class="s1">arr_view = sliding_window_view(arr</span><span class="s0">, </span><span class="s1">(</span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">))</span>
+        <span class="s1">expected = np.array([[[[</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s1">]</span><span class="s0">,</span>
+                               <span class="s1">[</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s1">]]]</span><span class="s0">,</span>
+                             <span class="s1">[[[</span><span class="s3">10</span><span class="s0">, </span><span class="s3">11</span><span class="s0">, </span><span class="s3">12</span><span class="s1">]</span><span class="s0">,</span>
+                               <span class="s1">[</span><span class="s3">11</span><span class="s0">, </span><span class="s3">12</span><span class="s0">, </span><span class="s3">13</span><span class="s1">]]]</span><span class="s0">,</span>
+                             <span class="s1">[[[</span><span class="s3">20</span><span class="s0">, </span><span class="s3">21</span><span class="s0">, </span><span class="s3">22</span><span class="s1">]</span><span class="s0">,</span>
+                               <span class="s1">[</span><span class="s3">21</span><span class="s0">, </span><span class="s3">22</span><span class="s0">, </span><span class="s3">23</span><span class="s1">]]]])</span>
+        <span class="s1">assert_array_equal(arr_view</span><span class="s0">, </span><span class="s1">expected)</span>
+
+    <span class="s0">def </span><span class="s1">test_2d_without_axis(self):</span>
+        <span class="s1">i</span><span class="s0">, </span><span class="s1">j = np.ogrid[:</span><span class="s3">4</span><span class="s0">, </span><span class="s1">:</span><span class="s3">4</span><span class="s1">]</span>
+        <span class="s1">arr = </span><span class="s3">10</span><span class="s1">*i + j</span>
+        <span class="s1">shape = (</span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s1">)</span>
+        <span class="s1">arr_view = sliding_window_view(arr</span><span class="s0">, </span><span class="s1">shape)</span>
+        <span class="s1">expected = np.array([[[[</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s3">10</span><span class="s0">, </span><span class="s3">11</span><span class="s0">, </span><span class="s3">12</span><span class="s1">]]</span><span class="s0">,</span>
+                              <span class="s1">[[</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s3">11</span><span class="s0">, </span><span class="s3">12</span><span class="s0">, </span><span class="s3">13</span><span class="s1">]]]</span><span class="s0">,</span>
+                             <span class="s1">[[[</span><span class="s3">10</span><span class="s0">, </span><span class="s3">11</span><span class="s0">, </span><span class="s3">12</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s3">20</span><span class="s0">, </span><span class="s3">21</span><span class="s0">, </span><span class="s3">22</span><span class="s1">]]</span><span class="s0">,</span>
+                              <span class="s1">[[</span><span class="s3">11</span><span class="s0">, </span><span class="s3">12</span><span class="s0">, </span><span class="s3">13</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s3">21</span><span class="s0">, </span><span class="s3">22</span><span class="s0">, </span><span class="s3">23</span><span class="s1">]]]</span><span class="s0">,</span>
+                             <span class="s1">[[[</span><span class="s3">20</span><span class="s0">, </span><span class="s3">21</span><span class="s0">, </span><span class="s3">22</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s3">30</span><span class="s0">, </span><span class="s3">31</span><span class="s0">, </span><span class="s3">32</span><span class="s1">]]</span><span class="s0">,</span>
+                              <span class="s1">[[</span><span class="s3">21</span><span class="s0">, </span><span class="s3">22</span><span class="s0">, </span><span class="s3">23</span><span class="s1">]</span><span class="s0">, </span><span class="s1">[</span><span class="s3">31</span><span class="s0">, </span><span class="s3">32</span><span class="s0">, </span><span class="s3">33</span><span class="s1">]]]])</span>
+        <span class="s1">assert_array_equal(arr_view</span><span class="s0">, </span><span class="s1">expected)</span>
+
+    <span class="s0">def </span><span class="s1">test_errors(self):</span>
+        <span class="s1">i</span><span class="s0">, </span><span class="s1">j = np.ogrid[:</span><span class="s3">4</span><span class="s0">, </span><span class="s1">:</span><span class="s3">4</span><span class="s1">]</span>
+        <span class="s1">arr = </span><span class="s3">10</span><span class="s1">*i + j</span>
+        <span class="s0">with </span><span class="s1">pytest.raises(ValueError</span><span class="s0">, </span><span class="s1">match=</span><span class="s4">'cannot contain negative values'</span><span class="s1">):</span>
+            <span class="s1">sliding_window_view(arr</span><span class="s0">, </span><span class="s1">(-</span><span class="s3">1</span><span class="s0">, </span><span class="s3">3</span><span class="s1">))</span>
+        <span class="s0">with </span><span class="s1">pytest.raises(</span>
+                <span class="s1">ValueError</span><span class="s0">,</span>
+                <span class="s1">match=</span><span class="s4">'must provide window_shape for all dimensions of `x`'</span><span class="s1">):</span>
+            <span class="s1">sliding_window_view(arr</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">,</span><span class="s1">))</span>
+        <span class="s0">with </span><span class="s1">pytest.raises(</span>
+                <span class="s1">ValueError</span><span class="s0">,</span>
+                <span class="s1">match=</span><span class="s4">'Must provide matching length window_shape and axis'</span><span class="s1">):</span>
+            <span class="s1">sliding_window_view(arr</span><span class="s0">, </span><span class="s1">(</span><span class="s3">1</span><span class="s0">, </span><span class="s3">3</span><span class="s0">, </span><span class="s3">4</span><span class="s1">)</span><span class="s0">, </span><span class="s1">axis=(</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">))</span>
+        <span class="s0">with </span><span class="s1">pytest.raises(</span>
+                <span class="s1">ValueError</span><span class="s0">,</span>
+                <span class="s1">match=</span><span class="s4">'window shape cannot be larger than input array'</span><span class="s1">):</span>
+            <span class="s1">sliding_window_view(arr</span><span class="s0">, </span><span class="s1">(</span><span class="s3">5</span><span class="s0">, </span><span class="s3">5</span><span class="s1">))</span>
+
+    <span class="s0">def </span><span class="s1">test_writeable(self):</span>
+        <span class="s1">arr = np.arange(</span><span class="s3">5</span><span class="s1">)</span>
+        <span class="s1">view = sliding_window_view(arr</span><span class="s0">, </span><span class="s3">2</span><span class="s0">, </span><span class="s1">writeable=</span><span class="s0">False</span><span class="s1">)</span>
+        <span class="s1">assert_(</span><span class="s0">not </span><span class="s1">view.flags.writeable)</span>
+        <span class="s0">with </span><span class="s1">pytest.raises(</span>
+                <span class="s1">ValueError</span><span class="s0">,</span>
+                <span class="s1">match=</span><span class="s4">'assignment destination is read-only'</span><span class="s1">):</span>
+            <span class="s1">view[</span><span class="s3">0</span><span class="s0">, </span><span class="s3">0</span><span class="s1">] = </span><span class="s3">3</span>
+        <span class="s1">view = sliding_window_view(arr</span><span class="s0">, </span><span class="s3">2</span><span class="s0">, </span><span class="s1">writeable=</span><span class="s0">True</span><span class="s1">)</span>
+        <span class="s1">assert_(view.flags.writeable)</span>
+        <span class="s1">view[</span><span class="s3">0</span><span class="s0">, </span><span class="s3">1</span><span class="s1">] = </span><span class="s3">3</span>
+        <span class="s1">assert_array_equal(arr</span><span class="s0">, </span><span class="s1">np.array([</span><span class="s3">0</span><span class="s0">, </span><span class="s3">3</span><span class="s0">, </span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s0">, </span><span class="s3">4</span><span class="s1">]))</span>
+
+    <span class="s0">def </span><span class="s1">test_subok(self):</span>
+        <span class="s0">class </span><span class="s1">MyArray(np.ndarray):</span>
+            <span class="s0">pass</span>
+
+        <span class="s1">arr = np.arange(</span><span class="s3">5</span><span class="s1">).view(MyArray)</span>
+        <span class="s1">assert_(</span><span class="s0">not </span><span class="s1">isinstance(sliding_window_view(arr</span><span class="s0">, </span><span class="s3">2</span><span class="s0">,</span>
+                                                   <span class="s1">subok=</span><span class="s0">False</span><span class="s1">)</span><span class="s0">,</span>
+                               <span class="s1">MyArray))</span>
+        <span class="s1">assert_(isinstance(sliding_window_view(arr</span><span class="s0">, </span><span class="s3">2</span><span class="s0">, </span><span class="s1">subok=</span><span class="s0">True</span><span class="s1">)</span><span class="s0">, </span><span class="s1">MyArray))</span>
+        <span class="s2"># Default behavior</span>
+        <span class="s1">assert_(</span><span class="s0">not </span><span class="s1">isinstance(sliding_window_view(arr</span><span class="s0">, </span><span class="s3">2</span><span class="s1">)</span><span class="s0">, </span><span class="s1">MyArray))</span>
+
+
+<span class="s0">def </span><span class="s1">as_strided_writeable():</span>
+    <span class="s1">arr = np.ones(</span><span class="s3">10</span><span class="s1">)</span>
+    <span class="s1">view = as_strided(arr</span><span class="s0">, </span><span class="s1">writeable=</span><span class="s0">False</span><span class="s1">)</span>
+    <span class="s1">assert_(</span><span class="s0">not </span><span class="s1">view.flags.writeable)</span>
+
+    <span class="s2"># Check that writeable also is fine:</span>
+    <span class="s1">view = as_strided(arr</span><span class="s0">, </span><span class="s1">writeable=</span><span class="s0">True</span><span class="s1">)</span>
+    <span class="s1">assert_(view.flags.writeable)</span>
+    <span class="s1">view[...] = </span><span class="s3">3</span>
+    <span class="s1">assert_array_equal(arr</span><span class="s0">, </span><span class="s1">np.full_like(arr</span><span class="s0">, </span><span class="s3">3</span><span class="s1">))</span>
+
+    <span class="s2"># Test that things do not break down for readonly:</span>
+    <span class="s1">arr.flags.writeable = </span><span class="s0">False</span>
+    <span class="s1">view = as_strided(arr</span><span class="s0">, </span><span class="s1">writeable=</span><span class="s0">False</span><span class="s1">)</span>
+    <span class="s1">view = as_strided(arr</span><span class="s0">, </span><span class="s1">writeable=</span><span class="s0">True</span><span class="s1">)</span>
+    <span class="s1">assert_(</span><span class="s0">not </span><span class="s1">view.flags.writeable)</span>
+
+
+<span class="s0">class </span><span class="s1">VerySimpleSubClass(np.ndarray):</span>
+    <span class="s0">def </span><span class="s1">__new__(cls</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s0">return </span><span class="s1">np.array(*args</span><span class="s0">, </span><span class="s1">subok=</span><span class="s0">True, </span><span class="s1">**kwargs).view(cls)</span>
+
+
+<span class="s0">class </span><span class="s1">SimpleSubClass(VerySimpleSubClass):</span>
+    <span class="s0">def </span><span class="s1">__new__(cls</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">self = np.array(*args</span><span class="s0">, </span><span class="s1">subok=</span><span class="s0">True, </span><span class="s1">**kwargs).view(cls)</span>
+        <span class="s1">self.info = </span><span class="s4">'simple'</span>
+        <span class="s0">return </span><span class="s1">self</span>
+
+    <span class="s0">def </span><span class="s1">__array_finalize__(self</span><span class="s0">, </span><span class="s1">obj):</span>
+        <span class="s1">self.info = getattr(obj</span><span class="s0">, </span><span class="s4">'info'</span><span class="s0">, </span><span class="s4">''</span><span class="s1">) + </span><span class="s4">' finalized'</span>
+
+
+<span class="s0">def </span><span class="s1">test_subclasses():</span>
+    <span class="s2"># test that subclass is preserved only if subok=True</span>
+    <span class="s1">a = VerySimpleSubClass([</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s0">, </span><span class="s3">4</span><span class="s1">])</span>
+    <span class="s1">assert_(type(a) </span><span class="s0">is </span><span class="s1">VerySimpleSubClass)</span>
+    <span class="s1">a_view = as_strided(a</span><span class="s0">, </span><span class="s1">shape=(</span><span class="s3">2</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">strides=(</span><span class="s3">2 </span><span class="s1">* a.itemsize</span><span class="s0">,</span><span class="s1">))</span>
+    <span class="s1">assert_(type(a_view) </span><span class="s0">is </span><span class="s1">np.ndarray)</span>
+    <span class="s1">a_view = as_strided(a</span><span class="s0">, </span><span class="s1">shape=(</span><span class="s3">2</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">strides=(</span><span class="s3">2 </span><span class="s1">* a.itemsize</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">subok=</span><span class="s0">True</span><span class="s1">)</span>
+    <span class="s1">assert_(type(a_view) </span><span class="s0">is </span><span class="s1">VerySimpleSubClass)</span>
+    <span class="s2"># test that if a subclass has __array_finalize__, it is used</span>
+    <span class="s1">a = SimpleSubClass([</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s0">, </span><span class="s3">4</span><span class="s1">])</span>
+    <span class="s1">a_view = as_strided(a</span><span class="s0">, </span><span class="s1">shape=(</span><span class="s3">2</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">strides=(</span><span class="s3">2 </span><span class="s1">* a.itemsize</span><span class="s0">,</span><span class="s1">)</span><span class="s0">, </span><span class="s1">subok=</span><span class="s0">True</span><span class="s1">)</span>
+    <span class="s1">assert_(type(a_view) </span><span class="s0">is </span><span class="s1">SimpleSubClass)</span>
+    <span class="s1">assert_(a_view.info == </span><span class="s4">'simple finalized'</span><span class="s1">)</span>
+
+    <span class="s2"># similar tests for broadcast_arrays</span>
+    <span class="s1">b = np.arange(len(a)).reshape(-</span><span class="s3">1</span><span class="s0">, </span><span class="s3">1</span><span class="s1">)</span>
+    <span class="s1">a_view</span><span class="s0">, </span><span class="s1">b_view = broadcast_arrays(a</span><span class="s0">, </span><span class="s1">b)</span>
+    <span class="s1">assert_(type(a_view) </span><span class="s0">is </span><span class="s1">np.ndarray)</span>
+    <span class="s1">assert_(type(b_view) </span><span class="s0">is </span><span class="s1">np.ndarray)</span>
+    <span class="s1">assert_(a_view.shape == b_view.shape)</span>
+    <span class="s1">a_view</span><span class="s0">, </span><span class="s1">b_view = broadcast_arrays(a</span><span class="s0">, </span><span class="s1">b</span><span class="s0">, </span><span class="s1">subok=</span><span class="s0">True</span><span class="s1">)</span>
+    <span class="s1">assert_(type(a_view) </span><span class="s0">is </span><span class="s1">SimpleSubClass)</span>
+    <span class="s1">assert_(a_view.info == </span><span class="s4">'simple finalized'</span><span class="s1">)</span>
+    <span class="s1">assert_(type(b_view) </span><span class="s0">is </span><span class="s1">np.ndarray)</span>
+    <span class="s1">assert_(a_view.shape == b_view.shape)</span>
+
+    <span class="s2"># and for broadcast_to</span>
+    <span class="s1">shape = (</span><span class="s3">2</span><span class="s0">, </span><span class="s3">4</span><span class="s1">)</span>
+    <span class="s1">a_view = broadcast_to(a</span><span class="s0">, </span><span class="s1">shape)</span>
+    <span class="s1">assert_(type(a_view) </span><span class="s0">is </span><span class="s1">np.ndarray)</span>
+    <span class="s1">assert_(a_view.shape == shape)</span>
+    <span class="s1">a_view = broadcast_to(a</span><span class="s0">, </span><span class="s1">shape</span><span class="s0">, </span><span class="s1">subok=</span><span class="s0">True</span><span class="s1">)</span>
+    <span class="s1">assert_(type(a_view) </span><span class="s0">is </span><span class="s1">SimpleSubClass)</span>
+    <span class="s1">assert_(a_view.info == </span><span class="s4">'simple finalized'</span><span class="s1">)</span>
+    <span class="s1">assert_(a_view.shape == shape)</span>
+
+
+<span class="s0">def </span><span class="s1">test_writeable():</span>
+    <span class="s2"># broadcast_to should return a readonly array</span>
+    <span class="s1">original = np.array([</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s1">])</span>
+    <span class="s1">result = broadcast_to(original</span><span class="s0">, </span><span class="s1">(</span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s1">))</span>
+    <span class="s1">assert_equal(result.flags.writeable</span><span class="s0">, False</span><span class="s1">)</span>
+    <span class="s1">assert_raises(ValueError</span><span class="s0">, </span><span class="s1">result.__setitem__</span><span class="s0">, </span><span class="s1">slice(</span><span class="s0">None</span><span class="s1">)</span><span class="s0">, </span><span class="s3">0</span><span class="s1">)</span>
+
+    <span class="s2"># but the result of broadcast_arrays needs to be writeable, to</span>
+    <span class="s2"># preserve backwards compatibility</span>
+    <span class="s0">for </span><span class="s1">is_broadcast</span><span class="s0">, </span><span class="s1">results </span><span class="s0">in </span><span class="s1">[(</span><span class="s0">False, </span><span class="s1">broadcast_arrays(original</span><span class="s0">,</span><span class="s1">))</span><span class="s0">,</span>
+                                  <span class="s1">(</span><span class="s0">True, </span><span class="s1">broadcast_arrays(</span><span class="s3">0</span><span class="s0">, </span><span class="s1">original))]:</span>
+        <span class="s0">for </span><span class="s1">result </span><span class="s0">in </span><span class="s1">results:</span>
+            <span class="s2"># This will change to False in a future version</span>
+            <span class="s0">if </span><span class="s1">is_broadcast:</span>
+                <span class="s0">with </span><span class="s1">assert_warns(FutureWarning):</span>
+                    <span class="s1">assert_equal(result.flags.writeable</span><span class="s0">, True</span><span class="s1">)</span>
+                <span class="s0">with </span><span class="s1">assert_warns(DeprecationWarning):</span>
+                    <span class="s1">result[:] = </span><span class="s3">0</span>
+                <span class="s2"># Warning not emitted, writing to the array resets it</span>
+                <span class="s1">assert_equal(result.flags.writeable</span><span class="s0">, True</span><span class="s1">)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s2"># No warning:</span>
+                <span class="s1">assert_equal(result.flags.writeable</span><span class="s0">, True</span><span class="s1">)</span>
+
+    <span class="s0">for </span><span class="s1">results </span><span class="s0">in </span><span class="s1">[broadcast_arrays(original)</span><span class="s0">,</span>
+                    <span class="s1">broadcast_arrays(</span><span class="s3">0</span><span class="s0">, </span><span class="s1">original)]:</span>
+        <span class="s0">for </span><span class="s1">result </span><span class="s0">in </span><span class="s1">results:</span>
+            <span class="s2"># resets the warn_on_write DeprecationWarning</span>
+            <span class="s1">result.flags.writeable = </span><span class="s0">True</span>
+            <span class="s2"># check: no warning emitted</span>
+            <span class="s1">assert_equal(result.flags.writeable</span><span class="s0">, True</span><span class="s1">)</span>
+            <span class="s1">result[:] = </span><span class="s3">0</span>
+
+    <span class="s2"># keep readonly input readonly</span>
+    <span class="s1">original.flags.writeable = </span><span class="s0">False</span>
+    <span class="s1">_</span><span class="s0">, </span><span class="s1">result = broadcast_arrays(</span><span class="s3">0</span><span class="s0">, </span><span class="s1">original)</span>
+    <span class="s1">assert_equal(result.flags.writeable</span><span class="s0">, False</span><span class="s1">)</span>
+
+    <span class="s2"># regression test for GH6491</span>
+    <span class="s1">shape = (</span><span class="s3">2</span><span class="s0">,</span><span class="s1">)</span>
+    <span class="s1">strides = [</span><span class="s3">0</span><span class="s1">]</span>
+    <span class="s1">tricky_array = as_strided(np.array(</span><span class="s3">0</span><span class="s1">)</span><span class="s0">, </span><span class="s1">shape</span><span class="s0">, </span><span class="s1">strides)</span>
+    <span class="s1">other = np.zeros((</span><span class="s3">1</span><span class="s0">,</span><span class="s1">))</span>
+    <span class="s1">first</span><span class="s0">, </span><span class="s1">second = broadcast_arrays(tricky_array</span><span class="s0">, </span><span class="s1">other)</span>
+    <span class="s1">assert_(first.shape == second.shape)</span>
+
+
+<span class="s0">def </span><span class="s1">test_writeable_memoryview():</span>
+    <span class="s2"># The result of broadcast_arrays exports as a non-writeable memoryview</span>
+    <span class="s2"># because otherwise there is no good way to opt in to the new behaviour</span>
+    <span class="s2"># (i.e. you would need to set writeable to False explicitly).</span>
+    <span class="s2"># See gh-13929.</span>
+    <span class="s1">original = np.array([</span><span class="s3">1</span><span class="s0">, </span><span class="s3">2</span><span class="s0">, </span><span class="s3">3</span><span class="s1">])</span>
+
+    <span class="s0">for </span><span class="s1">is_broadcast</span><span class="s0">, </span><span class="s1">results </span><span class="s0">in </span><span class="s1">[(</span><span class="s0">False, </span><span class="s1">broadcast_arrays(original</span><span class="s0">,</span><span class="s1">))</span><span class="s0">,</span>
+                                  <span class="s1">(</span><span class="s0">True, </span><span class="s1">broadcast_arrays(</span><span class="s3">0</span><span class="s0">, </span><span class="s1">original))]:</span>
+        <span class="s0">for </span><span class="s1">result </span><span class="s0">in </span><span class="s1">results:</span>
+            <span class="s2"># This will change to False in a future version</span>
+            <span class="s0">if </span><span class="s1">is_broadcast:</span>
+                <span class="s2"># memoryview(result, writable=True) will give warning but cannot</span>
+                <span class="s2"># be tested using the python API.</span>
+                <span class="s0">assert </span><span class="s1">memoryview(result).readonly</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s0">assert not </span><span class="s1">memoryview(result).readonly</span>
+
+
+<span class="s0">def </span><span class="s1">test_reference_types():</span>
+    <span class="s1">input_array = np.array(</span><span class="s4">'a'</span><span class="s0">, </span><span class="s1">dtype=object)</span>
+    <span class="s1">expected = np.array([</span><span class="s4">'a'</span><span class="s1">] * </span><span class="s3">3</span><span class="s0">, </span><span class="s1">dtype=object)</span>
+    <span class="s1">actual = broadcast_to(input_array</span><span class="s0">, </span><span class="s1">(</span><span class="s3">3</span><span class="s0">,</span><span class="s1">))</span>
+    <span class="s1">assert_array_equal(expected</span><span class="s0">, </span><span class="s1">actual)</span>
+
+    <span class="s1">actual</span><span class="s0">, </span><span class="s1">_ = broadcast_arrays(input_array</span><span class="s0">, </span><span class="s1">np.ones(</span><span class="s3">3</span><span class="s1">))</span>
+    <span class="s1">assert_array_equal(expected</span><span class="s0">, </span><span class="s1">actual)</span>
+</pre>
+</body>
+</html>

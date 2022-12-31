@@ -1,0 +1,477 @@
+<html>
+<head>
+<title>test_typing.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #6a8759;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test_typing.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">importlib.util</span>
+<span class="s0">import </span><span class="s1">itertools</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">re</span>
+<span class="s0">import </span><span class="s1">shutil</span>
+<span class="s0">from </span><span class="s1">collections </span><span class="s0">import </span><span class="s1">defaultdict</span>
+<span class="s0">from </span><span class="s1">collections.abc </span><span class="s0">import </span><span class="s1">Iterator</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">IO</span><span class="s0">, </span><span class="s1">TYPE_CHECKING</span>
+
+<span class="s0">import </span><span class="s1">pytest</span>
+<span class="s0">import </span><span class="s1">numpy </span><span class="s0">as </span><span class="s1">np</span>
+<span class="s0">import </span><span class="s1">numpy.typing </span><span class="s0">as </span><span class="s1">npt</span>
+<span class="s0">from </span><span class="s1">numpy.typing.mypy_plugin </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">_PRECISION_DICT</span><span class="s0">,</span>
+    <span class="s1">_EXTENDED_PRECISION_LIST</span><span class="s0">,</span>
+    <span class="s1">_C_INTP</span><span class="s0">,</span>
+<span class="s1">)</span>
+
+<span class="s0">try</span><span class="s1">:</span>
+    <span class="s0">from </span><span class="s1">mypy </span><span class="s0">import </span><span class="s1">api</span>
+<span class="s0">except </span><span class="s1">ImportError:</span>
+    <span class="s1">NO_MYPY = </span><span class="s0">True</span>
+<span class="s0">else</span><span class="s1">:</span>
+    <span class="s1">NO_MYPY = </span><span class="s0">False</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING:</span>
+    <span class="s2"># We need this as annotation, but it's located in a private namespace.</span>
+    <span class="s2"># As a compromise, do *not* import it during runtime</span>
+    <span class="s0">from </span><span class="s1">_pytest.mark.structures </span><span class="s0">import </span><span class="s1">ParameterSet</span>
+
+<span class="s1">DATA_DIR = os.path.join(os.path.dirname(__file__)</span><span class="s0">, </span><span class="s3">&quot;data&quot;</span><span class="s1">)</span>
+<span class="s1">PASS_DIR = os.path.join(DATA_DIR</span><span class="s0">, </span><span class="s3">&quot;pass&quot;</span><span class="s1">)</span>
+<span class="s1">FAIL_DIR = os.path.join(DATA_DIR</span><span class="s0">, </span><span class="s3">&quot;fail&quot;</span><span class="s1">)</span>
+<span class="s1">REVEAL_DIR = os.path.join(DATA_DIR</span><span class="s0">, </span><span class="s3">&quot;reveal&quot;</span><span class="s1">)</span>
+<span class="s1">MISC_DIR = os.path.join(DATA_DIR</span><span class="s0">, </span><span class="s3">&quot;misc&quot;</span><span class="s1">)</span>
+<span class="s1">MYPY_INI = os.path.join(DATA_DIR</span><span class="s0">, </span><span class="s3">&quot;mypy.ini&quot;</span><span class="s1">)</span>
+<span class="s1">CACHE_DIR = os.path.join(DATA_DIR</span><span class="s0">, </span><span class="s3">&quot;.mypy_cache&quot;</span><span class="s1">)</span>
+
+<span class="s2">#: A dictionary with file names as keys and lists of the mypy stdout as values.</span>
+<span class="s2">#: To-be populated by `run_mypy`.</span>
+<span class="s1">OUTPUT_MYPY: dict[str</span><span class="s0">, </span><span class="s1">list[str]] = {}</span>
+
+
+<span class="s0">def </span><span class="s1">_key_func(key: str) -&gt; str:</span>
+    <span class="s4">&quot;&quot;&quot;Split at the first occurrence of the ``:`` character. 
+ 
+    Windows drive-letters (*e.g.* ``C:``) are ignored herein. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">drive</span><span class="s0">, </span><span class="s1">tail = os.path.splitdrive(key)</span>
+    <span class="s0">return </span><span class="s1">os.path.join(drive</span><span class="s0">, </span><span class="s1">tail.split(</span><span class="s3">&quot;:&quot;</span><span class="s0">, </span><span class="s5">1</span><span class="s1">)[</span><span class="s5">0</span><span class="s1">])</span>
+
+
+<span class="s0">def </span><span class="s1">_strip_filename(msg: str) -&gt; str:</span>
+    <span class="s4">&quot;&quot;&quot;Strip the filename from a mypy message.&quot;&quot;&quot;</span>
+    <span class="s1">_</span><span class="s0">, </span><span class="s1">tail = os.path.splitdrive(msg)</span>
+    <span class="s0">return </span><span class="s1">tail.split(</span><span class="s3">&quot;:&quot;</span><span class="s0">, </span><span class="s5">1</span><span class="s1">)[-</span><span class="s5">1</span><span class="s1">]</span>
+
+
+<span class="s0">def </span><span class="s1">strip_func(match: re.Match[str]) -&gt; str:</span>
+    <span class="s4">&quot;&quot;&quot;`re.sub` helper function for stripping module names.&quot;&quot;&quot;</span>
+    <span class="s0">return </span><span class="s1">match.groups()[</span><span class="s5">1</span><span class="s1">]</span>
+
+
+<span class="s1">@pytest.mark.slow</span>
+<span class="s1">@pytest.mark.skipif(NO_MYPY</span><span class="s0">, </span><span class="s1">reason=</span><span class="s3">&quot;Mypy is not installed&quot;</span><span class="s1">)</span>
+<span class="s1">@pytest.fixture(scope=</span><span class="s3">&quot;module&quot;</span><span class="s0">, </span><span class="s1">autouse=</span><span class="s0">True</span><span class="s1">)</span>
+<span class="s0">def </span><span class="s1">run_mypy() -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+    <span class="s4">&quot;&quot;&quot;Clears the cache and run mypy before running any of the typing tests. 
+ 
+    The mypy results are cached in `OUTPUT_MYPY` for further use. 
+ 
+    The cache refresh can be skipped using 
+ 
+    NUMPY_TYPING_TEST_CLEAR_CACHE=0 pytest numpy/typing/tests 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">(</span>
+        <span class="s1">os.path.isdir(CACHE_DIR)</span>
+        <span class="s0">and </span><span class="s1">bool(os.environ.get(</span><span class="s3">&quot;NUMPY_TYPING_TEST_CLEAR_CACHE&quot;</span><span class="s0">, True</span><span class="s1">))</span>
+    <span class="s1">):</span>
+        <span class="s1">shutil.rmtree(CACHE_DIR)</span>
+
+    <span class="s0">for </span><span class="s1">directory </span><span class="s0">in </span><span class="s1">(PASS_DIR</span><span class="s0">, </span><span class="s1">REVEAL_DIR</span><span class="s0">, </span><span class="s1">FAIL_DIR</span><span class="s0">, </span><span class="s1">MISC_DIR):</span>
+        <span class="s2"># Run mypy</span>
+        <span class="s1">stdout</span><span class="s0">, </span><span class="s1">stderr</span><span class="s0">, </span><span class="s1">exit_code = api.run([</span>
+            <span class="s3">&quot;--config-file&quot;</span><span class="s0">,</span>
+            <span class="s1">MYPY_INI</span><span class="s0">,</span>
+            <span class="s3">&quot;--cache-dir&quot;</span><span class="s0">,</span>
+            <span class="s1">CACHE_DIR</span><span class="s0">,</span>
+            <span class="s1">directory</span><span class="s0">,</span>
+        <span class="s1">])</span>
+        <span class="s0">if </span><span class="s1">stderr:</span>
+            <span class="s1">pytest.fail(</span><span class="s3">f&quot;Unexpected mypy standard error</span><span class="s0">\n\n{</span><span class="s1">stderr</span><span class="s0">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+        <span class="s0">elif </span><span class="s1">exit_code </span><span class="s0">not in </span><span class="s1">{</span><span class="s5">0</span><span class="s0">, </span><span class="s5">1</span><span class="s1">}:</span>
+            <span class="s1">pytest.fail(</span><span class="s3">f&quot;Unexpected mypy exit code: </span><span class="s0">{</span><span class="s1">exit_code</span><span class="s0">}\n\n{</span><span class="s1">stdout</span><span class="s0">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+        <span class="s1">stdout = stdout.replace(</span><span class="s3">'*'</span><span class="s0">, </span><span class="s3">''</span><span class="s1">)</span>
+
+        <span class="s2"># Parse the output</span>
+        <span class="s1">iterator = itertools.groupby(stdout.split(</span><span class="s3">&quot;</span><span class="s0">\n</span><span class="s3">&quot;</span><span class="s1">)</span><span class="s0">, </span><span class="s1">key=_key_func)</span>
+        <span class="s1">OUTPUT_MYPY.update((k</span><span class="s0">, </span><span class="s1">list(v)) </span><span class="s0">for </span><span class="s1">k</span><span class="s0">, </span><span class="s1">v </span><span class="s0">in </span><span class="s1">iterator </span><span class="s0">if </span><span class="s1">k)</span>
+
+
+<span class="s0">def </span><span class="s1">get_test_cases(directory: str) -&gt; Iterator[ParameterSet]:</span>
+    <span class="s0">for </span><span class="s1">root</span><span class="s0">, </span><span class="s1">_</span><span class="s0">, </span><span class="s1">files </span><span class="s0">in </span><span class="s1">os.walk(directory):</span>
+        <span class="s0">for </span><span class="s1">fname </span><span class="s0">in </span><span class="s1">files:</span>
+            <span class="s1">short_fname</span><span class="s0">, </span><span class="s1">ext = os.path.splitext(fname)</span>
+            <span class="s0">if </span><span class="s1">ext </span><span class="s0">in </span><span class="s1">(</span><span class="s3">&quot;.pyi&quot;</span><span class="s0">, </span><span class="s3">&quot;.py&quot;</span><span class="s1">):</span>
+                <span class="s1">fullpath = os.path.join(root</span><span class="s0">, </span><span class="s1">fname)</span>
+                <span class="s0">yield </span><span class="s1">pytest.param(fullpath</span><span class="s0">, </span><span class="s1">id=short_fname)</span>
+
+
+<span class="s1">@pytest.mark.slow</span>
+<span class="s1">@pytest.mark.skipif(NO_MYPY</span><span class="s0">, </span><span class="s1">reason=</span><span class="s3">&quot;Mypy is not installed&quot;</span><span class="s1">)</span>
+<span class="s1">@pytest.mark.parametrize(</span><span class="s3">&quot;path&quot;</span><span class="s0">, </span><span class="s1">get_test_cases(PASS_DIR))</span>
+<span class="s0">def </span><span class="s1">test_success(path) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+    <span class="s2"># Alias `OUTPUT_MYPY` so that it appears in the local namespace</span>
+    <span class="s1">output_mypy = OUTPUT_MYPY</span>
+    <span class="s0">if </span><span class="s1">path </span><span class="s0">in </span><span class="s1">output_mypy:</span>
+        <span class="s1">msg = </span><span class="s3">&quot;Unexpected mypy output</span><span class="s0">\n\n</span><span class="s3">&quot;</span>
+        <span class="s1">msg += </span><span class="s3">&quot;</span><span class="s0">\n</span><span class="s3">&quot;</span><span class="s1">.join(_strip_filename(v) </span><span class="s0">for </span><span class="s1">v </span><span class="s0">in </span><span class="s1">output_mypy[path])</span>
+        <span class="s0">raise </span><span class="s1">AssertionError(msg)</span>
+
+
+<span class="s1">@pytest.mark.slow</span>
+<span class="s1">@pytest.mark.skipif(NO_MYPY</span><span class="s0">, </span><span class="s1">reason=</span><span class="s3">&quot;Mypy is not installed&quot;</span><span class="s1">)</span>
+<span class="s1">@pytest.mark.parametrize(</span><span class="s3">&quot;path&quot;</span><span class="s0">, </span><span class="s1">get_test_cases(FAIL_DIR))</span>
+<span class="s0">def </span><span class="s1">test_fail(path: str) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+    <span class="s1">__tracebackhide__ = </span><span class="s0">True</span>
+
+    <span class="s0">with </span><span class="s1">open(path) </span><span class="s0">as </span><span class="s1">fin:</span>
+        <span class="s1">lines = fin.readlines()</span>
+
+    <span class="s1">errors = defaultdict(</span><span class="s0">lambda</span><span class="s1">: </span><span class="s3">&quot;&quot;</span><span class="s1">)</span>
+
+    <span class="s1">output_mypy = OUTPUT_MYPY</span>
+    <span class="s0">assert </span><span class="s1">path </span><span class="s0">in </span><span class="s1">output_mypy</span>
+    <span class="s0">for </span><span class="s1">error_line </span><span class="s0">in </span><span class="s1">output_mypy[path]:</span>
+        <span class="s1">error_line = _strip_filename(error_line)</span>
+        <span class="s1">match = re.match(</span>
+            <span class="s3">r&quot;(?P&lt;lineno&gt;\d+): (error|note): .+$&quot;</span><span class="s0">,</span>
+            <span class="s1">error_line</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s0">if </span><span class="s1">match </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s3">f&quot;Unexpected error line format: </span><span class="s0">{</span><span class="s1">error_line</span><span class="s0">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+        <span class="s1">lineno = int(match.group(</span><span class="s3">'lineno'</span><span class="s1">))</span>
+        <span class="s1">errors[lineno] += </span><span class="s3">f'</span><span class="s0">{</span><span class="s1">error_line</span><span class="s0">}\n</span><span class="s3">'</span>
+
+    <span class="s0">for </span><span class="s1">i</span><span class="s0">, </span><span class="s1">line </span><span class="s0">in </span><span class="s1">enumerate(lines):</span>
+        <span class="s1">lineno = i + </span><span class="s5">1</span>
+        <span class="s0">if </span><span class="s1">(</span>
+            <span class="s1">line.startswith(</span><span class="s3">'#'</span><span class="s1">)</span>
+            <span class="s0">or </span><span class="s1">(</span><span class="s3">&quot; E:&quot; </span><span class="s0">not in </span><span class="s1">line </span><span class="s0">and </span><span class="s1">lineno </span><span class="s0">not in </span><span class="s1">errors)</span>
+        <span class="s1">):</span>
+            <span class="s0">continue</span>
+
+        <span class="s1">target_line = lines[lineno - </span><span class="s5">1</span><span class="s1">]</span>
+        <span class="s0">if </span><span class="s3">&quot;# E:&quot; </span><span class="s0">in </span><span class="s1">target_line:</span>
+            <span class="s1">expression</span><span class="s0">, </span><span class="s1">_</span><span class="s0">, </span><span class="s1">marker = target_line.partition(</span><span class="s3">&quot;  # E: &quot;</span><span class="s1">)</span>
+            <span class="s1">expected_error = errors[lineno].strip()</span>
+            <span class="s1">marker = marker.strip()</span>
+            <span class="s1">_test_fail(path</span><span class="s0">, </span><span class="s1">expression</span><span class="s0">, </span><span class="s1">marker</span><span class="s0">, </span><span class="s1">expected_error</span><span class="s0">, </span><span class="s1">lineno)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">pytest.fail(</span>
+                <span class="s3">f&quot;Unexpected mypy output at line </span><span class="s0">{</span><span class="s1">lineno</span><span class="s0">}\n\n{</span><span class="s1">errors[lineno]</span><span class="s0">}</span><span class="s3">&quot;</span>
+            <span class="s1">)</span>
+
+
+<span class="s1">_FAIL_MSG1 = </span><span class="s3">&quot;&quot;&quot;Extra error at line {} 
+ 
+Expression: {} 
+Extra error: {!r} 
+&quot;&quot;&quot;</span>
+
+<span class="s1">_FAIL_MSG2 = </span><span class="s3">&quot;&quot;&quot;Error mismatch at line {} 
+ 
+Expression: {} 
+Expected error: {!r} 
+Observed error: {!r} 
+&quot;&quot;&quot;</span>
+
+
+<span class="s0">def </span><span class="s1">_test_fail(</span>
+    <span class="s1">path: str</span><span class="s0">,</span>
+    <span class="s1">expression: str</span><span class="s0">,</span>
+    <span class="s1">error: str</span><span class="s0">,</span>
+    <span class="s1">expected_error: </span><span class="s0">None </span><span class="s1">| str</span><span class="s0">,</span>
+    <span class="s1">lineno: int</span><span class="s0">,</span>
+<span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+    <span class="s0">if </span><span class="s1">expected_error </span><span class="s0">is None</span><span class="s1">:</span>
+        <span class="s0">raise </span><span class="s1">AssertionError(_FAIL_MSG1.format(lineno</span><span class="s0">, </span><span class="s1">expression</span><span class="s0">, </span><span class="s1">error))</span>
+    <span class="s0">elif </span><span class="s1">error </span><span class="s0">not in </span><span class="s1">expected_error:</span>
+        <span class="s0">raise </span><span class="s1">AssertionError(_FAIL_MSG2.format(</span>
+            <span class="s1">lineno</span><span class="s0">, </span><span class="s1">expression</span><span class="s0">, </span><span class="s1">expected_error</span><span class="s0">, </span><span class="s1">error</span>
+        <span class="s1">))</span>
+
+
+<span class="s0">def </span><span class="s1">_construct_ctypes_dict() -&gt; dict[str</span><span class="s0">, </span><span class="s1">str]:</span>
+    <span class="s1">dct = {</span>
+        <span class="s3">&quot;ubyte&quot;</span><span class="s1">: </span><span class="s3">&quot;c_ubyte&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;ushort&quot;</span><span class="s1">: </span><span class="s3">&quot;c_ushort&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;uintc&quot;</span><span class="s1">: </span><span class="s3">&quot;c_uint&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;uint&quot;</span><span class="s1">: </span><span class="s3">&quot;c_ulong&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;ulonglong&quot;</span><span class="s1">: </span><span class="s3">&quot;c_ulonglong&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;byte&quot;</span><span class="s1">: </span><span class="s3">&quot;c_byte&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;short&quot;</span><span class="s1">: </span><span class="s3">&quot;c_short&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;intc&quot;</span><span class="s1">: </span><span class="s3">&quot;c_int&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;int_&quot;</span><span class="s1">: </span><span class="s3">&quot;c_long&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;longlong&quot;</span><span class="s1">: </span><span class="s3">&quot;c_longlong&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;single&quot;</span><span class="s1">: </span><span class="s3">&quot;c_float&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;double&quot;</span><span class="s1">: </span><span class="s3">&quot;c_double&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;longdouble&quot;</span><span class="s1">: </span><span class="s3">&quot;c_longdouble&quot;</span><span class="s0">,</span>
+    <span class="s1">}</span>
+
+    <span class="s2"># Match `ctypes` names to the first ctypes type with a given kind and</span>
+    <span class="s2"># precision, e.g. {&quot;c_double&quot;: &quot;c_double&quot;, &quot;c_longdouble&quot;: &quot;c_double&quot;}</span>
+    <span class="s2"># if both types represent 64-bit floats.</span>
+    <span class="s2"># In this context &quot;first&quot; is defined by the order of `dct`</span>
+    <span class="s1">ret = {}</span>
+    <span class="s1">visited: dict[tuple[str</span><span class="s0">, </span><span class="s1">int]</span><span class="s0">, </span><span class="s1">str] = {}</span>
+    <span class="s0">for </span><span class="s1">np_name</span><span class="s0">, </span><span class="s1">ct_name </span><span class="s0">in </span><span class="s1">dct.items():</span>
+        <span class="s1">np_scalar = getattr(np</span><span class="s0">, </span><span class="s1">np_name)()</span>
+
+        <span class="s2"># Find the first `ctypes` type for a given `kind`/`itemsize` combo</span>
+        <span class="s1">key = (np_scalar.dtype.kind</span><span class="s0">, </span><span class="s1">np_scalar.dtype.itemsize)</span>
+        <span class="s1">ret[ct_name] = visited.setdefault(key</span><span class="s0">, </span><span class="s3">f&quot;ctypes.</span><span class="s0">{</span><span class="s1">ct_name</span><span class="s0">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+    <span class="s0">return </span><span class="s1">ret</span>
+
+
+<span class="s0">def </span><span class="s1">_construct_format_dict() -&gt; dict[str</span><span class="s0">, </span><span class="s1">str]:</span>
+    <span class="s1">dct = {k.split(</span><span class="s3">&quot;.&quot;</span><span class="s1">)[-</span><span class="s5">1</span><span class="s1">]: v.replace(</span><span class="s3">&quot;numpy&quot;</span><span class="s0">, </span><span class="s3">&quot;numpy.typing&quot;</span><span class="s1">) </span><span class="s0">for</span>
+           <span class="s1">k</span><span class="s0">, </span><span class="s1">v </span><span class="s0">in </span><span class="s1">_PRECISION_DICT.items()}</span>
+
+    <span class="s0">return </span><span class="s1">{</span>
+        <span class="s3">&quot;uint8&quot;</span><span class="s1">: </span><span class="s3">&quot;numpy.unsignedinteger[numpy.typing._8Bit]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;uint16&quot;</span><span class="s1">: </span><span class="s3">&quot;numpy.unsignedinteger[numpy.typing._16Bit]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;uint32&quot;</span><span class="s1">: </span><span class="s3">&quot;numpy.unsignedinteger[numpy.typing._32Bit]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;uint64&quot;</span><span class="s1">: </span><span class="s3">&quot;numpy.unsignedinteger[numpy.typing._64Bit]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;uint128&quot;</span><span class="s1">: </span><span class="s3">&quot;numpy.unsignedinteger[numpy.typing._128Bit]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;uint256&quot;</span><span class="s1">: </span><span class="s3">&quot;numpy.unsignedinteger[numpy.typing._256Bit]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;int8&quot;</span><span class="s1">: </span><span class="s3">&quot;numpy.signedinteger[numpy.typing._8Bit]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;int16&quot;</span><span class="s1">: </span><span class="s3">&quot;numpy.signedinteger[numpy.typing._16Bit]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;int32&quot;</span><span class="s1">: </span><span class="s3">&quot;numpy.signedinteger[numpy.typing._32Bit]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;int64&quot;</span><span class="s1">: </span><span class="s3">&quot;numpy.signedinteger[numpy.typing._64Bit]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;int128&quot;</span><span class="s1">: </span><span class="s3">&quot;numpy.signedinteger[numpy.typing._128Bit]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;int256&quot;</span><span class="s1">: </span><span class="s3">&quot;numpy.signedinteger[numpy.typing._256Bit]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;float16&quot;</span><span class="s1">: </span><span class="s3">&quot;numpy.floating[numpy.typing._16Bit]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;float32&quot;</span><span class="s1">: </span><span class="s3">&quot;numpy.floating[numpy.typing._32Bit]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;float64&quot;</span><span class="s1">: </span><span class="s3">&quot;numpy.floating[numpy.typing._64Bit]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;float80&quot;</span><span class="s1">: </span><span class="s3">&quot;numpy.floating[numpy.typing._80Bit]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;float96&quot;</span><span class="s1">: </span><span class="s3">&quot;numpy.floating[numpy.typing._96Bit]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;float128&quot;</span><span class="s1">: </span><span class="s3">&quot;numpy.floating[numpy.typing._128Bit]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;float256&quot;</span><span class="s1">: </span><span class="s3">&quot;numpy.floating[numpy.typing._256Bit]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;complex64&quot;</span><span class="s1">: (</span><span class="s3">&quot;numpy.complexfloating&quot;</span>
+                      <span class="s3">&quot;[numpy.typing._32Bit, numpy.typing._32Bit]&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s3">&quot;complex128&quot;</span><span class="s1">: (</span><span class="s3">&quot;numpy.complexfloating&quot;</span>
+                       <span class="s3">&quot;[numpy.typing._64Bit, numpy.typing._64Bit]&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s3">&quot;complex160&quot;</span><span class="s1">: (</span><span class="s3">&quot;numpy.complexfloating&quot;</span>
+                       <span class="s3">&quot;[numpy.typing._80Bit, numpy.typing._80Bit]&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s3">&quot;complex192&quot;</span><span class="s1">: (</span><span class="s3">&quot;numpy.complexfloating&quot;</span>
+                       <span class="s3">&quot;[numpy.typing._96Bit, numpy.typing._96Bit]&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s3">&quot;complex256&quot;</span><span class="s1">: (</span><span class="s3">&quot;numpy.complexfloating&quot;</span>
+                       <span class="s3">&quot;[numpy.typing._128Bit, numpy.typing._128Bit]&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s3">&quot;complex512&quot;</span><span class="s1">: (</span><span class="s3">&quot;numpy.complexfloating&quot;</span>
+                       <span class="s3">&quot;[numpy.typing._256Bit, numpy.typing._256Bit]&quot;</span><span class="s1">)</span><span class="s0">,</span>
+
+        <span class="s3">&quot;ubyte&quot;</span><span class="s1">: </span><span class="s3">f&quot;numpy.unsignedinteger[</span><span class="s0">{</span><span class="s1">dct[</span><span class="s3">'_NBitByte'</span><span class="s1">]</span><span class="s0">}</span><span class="s3">]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;ushort&quot;</span><span class="s1">: </span><span class="s3">f&quot;numpy.unsignedinteger[</span><span class="s0">{</span><span class="s1">dct[</span><span class="s3">'_NBitShort'</span><span class="s1">]</span><span class="s0">}</span><span class="s3">]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;uintc&quot;</span><span class="s1">: </span><span class="s3">f&quot;numpy.unsignedinteger[</span><span class="s0">{</span><span class="s1">dct[</span><span class="s3">'_NBitIntC'</span><span class="s1">]</span><span class="s0">}</span><span class="s3">]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;uintp&quot;</span><span class="s1">: </span><span class="s3">f&quot;numpy.unsignedinteger[</span><span class="s0">{</span><span class="s1">dct[</span><span class="s3">'_NBitIntP'</span><span class="s1">]</span><span class="s0">}</span><span class="s3">]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;uint&quot;</span><span class="s1">: </span><span class="s3">f&quot;numpy.unsignedinteger[</span><span class="s0">{</span><span class="s1">dct[</span><span class="s3">'_NBitInt'</span><span class="s1">]</span><span class="s0">}</span><span class="s3">]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;ulonglong&quot;</span><span class="s1">: </span><span class="s3">f&quot;numpy.unsignedinteger[</span><span class="s0">{</span><span class="s1">dct[</span><span class="s3">'_NBitLongLong'</span><span class="s1">]</span><span class="s0">}</span><span class="s3">]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;byte&quot;</span><span class="s1">: </span><span class="s3">f&quot;numpy.signedinteger[</span><span class="s0">{</span><span class="s1">dct[</span><span class="s3">'_NBitByte'</span><span class="s1">]</span><span class="s0">}</span><span class="s3">]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;short&quot;</span><span class="s1">: </span><span class="s3">f&quot;numpy.signedinteger[</span><span class="s0">{</span><span class="s1">dct[</span><span class="s3">'_NBitShort'</span><span class="s1">]</span><span class="s0">}</span><span class="s3">]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;intc&quot;</span><span class="s1">: </span><span class="s3">f&quot;numpy.signedinteger[</span><span class="s0">{</span><span class="s1">dct[</span><span class="s3">'_NBitIntC'</span><span class="s1">]</span><span class="s0">}</span><span class="s3">]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;intp&quot;</span><span class="s1">: </span><span class="s3">f&quot;numpy.signedinteger[</span><span class="s0">{</span><span class="s1">dct[</span><span class="s3">'_NBitIntP'</span><span class="s1">]</span><span class="s0">}</span><span class="s3">]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;int_&quot;</span><span class="s1">: </span><span class="s3">f&quot;numpy.signedinteger[</span><span class="s0">{</span><span class="s1">dct[</span><span class="s3">'_NBitInt'</span><span class="s1">]</span><span class="s0">}</span><span class="s3">]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;longlong&quot;</span><span class="s1">: </span><span class="s3">f&quot;numpy.signedinteger[</span><span class="s0">{</span><span class="s1">dct[</span><span class="s3">'_NBitLongLong'</span><span class="s1">]</span><span class="s0">}</span><span class="s3">]&quot;</span><span class="s0">,</span>
+
+        <span class="s3">&quot;half&quot;</span><span class="s1">: </span><span class="s3">f&quot;numpy.floating[</span><span class="s0">{</span><span class="s1">dct[</span><span class="s3">'_NBitHalf'</span><span class="s1">]</span><span class="s0">}</span><span class="s3">]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;single&quot;</span><span class="s1">: </span><span class="s3">f&quot;numpy.floating[</span><span class="s0">{</span><span class="s1">dct[</span><span class="s3">'_NBitSingle'</span><span class="s1">]</span><span class="s0">}</span><span class="s3">]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;double&quot;</span><span class="s1">: </span><span class="s3">f&quot;numpy.floating[</span><span class="s0">{</span><span class="s1">dct[</span><span class="s3">'_NBitDouble'</span><span class="s1">]</span><span class="s0">}</span><span class="s3">]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;longdouble&quot;</span><span class="s1">: </span><span class="s3">f&quot;numpy.floating[</span><span class="s0">{</span><span class="s1">dct[</span><span class="s3">'_NBitLongDouble'</span><span class="s1">]</span><span class="s0">}</span><span class="s3">]&quot;</span><span class="s0">,</span>
+        <span class="s3">&quot;csingle&quot;</span><span class="s1">: (</span><span class="s3">&quot;numpy.complexfloating&quot;</span>
+                    <span class="s3">f&quot;[</span><span class="s0">{</span><span class="s1">dct[</span><span class="s3">'_NBitSingle'</span><span class="s1">]</span><span class="s0">}</span><span class="s3">, </span><span class="s0">{</span><span class="s1">dct[</span><span class="s3">'_NBitSingle'</span><span class="s1">]</span><span class="s0">}</span><span class="s3">]&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s3">&quot;cdouble&quot;</span><span class="s1">: (</span><span class="s3">&quot;numpy.complexfloating&quot;</span>
+                    <span class="s3">f&quot;[</span><span class="s0">{</span><span class="s1">dct[</span><span class="s3">'_NBitDouble'</span><span class="s1">]</span><span class="s0">}</span><span class="s3">, </span><span class="s0">{</span><span class="s1">dct[</span><span class="s3">'_NBitDouble'</span><span class="s1">]</span><span class="s0">}</span><span class="s3">]&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s3">&quot;clongdouble&quot;</span><span class="s1">: (</span>
+            <span class="s3">&quot;numpy.complexfloating&quot;</span>
+            <span class="s3">f&quot;[</span><span class="s0">{</span><span class="s1">dct[</span><span class="s3">'_NBitLongDouble'</span><span class="s1">]</span><span class="s0">}</span><span class="s3">, </span><span class="s0">{</span><span class="s1">dct[</span><span class="s3">'_NBitLongDouble'</span><span class="s1">]</span><span class="s0">}</span><span class="s3">]&quot;</span>
+        <span class="s1">)</span><span class="s0">,</span>
+
+        <span class="s2"># numpy.typing</span>
+        <span class="s3">&quot;_NBitInt&quot;</span><span class="s1">: dct[</span><span class="s3">'_NBitInt'</span><span class="s1">]</span><span class="s0">,</span>
+
+        <span class="s2"># numpy.ctypeslib</span>
+        <span class="s3">&quot;c_intp&quot;</span><span class="s1">: </span><span class="s3">f&quot;ctypes.</span><span class="s0">{</span><span class="s1">_C_INTP</span><span class="s0">}</span><span class="s3">&quot;</span>
+    <span class="s1">}</span>
+
+
+<span class="s2">#: A dictionary with all supported format keys (as keys)</span>
+<span class="s2">#: and matching values</span>
+<span class="s1">FORMAT_DICT: dict[str</span><span class="s0">, </span><span class="s1">str] = _construct_format_dict()</span>
+<span class="s1">FORMAT_DICT.update(_construct_ctypes_dict())</span>
+
+
+<span class="s0">def </span><span class="s1">_parse_reveals(file: IO[str]) -&gt; tuple[npt.NDArray[np.str_]</span><span class="s0">, </span><span class="s1">list[str]]:</span>
+    <span class="s4">&quot;&quot;&quot;Extract and parse all ``&quot;  # E: &quot;`` comments from the passed 
+    file-like object. 
+ 
+    All format keys will be substituted for their respective value 
+    from `FORMAT_DICT`, *e.g.* ``&quot;{float64}&quot;`` becomes 
+    ``&quot;numpy.floating[numpy.typing._64Bit]&quot;``. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">string = file.read().replace(</span><span class="s3">&quot;*&quot;</span><span class="s0">, </span><span class="s3">&quot;&quot;</span><span class="s1">)</span>
+
+    <span class="s2"># Grab all `# E:`-based comments and matching expressions</span>
+    <span class="s1">expression_array</span><span class="s0">, </span><span class="s1">_</span><span class="s0">, </span><span class="s1">comments_array = np.char.partition(</span>
+        <span class="s1">string.split(</span><span class="s3">&quot;</span><span class="s0">\n</span><span class="s3">&quot;</span><span class="s1">)</span><span class="s0">, </span><span class="s1">sep=</span><span class="s3">&quot;  # E: &quot;</span>
+    <span class="s1">).T</span>
+    <span class="s1">comments = </span><span class="s3">&quot;/n&quot;</span><span class="s1">.join(comments_array)</span>
+
+    <span class="s2"># Only search for the `{*}` pattern within comments, otherwise</span>
+    <span class="s2"># there is the risk of accidentally grabbing dictionaries and sets</span>
+    <span class="s1">key_set = set(re.findall(</span><span class="s3">r&quot;\{(.*?)\}&quot;</span><span class="s0">, </span><span class="s1">comments))</span>
+    <span class="s1">kwargs = {</span>
+        <span class="s1">k: FORMAT_DICT.get(k</span><span class="s0">, </span><span class="s3">f&quot;&lt;UNRECOGNIZED FORMAT KEY </span><span class="s0">{</span><span class="s1">k</span><span class="s0">!r}</span><span class="s3">&gt;&quot;</span><span class="s1">) </span><span class="s0">for</span>
+        <span class="s1">k </span><span class="s0">in </span><span class="s1">key_set</span>
+    <span class="s1">}</span>
+    <span class="s1">fmt_str = comments.format(**kwargs)</span>
+
+    <span class="s0">return </span><span class="s1">expression_array</span><span class="s0">, </span><span class="s1">fmt_str.split(</span><span class="s3">&quot;/n&quot;</span><span class="s1">)</span>
+
+
+<span class="s1">@pytest.mark.slow</span>
+<span class="s1">@pytest.mark.skipif(NO_MYPY</span><span class="s0">, </span><span class="s1">reason=</span><span class="s3">&quot;Mypy is not installed&quot;</span><span class="s1">)</span>
+<span class="s1">@pytest.mark.parametrize(</span><span class="s3">&quot;path&quot;</span><span class="s0">, </span><span class="s1">get_test_cases(REVEAL_DIR))</span>
+<span class="s0">def </span><span class="s1">test_reveal(path: str) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+    <span class="s4">&quot;&quot;&quot;Validate that mypy correctly infers the return-types of 
+    the expressions in `path`. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">__tracebackhide__ = </span><span class="s0">True</span>
+
+    <span class="s0">with </span><span class="s1">open(path) </span><span class="s0">as </span><span class="s1">fin:</span>
+        <span class="s1">expression_array</span><span class="s0">, </span><span class="s1">reveal_list = _parse_reveals(fin)</span>
+
+    <span class="s1">output_mypy = OUTPUT_MYPY</span>
+    <span class="s0">assert </span><span class="s1">path </span><span class="s0">in </span><span class="s1">output_mypy</span>
+    <span class="s0">for </span><span class="s1">error_line </span><span class="s0">in </span><span class="s1">output_mypy[path]:</span>
+        <span class="s1">error_line = _strip_filename(error_line)</span>
+        <span class="s1">match = re.match(</span>
+            <span class="s3">r&quot;(?P&lt;lineno&gt;\d+): note: .+$&quot;</span><span class="s0">,</span>
+            <span class="s1">error_line</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s0">if </span><span class="s1">match </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s3">f&quot;Unexpected reveal line format: </span><span class="s0">{</span><span class="s1">error_line</span><span class="s0">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+        <span class="s1">lineno = int(match.group(</span><span class="s3">'lineno'</span><span class="s1">)) - </span><span class="s5">1</span>
+        <span class="s0">assert </span><span class="s3">&quot;Revealed type is&quot; </span><span class="s0">in </span><span class="s1">error_line</span>
+
+        <span class="s1">marker = reveal_list[lineno]</span>
+        <span class="s1">expression = expression_array[lineno]</span>
+        <span class="s1">_test_reveal(path</span><span class="s0">, </span><span class="s1">expression</span><span class="s0">, </span><span class="s1">marker</span><span class="s0">, </span><span class="s1">error_line</span><span class="s0">, </span><span class="s5">1 </span><span class="s1">+ lineno)</span>
+
+
+<span class="s1">_REVEAL_MSG = </span><span class="s3">&quot;&quot;&quot;Reveal mismatch at line {} 
+ 
+Expression: {} 
+Expected reveal: {!r} 
+Observed reveal: {!r} 
+&quot;&quot;&quot;</span>
+
+
+<span class="s0">def </span><span class="s1">_test_reveal(</span>
+    <span class="s1">path: str</span><span class="s0">,</span>
+    <span class="s1">expression: str</span><span class="s0">,</span>
+    <span class="s1">reveal: str</span><span class="s0">,</span>
+    <span class="s1">expected_reveal: str</span><span class="s0">,</span>
+    <span class="s1">lineno: int</span><span class="s0">,</span>
+<span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+    <span class="s4">&quot;&quot;&quot;Error-reporting helper function for `test_reveal`.&quot;&quot;&quot;</span>
+    <span class="s1">strip_pattern = re.compile(</span><span class="s3">r&quot;(\w+\.)+(\w+)&quot;</span><span class="s1">)</span>
+    <span class="s1">stripped_reveal = strip_pattern.sub(strip_func</span><span class="s0">, </span><span class="s1">reveal)</span>
+    <span class="s1">stripped_expected_reveal = strip_pattern.sub(strip_func</span><span class="s0">, </span><span class="s1">expected_reveal)</span>
+    <span class="s0">if </span><span class="s1">stripped_reveal </span><span class="s0">not in </span><span class="s1">stripped_expected_reveal:</span>
+        <span class="s0">raise </span><span class="s1">AssertionError(</span>
+            <span class="s1">_REVEAL_MSG.format(lineno</span><span class="s0">,</span>
+                               <span class="s1">expression</span><span class="s0">,</span>
+                               <span class="s1">stripped_expected_reveal</span><span class="s0">,</span>
+                               <span class="s1">stripped_reveal)</span>
+        <span class="s1">)</span>
+
+
+<span class="s1">@pytest.mark.slow</span>
+<span class="s1">@pytest.mark.skipif(NO_MYPY</span><span class="s0">, </span><span class="s1">reason=</span><span class="s3">&quot;Mypy is not installed&quot;</span><span class="s1">)</span>
+<span class="s1">@pytest.mark.parametrize(</span><span class="s3">&quot;path&quot;</span><span class="s0">, </span><span class="s1">get_test_cases(PASS_DIR))</span>
+<span class="s0">def </span><span class="s1">test_code_runs(path: str) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+    <span class="s4">&quot;&quot;&quot;Validate that the code in `path` properly during runtime.&quot;&quot;&quot;</span>
+    <span class="s1">path_without_extension</span><span class="s0">, </span><span class="s1">_ = os.path.splitext(path)</span>
+    <span class="s1">dirname</span><span class="s0">, </span><span class="s1">filename = path.split(os.sep)[-</span><span class="s5">2</span><span class="s1">:]</span>
+
+    <span class="s1">spec = importlib.util.spec_from_file_location(</span>
+        <span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">dirname</span><span class="s0">}</span><span class="s3">.</span><span class="s0">{</span><span class="s1">filename</span><span class="s0">}</span><span class="s3">&quot;</span><span class="s0">, </span><span class="s1">path</span>
+    <span class="s1">)</span>
+    <span class="s0">assert </span><span class="s1">spec </span><span class="s0">is not None</span>
+    <span class="s0">assert </span><span class="s1">spec.loader </span><span class="s0">is not None</span>
+
+    <span class="s1">test_module = importlib.util.module_from_spec(spec)</span>
+    <span class="s1">spec.loader.exec_module(test_module)</span>
+
+
+<span class="s1">LINENO_MAPPING = {</span>
+    <span class="s5">3</span><span class="s1">: </span><span class="s3">&quot;uint128&quot;</span><span class="s0">,</span>
+    <span class="s5">4</span><span class="s1">: </span><span class="s3">&quot;uint256&quot;</span><span class="s0">,</span>
+    <span class="s5">6</span><span class="s1">: </span><span class="s3">&quot;int128&quot;</span><span class="s0">,</span>
+    <span class="s5">7</span><span class="s1">: </span><span class="s3">&quot;int256&quot;</span><span class="s0">,</span>
+    <span class="s5">9</span><span class="s1">: </span><span class="s3">&quot;float80&quot;</span><span class="s0">,</span>
+    <span class="s5">10</span><span class="s1">: </span><span class="s3">&quot;float96&quot;</span><span class="s0">,</span>
+    <span class="s5">11</span><span class="s1">: </span><span class="s3">&quot;float128&quot;</span><span class="s0">,</span>
+    <span class="s5">12</span><span class="s1">: </span><span class="s3">&quot;float256&quot;</span><span class="s0">,</span>
+    <span class="s5">14</span><span class="s1">: </span><span class="s3">&quot;complex160&quot;</span><span class="s0">,</span>
+    <span class="s5">15</span><span class="s1">: </span><span class="s3">&quot;complex192&quot;</span><span class="s0">,</span>
+    <span class="s5">16</span><span class="s1">: </span><span class="s3">&quot;complex256&quot;</span><span class="s0">,</span>
+    <span class="s5">17</span><span class="s1">: </span><span class="s3">&quot;complex512&quot;</span><span class="s0">,</span>
+<span class="s1">}</span>
+
+
+<span class="s1">@pytest.mark.slow</span>
+<span class="s1">@pytest.mark.skipif(NO_MYPY</span><span class="s0">, </span><span class="s1">reason=</span><span class="s3">&quot;Mypy is not installed&quot;</span><span class="s1">)</span>
+<span class="s0">def </span><span class="s1">test_extended_precision() -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+    <span class="s1">path = os.path.join(MISC_DIR</span><span class="s0">, </span><span class="s3">&quot;extended_precision.pyi&quot;</span><span class="s1">)</span>
+    <span class="s1">output_mypy = OUTPUT_MYPY</span>
+    <span class="s0">assert </span><span class="s1">path </span><span class="s0">in </span><span class="s1">output_mypy</span>
+
+    <span class="s0">with </span><span class="s1">open(path</span><span class="s0">, </span><span class="s3">&quot;r&quot;</span><span class="s1">) </span><span class="s0">as </span><span class="s1">f:</span>
+        <span class="s1">expression_list = f.readlines()</span>
+
+    <span class="s0">for </span><span class="s1">_msg </span><span class="s0">in </span><span class="s1">output_mypy[path]:</span>
+        <span class="s1">*_</span><span class="s0">, </span><span class="s1">_lineno</span><span class="s0">, </span><span class="s1">msg_typ</span><span class="s0">, </span><span class="s1">msg = _msg.split(</span><span class="s3">&quot;:&quot;</span><span class="s1">)</span>
+
+        <span class="s1">msg = _strip_filename(msg)</span>
+        <span class="s1">lineno = int(_lineno)</span>
+        <span class="s1">expression = expression_list[lineno - </span><span class="s5">1</span><span class="s1">].rstrip(</span><span class="s3">&quot;</span><span class="s0">\n</span><span class="s3">&quot;</span><span class="s1">)</span>
+        <span class="s1">msg_typ = msg_typ.strip()</span>
+        <span class="s0">assert </span><span class="s1">msg_typ </span><span class="s0">in </span><span class="s1">{</span><span class="s3">&quot;error&quot;</span><span class="s0">, </span><span class="s3">&quot;note&quot;</span><span class="s1">}</span>
+
+        <span class="s0">if </span><span class="s1">LINENO_MAPPING[lineno] </span><span class="s0">in </span><span class="s1">_EXTENDED_PRECISION_LIST:</span>
+            <span class="s0">if </span><span class="s1">msg_typ == </span><span class="s3">&quot;error&quot;</span><span class="s1">:</span>
+                <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s3">f&quot;Unexpected reveal line format: </span><span class="s0">{</span><span class="s1">lineno</span><span class="s0">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">marker = FORMAT_DICT[LINENO_MAPPING[lineno]]</span>
+                <span class="s1">_test_reveal(path</span><span class="s0">, </span><span class="s1">expression</span><span class="s0">, </span><span class="s1">marker</span><span class="s0">, </span><span class="s1">msg</span><span class="s0">, </span><span class="s1">lineno)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">if </span><span class="s1">msg_typ == </span><span class="s3">&quot;error&quot;</span><span class="s1">:</span>
+                <span class="s1">marker = </span><span class="s3">&quot;Module has no attribute&quot;</span>
+                <span class="s1">_test_fail(path</span><span class="s0">, </span><span class="s1">expression</span><span class="s0">, </span><span class="s1">marker</span><span class="s0">, </span><span class="s1">msg</span><span class="s0">, </span><span class="s1">lineno)</span>
+</pre>
+</body>
+</html>

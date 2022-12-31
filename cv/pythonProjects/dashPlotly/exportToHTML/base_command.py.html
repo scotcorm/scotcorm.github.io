@@ -1,0 +1,244 @@
+<html>
+<head>
+<title>base_command.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #808080;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+base_command.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;Base Command class, and related routines&quot;&quot;&quot;</span>
+
+<span class="s2">import </span><span class="s1">functools</span>
+<span class="s2">import </span><span class="s1">logging</span>
+<span class="s2">import </span><span class="s1">logging.config</span>
+<span class="s2">import </span><span class="s1">optparse</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">traceback</span>
+<span class="s2">from </span><span class="s1">optparse </span><span class="s2">import </span><span class="s1">Values</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Any</span><span class="s2">, </span><span class="s1">Callable</span><span class="s2">, </span><span class="s1">List</span><span class="s2">, </span><span class="s1">Optional</span><span class="s2">, </span><span class="s1">Tuple</span>
+
+<span class="s2">from </span><span class="s1">pip._vendor.rich </span><span class="s2">import </span><span class="s1">traceback </span><span class="s2">as </span><span class="s1">rich_traceback</span>
+
+<span class="s2">from </span><span class="s1">pip._internal.cli </span><span class="s2">import </span><span class="s1">cmdoptions</span>
+<span class="s2">from </span><span class="s1">pip._internal.cli.command_context </span><span class="s2">import </span><span class="s1">CommandContextMixIn</span>
+<span class="s2">from </span><span class="s1">pip._internal.cli.parser </span><span class="s2">import </span><span class="s1">ConfigOptionParser</span><span class="s2">, </span><span class="s1">UpdatingDefaultsHelpFormatter</span>
+<span class="s2">from </span><span class="s1">pip._internal.cli.status_codes </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">ERROR</span><span class="s2">,</span>
+    <span class="s1">PREVIOUS_BUILD_DIR_ERROR</span><span class="s2">,</span>
+    <span class="s1">UNKNOWN_ERROR</span><span class="s2">,</span>
+    <span class="s1">VIRTUALENV_NOT_FOUND</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pip._internal.exceptions </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">BadCommand</span><span class="s2">,</span>
+    <span class="s1">CommandError</span><span class="s2">,</span>
+    <span class="s1">DiagnosticPipError</span><span class="s2">,</span>
+    <span class="s1">InstallationError</span><span class="s2">,</span>
+    <span class="s1">NetworkConnectionError</span><span class="s2">,</span>
+    <span class="s1">PreviousBuildDirError</span><span class="s2">,</span>
+    <span class="s1">UninstallationError</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pip._internal.utils.filesystem </span><span class="s2">import </span><span class="s1">check_path_owner</span>
+<span class="s2">from </span><span class="s1">pip._internal.utils.logging </span><span class="s2">import </span><span class="s1">BrokenStdoutLoggingError</span><span class="s2">, </span><span class="s1">setup_logging</span>
+<span class="s2">from </span><span class="s1">pip._internal.utils.misc </span><span class="s2">import </span><span class="s1">get_prog</span><span class="s2">, </span><span class="s1">normalize_path</span>
+<span class="s2">from </span><span class="s1">pip._internal.utils.temp_dir </span><span class="s2">import </span><span class="s1">TempDirectoryTypeRegistry </span><span class="s2">as </span><span class="s1">TempDirRegistry</span>
+<span class="s2">from </span><span class="s1">pip._internal.utils.temp_dir </span><span class="s2">import </span><span class="s1">global_tempdir_manager</span><span class="s2">, </span><span class="s1">tempdir_registry</span>
+<span class="s2">from </span><span class="s1">pip._internal.utils.virtualenv </span><span class="s2">import </span><span class="s1">running_under_virtualenv</span>
+
+<span class="s1">__all__ = [</span><span class="s3">&quot;Command&quot;</span><span class="s1">]</span>
+
+<span class="s1">logger = logging.getLogger(__name__)</span>
+
+
+<span class="s2">class </span><span class="s1">Command(CommandContextMixIn):</span>
+    <span class="s1">usage: str = </span><span class="s3">&quot;&quot;</span>
+    <span class="s1">ignore_require_venv: bool = </span><span class="s2">False</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">name: str</span><span class="s2">, </span><span class="s1">summary: str</span><span class="s2">, </span><span class="s1">isolated: bool = </span><span class="s2">False</span><span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">super().__init__()</span>
+
+        <span class="s1">self.name = name</span>
+        <span class="s1">self.summary = summary</span>
+        <span class="s1">self.parser = ConfigOptionParser(</span>
+            <span class="s1">usage=self.usage</span><span class="s2">,</span>
+            <span class="s1">prog=</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">get_prog()</span><span class="s2">} {</span><span class="s1">name</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s2">,</span>
+            <span class="s1">formatter=UpdatingDefaultsHelpFormatter()</span><span class="s2">,</span>
+            <span class="s1">add_help_option=</span><span class="s2">False,</span>
+            <span class="s1">name=name</span><span class="s2">,</span>
+            <span class="s1">description=self.__doc__</span><span class="s2">,</span>
+            <span class="s1">isolated=isolated</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+        <span class="s1">self.tempdir_registry: Optional[TempDirRegistry] = </span><span class="s2">None</span>
+
+        <span class="s4"># Commands should add options to this option group</span>
+        <span class="s1">optgroup_name = </span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">self.name.capitalize()</span><span class="s2">} </span><span class="s3">Options&quot;</span>
+        <span class="s1">self.cmd_opts = optparse.OptionGroup(self.parser</span><span class="s2">, </span><span class="s1">optgroup_name)</span>
+
+        <span class="s4"># Add the general options</span>
+        <span class="s1">gen_opts = cmdoptions.make_option_group(</span>
+            <span class="s1">cmdoptions.general_group</span><span class="s2">,</span>
+            <span class="s1">self.parser</span><span class="s2">,</span>
+        <span class="s1">)</span>
+        <span class="s1">self.parser.add_option_group(gen_opts)</span>
+
+        <span class="s1">self.add_options()</span>
+
+    <span class="s2">def </span><span class="s1">add_options(self) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">pass</span>
+
+    <span class="s2">def </span><span class="s1">handle_pip_version_check(self</span><span class="s2">, </span><span class="s1">options: Values) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot; 
+        This is a no-op so that commands by default do not do the pip version 
+        check. 
+        &quot;&quot;&quot;</span>
+        <span class="s4"># Make sure we do the pip version check if the index_group options</span>
+        <span class="s4"># are present.</span>
+        <span class="s2">assert not </span><span class="s1">hasattr(options</span><span class="s2">, </span><span class="s3">&quot;no_index&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">run(self</span><span class="s2">, </span><span class="s1">options: Values</span><span class="s2">, </span><span class="s1">args: List[str]) -&gt; int:</span>
+        <span class="s2">raise </span><span class="s1">NotImplementedError</span>
+
+    <span class="s2">def </span><span class="s1">parse_args(self</span><span class="s2">, </span><span class="s1">args: List[str]) -&gt; Tuple[Values</span><span class="s2">, </span><span class="s1">List[str]]:</span>
+        <span class="s4"># factored out for testability</span>
+        <span class="s2">return </span><span class="s1">self.parser.parse_args(args)</span>
+
+    <span class="s2">def </span><span class="s1">main(self</span><span class="s2">, </span><span class="s1">args: List[str]) -&gt; int:</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">with </span><span class="s1">self.main_context():</span>
+                <span class="s2">return </span><span class="s1">self._main(args)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">logging.shutdown()</span>
+
+    <span class="s2">def </span><span class="s1">_main(self</span><span class="s2">, </span><span class="s1">args: List[str]) -&gt; int:</span>
+        <span class="s4"># We must initialize this before the tempdir manager, otherwise the</span>
+        <span class="s4"># configuration would not be accessible by the time we clean up the</span>
+        <span class="s4"># tempdir manager.</span>
+        <span class="s1">self.tempdir_registry = self.enter_context(tempdir_registry())</span>
+        <span class="s4"># Intentionally set as early as possible so globally-managed temporary</span>
+        <span class="s4"># directories are available to the rest of the code.</span>
+        <span class="s1">self.enter_context(global_tempdir_manager())</span>
+
+        <span class="s1">options</span><span class="s2">, </span><span class="s1">args = self.parse_args(args)</span>
+
+        <span class="s4"># Set verbosity so that it can be used elsewhere.</span>
+        <span class="s1">self.verbosity = options.verbose - options.quiet</span>
+
+        <span class="s1">level_number = setup_logging(</span>
+            <span class="s1">verbosity=self.verbosity</span><span class="s2">,</span>
+            <span class="s1">no_color=options.no_color</span><span class="s2">,</span>
+            <span class="s1">user_log_file=options.log</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+        <span class="s4"># TODO: Try to get these passing down from the command?</span>
+        <span class="s4">#       without resorting to os.environ to hold these.</span>
+        <span class="s4">#       This also affects isolated builds and it should.</span>
+
+        <span class="s2">if </span><span class="s1">options.no_input:</span>
+            <span class="s1">os.environ[</span><span class="s3">&quot;PIP_NO_INPUT&quot;</span><span class="s1">] = </span><span class="s3">&quot;1&quot;</span>
+
+        <span class="s2">if </span><span class="s1">options.exists_action:</span>
+            <span class="s1">os.environ[</span><span class="s3">&quot;PIP_EXISTS_ACTION&quot;</span><span class="s1">] = </span><span class="s3">&quot; &quot;</span><span class="s1">.join(options.exists_action)</span>
+
+        <span class="s2">if </span><span class="s1">options.require_venv </span><span class="s2">and not </span><span class="s1">self.ignore_require_venv:</span>
+            <span class="s4"># If a venv is required check if it can really be found</span>
+            <span class="s2">if not </span><span class="s1">running_under_virtualenv():</span>
+                <span class="s1">logger.critical(</span><span class="s3">&quot;Could not find an activated virtualenv (required).&quot;</span><span class="s1">)</span>
+                <span class="s1">sys.exit(VIRTUALENV_NOT_FOUND)</span>
+
+        <span class="s2">if </span><span class="s1">options.cache_dir:</span>
+            <span class="s1">options.cache_dir = normalize_path(options.cache_dir)</span>
+            <span class="s2">if not </span><span class="s1">check_path_owner(options.cache_dir):</span>
+                <span class="s1">logger.warning(</span>
+                    <span class="s3">&quot;The directory '%s' or its parent directory is not owned &quot;</span>
+                    <span class="s3">&quot;or is not writable by the current user. The cache &quot;</span>
+                    <span class="s3">&quot;has been disabled. Check the permissions and owner of &quot;</span>
+                    <span class="s3">&quot;that directory. If executing pip with sudo, you should &quot;</span>
+                    <span class="s3">&quot;use sudo's -H flag.&quot;</span><span class="s2">,</span>
+                    <span class="s1">options.cache_dir</span><span class="s2">,</span>
+                <span class="s1">)</span>
+                <span class="s1">options.cache_dir = </span><span class="s2">None</span>
+
+        <span class="s2">if </span><span class="s3">&quot;2020-resolver&quot; </span><span class="s2">in </span><span class="s1">options.features_enabled:</span>
+            <span class="s1">logger.warning(</span>
+                <span class="s3">&quot;--use-feature=2020-resolver no longer has any effect, &quot;</span>
+                <span class="s3">&quot;since it is now the default dependency resolver in pip. &quot;</span>
+                <span class="s3">&quot;This will become an error in pip 21.0.&quot;</span>
+            <span class="s1">)</span>
+
+        <span class="s2">def </span><span class="s1">intercepts_unhandled_exc(</span>
+            <span class="s1">run_func: Callable[...</span><span class="s2">, </span><span class="s1">int]</span>
+        <span class="s1">) -&gt; Callable[...</span><span class="s2">, </span><span class="s1">int]:</span>
+            <span class="s1">@functools.wraps(run_func)</span>
+            <span class="s2">def </span><span class="s1">exc_logging_wrapper(*args: Any) -&gt; int:</span>
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s1">status = run_func(*args)</span>
+                    <span class="s2">assert </span><span class="s1">isinstance(status</span><span class="s2">, </span><span class="s1">int)</span>
+                    <span class="s2">return </span><span class="s1">status</span>
+                <span class="s2">except </span><span class="s1">DiagnosticPipError </span><span class="s2">as </span><span class="s1">exc:</span>
+                    <span class="s1">logger.error(</span><span class="s3">&quot;[present-diagnostic] %s&quot;</span><span class="s2">, </span><span class="s1">exc)</span>
+                    <span class="s1">logger.debug(</span><span class="s3">&quot;Exception information:&quot;</span><span class="s2">, </span><span class="s1">exc_info=</span><span class="s2">True</span><span class="s1">)</span>
+
+                    <span class="s2">return </span><span class="s1">ERROR</span>
+                <span class="s2">except </span><span class="s1">PreviousBuildDirError </span><span class="s2">as </span><span class="s1">exc:</span>
+                    <span class="s1">logger.critical(str(exc))</span>
+                    <span class="s1">logger.debug(</span><span class="s3">&quot;Exception information:&quot;</span><span class="s2">, </span><span class="s1">exc_info=</span><span class="s2">True</span><span class="s1">)</span>
+
+                    <span class="s2">return </span><span class="s1">PREVIOUS_BUILD_DIR_ERROR</span>
+                <span class="s2">except </span><span class="s1">(</span>
+                    <span class="s1">InstallationError</span><span class="s2">,</span>
+                    <span class="s1">UninstallationError</span><span class="s2">,</span>
+                    <span class="s1">BadCommand</span><span class="s2">,</span>
+                    <span class="s1">NetworkConnectionError</span><span class="s2">,</span>
+                <span class="s1">) </span><span class="s2">as </span><span class="s1">exc:</span>
+                    <span class="s1">logger.critical(str(exc))</span>
+                    <span class="s1">logger.debug(</span><span class="s3">&quot;Exception information:&quot;</span><span class="s2">, </span><span class="s1">exc_info=</span><span class="s2">True</span><span class="s1">)</span>
+
+                    <span class="s2">return </span><span class="s1">ERROR</span>
+                <span class="s2">except </span><span class="s1">CommandError </span><span class="s2">as </span><span class="s1">exc:</span>
+                    <span class="s1">logger.critical(</span><span class="s3">&quot;%s&quot;</span><span class="s2">, </span><span class="s1">exc)</span>
+                    <span class="s1">logger.debug(</span><span class="s3">&quot;Exception information:&quot;</span><span class="s2">, </span><span class="s1">exc_info=</span><span class="s2">True</span><span class="s1">)</span>
+
+                    <span class="s2">return </span><span class="s1">ERROR</span>
+                <span class="s2">except </span><span class="s1">BrokenStdoutLoggingError:</span>
+                    <span class="s4"># Bypass our logger and write any remaining messages to</span>
+                    <span class="s4"># stderr because stdout no longer works.</span>
+                    <span class="s1">print(</span><span class="s3">&quot;ERROR: Pipe to stdout was broken&quot;</span><span class="s2">, </span><span class="s1">file=sys.stderr)</span>
+                    <span class="s2">if </span><span class="s1">level_number &lt;= logging.DEBUG:</span>
+                        <span class="s1">traceback.print_exc(file=sys.stderr)</span>
+
+                    <span class="s2">return </span><span class="s1">ERROR</span>
+                <span class="s2">except </span><span class="s1">KeyboardInterrupt:</span>
+                    <span class="s1">logger.critical(</span><span class="s3">&quot;Operation cancelled by user&quot;</span><span class="s1">)</span>
+                    <span class="s1">logger.debug(</span><span class="s3">&quot;Exception information:&quot;</span><span class="s2">, </span><span class="s1">exc_info=</span><span class="s2">True</span><span class="s1">)</span>
+
+                    <span class="s2">return </span><span class="s1">ERROR</span>
+                <span class="s2">except </span><span class="s1">BaseException:</span>
+                    <span class="s1">logger.critical(</span><span class="s3">&quot;Exception:&quot;</span><span class="s2">, </span><span class="s1">exc_info=</span><span class="s2">True</span><span class="s1">)</span>
+
+                    <span class="s2">return </span><span class="s1">UNKNOWN_ERROR</span>
+
+            <span class="s2">return </span><span class="s1">exc_logging_wrapper</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">if not </span><span class="s1">options.debug_mode:</span>
+                <span class="s1">run = intercepts_unhandled_exc(self.run)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">run = self.run</span>
+                <span class="s1">rich_traceback.install(show_locals=</span><span class="s2">True</span><span class="s1">)</span>
+            <span class="s2">return </span><span class="s1">run(options</span><span class="s2">, </span><span class="s1">args)</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">self.handle_pip_version_check(options)</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,2278 @@
+<html>
+<head>
+<title>sql.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #808080;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+sql.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+Collection of query wrappers / abstractions to both facilitate data 
+retrieval and to reduce dependency on DB-specific API. 
+&quot;&quot;&quot;</span>
+
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">from </span><span class="s1">contextlib </span><span class="s2">import </span><span class="s1">contextmanager</span>
+<span class="s2">from </span><span class="s1">datetime </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">date</span><span class="s2">,</span>
+    <span class="s1">datetime</span><span class="s2">,</span>
+    <span class="s1">time</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">functools </span><span class="s2">import </span><span class="s1">partial</span>
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">Any</span><span class="s2">,</span>
+    <span class="s1">Iterator</span><span class="s2">,</span>
+    <span class="s1">Sequence</span><span class="s2">,</span>
+    <span class="s1">cast</span><span class="s2">,</span>
+    <span class="s1">overload</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">import </span><span class="s1">warnings</span>
+
+<span class="s2">import </span><span class="s1">numpy </span><span class="s2">as </span><span class="s1">np</span>
+
+<span class="s2">import </span><span class="s1">pandas._libs.lib </span><span class="s2">as </span><span class="s1">lib</span>
+<span class="s2">from </span><span class="s1">pandas._typing </span><span class="s2">import </span><span class="s1">DtypeArg</span>
+<span class="s2">from </span><span class="s1">pandas.compat._optional </span><span class="s2">import </span><span class="s1">import_optional_dependency</span>
+<span class="s2">from </span><span class="s1">pandas.errors </span><span class="s2">import </span><span class="s1">AbstractMethodError</span>
+<span class="s2">from </span><span class="s1">pandas.util._exceptions </span><span class="s2">import </span><span class="s1">find_stack_level</span>
+
+<span class="s2">from </span><span class="s1">pandas.core.dtypes.common </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">is_datetime64tz_dtype</span><span class="s2">,</span>
+    <span class="s1">is_dict_like</span><span class="s2">,</span>
+    <span class="s1">is_list_like</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas.core.dtypes.dtypes </span><span class="s2">import </span><span class="s1">DatetimeTZDtype</span>
+<span class="s2">from </span><span class="s1">pandas.core.dtypes.missing </span><span class="s2">import </span><span class="s1">isna</span>
+
+<span class="s2">from </span><span class="s1">pandas </span><span class="s2">import </span><span class="s1">get_option</span>
+<span class="s2">from </span><span class="s1">pandas.core.api </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">DataFrame</span><span class="s2">,</span>
+    <span class="s1">Series</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas.core.base </span><span class="s2">import </span><span class="s1">PandasObject</span>
+<span class="s2">import </span><span class="s1">pandas.core.common </span><span class="s2">as </span><span class="s1">com</span>
+<span class="s2">from </span><span class="s1">pandas.core.tools.datetimes </span><span class="s2">import </span><span class="s1">to_datetime</span>
+<span class="s2">from </span><span class="s1">pandas.util.version </span><span class="s2">import </span><span class="s1">Version</span>
+
+
+<span class="s2">class </span><span class="s1">DatabaseError(OSError):</span>
+    <span class="s2">pass</span>
+
+
+<span class="s3"># -----------------------------------------------------------------------------</span>
+<span class="s3"># -- Helper functions</span>
+
+
+<span class="s2">def </span><span class="s1">_gt14() -&gt; bool:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Check if sqlalchemy.__version__ is at least 1.4.0, when several 
+    deprecations were made. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">import </span><span class="s1">sqlalchemy</span>
+
+    <span class="s2">return </span><span class="s1">Version(sqlalchemy.__version__) &gt;= Version(</span><span class="s4">&quot;1.4.0&quot;</span><span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">_convert_params(sql</span><span class="s2">, </span><span class="s1">params):</span>
+    <span class="s0">&quot;&quot;&quot;Convert SQL and params args to DBAPI2.0 compliant format.&quot;&quot;&quot;</span>
+    <span class="s1">args = [sql]</span>
+    <span class="s2">if </span><span class="s1">params </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">hasattr(params</span><span class="s2">, </span><span class="s4">&quot;keys&quot;</span><span class="s1">):  </span><span class="s3"># test if params is a mapping</span>
+            <span class="s1">args += [params]</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">args += [list(params)]</span>
+    <span class="s2">return </span><span class="s1">args</span>
+
+
+<span class="s2">def </span><span class="s1">_process_parse_dates_argument(parse_dates):</span>
+    <span class="s0">&quot;&quot;&quot;Process parse_dates argument for read_sql functions&quot;&quot;&quot;</span>
+    <span class="s3"># handle non-list entries for parse_dates gracefully</span>
+    <span class="s2">if </span><span class="s1">parse_dates </span><span class="s2">is True or </span><span class="s1">parse_dates </span><span class="s2">is None or </span><span class="s1">parse_dates </span><span class="s2">is False</span><span class="s1">:</span>
+        <span class="s1">parse_dates = []</span>
+
+    <span class="s2">elif not </span><span class="s1">hasattr(parse_dates</span><span class="s2">, </span><span class="s4">&quot;__iter__&quot;</span><span class="s1">):</span>
+        <span class="s1">parse_dates = [parse_dates]</span>
+    <span class="s2">return </span><span class="s1">parse_dates</span>
+
+
+<span class="s2">def </span><span class="s1">_handle_date_column(</span>
+    <span class="s1">col</span><span class="s2">, </span><span class="s1">utc: bool | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None, </span><span class="s1">format: str | dict[str</span><span class="s2">, </span><span class="s1">Any] | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None</span>
+<span class="s1">):</span>
+    <span class="s2">if </span><span class="s1">isinstance(format</span><span class="s2">, </span><span class="s1">dict):</span>
+        <span class="s3"># GH35185 Allow custom error values in parse_dates argument of</span>
+        <span class="s3"># read_sql like functions.</span>
+        <span class="s3"># Format can take on custom to_datetime argument values such as</span>
+        <span class="s3"># {&quot;errors&quot;: &quot;coerce&quot;} or {&quot;dayfirst&quot;: True}</span>
+        <span class="s1">error = format.pop(</span><span class="s4">&quot;errors&quot;</span><span class="s2">, None</span><span class="s1">) </span><span class="s2">or </span><span class="s4">&quot;ignore&quot;</span>
+        <span class="s2">return </span><span class="s1">to_datetime(col</span><span class="s2">, </span><span class="s1">errors=error</span><span class="s2">, </span><span class="s1">**format)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s3"># Allow passing of formatting string for integers</span>
+        <span class="s3"># GH17855</span>
+        <span class="s2">if </span><span class="s1">format </span><span class="s2">is None and </span><span class="s1">(</span>
+            <span class="s1">issubclass(col.dtype.type</span><span class="s2">, </span><span class="s1">np.floating)</span>
+            <span class="s2">or </span><span class="s1">issubclass(col.dtype.type</span><span class="s2">, </span><span class="s1">np.integer)</span>
+        <span class="s1">):</span>
+            <span class="s1">format = </span><span class="s4">&quot;s&quot;</span>
+        <span class="s2">if </span><span class="s1">format </span><span class="s2">in </span><span class="s1">[</span><span class="s4">&quot;D&quot;</span><span class="s2">, </span><span class="s4">&quot;d&quot;</span><span class="s2">, </span><span class="s4">&quot;h&quot;</span><span class="s2">, </span><span class="s4">&quot;m&quot;</span><span class="s2">, </span><span class="s4">&quot;s&quot;</span><span class="s2">, </span><span class="s4">&quot;ms&quot;</span><span class="s2">, </span><span class="s4">&quot;us&quot;</span><span class="s2">, </span><span class="s4">&quot;ns&quot;</span><span class="s1">]:</span>
+            <span class="s2">return </span><span class="s1">to_datetime(col</span><span class="s2">, </span><span class="s1">errors=</span><span class="s4">&quot;coerce&quot;</span><span class="s2">, </span><span class="s1">unit=format</span><span class="s2">, </span><span class="s1">utc=utc)</span>
+        <span class="s2">elif </span><span class="s1">is_datetime64tz_dtype(col.dtype):</span>
+            <span class="s3"># coerce to UTC timezone</span>
+            <span class="s3"># GH11216</span>
+            <span class="s2">return </span><span class="s1">to_datetime(col</span><span class="s2">, </span><span class="s1">utc=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">to_datetime(col</span><span class="s2">, </span><span class="s1">errors=</span><span class="s4">&quot;coerce&quot;</span><span class="s2">, </span><span class="s1">format=format</span><span class="s2">, </span><span class="s1">utc=utc)</span>
+
+
+<span class="s2">def </span><span class="s1">_parse_date_columns(data_frame</span><span class="s2">, </span><span class="s1">parse_dates):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Force non-datetime columns to be read as such. 
+    Supports both string formatted and integer timestamp columns. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">parse_dates = _process_parse_dates_argument(parse_dates)</span>
+
+    <span class="s3"># we want to coerce datetime64_tz dtypes for now to UTC</span>
+    <span class="s3"># we could in theory do a 'nice' conversion from a FixedOffset tz</span>
+    <span class="s3"># GH11216</span>
+    <span class="s2">for </span><span class="s1">col_name</span><span class="s2">, </span><span class="s1">df_col </span><span class="s2">in </span><span class="s1">data_frame.items():</span>
+        <span class="s2">if </span><span class="s1">is_datetime64tz_dtype(df_col.dtype) </span><span class="s2">or </span><span class="s1">col_name </span><span class="s2">in </span><span class="s1">parse_dates:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">fmt = parse_dates[col_name]</span>
+            <span class="s2">except </span><span class="s1">TypeError:</span>
+                <span class="s1">fmt = </span><span class="s2">None</span>
+            <span class="s1">data_frame[col_name] = _handle_date_column(df_col</span><span class="s2">, </span><span class="s1">format=fmt)</span>
+
+    <span class="s2">return </span><span class="s1">data_frame</span>
+
+
+<span class="s2">def </span><span class="s1">_wrap_result(</span>
+    <span class="s1">data</span><span class="s2">,</span>
+    <span class="s1">columns</span><span class="s2">,</span>
+    <span class="s1">index_col=</span><span class="s2">None,</span>
+    <span class="s1">coerce_float: bool = </span><span class="s2">True,</span>
+    <span class="s1">parse_dates=</span><span class="s2">None,</span>
+    <span class="s1">dtype: DtypeArg | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+<span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot;Wrap result set of query in a DataFrame.&quot;&quot;&quot;</span>
+    <span class="s1">frame = DataFrame.from_records(data</span><span class="s2">, </span><span class="s1">columns=columns</span><span class="s2">, </span><span class="s1">coerce_float=coerce_float)</span>
+
+    <span class="s2">if </span><span class="s1">dtype:</span>
+        <span class="s1">frame = frame.astype(dtype)</span>
+
+    <span class="s1">frame = _parse_date_columns(frame</span><span class="s2">, </span><span class="s1">parse_dates)</span>
+
+    <span class="s2">if </span><span class="s1">index_col </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s1">frame.set_index(index_col</span><span class="s2">, </span><span class="s1">inplace=</span><span class="s2">True</span><span class="s1">)</span>
+
+    <span class="s2">return </span><span class="s1">frame</span>
+
+
+<span class="s2">def </span><span class="s1">execute(sql</span><span class="s2">, </span><span class="s1">con</span><span class="s2">, </span><span class="s1">params=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Execute the given SQL query using the provided connection object. 
+ 
+    Parameters 
+    ---------- 
+    sql : string 
+        SQL query to be executed. 
+    con : SQLAlchemy connectable(engine/connection) or sqlite3 connection 
+        Using SQLAlchemy makes it possible to use any DB supported by the 
+        library. 
+        If a DBAPI2 object, only sqlite3 is supported. 
+    params : list or tuple, optional, default: None 
+        List of parameters to pass to execute method. 
+ 
+    Returns 
+    ------- 
+    Results Iterable 
+    &quot;&quot;&quot;</span>
+    <span class="s1">pandas_sql = pandasSQL_builder(con)</span>
+    <span class="s1">args = _convert_params(sql</span><span class="s2">, </span><span class="s1">params)</span>
+    <span class="s2">return </span><span class="s1">pandas_sql.execute(*args)</span>
+
+
+<span class="s3"># -----------------------------------------------------------------------------</span>
+<span class="s3"># -- Read and write to DataFrames</span>
+
+
+<span class="s1">@overload</span>
+<span class="s2">def </span><span class="s1">read_sql_table(</span>
+    <span class="s1">table_name</span><span class="s2">,</span>
+    <span class="s1">con</span><span class="s2">,</span>
+    <span class="s1">schema=...</span><span class="s2">,</span>
+    <span class="s1">index_col=...</span><span class="s2">,</span>
+    <span class="s1">coerce_float=...</span><span class="s2">,</span>
+    <span class="s1">parse_dates=...</span><span class="s2">,</span>
+    <span class="s1">columns=...</span><span class="s2">,</span>
+    <span class="s1">chunksize: </span><span class="s2">None </span><span class="s1">= ...</span><span class="s2">,</span>
+<span class="s1">) -&gt; DataFrame:</span>
+    <span class="s1">...</span>
+
+
+<span class="s1">@overload</span>
+<span class="s2">def </span><span class="s1">read_sql_table(</span>
+    <span class="s1">table_name</span><span class="s2">,</span>
+    <span class="s1">con</span><span class="s2">,</span>
+    <span class="s1">schema=...</span><span class="s2">,</span>
+    <span class="s1">index_col=...</span><span class="s2">,</span>
+    <span class="s1">coerce_float=...</span><span class="s2">,</span>
+    <span class="s1">parse_dates=...</span><span class="s2">,</span>
+    <span class="s1">columns=...</span><span class="s2">,</span>
+    <span class="s1">chunksize: int = ...</span><span class="s2">,</span>
+<span class="s1">) -&gt; Iterator[DataFrame]:</span>
+    <span class="s1">...</span>
+
+
+<span class="s2">def </span><span class="s1">read_sql_table(</span>
+    <span class="s1">table_name: str</span><span class="s2">,</span>
+    <span class="s1">con</span><span class="s2">,</span>
+    <span class="s1">schema: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">index_col: str | Sequence[str] | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">coerce_float: bool = </span><span class="s2">True,</span>
+    <span class="s1">parse_dates=</span><span class="s2">None,</span>
+    <span class="s1">columns=</span><span class="s2">None,</span>
+    <span class="s1">chunksize: int | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+<span class="s1">) -&gt; DataFrame | Iterator[DataFrame]:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Read SQL database table into a DataFrame. 
+ 
+    Given a table name and a SQLAlchemy connectable, returns a DataFrame. 
+    This function does not support DBAPI connections. 
+ 
+    Parameters 
+    ---------- 
+    table_name : str 
+        Name of SQL table in database. 
+    con : SQLAlchemy connectable or str 
+        A database URI could be provided as str. 
+        SQLite DBAPI connection mode not supported. 
+    schema : str, default None 
+        Name of SQL schema in database to query (if database flavor 
+        supports this). Uses default schema if None (default). 
+    index_col : str or list of str, optional, default: None 
+        Column(s) to set as index(MultiIndex). 
+    coerce_float : bool, default True 
+        Attempts to convert values of non-string, non-numeric objects (like 
+        decimal.Decimal) to floating point. Can result in loss of Precision. 
+    parse_dates : list or dict, default None 
+        - List of column names to parse as dates. 
+        - Dict of ``{column_name: format string}`` where format string is 
+          strftime compatible in case of parsing string times or is one of 
+          (D, s, ns, ms, us) in case of parsing integer timestamps. 
+        - Dict of ``{column_name: arg dict}``, where the arg dict corresponds 
+          to the keyword arguments of :func:`pandas.to_datetime` 
+          Especially useful with databases without native Datetime support, 
+          such as SQLite. 
+    columns : list, default None 
+        List of column names to select from SQL table. 
+    chunksize : int, default None 
+        If specified, returns an iterator where `chunksize` is the number of 
+        rows to include in each chunk. 
+ 
+    Returns 
+    ------- 
+    DataFrame or Iterator[DataFrame] 
+        A SQL table is returned as two-dimensional data structure with labeled 
+        axes. 
+ 
+    See Also 
+    -------- 
+    read_sql_query : Read SQL query into a DataFrame. 
+    read_sql : Read SQL query or database table into a DataFrame. 
+ 
+    Notes 
+    ----- 
+    Any datetime values with time zone information will be converted to UTC. 
+ 
+    Examples 
+    -------- 
+    &gt;&gt;&gt; pd.read_sql_table('table_name', 'postgres:///db_name')  # doctest:+SKIP 
+    &quot;&quot;&quot;</span>
+    <span class="s1">pandas_sql = pandasSQL_builder(con</span><span class="s2">, </span><span class="s1">schema=schema)</span>
+    <span class="s2">if not </span><span class="s1">pandas_sql.has_table(table_name):</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;Table </span><span class="s2">{</span><span class="s1">table_name</span><span class="s2">} </span><span class="s4">not found&quot;</span><span class="s1">)</span>
+
+    <span class="s1">table = pandas_sql.read_table(</span>
+        <span class="s1">table_name</span><span class="s2">,</span>
+        <span class="s1">index_col=index_col</span><span class="s2">,</span>
+        <span class="s1">coerce_float=coerce_float</span><span class="s2">,</span>
+        <span class="s1">parse_dates=parse_dates</span><span class="s2">,</span>
+        <span class="s1">columns=columns</span><span class="s2">,</span>
+        <span class="s1">chunksize=chunksize</span><span class="s2">,</span>
+    <span class="s1">)</span>
+
+    <span class="s2">if </span><span class="s1">table </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">table</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;Table </span><span class="s2">{</span><span class="s1">table_name</span><span class="s2">} </span><span class="s4">not found&quot;</span><span class="s2">, </span><span class="s1">con)</span>
+
+
+<span class="s1">@overload</span>
+<span class="s2">def </span><span class="s1">read_sql_query(</span>
+    <span class="s1">sql</span><span class="s2">,</span>
+    <span class="s1">con</span><span class="s2">,</span>
+    <span class="s1">index_col=...</span><span class="s2">,</span>
+    <span class="s1">coerce_float=...</span><span class="s2">,</span>
+    <span class="s1">params=...</span><span class="s2">,</span>
+    <span class="s1">parse_dates=...</span><span class="s2">,</span>
+    <span class="s1">chunksize: </span><span class="s2">None </span><span class="s1">= ...</span><span class="s2">,</span>
+    <span class="s1">dtype: DtypeArg | </span><span class="s2">None </span><span class="s1">= ...</span><span class="s2">,</span>
+<span class="s1">) -&gt; DataFrame:</span>
+    <span class="s1">...</span>
+
+
+<span class="s1">@overload</span>
+<span class="s2">def </span><span class="s1">read_sql_query(</span>
+    <span class="s1">sql</span><span class="s2">,</span>
+    <span class="s1">con</span><span class="s2">,</span>
+    <span class="s1">index_col=...</span><span class="s2">,</span>
+    <span class="s1">coerce_float=...</span><span class="s2">,</span>
+    <span class="s1">params=...</span><span class="s2">,</span>
+    <span class="s1">parse_dates=...</span><span class="s2">,</span>
+    <span class="s1">chunksize: int = ...</span><span class="s2">,</span>
+    <span class="s1">dtype: DtypeArg | </span><span class="s2">None </span><span class="s1">= ...</span><span class="s2">,</span>
+<span class="s1">) -&gt; Iterator[DataFrame]:</span>
+    <span class="s1">...</span>
+
+
+<span class="s2">def </span><span class="s1">read_sql_query(</span>
+    <span class="s1">sql</span><span class="s2">,</span>
+    <span class="s1">con</span><span class="s2">,</span>
+    <span class="s1">index_col=</span><span class="s2">None,</span>
+    <span class="s1">coerce_float: bool = </span><span class="s2">True,</span>
+    <span class="s1">params=</span><span class="s2">None,</span>
+    <span class="s1">parse_dates=</span><span class="s2">None,</span>
+    <span class="s1">chunksize: int | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">dtype: DtypeArg | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+<span class="s1">) -&gt; DataFrame | Iterator[DataFrame]:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Read SQL query into a DataFrame. 
+ 
+    Returns a DataFrame corresponding to the result set of the query 
+    string. Optionally provide an `index_col` parameter to use one of the 
+    columns as the index, otherwise default integer index will be used. 
+ 
+    Parameters 
+    ---------- 
+    sql : str SQL query or SQLAlchemy Selectable (select or text object) 
+        SQL query to be executed. 
+    con : SQLAlchemy connectable, str, or sqlite3 connection 
+        Using SQLAlchemy makes it possible to use any DB supported by that 
+        library. If a DBAPI2 object, only sqlite3 is supported. 
+    index_col : str or list of str, optional, default: None 
+        Column(s) to set as index(MultiIndex). 
+    coerce_float : bool, default True 
+        Attempts to convert values of non-string, non-numeric objects (like 
+        decimal.Decimal) to floating point. Useful for SQL result sets. 
+    params : list, tuple or dict, optional, default: None 
+        List of parameters to pass to execute method.  The syntax used 
+        to pass parameters is database driver dependent. Check your 
+        database driver documentation for which of the five syntax styles, 
+        described in PEP 249's paramstyle, is supported. 
+        Eg. for psycopg2, uses %(name)s so use params={'name' : 'value'}. 
+    parse_dates : list or dict, default: None 
+        - List of column names to parse as dates. 
+        - Dict of ``{column_name: format string}`` where format string is 
+          strftime compatible in case of parsing string times, or is one of 
+          (D, s, ns, ms, us) in case of parsing integer timestamps. 
+        - Dict of ``{column_name: arg dict}``, where the arg dict corresponds 
+          to the keyword arguments of :func:`pandas.to_datetime` 
+          Especially useful with databases without native Datetime support, 
+          such as SQLite. 
+    chunksize : int, default None 
+        If specified, return an iterator where `chunksize` is the number of 
+        rows to include in each chunk. 
+    dtype : Type name or dict of columns 
+        Data type for data or columns. E.g. np.float64 or 
+        {‘a’: np.float64, ‘b’: np.int32, ‘c’: ‘Int64’}. 
+ 
+        .. versionadded:: 1.3.0 
+ 
+    Returns 
+    ------- 
+    DataFrame or Iterator[DataFrame] 
+ 
+    See Also 
+    -------- 
+    read_sql_table : Read SQL database table into a DataFrame. 
+    read_sql : Read SQL query or database table into a DataFrame. 
+ 
+    Notes 
+    ----- 
+    Any datetime values with time zone information parsed via the `parse_dates` 
+    parameter will be converted to UTC. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">pandas_sql = pandasSQL_builder(con)</span>
+    <span class="s2">return </span><span class="s1">pandas_sql.read_query(</span>
+        <span class="s1">sql</span><span class="s2">,</span>
+        <span class="s1">index_col=index_col</span><span class="s2">,</span>
+        <span class="s1">params=params</span><span class="s2">,</span>
+        <span class="s1">coerce_float=coerce_float</span><span class="s2">,</span>
+        <span class="s1">parse_dates=parse_dates</span><span class="s2">,</span>
+        <span class="s1">chunksize=chunksize</span><span class="s2">,</span>
+        <span class="s1">dtype=dtype</span><span class="s2">,</span>
+    <span class="s1">)</span>
+
+
+<span class="s1">@overload</span>
+<span class="s2">def </span><span class="s1">read_sql(</span>
+    <span class="s1">sql</span><span class="s2">,</span>
+    <span class="s1">con</span><span class="s2">,</span>
+    <span class="s1">index_col=...</span><span class="s2">,</span>
+    <span class="s1">coerce_float=...</span><span class="s2">,</span>
+    <span class="s1">params=...</span><span class="s2">,</span>
+    <span class="s1">parse_dates=...</span><span class="s2">,</span>
+    <span class="s1">columns=...</span><span class="s2">,</span>
+    <span class="s1">chunksize: </span><span class="s2">None </span><span class="s1">= ...</span><span class="s2">,</span>
+<span class="s1">) -&gt; DataFrame:</span>
+    <span class="s1">...</span>
+
+
+<span class="s1">@overload</span>
+<span class="s2">def </span><span class="s1">read_sql(</span>
+    <span class="s1">sql</span><span class="s2">,</span>
+    <span class="s1">con</span><span class="s2">,</span>
+    <span class="s1">index_col=...</span><span class="s2">,</span>
+    <span class="s1">coerce_float=...</span><span class="s2">,</span>
+    <span class="s1">params=...</span><span class="s2">,</span>
+    <span class="s1">parse_dates=...</span><span class="s2">,</span>
+    <span class="s1">columns=...</span><span class="s2">,</span>
+    <span class="s1">chunksize: int = ...</span><span class="s2">,</span>
+<span class="s1">) -&gt; Iterator[DataFrame]:</span>
+    <span class="s1">...</span>
+
+
+<span class="s2">def </span><span class="s1">read_sql(</span>
+    <span class="s1">sql</span><span class="s2">,</span>
+    <span class="s1">con</span><span class="s2">,</span>
+    <span class="s1">index_col: str | Sequence[str] | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">coerce_float: bool = </span><span class="s2">True,</span>
+    <span class="s1">params=</span><span class="s2">None,</span>
+    <span class="s1">parse_dates=</span><span class="s2">None,</span>
+    <span class="s1">columns=</span><span class="s2">None,</span>
+    <span class="s1">chunksize: int | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+<span class="s1">) -&gt; DataFrame | Iterator[DataFrame]:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Read SQL query or database table into a DataFrame. 
+ 
+    This function is a convenience wrapper around ``read_sql_table`` and 
+    ``read_sql_query`` (for backward compatibility). It will delegate 
+    to the specific function depending on the provided input. A SQL query 
+    will be routed to ``read_sql_query``, while a database table name will 
+    be routed to ``read_sql_table``. Note that the delegated function might 
+    have more specific notes about their functionality not listed here. 
+ 
+    Parameters 
+    ---------- 
+    sql : str or SQLAlchemy Selectable (select or text object) 
+        SQL query to be executed or a table name. 
+    con : SQLAlchemy connectable, str, or sqlite3 connection 
+        Using SQLAlchemy makes it possible to use any DB supported by that 
+        library. If a DBAPI2 object, only sqlite3 is supported. The user is responsible 
+        for engine disposal and connection closure for the SQLAlchemy connectable; str 
+        connections are closed automatically. See 
+        `here &lt;https://docs.sqlalchemy.org/en/13/core/connections.html&gt;`_. 
+    index_col : str or list of str, optional, default: None 
+        Column(s) to set as index(MultiIndex). 
+    coerce_float : bool, default True 
+        Attempts to convert values of non-string, non-numeric objects (like 
+        decimal.Decimal) to floating point, useful for SQL result sets. 
+    params : list, tuple or dict, optional, default: None 
+        List of parameters to pass to execute method.  The syntax used 
+        to pass parameters is database driver dependent. Check your 
+        database driver documentation for which of the five syntax styles, 
+        described in PEP 249's paramstyle, is supported. 
+        Eg. for psycopg2, uses %(name)s so use params={'name' : 'value'}. 
+    parse_dates : list or dict, default: None 
+        - List of column names to parse as dates. 
+        - Dict of ``{column_name: format string}`` where format string is 
+          strftime compatible in case of parsing string times, or is one of 
+          (D, s, ns, ms, us) in case of parsing integer timestamps. 
+        - Dict of ``{column_name: arg dict}``, where the arg dict corresponds 
+          to the keyword arguments of :func:`pandas.to_datetime` 
+          Especially useful with databases without native Datetime support, 
+          such as SQLite. 
+    columns : list, default: None 
+        List of column names to select from SQL table (only used when reading 
+        a table). 
+    chunksize : int, default None 
+        If specified, return an iterator where `chunksize` is the 
+        number of rows to include in each chunk. 
+ 
+    Returns 
+    ------- 
+    DataFrame or Iterator[DataFrame] 
+ 
+    See Also 
+    -------- 
+    read_sql_table : Read SQL database table into a DataFrame. 
+    read_sql_query : Read SQL query into a DataFrame. 
+ 
+    Examples 
+    -------- 
+    Read data from SQL via either a SQL query or a SQL tablename. 
+    When using a SQLite database only SQL queries are accepted, 
+    providing only the SQL tablename will result in an error. 
+ 
+    &gt;&gt;&gt; from sqlite3 import connect 
+    &gt;&gt;&gt; conn = connect(':memory:') 
+    &gt;&gt;&gt; df = pd.DataFrame(data=[[0, '10/11/12'], [1, '12/11/10']], 
+    ...                   columns=['int_column', 'date_column']) 
+    &gt;&gt;&gt; df.to_sql('test_data', conn) 
+    2 
+ 
+    &gt;&gt;&gt; pd.read_sql('SELECT int_column, date_column FROM test_data', conn) 
+       int_column date_column 
+    0           0    10/11/12 
+    1           1    12/11/10 
+ 
+    &gt;&gt;&gt; pd.read_sql('test_data', 'postgres:///db_name')  # doctest:+SKIP 
+ 
+    Apply date parsing to columns through the ``parse_dates`` argument 
+ 
+    &gt;&gt;&gt; pd.read_sql('SELECT int_column, date_column FROM test_data', 
+    ...             conn, 
+    ...             parse_dates=[&quot;date_column&quot;]) 
+       int_column date_column 
+    0           0  2012-10-11 
+    1           1  2010-12-11 
+ 
+    The ``parse_dates`` argument calls ``pd.to_datetime`` on the provided columns. 
+    Custom argument values for applying ``pd.to_datetime`` on a column are specified 
+    via a dictionary format: 
+    1. Ignore errors while parsing the values of &quot;date_column&quot; 
+ 
+    &gt;&gt;&gt; pd.read_sql('SELECT int_column, date_column FROM test_data', 
+    ...             conn, 
+    ...             parse_dates={&quot;date_column&quot;: {&quot;errors&quot;: &quot;ignore&quot;}}) 
+       int_column date_column 
+    0           0  2012-10-11 
+    1           1  2010-12-11 
+ 
+    2. Apply a dayfirst date parsing order on the values of &quot;date_column&quot; 
+ 
+    &gt;&gt;&gt; pd.read_sql('SELECT int_column, date_column FROM test_data', 
+    ...             conn, 
+    ...             parse_dates={&quot;date_column&quot;: {&quot;dayfirst&quot;: True}}) 
+       int_column date_column 
+    0           0  2012-11-10 
+    1           1  2010-11-12 
+ 
+    3. Apply custom formatting when date parsing the values of &quot;date_column&quot; 
+ 
+    &gt;&gt;&gt; pd.read_sql('SELECT int_column, date_column FROM test_data', 
+    ...             conn, 
+    ...             parse_dates={&quot;date_column&quot;: {&quot;format&quot;: &quot;%d/%m/%y&quot;}}) 
+       int_column date_column 
+    0           0  2012-11-10 
+    1           1  2010-11-12 
+    &quot;&quot;&quot;</span>
+    <span class="s1">pandas_sql = pandasSQL_builder(con)</span>
+
+    <span class="s2">if </span><span class="s1">isinstance(pandas_sql</span><span class="s2">, </span><span class="s1">SQLiteDatabase):</span>
+        <span class="s2">return </span><span class="s1">pandas_sql.read_query(</span>
+            <span class="s1">sql</span><span class="s2">,</span>
+            <span class="s1">index_col=index_col</span><span class="s2">,</span>
+            <span class="s1">params=params</span><span class="s2">,</span>
+            <span class="s1">coerce_float=coerce_float</span><span class="s2">,</span>
+            <span class="s1">parse_dates=parse_dates</span><span class="s2">,</span>
+            <span class="s1">chunksize=chunksize</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">_is_table_name = pandas_sql.has_table(sql)</span>
+    <span class="s2">except </span><span class="s1">Exception:</span>
+        <span class="s3"># using generic exception to catch errors from sql drivers (GH24988)</span>
+        <span class="s1">_is_table_name = </span><span class="s2">False</span>
+
+    <span class="s2">if </span><span class="s1">_is_table_name:</span>
+        <span class="s1">pandas_sql.meta.reflect(bind=pandas_sql.connectable</span><span class="s2">, </span><span class="s1">only=[sql])</span>
+        <span class="s2">return </span><span class="s1">pandas_sql.read_table(</span>
+            <span class="s1">sql</span><span class="s2">,</span>
+            <span class="s1">index_col=index_col</span><span class="s2">,</span>
+            <span class="s1">coerce_float=coerce_float</span><span class="s2">,</span>
+            <span class="s1">parse_dates=parse_dates</span><span class="s2">,</span>
+            <span class="s1">columns=columns</span><span class="s2">,</span>
+            <span class="s1">chunksize=chunksize</span><span class="s2">,</span>
+        <span class="s1">)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">pandas_sql.read_query(</span>
+            <span class="s1">sql</span><span class="s2">,</span>
+            <span class="s1">index_col=index_col</span><span class="s2">,</span>
+            <span class="s1">params=params</span><span class="s2">,</span>
+            <span class="s1">coerce_float=coerce_float</span><span class="s2">,</span>
+            <span class="s1">parse_dates=parse_dates</span><span class="s2">,</span>
+            <span class="s1">chunksize=chunksize</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">to_sql(</span>
+    <span class="s1">frame</span><span class="s2">,</span>
+    <span class="s1">name: str</span><span class="s2">,</span>
+    <span class="s1">con</span><span class="s2">,</span>
+    <span class="s1">schema: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">if_exists: str = </span><span class="s4">&quot;fail&quot;</span><span class="s2">,</span>
+    <span class="s1">index: bool = </span><span class="s2">True,</span>
+    <span class="s1">index_label=</span><span class="s2">None,</span>
+    <span class="s1">chunksize: int | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">dtype: DtypeArg | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">method: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">engine: str = </span><span class="s4">&quot;auto&quot;</span><span class="s2">,</span>
+    <span class="s1">**engine_kwargs</span><span class="s2">,</span>
+<span class="s1">) -&gt; int | </span><span class="s2">None</span><span class="s1">:</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Write records stored in a DataFrame to a SQL database. 
+ 
+    Parameters 
+    ---------- 
+    frame : DataFrame, Series 
+    name : str 
+        Name of SQL table. 
+    con : SQLAlchemy connectable(engine/connection) or database string URI 
+        or sqlite3 DBAPI2 connection 
+        Using SQLAlchemy makes it possible to use any DB supported by that 
+        library. 
+        If a DBAPI2 object, only sqlite3 is supported. 
+    schema : str, optional 
+        Name of SQL schema in database to write to (if database flavor 
+        supports this). If None, use default schema (default). 
+    if_exists : {'fail', 'replace', 'append'}, default 'fail' 
+        - fail: If table exists, do nothing. 
+        - replace: If table exists, drop it, recreate it, and insert data. 
+        - append: If table exists, insert data. Create if does not exist. 
+    index : bool, default True 
+        Write DataFrame index as a column. 
+    index_label : str or sequence, optional 
+        Column label for index column(s). If None is given (default) and 
+        `index` is True, then the index names are used. 
+        A sequence should be given if the DataFrame uses MultiIndex. 
+    chunksize : int, optional 
+        Specify the number of rows in each batch to be written at a time. 
+        By default, all rows will be written at once. 
+    dtype : dict or scalar, optional 
+        Specifying the datatype for columns. If a dictionary is used, the 
+        keys should be the column names and the values should be the 
+        SQLAlchemy types or strings for the sqlite3 fallback mode. If a 
+        scalar is provided, it will be applied to all columns. 
+    method : {None, 'multi', callable}, optional 
+        Controls the SQL insertion clause used: 
+ 
+        - None : Uses standard SQL ``INSERT`` clause (one per row). 
+        - ``'multi'``: Pass multiple values in a single ``INSERT`` clause. 
+        - callable with signature ``(pd_table, conn, keys, data_iter) -&gt; int | None``. 
+ 
+        Details and a sample callable implementation can be found in the 
+        section :ref:`insert method &lt;io.sql.method&gt;`. 
+    engine : {'auto', 'sqlalchemy'}, default 'auto' 
+        SQL engine library to use. If 'auto', then the option 
+        ``io.sql.engine`` is used. The default ``io.sql.engine`` 
+        behavior is 'sqlalchemy' 
+ 
+        .. versionadded:: 1.3.0 
+ 
+    **engine_kwargs 
+        Any additional kwargs are passed to the engine. 
+ 
+    Returns 
+    ------- 
+    None or int 
+        Number of rows affected by to_sql. None is returned if the callable 
+        passed into ``method`` does not return the number of rows. 
+ 
+        .. versionadded:: 1.4.0 
+ 
+    Notes 
+    ----- 
+    The returned rows affected is the sum of the ``rowcount`` attribute of ``sqlite3.Cursor`` 
+    or SQLAlchemy connectable. The returned value may not reflect the exact number of written 
+    rows as stipulated in the 
+    `sqlite3 &lt;https://docs.python.org/3/library/sqlite3.html#sqlite3.Cursor.rowcount&gt;`__ or 
+    `SQLAlchemy &lt;https://docs.sqlalchemy.org/en/14/core/connections.html#sqlalchemy.engine.BaseCursorResult.rowcount&gt;`__ 
+    &quot;&quot;&quot;  </span><span class="s3"># noqa:E501</span>
+    <span class="s2">if </span><span class="s1">if_exists </span><span class="s2">not in </span><span class="s1">(</span><span class="s4">&quot;fail&quot;</span><span class="s2">, </span><span class="s4">&quot;replace&quot;</span><span class="s2">, </span><span class="s4">&quot;append&quot;</span><span class="s1">):</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;'</span><span class="s2">{</span><span class="s1">if_exists</span><span class="s2">}</span><span class="s4">' is not valid for if_exists&quot;</span><span class="s1">)</span>
+
+    <span class="s1">pandas_sql = pandasSQL_builder(con</span><span class="s2">, </span><span class="s1">schema=schema)</span>
+
+    <span class="s2">if </span><span class="s1">isinstance(frame</span><span class="s2">, </span><span class="s1">Series):</span>
+        <span class="s1">frame = frame.to_frame()</span>
+    <span class="s2">elif not </span><span class="s1">isinstance(frame</span><span class="s2">, </span><span class="s1">DataFrame):</span>
+        <span class="s2">raise </span><span class="s1">NotImplementedError(</span>
+            <span class="s4">&quot;'frame' argument should be either a Series or a DataFrame&quot;</span>
+        <span class="s1">)</span>
+
+    <span class="s2">return </span><span class="s1">pandas_sql.to_sql(</span>
+        <span class="s1">frame</span><span class="s2">,</span>
+        <span class="s1">name</span><span class="s2">,</span>
+        <span class="s1">if_exists=if_exists</span><span class="s2">,</span>
+        <span class="s1">index=index</span><span class="s2">,</span>
+        <span class="s1">index_label=index_label</span><span class="s2">,</span>
+        <span class="s1">schema=schema</span><span class="s2">,</span>
+        <span class="s1">chunksize=chunksize</span><span class="s2">,</span>
+        <span class="s1">dtype=dtype</span><span class="s2">,</span>
+        <span class="s1">method=method</span><span class="s2">,</span>
+        <span class="s1">engine=engine</span><span class="s2">,</span>
+        <span class="s1">**engine_kwargs</span><span class="s2">,</span>
+    <span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">has_table(table_name: str</span><span class="s2">, </span><span class="s1">con</span><span class="s2">, </span><span class="s1">schema: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Check if DataBase has named table. 
+ 
+    Parameters 
+    ---------- 
+    table_name: string 
+        Name of SQL table. 
+    con: SQLAlchemy connectable(engine/connection) or sqlite3 DBAPI2 connection 
+        Using SQLAlchemy makes it possible to use any DB supported by that 
+        library. 
+        If a DBAPI2 object, only sqlite3 is supported. 
+    schema : string, default None 
+        Name of SQL schema in database to write to (if database flavor supports 
+        this). If None, use default schema (default). 
+ 
+    Returns 
+    ------- 
+    boolean 
+    &quot;&quot;&quot;</span>
+    <span class="s1">pandas_sql = pandasSQL_builder(con</span><span class="s2">, </span><span class="s1">schema=schema)</span>
+    <span class="s2">return </span><span class="s1">pandas_sql.has_table(table_name)</span>
+
+
+<span class="s1">table_exists = has_table</span>
+
+
+<span class="s2">def </span><span class="s1">pandasSQL_builder(con</span><span class="s2">, </span><span class="s1">schema: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Convenience function to return the correct PandasSQL subclass based on the 
+    provided parameters. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">import </span><span class="s1">sqlite3</span>
+    <span class="s2">import </span><span class="s1">warnings</span>
+
+    <span class="s2">if </span><span class="s1">isinstance(con</span><span class="s2">, </span><span class="s1">sqlite3.Connection) </span><span class="s2">or </span><span class="s1">con </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">SQLiteDatabase(con)</span>
+
+    <span class="s1">sqlalchemy = import_optional_dependency(</span><span class="s4">&quot;sqlalchemy&quot;</span><span class="s1">)</span>
+
+    <span class="s2">if </span><span class="s1">isinstance(con</span><span class="s2">, </span><span class="s1">str):</span>
+        <span class="s1">con = sqlalchemy.create_engine(con)</span>
+
+    <span class="s2">if </span><span class="s1">isinstance(con</span><span class="s2">, </span><span class="s1">sqlalchemy.engine.Connectable):</span>
+        <span class="s2">return </span><span class="s1">SQLDatabase(con</span><span class="s2">, </span><span class="s1">schema=schema)</span>
+
+    <span class="s1">warnings.warn(</span>
+        <span class="s4">&quot;pandas only support SQLAlchemy connectable(engine/connection) or&quot;</span>
+        <span class="s4">&quot;database string URI or sqlite3 DBAPI2 connection&quot;</span>
+        <span class="s4">&quot;other DBAPI2 objects are not tested, please consider using SQLAlchemy&quot;</span><span class="s2">,</span>
+        <span class="s1">UserWarning</span><span class="s2">,</span>
+    <span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">SQLiteDatabase(con)</span>
+
+
+<span class="s2">class </span><span class="s1">SQLTable(PandasObject):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    For mapping Pandas tables to SQL tables. 
+    Uses fact that table is reflected by SQLAlchemy to 
+    do better type conversions. 
+    Also holds various flags needed to avoid having to 
+    pass them between functions all the time. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s3"># TODO: support for multiIndex</span>
+
+    <span class="s2">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">name: str</span><span class="s2">,</span>
+        <span class="s1">pandas_sql_engine</span><span class="s2">,</span>
+        <span class="s1">frame=</span><span class="s2">None,</span>
+        <span class="s1">index=</span><span class="s2">True,</span>
+        <span class="s1">if_exists=</span><span class="s4">&quot;fail&quot;</span><span class="s2">,</span>
+        <span class="s1">prefix=</span><span class="s4">&quot;pandas&quot;</span><span class="s2">,</span>
+        <span class="s1">index_label=</span><span class="s2">None,</span>
+        <span class="s1">schema=</span><span class="s2">None,</span>
+        <span class="s1">keys=</span><span class="s2">None,</span>
+        <span class="s1">dtype: DtypeArg | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">):</span>
+        <span class="s1">self.name = name</span>
+        <span class="s1">self.pd_sql = pandas_sql_engine</span>
+        <span class="s1">self.prefix = prefix</span>
+        <span class="s1">self.frame = frame</span>
+        <span class="s1">self.index = self._index_name(index</span><span class="s2">, </span><span class="s1">index_label)</span>
+        <span class="s1">self.schema = schema</span>
+        <span class="s1">self.if_exists = if_exists</span>
+        <span class="s1">self.keys = keys</span>
+        <span class="s1">self.dtype = dtype</span>
+
+        <span class="s2">if </span><span class="s1">frame </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s3"># We want to initialize based on a dataframe</span>
+            <span class="s1">self.table = self._create_table_setup()</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s3"># no data provided, read-only mode</span>
+            <span class="s1">self.table = self.pd_sql.get_table(self.name</span><span class="s2">, </span><span class="s1">self.schema)</span>
+
+        <span class="s2">if </span><span class="s1">self.table </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;Could not init table '</span><span class="s2">{</span><span class="s1">name</span><span class="s2">}</span><span class="s4">'&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">exists(self):</span>
+        <span class="s2">return </span><span class="s1">self.pd_sql.has_table(self.name</span><span class="s2">, </span><span class="s1">self.schema)</span>
+
+    <span class="s2">def </span><span class="s1">sql_schema(self):</span>
+        <span class="s2">from </span><span class="s1">sqlalchemy.schema </span><span class="s2">import </span><span class="s1">CreateTable</span>
+
+        <span class="s2">return </span><span class="s1">str(CreateTable(self.table).compile(self.pd_sql.connectable))</span>
+
+    <span class="s2">def </span><span class="s1">_execute_create(self):</span>
+        <span class="s3"># Inserting table into database, add to MetaData object</span>
+        <span class="s2">if </span><span class="s1">_gt14():</span>
+            <span class="s1">self.table = self.table.to_metadata(self.pd_sql.meta)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.table = self.table.tometadata(self.pd_sql.meta)</span>
+        <span class="s1">self.table.create(bind=self.pd_sql.connectable)</span>
+
+    <span class="s2">def </span><span class="s1">create(self):</span>
+        <span class="s2">if </span><span class="s1">self.exists():</span>
+            <span class="s2">if </span><span class="s1">self.if_exists == </span><span class="s4">&quot;fail&quot;</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;Table '</span><span class="s2">{</span><span class="s1">self.name</span><span class="s2">}</span><span class="s4">' already exists.&quot;</span><span class="s1">)</span>
+            <span class="s2">elif </span><span class="s1">self.if_exists == </span><span class="s4">&quot;replace&quot;</span><span class="s1">:</span>
+                <span class="s1">self.pd_sql.drop_table(self.name</span><span class="s2">, </span><span class="s1">self.schema)</span>
+                <span class="s1">self._execute_create()</span>
+            <span class="s2">elif </span><span class="s1">self.if_exists == </span><span class="s4">&quot;append&quot;</span><span class="s1">:</span>
+                <span class="s2">pass</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;'</span><span class="s2">{</span><span class="s1">self.if_exists</span><span class="s2">}</span><span class="s4">' is not valid for if_exists&quot;</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self._execute_create()</span>
+
+    <span class="s2">def </span><span class="s1">_execute_insert(self</span><span class="s2">, </span><span class="s1">conn</span><span class="s2">, </span><span class="s1">keys: list[str]</span><span class="s2">, </span><span class="s1">data_iter) -&gt; int:</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Execute SQL statement inserting data 
+ 
+        Parameters 
+        ---------- 
+        conn : sqlalchemy.engine.Engine or sqlalchemy.engine.Connection 
+        keys : list of str 
+           Column names 
+        data_iter : generator of list 
+           Each item contains a list of values to be inserted 
+        &quot;&quot;&quot;</span>
+        <span class="s1">data = [dict(zip(keys</span><span class="s2">, </span><span class="s1">row)) </span><span class="s2">for </span><span class="s1">row </span><span class="s2">in </span><span class="s1">data_iter]</span>
+        <span class="s1">result = conn.execute(self.table.insert()</span><span class="s2">, </span><span class="s1">data)</span>
+        <span class="s2">return </span><span class="s1">result.rowcount</span>
+
+    <span class="s2">def </span><span class="s1">_execute_insert_multi(self</span><span class="s2">, </span><span class="s1">conn</span><span class="s2">, </span><span class="s1">keys: list[str]</span><span class="s2">, </span><span class="s1">data_iter) -&gt; int:</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Alternative to _execute_insert for DBs support multivalue INSERT. 
+ 
+        Note: multi-value insert is usually faster for analytics DBs 
+        and tables containing a few columns 
+        but performance degrades quickly with increase of columns. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s2">from </span><span class="s1">sqlalchemy </span><span class="s2">import </span><span class="s1">insert</span>
+
+        <span class="s1">data = [dict(zip(keys</span><span class="s2">, </span><span class="s1">row)) </span><span class="s2">for </span><span class="s1">row </span><span class="s2">in </span><span class="s1">data_iter]</span>
+        <span class="s1">stmt = insert(self.table).values(data)</span>
+        <span class="s1">result = conn.execute(stmt)</span>
+        <span class="s2">return </span><span class="s1">result.rowcount</span>
+
+    <span class="s2">def </span><span class="s1">insert_data(self):</span>
+        <span class="s2">if </span><span class="s1">self.index </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">temp = self.frame.copy()</span>
+            <span class="s1">temp.index.names = self.index</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">temp.reset_index(inplace=</span><span class="s2">True</span><span class="s1">)</span>
+            <span class="s2">except </span><span class="s1">ValueError </span><span class="s2">as </span><span class="s1">err:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;duplicate name in index/columns: </span><span class="s2">{</span><span class="s1">err</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s1">) </span><span class="s2">from </span><span class="s1">err</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">temp = self.frame</span>
+
+        <span class="s1">column_names = list(map(str</span><span class="s2">, </span><span class="s1">temp.columns))</span>
+        <span class="s1">ncols = len(column_names)</span>
+        <span class="s1">data_list = [</span><span class="s2">None</span><span class="s1">] * ncols</span>
+
+        <span class="s2">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">(_</span><span class="s2">, </span><span class="s1">ser) </span><span class="s2">in </span><span class="s1">enumerate(temp.items()):</span>
+            <span class="s1">vals = ser._values</span>
+            <span class="s2">if </span><span class="s1">vals.dtype.kind == </span><span class="s4">&quot;M&quot;</span><span class="s1">:</span>
+                <span class="s1">d = vals.to_pydatetime()</span>
+            <span class="s2">elif </span><span class="s1">vals.dtype.kind == </span><span class="s4">&quot;m&quot;</span><span class="s1">:</span>
+                <span class="s3"># store as integers, see GH#6921, GH#7076</span>
+                <span class="s1">d = vals.view(</span><span class="s4">&quot;i8&quot;</span><span class="s1">).astype(object)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">d = vals.astype(object)</span>
+
+            <span class="s2">assert </span><span class="s1">isinstance(d</span><span class="s2">, </span><span class="s1">np.ndarray)</span><span class="s2">, </span><span class="s1">type(d)</span>
+
+            <span class="s2">if </span><span class="s1">ser._can_hold_na:</span>
+                <span class="s3"># Note: this will miss timedeltas since they are converted to int</span>
+                <span class="s1">mask = isna(d)</span>
+                <span class="s1">d[mask] = </span><span class="s2">None</span>
+
+            <span class="s3"># error: No overload variant of &quot;__setitem__&quot; of &quot;list&quot; matches</span>
+            <span class="s3"># argument types &quot;int&quot;, &quot;ndarray&quot;</span>
+            <span class="s1">data_list[i] = d  </span><span class="s3"># type: ignore[call-overload]</span>
+
+        <span class="s2">return </span><span class="s1">column_names</span><span class="s2">, </span><span class="s1">data_list</span>
+
+    <span class="s2">def </span><span class="s1">insert(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">chunksize: int | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None, </span><span class="s1">method: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None</span>
+    <span class="s1">) -&gt; int | </span><span class="s2">None</span><span class="s1">:</span>
+
+        <span class="s3"># set insert method</span>
+        <span class="s2">if </span><span class="s1">method </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">exec_insert = self._execute_insert</span>
+        <span class="s2">elif </span><span class="s1">method == </span><span class="s4">&quot;multi&quot;</span><span class="s1">:</span>
+            <span class="s1">exec_insert = self._execute_insert_multi</span>
+        <span class="s2">elif </span><span class="s1">callable(method):</span>
+            <span class="s1">exec_insert = partial(method</span><span class="s2">, </span><span class="s1">self)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;Invalid parameter `method`: </span><span class="s2">{</span><span class="s1">method</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+
+        <span class="s1">keys</span><span class="s2">, </span><span class="s1">data_list = self.insert_data()</span>
+
+        <span class="s1">nrows = len(self.frame)</span>
+
+        <span class="s2">if </span><span class="s1">nrows == </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s5">0</span>
+
+        <span class="s2">if </span><span class="s1">chunksize </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">chunksize = nrows</span>
+        <span class="s2">elif </span><span class="s1">chunksize == </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;chunksize argument should be non-zero&quot;</span><span class="s1">)</span>
+
+        <span class="s1">chunks = (nrows // chunksize) + </span><span class="s5">1</span>
+        <span class="s1">total_inserted = </span><span class="s5">0</span>
+        <span class="s2">with </span><span class="s1">self.pd_sql.run_transaction() </span><span class="s2">as </span><span class="s1">conn:</span>
+            <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(chunks):</span>
+                <span class="s1">start_i = i * chunksize</span>
+                <span class="s1">end_i = min((i + </span><span class="s5">1</span><span class="s1">) * chunksize</span><span class="s2">, </span><span class="s1">nrows)</span>
+                <span class="s2">if </span><span class="s1">start_i &gt;= end_i:</span>
+                    <span class="s2">break</span>
+
+                <span class="s1">chunk_iter = zip(*(arr[start_i:end_i] </span><span class="s2">for </span><span class="s1">arr </span><span class="s2">in </span><span class="s1">data_list))</span>
+                <span class="s1">num_inserted = exec_insert(conn</span><span class="s2">, </span><span class="s1">keys</span><span class="s2">, </span><span class="s1">chunk_iter)</span>
+                <span class="s2">if </span><span class="s1">num_inserted </span><span class="s2">is None</span><span class="s1">:</span>
+                    <span class="s1">total_inserted = </span><span class="s2">None</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">total_inserted += num_inserted</span>
+        <span class="s2">return </span><span class="s1">total_inserted</span>
+
+    <span class="s2">def </span><span class="s1">_query_iterator(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">result</span><span class="s2">,</span>
+        <span class="s1">chunksize: str | </span><span class="s2">None,</span>
+        <span class="s1">columns</span><span class="s2">,</span>
+        <span class="s1">coerce_float: bool = </span><span class="s2">True,</span>
+        <span class="s1">parse_dates=</span><span class="s2">None,</span>
+    <span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Return generator through chunked result set.&quot;&quot;&quot;</span>
+        <span class="s1">has_read_data = </span><span class="s2">False</span>
+        <span class="s2">while True</span><span class="s1">:</span>
+            <span class="s1">data = result.fetchmany(chunksize)</span>
+            <span class="s2">if not </span><span class="s1">data:</span>
+                <span class="s2">if not </span><span class="s1">has_read_data:</span>
+                    <span class="s2">yield </span><span class="s1">DataFrame.from_records(</span>
+                        <span class="s1">[]</span><span class="s2">, </span><span class="s1">columns=columns</span><span class="s2">, </span><span class="s1">coerce_float=coerce_float</span>
+                    <span class="s1">)</span>
+                <span class="s2">break</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">has_read_data = </span><span class="s2">True</span>
+                <span class="s1">self.frame = DataFrame.from_records(</span>
+                    <span class="s1">data</span><span class="s2">, </span><span class="s1">columns=columns</span><span class="s2">, </span><span class="s1">coerce_float=coerce_float</span>
+                <span class="s1">)</span>
+
+                <span class="s1">self._harmonize_columns(parse_dates=parse_dates)</span>
+
+                <span class="s2">if </span><span class="s1">self.index </span><span class="s2">is not None</span><span class="s1">:</span>
+                    <span class="s1">self.frame.set_index(self.index</span><span class="s2">, </span><span class="s1">inplace=</span><span class="s2">True</span><span class="s1">)</span>
+
+                <span class="s2">yield </span><span class="s1">self.frame</span>
+
+    <span class="s2">def </span><span class="s1">read(self</span><span class="s2">, </span><span class="s1">coerce_float=</span><span class="s2">True, </span><span class="s1">parse_dates=</span><span class="s2">None, </span><span class="s1">columns=</span><span class="s2">None, </span><span class="s1">chunksize=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s2">from </span><span class="s1">sqlalchemy </span><span class="s2">import </span><span class="s1">select</span>
+
+        <span class="s2">if </span><span class="s1">columns </span><span class="s2">is not None and </span><span class="s1">len(columns) &gt; </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s1">cols = [self.table.c[n] </span><span class="s2">for </span><span class="s1">n </span><span class="s2">in </span><span class="s1">columns]</span>
+            <span class="s2">if </span><span class="s1">self.index </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s2">for </span><span class="s1">idx </span><span class="s2">in </span><span class="s1">self.index[::-</span><span class="s5">1</span><span class="s1">]:</span>
+                    <span class="s1">cols.insert(</span><span class="s5">0</span><span class="s2">, </span><span class="s1">self.table.c[idx])</span>
+            <span class="s1">sql_select = select(*cols) </span><span class="s2">if </span><span class="s1">_gt14() </span><span class="s2">else </span><span class="s1">select(cols)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">sql_select = select(self.table) </span><span class="s2">if </span><span class="s1">_gt14() </span><span class="s2">else </span><span class="s1">self.table.select()</span>
+
+        <span class="s1">result = self.pd_sql.execute(sql_select)</span>
+        <span class="s1">column_names = result.keys()</span>
+
+        <span class="s2">if </span><span class="s1">chunksize </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">self._query_iterator(</span>
+                <span class="s1">result</span><span class="s2">,</span>
+                <span class="s1">chunksize</span><span class="s2">,</span>
+                <span class="s1">column_names</span><span class="s2">,</span>
+                <span class="s1">coerce_float=coerce_float</span><span class="s2">,</span>
+                <span class="s1">parse_dates=parse_dates</span><span class="s2">,</span>
+            <span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">data = result.fetchall()</span>
+            <span class="s1">self.frame = DataFrame.from_records(</span>
+                <span class="s1">data</span><span class="s2">, </span><span class="s1">columns=column_names</span><span class="s2">, </span><span class="s1">coerce_float=coerce_float</span>
+            <span class="s1">)</span>
+
+            <span class="s1">self._harmonize_columns(parse_dates=parse_dates)</span>
+
+            <span class="s2">if </span><span class="s1">self.index </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s1">self.frame.set_index(self.index</span><span class="s2">, </span><span class="s1">inplace=</span><span class="s2">True</span><span class="s1">)</span>
+
+            <span class="s2">return </span><span class="s1">self.frame</span>
+
+    <span class="s2">def </span><span class="s1">_index_name(self</span><span class="s2">, </span><span class="s1">index</span><span class="s2">, </span><span class="s1">index_label):</span>
+        <span class="s3"># for writing: index=True to include index in sql table</span>
+        <span class="s2">if </span><span class="s1">index </span><span class="s2">is True</span><span class="s1">:</span>
+            <span class="s1">nlevels = self.frame.index.nlevels</span>
+            <span class="s3"># if index_label is specified, set this as index name(s)</span>
+            <span class="s2">if </span><span class="s1">index_label </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s2">if not </span><span class="s1">isinstance(index_label</span><span class="s2">, </span><span class="s1">list):</span>
+                    <span class="s1">index_label = [index_label]</span>
+                <span class="s2">if </span><span class="s1">len(index_label) != nlevels:</span>
+                    <span class="s2">raise </span><span class="s1">ValueError(</span>
+                        <span class="s4">&quot;Length of 'index_label' should match number of &quot;</span>
+                        <span class="s4">f&quot;levels, which is </span><span class="s2">{</span><span class="s1">nlevels</span><span class="s2">}</span><span class="s4">&quot;</span>
+                    <span class="s1">)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s2">return </span><span class="s1">index_label</span>
+            <span class="s3"># return the used column labels for the index columns</span>
+            <span class="s2">if </span><span class="s1">(</span>
+                <span class="s1">nlevels == </span><span class="s5">1</span>
+                <span class="s2">and </span><span class="s4">&quot;index&quot; </span><span class="s2">not in </span><span class="s1">self.frame.columns</span>
+                <span class="s2">and </span><span class="s1">self.frame.index.name </span><span class="s2">is None</span>
+            <span class="s1">):</span>
+                <span class="s2">return </span><span class="s1">[</span><span class="s4">&quot;index&quot;</span><span class="s1">]</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">com.fill_missing_names(self.frame.index.names)</span>
+
+        <span class="s3"># for reading: index=(list of) string to specify column to set as index</span>
+        <span class="s2">elif </span><span class="s1">isinstance(index</span><span class="s2">, </span><span class="s1">str):</span>
+            <span class="s2">return </span><span class="s1">[index]</span>
+        <span class="s2">elif </span><span class="s1">isinstance(index</span><span class="s2">, </span><span class="s1">list):</span>
+            <span class="s2">return </span><span class="s1">index</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return None</span>
+
+    <span class="s2">def </span><span class="s1">_get_column_names_and_types(self</span><span class="s2">, </span><span class="s1">dtype_mapper):</span>
+        <span class="s1">column_names_and_types = []</span>
+        <span class="s2">if </span><span class="s1">self.index </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">for </span><span class="s1">i</span><span class="s2">, </span><span class="s1">idx_label </span><span class="s2">in </span><span class="s1">enumerate(self.index):</span>
+                <span class="s1">idx_type = dtype_mapper(self.frame.index._get_level_values(i))</span>
+                <span class="s1">column_names_and_types.append((str(idx_label)</span><span class="s2">, </span><span class="s1">idx_type</span><span class="s2">, True</span><span class="s1">))</span>
+
+        <span class="s1">column_names_and_types += [</span>
+            <span class="s1">(str(self.frame.columns[i])</span><span class="s2">, </span><span class="s1">dtype_mapper(self.frame.iloc[:</span><span class="s2">, </span><span class="s1">i])</span><span class="s2">, False</span><span class="s1">)</span>
+            <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">range(len(self.frame.columns))</span>
+        <span class="s1">]</span>
+
+        <span class="s2">return </span><span class="s1">column_names_and_types</span>
+
+    <span class="s2">def </span><span class="s1">_create_table_setup(self):</span>
+        <span class="s2">from </span><span class="s1">sqlalchemy </span><span class="s2">import </span><span class="s1">(</span>
+            <span class="s1">Column</span><span class="s2">,</span>
+            <span class="s1">PrimaryKeyConstraint</span><span class="s2">,</span>
+            <span class="s1">Table</span><span class="s2">,</span>
+        <span class="s1">)</span>
+        <span class="s2">from </span><span class="s1">sqlalchemy.schema </span><span class="s2">import </span><span class="s1">MetaData</span>
+
+        <span class="s1">column_names_and_types = self._get_column_names_and_types(self._sqlalchemy_type)</span>
+
+        <span class="s1">columns = [</span>
+            <span class="s1">Column(name</span><span class="s2">, </span><span class="s1">typ</span><span class="s2">, </span><span class="s1">index=is_index)</span>
+            <span class="s2">for </span><span class="s1">name</span><span class="s2">, </span><span class="s1">typ</span><span class="s2">, </span><span class="s1">is_index </span><span class="s2">in </span><span class="s1">column_names_and_types</span>
+        <span class="s1">]</span>
+
+        <span class="s2">if </span><span class="s1">self.keys </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">if not </span><span class="s1">is_list_like(self.keys):</span>
+                <span class="s1">keys = [self.keys]</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">keys = self.keys</span>
+            <span class="s1">pkc = PrimaryKeyConstraint(*keys</span><span class="s2">, </span><span class="s1">name=self.name + </span><span class="s4">&quot;_pk&quot;</span><span class="s1">)</span>
+            <span class="s1">columns.append(pkc)</span>
+
+        <span class="s1">schema = self.schema </span><span class="s2">or </span><span class="s1">self.pd_sql.meta.schema</span>
+
+        <span class="s3"># At this point, attach to new metadata, only attach to self.meta</span>
+        <span class="s3"># once table is created.</span>
+        <span class="s1">meta = MetaData()</span>
+        <span class="s2">return </span><span class="s1">Table(self.name</span><span class="s2">, </span><span class="s1">meta</span><span class="s2">, </span><span class="s1">*columns</span><span class="s2">, </span><span class="s1">schema=schema)</span>
+
+    <span class="s2">def </span><span class="s1">_harmonize_columns(self</span><span class="s2">, </span><span class="s1">parse_dates=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Make the DataFrame's column types align with the SQL table 
+        column types. 
+        Need to work around limited NA value support. Floats are always 
+        fine, ints must always be floats if there are Null values. 
+        Booleans are hard because converting bool column with None replaces 
+        all Nones with false. Therefore only convert bool if there are no 
+        NA values. 
+        Datetimes should already be converted to np.datetime64 if supported, 
+        but here we also force conversion if required. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">parse_dates = _process_parse_dates_argument(parse_dates)</span>
+
+        <span class="s2">for </span><span class="s1">sql_col </span><span class="s2">in </span><span class="s1">self.table.columns:</span>
+            <span class="s1">col_name = sql_col.name</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">df_col = self.frame[col_name]</span>
+
+                <span class="s3"># Handle date parsing upfront; don't try to convert columns</span>
+                <span class="s3"># twice</span>
+                <span class="s2">if </span><span class="s1">col_name </span><span class="s2">in </span><span class="s1">parse_dates:</span>
+                    <span class="s2">try</span><span class="s1">:</span>
+                        <span class="s1">fmt = parse_dates[col_name]</span>
+                    <span class="s2">except </span><span class="s1">TypeError:</span>
+                        <span class="s1">fmt = </span><span class="s2">None</span>
+                    <span class="s1">self.frame[col_name] = _handle_date_column(df_col</span><span class="s2">, </span><span class="s1">format=fmt)</span>
+                    <span class="s2">continue</span>
+
+                <span class="s3"># the type the dataframe column should have</span>
+                <span class="s1">col_type = self._get_dtype(sql_col.type)</span>
+
+                <span class="s2">if </span><span class="s1">(</span>
+                    <span class="s1">col_type </span><span class="s2">is </span><span class="s1">datetime</span>
+                    <span class="s2">or </span><span class="s1">col_type </span><span class="s2">is </span><span class="s1">date</span>
+                    <span class="s2">or </span><span class="s1">col_type </span><span class="s2">is </span><span class="s1">DatetimeTZDtype</span>
+                <span class="s1">):</span>
+                    <span class="s3"># Convert tz-aware Datetime SQL columns to UTC</span>
+                    <span class="s1">utc = col_type </span><span class="s2">is </span><span class="s1">DatetimeTZDtype</span>
+                    <span class="s1">self.frame[col_name] = _handle_date_column(df_col</span><span class="s2">, </span><span class="s1">utc=utc)</span>
+                <span class="s2">elif </span><span class="s1">col_type </span><span class="s2">is </span><span class="s1">float:</span>
+                    <span class="s3"># floats support NA, can always convert!</span>
+                    <span class="s1">self.frame[col_name] = df_col.astype(col_type</span><span class="s2">, </span><span class="s1">copy=</span><span class="s2">False</span><span class="s1">)</span>
+
+                <span class="s2">elif </span><span class="s1">len(df_col) == df_col.count():</span>
+                    <span class="s3"># No NA values, can convert ints and bools</span>
+                    <span class="s2">if </span><span class="s1">col_type </span><span class="s2">is </span><span class="s1">np.dtype(</span><span class="s4">&quot;int64&quot;</span><span class="s1">) </span><span class="s2">or </span><span class="s1">col_type </span><span class="s2">is </span><span class="s1">bool:</span>
+                        <span class="s1">self.frame[col_name] = df_col.astype(col_type</span><span class="s2">, </span><span class="s1">copy=</span><span class="s2">False</span><span class="s1">)</span>
+            <span class="s2">except </span><span class="s1">KeyError:</span>
+                <span class="s2">pass  </span><span class="s3"># this column not in results</span>
+
+    <span class="s2">def </span><span class="s1">_sqlalchemy_type(self</span><span class="s2">, </span><span class="s1">col):</span>
+
+        <span class="s1">dtype: DtypeArg = self.dtype </span><span class="s2">or </span><span class="s1">{}</span>
+        <span class="s2">if </span><span class="s1">is_dict_like(dtype):</span>
+            <span class="s1">dtype = cast(dict</span><span class="s2">, </span><span class="s1">dtype)</span>
+            <span class="s2">if </span><span class="s1">col.name </span><span class="s2">in </span><span class="s1">dtype:</span>
+                <span class="s2">return </span><span class="s1">dtype[col.name]</span>
+
+        <span class="s3"># Infer type of column, while ignoring missing values.</span>
+        <span class="s3"># Needed for inserting typed data containing NULLs, GH 8778.</span>
+        <span class="s1">col_type = lib.infer_dtype(col</span><span class="s2">, </span><span class="s1">skipna=</span><span class="s2">True</span><span class="s1">)</span>
+
+        <span class="s2">from </span><span class="s1">sqlalchemy.types </span><span class="s2">import </span><span class="s1">(</span>
+            <span class="s1">TIMESTAMP</span><span class="s2">,</span>
+            <span class="s1">BigInteger</span><span class="s2">,</span>
+            <span class="s1">Boolean</span><span class="s2">,</span>
+            <span class="s1">Date</span><span class="s2">,</span>
+            <span class="s1">DateTime</span><span class="s2">,</span>
+            <span class="s1">Float</span><span class="s2">,</span>
+            <span class="s1">Integer</span><span class="s2">,</span>
+            <span class="s1">SmallInteger</span><span class="s2">,</span>
+            <span class="s1">Text</span><span class="s2">,</span>
+            <span class="s1">Time</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">col_type == </span><span class="s4">&quot;datetime64&quot; </span><span class="s2">or </span><span class="s1">col_type == </span><span class="s4">&quot;datetime&quot;</span><span class="s1">:</span>
+            <span class="s3"># GH 9086: TIMESTAMP is the suggested type if the column contains</span>
+            <span class="s3"># timezone information</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s2">if </span><span class="s1">col.dt.tz </span><span class="s2">is not None</span><span class="s1">:</span>
+                    <span class="s2">return </span><span class="s1">TIMESTAMP(timezone=</span><span class="s2">True</span><span class="s1">)</span>
+            <span class="s2">except </span><span class="s1">AttributeError:</span>
+                <span class="s3"># The column is actually a DatetimeIndex</span>
+                <span class="s3"># GH 26761 or an Index with date-like data e.g. 9999-01-01</span>
+                <span class="s2">if </span><span class="s1">getattr(col</span><span class="s2">, </span><span class="s4">&quot;tz&quot;</span><span class="s2">, None</span><span class="s1">) </span><span class="s2">is not None</span><span class="s1">:</span>
+                    <span class="s2">return </span><span class="s1">TIMESTAMP(timezone=</span><span class="s2">True</span><span class="s1">)</span>
+            <span class="s2">return </span><span class="s1">DateTime</span>
+        <span class="s2">if </span><span class="s1">col_type == </span><span class="s4">&quot;timedelta64&quot;</span><span class="s1">:</span>
+            <span class="s1">warnings.warn(</span>
+                <span class="s4">&quot;the 'timedelta' type is not supported, and will be &quot;</span>
+                <span class="s4">&quot;written as integer values (ns frequency) to the database.&quot;</span><span class="s2">,</span>
+                <span class="s1">UserWarning</span><span class="s2">,</span>
+                <span class="s1">stacklevel=find_stack_level()</span><span class="s2">,</span>
+            <span class="s1">)</span>
+            <span class="s2">return </span><span class="s1">BigInteger</span>
+        <span class="s2">elif </span><span class="s1">col_type == </span><span class="s4">&quot;floating&quot;</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">col.dtype == </span><span class="s4">&quot;float32&quot;</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">Float(precision=</span><span class="s5">23</span><span class="s1">)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">Float(precision=</span><span class="s5">53</span><span class="s1">)</span>
+        <span class="s2">elif </span><span class="s1">col_type == </span><span class="s4">&quot;integer&quot;</span><span class="s1">:</span>
+            <span class="s3"># GH35076 Map pandas integer to optimal SQLAlchemy integer type</span>
+            <span class="s2">if </span><span class="s1">col.dtype.name.lower() </span><span class="s2">in </span><span class="s1">(</span><span class="s4">&quot;int8&quot;</span><span class="s2">, </span><span class="s4">&quot;uint8&quot;</span><span class="s2">, </span><span class="s4">&quot;int16&quot;</span><span class="s1">):</span>
+                <span class="s2">return </span><span class="s1">SmallInteger</span>
+            <span class="s2">elif </span><span class="s1">col.dtype.name.lower() </span><span class="s2">in </span><span class="s1">(</span><span class="s4">&quot;uint16&quot;</span><span class="s2">, </span><span class="s4">&quot;int32&quot;</span><span class="s1">):</span>
+                <span class="s2">return </span><span class="s1">Integer</span>
+            <span class="s2">elif </span><span class="s1">col.dtype.name.lower() == </span><span class="s4">&quot;uint64&quot;</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Unsigned 64 bit integer datatype is not supported&quot;</span><span class="s1">)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">BigInteger</span>
+        <span class="s2">elif </span><span class="s1">col_type == </span><span class="s4">&quot;boolean&quot;</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">Boolean</span>
+        <span class="s2">elif </span><span class="s1">col_type == </span><span class="s4">&quot;date&quot;</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">Date</span>
+        <span class="s2">elif </span><span class="s1">col_type == </span><span class="s4">&quot;time&quot;</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">Time</span>
+        <span class="s2">elif </span><span class="s1">col_type == </span><span class="s4">&quot;complex&quot;</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Complex datatypes not supported&quot;</span><span class="s1">)</span>
+
+        <span class="s2">return </span><span class="s1">Text</span>
+
+    <span class="s2">def </span><span class="s1">_get_dtype(self</span><span class="s2">, </span><span class="s1">sqltype):</span>
+        <span class="s2">from </span><span class="s1">sqlalchemy.types </span><span class="s2">import </span><span class="s1">(</span>
+            <span class="s1">TIMESTAMP</span><span class="s2">,</span>
+            <span class="s1">Boolean</span><span class="s2">,</span>
+            <span class="s1">Date</span><span class="s2">,</span>
+            <span class="s1">DateTime</span><span class="s2">,</span>
+            <span class="s1">Float</span><span class="s2">,</span>
+            <span class="s1">Integer</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">isinstance(sqltype</span><span class="s2">, </span><span class="s1">Float):</span>
+            <span class="s2">return </span><span class="s1">float</span>
+        <span class="s2">elif </span><span class="s1">isinstance(sqltype</span><span class="s2">, </span><span class="s1">Integer):</span>
+            <span class="s3"># TODO: Refine integer size.</span>
+            <span class="s2">return </span><span class="s1">np.dtype(</span><span class="s4">&quot;int64&quot;</span><span class="s1">)</span>
+        <span class="s2">elif </span><span class="s1">isinstance(sqltype</span><span class="s2">, </span><span class="s1">TIMESTAMP):</span>
+            <span class="s3"># we have a timezone capable type</span>
+            <span class="s2">if not </span><span class="s1">sqltype.timezone:</span>
+                <span class="s2">return </span><span class="s1">datetime</span>
+            <span class="s2">return </span><span class="s1">DatetimeTZDtype</span>
+        <span class="s2">elif </span><span class="s1">isinstance(sqltype</span><span class="s2">, </span><span class="s1">DateTime):</span>
+            <span class="s3"># Caution: np.datetime64 is also a subclass of np.number.</span>
+            <span class="s2">return </span><span class="s1">datetime</span>
+        <span class="s2">elif </span><span class="s1">isinstance(sqltype</span><span class="s2">, </span><span class="s1">Date):</span>
+            <span class="s2">return </span><span class="s1">date</span>
+        <span class="s2">elif </span><span class="s1">isinstance(sqltype</span><span class="s2">, </span><span class="s1">Boolean):</span>
+            <span class="s2">return </span><span class="s1">bool</span>
+        <span class="s2">return </span><span class="s1">object</span>
+
+
+<span class="s2">class </span><span class="s1">PandasSQL(PandasObject):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Subclasses Should define read_sql and to_sql. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">read_sql(self</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span>
+            <span class="s4">&quot;PandasSQL must be created with an SQLAlchemy &quot;</span>
+            <span class="s4">&quot;connectable or sqlite connection&quot;</span>
+        <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">to_sql(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">frame</span><span class="s2">,</span>
+        <span class="s1">name</span><span class="s2">,</span>
+        <span class="s1">if_exists=</span><span class="s4">&quot;fail&quot;</span><span class="s2">,</span>
+        <span class="s1">index=</span><span class="s2">True,</span>
+        <span class="s1">index_label=</span><span class="s2">None,</span>
+        <span class="s1">schema=</span><span class="s2">None,</span>
+        <span class="s1">chunksize=</span><span class="s2">None,</span>
+        <span class="s1">dtype: DtypeArg | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+        <span class="s1">method=</span><span class="s2">None,</span>
+    <span class="s1">) -&gt; int | </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span>
+            <span class="s4">&quot;PandasSQL must be created with an SQLAlchemy &quot;</span>
+            <span class="s4">&quot;connectable or sqlite connection&quot;</span>
+        <span class="s1">)</span>
+
+
+<span class="s2">class </span><span class="s1">BaseEngine:</span>
+    <span class="s2">def </span><span class="s1">insert_records(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">table: SQLTable</span><span class="s2">,</span>
+        <span class="s1">con</span><span class="s2">,</span>
+        <span class="s1">frame</span><span class="s2">,</span>
+        <span class="s1">name</span><span class="s2">,</span>
+        <span class="s1">index=</span><span class="s2">True,</span>
+        <span class="s1">schema=</span><span class="s2">None,</span>
+        <span class="s1">chunksize=</span><span class="s2">None,</span>
+        <span class="s1">method=</span><span class="s2">None,</span>
+        <span class="s1">**engine_kwargs</span><span class="s2">,</span>
+    <span class="s1">) -&gt; int | </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Inserts data into already-prepared table 
+        &quot;&quot;&quot;</span>
+        <span class="s2">raise </span><span class="s1">AbstractMethodError(self)</span>
+
+
+<span class="s2">class </span><span class="s1">SQLAlchemyEngine(BaseEngine):</span>
+    <span class="s2">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">import_optional_dependency(</span>
+            <span class="s4">&quot;sqlalchemy&quot;</span><span class="s2">, </span><span class="s1">extra=</span><span class="s4">&quot;sqlalchemy is required for SQL support.&quot;</span>
+        <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">insert_records(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">table: SQLTable</span><span class="s2">,</span>
+        <span class="s1">con</span><span class="s2">,</span>
+        <span class="s1">frame</span><span class="s2">,</span>
+        <span class="s1">name</span><span class="s2">,</span>
+        <span class="s1">index=</span><span class="s2">True,</span>
+        <span class="s1">schema=</span><span class="s2">None,</span>
+        <span class="s1">chunksize=</span><span class="s2">None,</span>
+        <span class="s1">method=</span><span class="s2">None,</span>
+        <span class="s1">**engine_kwargs</span><span class="s2">,</span>
+    <span class="s1">) -&gt; int | </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">from </span><span class="s1">sqlalchemy </span><span class="s2">import </span><span class="s1">exc</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">table.insert(chunksize=chunksize</span><span class="s2">, </span><span class="s1">method=method)</span>
+        <span class="s2">except </span><span class="s1">exc.SQLAlchemyError </span><span class="s2">as </span><span class="s1">err:</span>
+            <span class="s3"># GH34431</span>
+            <span class="s3"># https://stackoverflow.com/a/67358288/6067848</span>
+            <span class="s1">msg = </span><span class="s4">r&quot;&quot;&quot;(\(1054, &quot;Unknown column 'inf(e0)?' in 'field list'&quot;\))(?# 
+            )|inf can not be used with MySQL&quot;&quot;&quot;</span>
+            <span class="s1">err_text = str(err.orig)</span>
+            <span class="s2">if </span><span class="s1">re.search(msg</span><span class="s2">, </span><span class="s1">err_text):</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;inf cannot be used with MySQL&quot;</span><span class="s1">) </span><span class="s2">from </span><span class="s1">err</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">err</span>
+
+
+<span class="s2">def </span><span class="s1">get_engine(engine: str) -&gt; BaseEngine:</span>
+    <span class="s0">&quot;&quot;&quot;return our implementation&quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">engine == </span><span class="s4">&quot;auto&quot;</span><span class="s1">:</span>
+        <span class="s1">engine = get_option(</span><span class="s4">&quot;io.sql.engine&quot;</span><span class="s1">)</span>
+
+    <span class="s2">if </span><span class="s1">engine == </span><span class="s4">&quot;auto&quot;</span><span class="s1">:</span>
+        <span class="s3"># try engines in this order</span>
+        <span class="s1">engine_classes = [SQLAlchemyEngine]</span>
+
+        <span class="s1">error_msgs = </span><span class="s4">&quot;&quot;</span>
+        <span class="s2">for </span><span class="s1">engine_class </span><span class="s2">in </span><span class="s1">engine_classes:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">engine_class()</span>
+            <span class="s2">except </span><span class="s1">ImportError </span><span class="s2">as </span><span class="s1">err:</span>
+                <span class="s1">error_msgs += </span><span class="s4">&quot;</span><span class="s2">\n </span><span class="s4">- &quot; </span><span class="s1">+ str(err)</span>
+
+        <span class="s2">raise </span><span class="s1">ImportError(</span>
+            <span class="s4">&quot;Unable to find a usable engine; &quot;</span>
+            <span class="s4">&quot;tried using: 'sqlalchemy'.</span><span class="s2">\n</span><span class="s4">&quot;</span>
+            <span class="s4">&quot;A suitable version of &quot;</span>
+            <span class="s4">&quot;sqlalchemy is required for sql I/O &quot;</span>
+            <span class="s4">&quot;support.</span><span class="s2">\n</span><span class="s4">&quot;</span>
+            <span class="s4">&quot;Trying to import the above resulted in these errors:&quot;</span>
+            <span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">error_msgs</span><span class="s2">}</span><span class="s4">&quot;</span>
+        <span class="s1">)</span>
+
+    <span class="s2">elif </span><span class="s1">engine == </span><span class="s4">&quot;sqlalchemy&quot;</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">SQLAlchemyEngine()</span>
+
+    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;engine must be one of 'auto', 'sqlalchemy'&quot;</span><span class="s1">)</span>
+
+
+<span class="s2">class </span><span class="s1">SQLDatabase(PandasSQL):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    This class enables conversion between DataFrame and SQL databases 
+    using SQLAlchemy to handle DataBase abstraction. 
+ 
+    Parameters 
+    ---------- 
+    engine : SQLAlchemy connectable 
+        Connectable to connect with the database. Using SQLAlchemy makes it 
+        possible to use any DB supported by that library. 
+    schema : string, default None 
+        Name of SQL schema in database to write to (if database flavor 
+        supports this). If None, use default schema (default). 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">engine</span><span class="s2">, </span><span class="s1">schema: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s2">from </span><span class="s1">sqlalchemy.schema </span><span class="s2">import </span><span class="s1">MetaData</span>
+
+        <span class="s1">self.connectable = engine</span>
+        <span class="s1">self.meta = MetaData(schema=schema)</span>
+
+    <span class="s1">@contextmanager</span>
+    <span class="s2">def </span><span class="s1">run_transaction(self):</span>
+        <span class="s2">from </span><span class="s1">sqlalchemy.engine </span><span class="s2">import </span><span class="s1">Engine</span>
+
+        <span class="s2">if </span><span class="s1">isinstance(self.connectable</span><span class="s2">, </span><span class="s1">Engine):</span>
+            <span class="s2">with </span><span class="s1">self.connectable.connect() </span><span class="s2">as </span><span class="s1">conn:</span>
+                <span class="s2">with </span><span class="s1">conn.begin():</span>
+                    <span class="s2">yield </span><span class="s1">conn</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">yield </span><span class="s1">self.connectable</span>
+
+    <span class="s2">def </span><span class="s1">execute(self</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+        <span class="s0">&quot;&quot;&quot;Simple passthrough to SQLAlchemy connectable&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self.connectable.execution_options().execute(*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s2">def </span><span class="s1">read_table(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">table_name: str</span><span class="s2">,</span>
+        <span class="s1">index_col: str | Sequence[str] | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+        <span class="s1">coerce_float: bool = </span><span class="s2">True,</span>
+        <span class="s1">parse_dates=</span><span class="s2">None,</span>
+        <span class="s1">columns=</span><span class="s2">None,</span>
+        <span class="s1">schema: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+        <span class="s1">chunksize: int | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Read SQL database table into a DataFrame. 
+ 
+        Parameters 
+        ---------- 
+        table_name : str 
+            Name of SQL table in database. 
+        index_col : string, optional, default: None 
+            Column to set as index. 
+        coerce_float : bool, default True 
+            Attempts to convert values of non-string, non-numeric objects 
+            (like decimal.Decimal) to floating point. This can result in 
+            loss of precision. 
+        parse_dates : list or dict, default: None 
+            - List of column names to parse as dates. 
+            - Dict of ``{column_name: format string}`` where format string is 
+              strftime compatible in case of parsing string times, or is one of 
+              (D, s, ns, ms, us) in case of parsing integer timestamps. 
+            - Dict of ``{column_name: arg}``, where the arg corresponds 
+              to the keyword arguments of :func:`pandas.to_datetime`. 
+              Especially useful with databases without native Datetime support, 
+              such as SQLite. 
+        columns : list, default: None 
+            List of column names to select from SQL table. 
+        schema : string, default None 
+            Name of SQL schema in database to query (if database flavor 
+            supports this).  If specified, this overwrites the default 
+            schema of the SQL database object. 
+        chunksize : int, default None 
+            If specified, return an iterator where `chunksize` is the number 
+            of rows to include in each chunk. 
+ 
+        Returns 
+        ------- 
+        DataFrame 
+ 
+        See Also 
+        -------- 
+        pandas.read_sql_table 
+        SQLDatabase.read_query 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s1">table = SQLTable(table_name</span><span class="s2">, </span><span class="s1">self</span><span class="s2">, </span><span class="s1">index=index_col</span><span class="s2">, </span><span class="s1">schema=schema)</span>
+        <span class="s2">return </span><span class="s1">table.read(</span>
+            <span class="s1">coerce_float=coerce_float</span><span class="s2">,</span>
+            <span class="s1">parse_dates=parse_dates</span><span class="s2">,</span>
+            <span class="s1">columns=columns</span><span class="s2">,</span>
+            <span class="s1">chunksize=chunksize</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s2">def </span><span class="s1">_query_iterator(</span>
+        <span class="s1">result</span><span class="s2">,</span>
+        <span class="s1">chunksize: int</span><span class="s2">,</span>
+        <span class="s1">columns</span><span class="s2">,</span>
+        <span class="s1">index_col=</span><span class="s2">None,</span>
+        <span class="s1">coerce_float=</span><span class="s2">True,</span>
+        <span class="s1">parse_dates=</span><span class="s2">None,</span>
+        <span class="s1">dtype: DtypeArg | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Return generator through chunked result set&quot;&quot;&quot;</span>
+        <span class="s1">has_read_data = </span><span class="s2">False</span>
+        <span class="s2">while True</span><span class="s1">:</span>
+            <span class="s1">data = result.fetchmany(chunksize)</span>
+            <span class="s2">if not </span><span class="s1">data:</span>
+                <span class="s2">if not </span><span class="s1">has_read_data:</span>
+                    <span class="s2">yield </span><span class="s1">_wrap_result(</span>
+                        <span class="s1">[]</span><span class="s2">,</span>
+                        <span class="s1">columns</span><span class="s2">,</span>
+                        <span class="s1">index_col=index_col</span><span class="s2">,</span>
+                        <span class="s1">coerce_float=coerce_float</span><span class="s2">,</span>
+                        <span class="s1">parse_dates=parse_dates</span><span class="s2">,</span>
+                    <span class="s1">)</span>
+                <span class="s2">break</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">has_read_data = </span><span class="s2">True</span>
+                <span class="s2">yield </span><span class="s1">_wrap_result(</span>
+                    <span class="s1">data</span><span class="s2">,</span>
+                    <span class="s1">columns</span><span class="s2">,</span>
+                    <span class="s1">index_col=index_col</span><span class="s2">,</span>
+                    <span class="s1">coerce_float=coerce_float</span><span class="s2">,</span>
+                    <span class="s1">parse_dates=parse_dates</span><span class="s2">,</span>
+                    <span class="s1">dtype=dtype</span><span class="s2">,</span>
+                <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">read_query(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">sql: str</span><span class="s2">,</span>
+        <span class="s1">index_col: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+        <span class="s1">coerce_float: bool = </span><span class="s2">True,</span>
+        <span class="s1">parse_dates=</span><span class="s2">None,</span>
+        <span class="s1">params=</span><span class="s2">None,</span>
+        <span class="s1">chunksize: int | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+        <span class="s1">dtype: DtypeArg | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Read SQL query into a DataFrame. 
+ 
+        Parameters 
+        ---------- 
+        sql : str 
+            SQL query to be executed. 
+        index_col : string, optional, default: None 
+            Column name to use as index for the returned DataFrame object. 
+        coerce_float : bool, default True 
+            Attempt to convert values of non-string, non-numeric objects (like 
+            decimal.Decimal) to floating point, useful for SQL result sets. 
+        params : list, tuple or dict, optional, default: None 
+            List of parameters to pass to execute method.  The syntax used 
+            to pass parameters is database driver dependent. Check your 
+            database driver documentation for which of the five syntax styles, 
+            described in PEP 249's paramstyle, is supported. 
+            Eg. for psycopg2, uses %(name)s so use params={'name' : 'value'} 
+        parse_dates : list or dict, default: None 
+            - List of column names to parse as dates. 
+            - Dict of ``{column_name: format string}`` where format string is 
+              strftime compatible in case of parsing string times, or is one of 
+              (D, s, ns, ms, us) in case of parsing integer timestamps. 
+            - Dict of ``{column_name: arg dict}``, where the arg dict 
+              corresponds to the keyword arguments of 
+              :func:`pandas.to_datetime` Especially useful with databases 
+              without native Datetime support, such as SQLite. 
+        chunksize : int, default None 
+            If specified, return an iterator where `chunksize` is the number 
+            of rows to include in each chunk. 
+        dtype : Type name or dict of columns 
+            Data type for data or columns. E.g. np.float64 or 
+            {‘a’: np.float64, ‘b’: np.int32, ‘c’: ‘Int64’} 
+ 
+            .. versionadded:: 1.3.0 
+ 
+        Returns 
+        ------- 
+        DataFrame 
+ 
+        See Also 
+        -------- 
+        read_sql_table : Read SQL database table into a DataFrame. 
+        read_sql 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s1">args = _convert_params(sql</span><span class="s2">, </span><span class="s1">params)</span>
+
+        <span class="s1">result = self.execute(*args)</span>
+        <span class="s1">columns = result.keys()</span>
+
+        <span class="s2">if </span><span class="s1">chunksize </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">self._query_iterator(</span>
+                <span class="s1">result</span><span class="s2">,</span>
+                <span class="s1">chunksize</span><span class="s2">,</span>
+                <span class="s1">columns</span><span class="s2">,</span>
+                <span class="s1">index_col=index_col</span><span class="s2">,</span>
+                <span class="s1">coerce_float=coerce_float</span><span class="s2">,</span>
+                <span class="s1">parse_dates=parse_dates</span><span class="s2">,</span>
+                <span class="s1">dtype=dtype</span><span class="s2">,</span>
+            <span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">data = result.fetchall()</span>
+            <span class="s1">frame = _wrap_result(</span>
+                <span class="s1">data</span><span class="s2">,</span>
+                <span class="s1">columns</span><span class="s2">,</span>
+                <span class="s1">index_col=index_col</span><span class="s2">,</span>
+                <span class="s1">coerce_float=coerce_float</span><span class="s2">,</span>
+                <span class="s1">parse_dates=parse_dates</span><span class="s2">,</span>
+                <span class="s1">dtype=dtype</span><span class="s2">,</span>
+            <span class="s1">)</span>
+            <span class="s2">return </span><span class="s1">frame</span>
+
+    <span class="s1">read_sql = read_query</span>
+
+    <span class="s2">def </span><span class="s1">prep_table(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">frame</span><span class="s2">,</span>
+        <span class="s1">name</span><span class="s2">,</span>
+        <span class="s1">if_exists=</span><span class="s4">&quot;fail&quot;</span><span class="s2">,</span>
+        <span class="s1">index=</span><span class="s2">True,</span>
+        <span class="s1">index_label=</span><span class="s2">None,</span>
+        <span class="s1">schema=</span><span class="s2">None,</span>
+        <span class="s1">dtype: DtypeArg | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">) -&gt; SQLTable:</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Prepares table in the database for data insertion. Creates it if needed, etc. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">dtype:</span>
+            <span class="s2">if not </span><span class="s1">is_dict_like(dtype):</span>
+                <span class="s3"># error: Value expression in dictionary comprehension has incompatible</span>
+                <span class="s3"># type &quot;Union[ExtensionDtype, str, dtype[Any], Type[object],</span>
+                <span class="s3"># Dict[Hashable, Union[ExtensionDtype, Union[str, dtype[Any]],</span>
+                <span class="s3"># Type[str], Type[float], Type[int], Type[complex], Type[bool],</span>
+                <span class="s3"># Type[object]]]]&quot;; expected type &quot;Union[ExtensionDtype, str,</span>
+                <span class="s3"># dtype[Any], Type[object]]&quot;</span>
+                <span class="s1">dtype = {col_name: dtype </span><span class="s2">for </span><span class="s1">col_name </span><span class="s2">in </span><span class="s1">frame}  </span><span class="s3"># type: ignore[misc]</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">dtype = cast(dict</span><span class="s2">, </span><span class="s1">dtype)</span>
+
+            <span class="s2">from </span><span class="s1">sqlalchemy.types </span><span class="s2">import </span><span class="s1">(</span>
+                <span class="s1">TypeEngine</span><span class="s2">,</span>
+                <span class="s1">to_instance</span><span class="s2">,</span>
+            <span class="s1">)</span>
+
+            <span class="s2">for </span><span class="s1">col</span><span class="s2">, </span><span class="s1">my_type </span><span class="s2">in </span><span class="s1">dtype.items():</span>
+                <span class="s2">if not </span><span class="s1">isinstance(to_instance(my_type)</span><span class="s2">, </span><span class="s1">TypeEngine):</span>
+                    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;The type of </span><span class="s2">{</span><span class="s1">col</span><span class="s2">} </span><span class="s4">is not a SQLAlchemy type&quot;</span><span class="s1">)</span>
+
+        <span class="s1">table = SQLTable(</span>
+            <span class="s1">name</span><span class="s2">,</span>
+            <span class="s1">self</span><span class="s2">,</span>
+            <span class="s1">frame=frame</span><span class="s2">,</span>
+            <span class="s1">index=index</span><span class="s2">,</span>
+            <span class="s1">if_exists=if_exists</span><span class="s2">,</span>
+            <span class="s1">index_label=index_label</span><span class="s2">,</span>
+            <span class="s1">schema=schema</span><span class="s2">,</span>
+            <span class="s1">dtype=dtype</span><span class="s2">,</span>
+        <span class="s1">)</span>
+        <span class="s1">table.create()</span>
+        <span class="s2">return </span><span class="s1">table</span>
+
+    <span class="s2">def </span><span class="s1">check_case_sensitive(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">name</span><span class="s2">,</span>
+        <span class="s1">schema</span><span class="s2">,</span>
+    <span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Checks table name for issues with case-sensitivity. 
+        Method is called after data is inserted. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if not </span><span class="s1">name.isdigit() </span><span class="s2">and not </span><span class="s1">name.islower():</span>
+            <span class="s3"># check for potentially case sensitivity issues (GH7815)</span>
+            <span class="s3"># Only check when name is not a number and name is not lower case</span>
+            <span class="s1">engine = self.connectable.engine</span>
+            <span class="s2">with </span><span class="s1">self.connectable.connect() </span><span class="s2">as </span><span class="s1">conn:</span>
+                <span class="s2">if </span><span class="s1">_gt14():</span>
+                    <span class="s2">from </span><span class="s1">sqlalchemy </span><span class="s2">import </span><span class="s1">inspect</span>
+
+                    <span class="s1">insp = inspect(conn)</span>
+                    <span class="s1">table_names = insp.get_table_names(</span>
+                        <span class="s1">schema=schema </span><span class="s2">or </span><span class="s1">self.meta.schema</span>
+                    <span class="s1">)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">table_names = engine.table_names(</span>
+                        <span class="s1">schema=schema </span><span class="s2">or </span><span class="s1">self.meta.schema</span><span class="s2">, </span><span class="s1">connection=conn</span>
+                    <span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">name </span><span class="s2">not in </span><span class="s1">table_names:</span>
+                <span class="s1">msg = (</span>
+                    <span class="s4">f&quot;The provided table name '</span><span class="s2">{</span><span class="s1">name</span><span class="s2">}</span><span class="s4">' is not found exactly as &quot;</span>
+                    <span class="s4">&quot;such in the database after writing the table, possibly &quot;</span>
+                    <span class="s4">&quot;due to case sensitivity issues. Consider using lower &quot;</span>
+                    <span class="s4">&quot;case table names.&quot;</span>
+                <span class="s1">)</span>
+                <span class="s1">warnings.warn(msg</span><span class="s2">, </span><span class="s1">UserWarning)</span>
+
+    <span class="s2">def </span><span class="s1">to_sql(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">frame</span><span class="s2">,</span>
+        <span class="s1">name</span><span class="s2">,</span>
+        <span class="s1">if_exists=</span><span class="s4">&quot;fail&quot;</span><span class="s2">,</span>
+        <span class="s1">index=</span><span class="s2">True,</span>
+        <span class="s1">index_label=</span><span class="s2">None,</span>
+        <span class="s1">schema=</span><span class="s2">None,</span>
+        <span class="s1">chunksize=</span><span class="s2">None,</span>
+        <span class="s1">dtype: DtypeArg | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+        <span class="s1">method=</span><span class="s2">None,</span>
+        <span class="s1">engine=</span><span class="s4">&quot;auto&quot;</span><span class="s2">,</span>
+        <span class="s1">**engine_kwargs</span><span class="s2">,</span>
+    <span class="s1">) -&gt; int | </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Write records stored in a DataFrame to a SQL database. 
+ 
+        Parameters 
+        ---------- 
+        frame : DataFrame 
+        name : string 
+            Name of SQL table. 
+        if_exists : {'fail', 'replace', 'append'}, default 'fail' 
+            - fail: If table exists, do nothing. 
+            - replace: If table exists, drop it, recreate it, and insert data. 
+            - append: If table exists, insert data. Create if does not exist. 
+        index : boolean, default True 
+            Write DataFrame index as a column. 
+        index_label : string or sequence, default None 
+            Column label for index column(s). If None is given (default) and 
+            `index` is True, then the index names are used. 
+            A sequence should be given if the DataFrame uses MultiIndex. 
+        schema : string, default None 
+            Name of SQL schema in database to write to (if database flavor 
+            supports this). If specified, this overwrites the default 
+            schema of the SQLDatabase object. 
+        chunksize : int, default None 
+            If not None, then rows will be written in batches of this size at a 
+            time.  If None, all rows will be written at once. 
+        dtype : single type or dict of column name to SQL type, default None 
+            Optional specifying the datatype for columns. The SQL type should 
+            be a SQLAlchemy type. If all columns are of the same type, one 
+            single value can be used. 
+        method : {None', 'multi', callable}, default None 
+            Controls the SQL insertion clause used: 
+ 
+            * None : Uses standard SQL ``INSERT`` clause (one per row). 
+            * 'multi': Pass multiple values in a single ``INSERT`` clause. 
+            * callable with signature ``(pd_table, conn, keys, data_iter)``. 
+ 
+            Details and a sample callable implementation can be found in the 
+            section :ref:`insert method &lt;io.sql.method&gt;`. 
+        engine : {'auto', 'sqlalchemy'}, default 'auto' 
+            SQL engine library to use. If 'auto', then the option 
+            ``io.sql.engine`` is used. The default ``io.sql.engine`` 
+            behavior is 'sqlalchemy' 
+ 
+            .. versionadded:: 1.3.0 
+ 
+        **engine_kwargs 
+            Any additional kwargs are passed to the engine. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">sql_engine = get_engine(engine)</span>
+
+        <span class="s1">table = self.prep_table(</span>
+            <span class="s1">frame=frame</span><span class="s2">,</span>
+            <span class="s1">name=name</span><span class="s2">,</span>
+            <span class="s1">if_exists=if_exists</span><span class="s2">,</span>
+            <span class="s1">index=index</span><span class="s2">,</span>
+            <span class="s1">index_label=index_label</span><span class="s2">,</span>
+            <span class="s1">schema=schema</span><span class="s2">,</span>
+            <span class="s1">dtype=dtype</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+        <span class="s1">total_inserted = sql_engine.insert_records(</span>
+            <span class="s1">table=table</span><span class="s2">,</span>
+            <span class="s1">con=self.connectable</span><span class="s2">,</span>
+            <span class="s1">frame=frame</span><span class="s2">,</span>
+            <span class="s1">name=name</span><span class="s2">,</span>
+            <span class="s1">index=index</span><span class="s2">,</span>
+            <span class="s1">schema=schema</span><span class="s2">,</span>
+            <span class="s1">chunksize=chunksize</span><span class="s2">,</span>
+            <span class="s1">method=method</span><span class="s2">,</span>
+            <span class="s1">**engine_kwargs</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+        <span class="s1">self.check_case_sensitive(name=name</span><span class="s2">, </span><span class="s1">schema=schema)</span>
+        <span class="s2">return </span><span class="s1">total_inserted</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">tables(self):</span>
+        <span class="s2">return </span><span class="s1">self.meta.tables</span>
+
+    <span class="s2">def </span><span class="s1">has_table(self</span><span class="s2">, </span><span class="s1">name: str</span><span class="s2">, </span><span class="s1">schema: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s2">if </span><span class="s1">_gt14():</span>
+            <span class="s2">from </span><span class="s1">sqlalchemy </span><span class="s2">import </span><span class="s1">inspect</span>
+
+            <span class="s1">insp = inspect(self.connectable)</span>
+            <span class="s2">return </span><span class="s1">insp.has_table(name</span><span class="s2">, </span><span class="s1">schema </span><span class="s2">or </span><span class="s1">self.meta.schema)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">self.connectable.run_callable(</span>
+                <span class="s1">self.connectable.dialect.has_table</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">schema </span><span class="s2">or </span><span class="s1">self.meta.schema</span>
+            <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">get_table(self</span><span class="s2">, </span><span class="s1">table_name: str</span><span class="s2">, </span><span class="s1">schema: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s2">from </span><span class="s1">sqlalchemy </span><span class="s2">import </span><span class="s1">(</span>
+            <span class="s1">Numeric</span><span class="s2">,</span>
+            <span class="s1">Table</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+        <span class="s1">schema = schema </span><span class="s2">or </span><span class="s1">self.meta.schema</span>
+        <span class="s1">tbl = Table(</span>
+            <span class="s1">table_name</span><span class="s2">, </span><span class="s1">self.meta</span><span class="s2">, </span><span class="s1">autoload_with=self.connectable</span><span class="s2">, </span><span class="s1">schema=schema</span>
+        <span class="s1">)</span>
+        <span class="s2">for </span><span class="s1">column </span><span class="s2">in </span><span class="s1">tbl.columns:</span>
+            <span class="s2">if </span><span class="s1">isinstance(column.type</span><span class="s2">, </span><span class="s1">Numeric):</span>
+                <span class="s1">column.type.asdecimal = </span><span class="s2">False</span>
+        <span class="s2">return </span><span class="s1">tbl</span>
+
+    <span class="s2">def </span><span class="s1">drop_table(self</span><span class="s2">, </span><span class="s1">table_name: str</span><span class="s2">, </span><span class="s1">schema: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s1">schema = schema </span><span class="s2">or </span><span class="s1">self.meta.schema</span>
+        <span class="s2">if </span><span class="s1">self.has_table(table_name</span><span class="s2">, </span><span class="s1">schema):</span>
+            <span class="s1">self.meta.reflect(bind=self.connectable</span><span class="s2">, </span><span class="s1">only=[table_name]</span><span class="s2">, </span><span class="s1">schema=schema)</span>
+            <span class="s1">self.get_table(table_name</span><span class="s2">, </span><span class="s1">schema).drop(bind=self.connectable)</span>
+            <span class="s1">self.meta.clear()</span>
+
+    <span class="s2">def </span><span class="s1">_create_sql_schema(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">frame: DataFrame</span><span class="s2">,</span>
+        <span class="s1">table_name: str</span><span class="s2">,</span>
+        <span class="s1">keys: list[str] | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+        <span class="s1">dtype: DtypeArg | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+        <span class="s1">schema: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">):</span>
+        <span class="s1">table = SQLTable(</span>
+            <span class="s1">table_name</span><span class="s2">,</span>
+            <span class="s1">self</span><span class="s2">,</span>
+            <span class="s1">frame=frame</span><span class="s2">,</span>
+            <span class="s1">index=</span><span class="s2">False,</span>
+            <span class="s1">keys=keys</span><span class="s2">,</span>
+            <span class="s1">dtype=dtype</span><span class="s2">,</span>
+            <span class="s1">schema=schema</span><span class="s2">,</span>
+        <span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">str(table.sql_schema())</span>
+
+
+<span class="s3"># ---- SQL without SQLAlchemy ---</span>
+<span class="s3"># sqlite-specific sql strings and handler class</span>
+<span class="s3"># dictionary used for readability purposes</span>
+<span class="s1">_SQL_TYPES = {</span>
+    <span class="s4">&quot;string&quot;</span><span class="s1">: </span><span class="s4">&quot;TEXT&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;floating&quot;</span><span class="s1">: </span><span class="s4">&quot;REAL&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;integer&quot;</span><span class="s1">: </span><span class="s4">&quot;INTEGER&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;datetime&quot;</span><span class="s1">: </span><span class="s4">&quot;TIMESTAMP&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;date&quot;</span><span class="s1">: </span><span class="s4">&quot;DATE&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;time&quot;</span><span class="s1">: </span><span class="s4">&quot;TIME&quot;</span><span class="s2">,</span>
+    <span class="s4">&quot;boolean&quot;</span><span class="s1">: </span><span class="s4">&quot;INTEGER&quot;</span><span class="s2">,</span>
+<span class="s1">}</span>
+
+
+<span class="s2">def </span><span class="s1">_get_unicode_name(name):</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">uname = str(name).encode(</span><span class="s4">&quot;utf-8&quot;</span><span class="s2">, </span><span class="s4">&quot;strict&quot;</span><span class="s1">).decode(</span><span class="s4">&quot;utf-8&quot;</span><span class="s1">)</span>
+    <span class="s2">except </span><span class="s1">UnicodeError </span><span class="s2">as </span><span class="s1">err:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;Cannot convert identifier to UTF-8: '</span><span class="s2">{</span><span class="s1">name</span><span class="s2">}</span><span class="s4">'&quot;</span><span class="s1">) </span><span class="s2">from </span><span class="s1">err</span>
+    <span class="s2">return </span><span class="s1">uname</span>
+
+
+<span class="s2">def </span><span class="s1">_get_valid_sqlite_name(name):</span>
+    <span class="s3"># See https://stackoverflow.com/questions/6514274/how-do-you-escape-strings\</span>
+    <span class="s3"># -for-sqlite-table-column-names-in-python</span>
+    <span class="s3"># Ensure the string can be encoded as UTF-8.</span>
+    <span class="s3"># Ensure the string does not include any NUL characters.</span>
+    <span class="s3"># Replace all &quot; with &quot;&quot;.</span>
+    <span class="s3"># Wrap the entire thing in double quotes.</span>
+
+    <span class="s1">uname = _get_unicode_name(name)</span>
+    <span class="s2">if not </span><span class="s1">len(uname):</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Empty table or column name specified&quot;</span><span class="s1">)</span>
+
+    <span class="s1">nul_index = uname.find(</span><span class="s4">&quot;</span><span class="s2">\x00</span><span class="s4">&quot;</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">nul_index &gt;= </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;SQLite identifier cannot contain NULs&quot;</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s4">'&quot;' </span><span class="s1">+ uname.replace(</span><span class="s4">'&quot;'</span><span class="s2">, </span><span class="s4">'&quot;&quot;'</span><span class="s1">) + </span><span class="s4">'&quot;'</span>
+
+
+<span class="s2">class </span><span class="s1">SQLiteTable(SQLTable):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Patch the SQLTable for fallback support. 
+    Instead of a table variable just use the Create Table statement. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+        <span class="s3"># GH 8341</span>
+        <span class="s3"># register an adapter callable for datetime.time object</span>
+        <span class="s2">import </span><span class="s1">sqlite3</span>
+
+        <span class="s3"># this will transform time(12,34,56,789) into '12:34:56.000789'</span>
+        <span class="s3"># (this is what sqlalchemy does)</span>
+        <span class="s1">sqlite3.register_adapter(time</span><span class="s2">, lambda </span><span class="s1">_: _.strftime(</span><span class="s4">&quot;%H:%M:%S.%f&quot;</span><span class="s1">))</span>
+        <span class="s1">super().__init__(*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s2">def </span><span class="s1">sql_schema(self):</span>
+        <span class="s2">return </span><span class="s1">str(</span><span class="s4">&quot;;</span><span class="s2">\n</span><span class="s4">&quot;</span><span class="s1">.join(self.table))</span>
+
+    <span class="s2">def </span><span class="s1">_execute_create(self):</span>
+        <span class="s2">with </span><span class="s1">self.pd_sql.run_transaction() </span><span class="s2">as </span><span class="s1">conn:</span>
+            <span class="s2">for </span><span class="s1">stmt </span><span class="s2">in </span><span class="s1">self.table:</span>
+                <span class="s1">conn.execute(stmt)</span>
+
+    <span class="s2">def </span><span class="s1">insert_statement(self</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">num_rows: int):</span>
+        <span class="s1">names = list(map(str</span><span class="s2">, </span><span class="s1">self.frame.columns))</span>
+        <span class="s1">wld = </span><span class="s4">&quot;?&quot;  </span><span class="s3"># wildcard char</span>
+        <span class="s1">escape = _get_valid_sqlite_name</span>
+
+        <span class="s2">if </span><span class="s1">self.index </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">for </span><span class="s1">idx </span><span class="s2">in </span><span class="s1">self.index[::-</span><span class="s5">1</span><span class="s1">]:</span>
+                <span class="s1">names.insert(</span><span class="s5">0</span><span class="s2">, </span><span class="s1">idx)</span>
+
+        <span class="s1">bracketed_names = [escape(column) </span><span class="s2">for </span><span class="s1">column </span><span class="s2">in </span><span class="s1">names]</span>
+        <span class="s1">col_names = </span><span class="s4">&quot;,&quot;</span><span class="s1">.join(bracketed_names)</span>
+
+        <span class="s1">row_wildcards = </span><span class="s4">&quot;,&quot;</span><span class="s1">.join([wld] * len(names))</span>
+        <span class="s1">wildcards = </span><span class="s4">&quot;,&quot;</span><span class="s1">.join([</span><span class="s4">f&quot;(</span><span class="s2">{</span><span class="s1">row_wildcards</span><span class="s2">}</span><span class="s4">)&quot; </span><span class="s2">for </span><span class="s1">_ </span><span class="s2">in </span><span class="s1">range(num_rows)])</span>
+        <span class="s1">insert_statement = (</span>
+            <span class="s4">f&quot;INSERT INTO </span><span class="s2">{</span><span class="s1">escape(self.name)</span><span class="s2">} </span><span class="s4">(</span><span class="s2">{</span><span class="s1">col_names</span><span class="s2">}</span><span class="s4">) VALUES </span><span class="s2">{</span><span class="s1">wildcards</span><span class="s2">}</span><span class="s4">&quot;</span>
+        <span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">insert_statement</span>
+
+    <span class="s2">def </span><span class="s1">_execute_insert(self</span><span class="s2">, </span><span class="s1">conn</span><span class="s2">, </span><span class="s1">keys</span><span class="s2">, </span><span class="s1">data_iter) -&gt; int:</span>
+        <span class="s1">data_list = list(data_iter)</span>
+        <span class="s1">conn.executemany(self.insert_statement(num_rows=</span><span class="s5">1</span><span class="s1">)</span><span class="s2">, </span><span class="s1">data_list)</span>
+        <span class="s2">return </span><span class="s1">conn.rowcount</span>
+
+    <span class="s2">def </span><span class="s1">_execute_insert_multi(self</span><span class="s2">, </span><span class="s1">conn</span><span class="s2">, </span><span class="s1">keys</span><span class="s2">, </span><span class="s1">data_iter) -&gt; int:</span>
+        <span class="s1">data_list = list(data_iter)</span>
+        <span class="s1">flattened_data = [x </span><span class="s2">for </span><span class="s1">row </span><span class="s2">in </span><span class="s1">data_list </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">row]</span>
+        <span class="s1">conn.execute(self.insert_statement(num_rows=len(data_list))</span><span class="s2">, </span><span class="s1">flattened_data)</span>
+        <span class="s2">return </span><span class="s1">conn.rowcount</span>
+
+    <span class="s2">def </span><span class="s1">_create_table_setup(self):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Return a list of SQL statements that creates a table reflecting the 
+        structure of a DataFrame.  The first entry will be a CREATE TABLE 
+        statement while the rest will be CREATE INDEX statements. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">column_names_and_types = self._get_column_names_and_types(self._sql_type_name)</span>
+        <span class="s1">escape = _get_valid_sqlite_name</span>
+
+        <span class="s1">create_tbl_stmts = [</span>
+            <span class="s1">escape(cname) + </span><span class="s4">&quot; &quot; </span><span class="s1">+ ctype </span><span class="s2">for </span><span class="s1">cname</span><span class="s2">, </span><span class="s1">ctype</span><span class="s2">, </span><span class="s1">_ </span><span class="s2">in </span><span class="s1">column_names_and_types</span>
+        <span class="s1">]</span>
+
+        <span class="s2">if </span><span class="s1">self.keys </span><span class="s2">is not None and </span><span class="s1">len(self.keys):</span>
+            <span class="s2">if not </span><span class="s1">is_list_like(self.keys):</span>
+                <span class="s1">keys = [self.keys]</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">keys = self.keys</span>
+            <span class="s1">cnames_br = </span><span class="s4">&quot;, &quot;</span><span class="s1">.join([escape(c) </span><span class="s2">for </span><span class="s1">c </span><span class="s2">in </span><span class="s1">keys])</span>
+            <span class="s1">create_tbl_stmts.append(</span>
+                <span class="s4">f&quot;CONSTRAINT </span><span class="s2">{</span><span class="s1">self.name</span><span class="s2">}</span><span class="s4">_pk PRIMARY KEY (</span><span class="s2">{</span><span class="s1">cnames_br</span><span class="s2">}</span><span class="s4">)&quot;</span>
+            <span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">self.schema:</span>
+            <span class="s1">schema_name = self.schema + </span><span class="s4">&quot;.&quot;</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">schema_name = </span><span class="s4">&quot;&quot;</span>
+        <span class="s1">create_stmts = [</span>
+            <span class="s4">&quot;CREATE TABLE &quot;</span>
+            <span class="s1">+ schema_name</span>
+            <span class="s1">+ escape(self.name)</span>
+            <span class="s1">+ </span><span class="s4">&quot; (</span><span class="s2">\n</span><span class="s4">&quot;</span>
+            <span class="s1">+ </span><span class="s4">&quot;,</span><span class="s2">\n  </span><span class="s4">&quot;</span><span class="s1">.join(create_tbl_stmts)</span>
+            <span class="s1">+ </span><span class="s4">&quot;</span><span class="s2">\n</span><span class="s4">)&quot;</span>
+        <span class="s1">]</span>
+
+        <span class="s1">ix_cols = [cname </span><span class="s2">for </span><span class="s1">cname</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">is_index </span><span class="s2">in </span><span class="s1">column_names_and_types </span><span class="s2">if </span><span class="s1">is_index]</span>
+        <span class="s2">if </span><span class="s1">len(ix_cols):</span>
+            <span class="s1">cnames = </span><span class="s4">&quot;_&quot;</span><span class="s1">.join(ix_cols)</span>
+            <span class="s1">cnames_br = </span><span class="s4">&quot;,&quot;</span><span class="s1">.join([escape(c) </span><span class="s2">for </span><span class="s1">c </span><span class="s2">in </span><span class="s1">ix_cols])</span>
+            <span class="s1">create_stmts.append(</span>
+                <span class="s4">&quot;CREATE INDEX &quot;</span>
+                <span class="s1">+ escape(</span><span class="s4">&quot;ix_&quot; </span><span class="s1">+ self.name + </span><span class="s4">&quot;_&quot; </span><span class="s1">+ cnames)</span>
+                <span class="s1">+ </span><span class="s4">&quot;ON &quot;</span>
+                <span class="s1">+ escape(self.name)</span>
+                <span class="s1">+ </span><span class="s4">&quot; (&quot;</span>
+                <span class="s1">+ cnames_br</span>
+                <span class="s1">+ </span><span class="s4">&quot;)&quot;</span>
+            <span class="s1">)</span>
+
+        <span class="s2">return </span><span class="s1">create_stmts</span>
+
+    <span class="s2">def </span><span class="s1">_sql_type_name(self</span><span class="s2">, </span><span class="s1">col):</span>
+        <span class="s1">dtype: DtypeArg = self.dtype </span><span class="s2">or </span><span class="s1">{}</span>
+        <span class="s2">if </span><span class="s1">is_dict_like(dtype):</span>
+            <span class="s1">dtype = cast(dict</span><span class="s2">, </span><span class="s1">dtype)</span>
+            <span class="s2">if </span><span class="s1">col.name </span><span class="s2">in </span><span class="s1">dtype:</span>
+                <span class="s2">return </span><span class="s1">dtype[col.name]</span>
+
+        <span class="s3"># Infer type of column, while ignoring missing values.</span>
+        <span class="s3"># Needed for inserting typed data containing NULLs, GH 8778.</span>
+        <span class="s1">col_type = lib.infer_dtype(col</span><span class="s2">, </span><span class="s1">skipna=</span><span class="s2">True</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">col_type == </span><span class="s4">&quot;timedelta64&quot;</span><span class="s1">:</span>
+            <span class="s1">warnings.warn(</span>
+                <span class="s4">&quot;the 'timedelta' type is not supported, and will be &quot;</span>
+                <span class="s4">&quot;written as integer values (ns frequency) to the database.&quot;</span><span class="s2">,</span>
+                <span class="s1">UserWarning</span><span class="s2">,</span>
+                <span class="s1">stacklevel=find_stack_level()</span><span class="s2">,</span>
+            <span class="s1">)</span>
+            <span class="s1">col_type = </span><span class="s4">&quot;integer&quot;</span>
+
+        <span class="s2">elif </span><span class="s1">col_type == </span><span class="s4">&quot;datetime64&quot;</span><span class="s1">:</span>
+            <span class="s1">col_type = </span><span class="s4">&quot;datetime&quot;</span>
+
+        <span class="s2">elif </span><span class="s1">col_type == </span><span class="s4">&quot;empty&quot;</span><span class="s1">:</span>
+            <span class="s1">col_type = </span><span class="s4">&quot;string&quot;</span>
+
+        <span class="s2">elif </span><span class="s1">col_type == </span><span class="s4">&quot;complex&quot;</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Complex datatypes not supported&quot;</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">col_type </span><span class="s2">not in </span><span class="s1">_SQL_TYPES:</span>
+            <span class="s1">col_type = </span><span class="s4">&quot;string&quot;</span>
+
+        <span class="s2">return </span><span class="s1">_SQL_TYPES[col_type]</span>
+
+
+<span class="s2">class </span><span class="s1">SQLiteDatabase(PandasSQL):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Version of SQLDatabase to support SQLite connections (fallback without 
+    SQLAlchemy). This should only be used internally. 
+ 
+    Parameters 
+    ---------- 
+    con : sqlite connection object 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">con):</span>
+        <span class="s1">self.con = con</span>
+
+    <span class="s1">@contextmanager</span>
+    <span class="s2">def </span><span class="s1">run_transaction(self):</span>
+        <span class="s1">cur = self.con.cursor()</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">yield </span><span class="s1">cur</span>
+            <span class="s1">self.con.commit()</span>
+        <span class="s2">except </span><span class="s1">Exception:</span>
+            <span class="s1">self.con.rollback()</span>
+            <span class="s2">raise</span>
+        <span class="s2">finally</span><span class="s1">:</span>
+            <span class="s1">cur.close()</span>
+
+    <span class="s2">def </span><span class="s1">execute(self</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">cur = self.con.cursor()</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">cur.execute(*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+            <span class="s2">return </span><span class="s1">cur</span>
+        <span class="s2">except </span><span class="s1">Exception </span><span class="s2">as </span><span class="s1">exc:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">self.con.rollback()</span>
+            <span class="s2">except </span><span class="s1">Exception </span><span class="s2">as </span><span class="s1">inner_exc:  </span><span class="s3"># pragma: no cover</span>
+                <span class="s1">ex = DatabaseError(</span>
+                    <span class="s4">f&quot;Execution failed on sql: </span><span class="s2">{</span><span class="s1">args[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">}\n{</span><span class="s1">exc</span><span class="s2">}\n</span><span class="s4">unable to rollback&quot;</span>
+                <span class="s1">)</span>
+                <span class="s2">raise </span><span class="s1">ex </span><span class="s2">from </span><span class="s1">inner_exc</span>
+
+            <span class="s1">ex = DatabaseError(</span><span class="s4">f&quot;Execution failed on sql '</span><span class="s2">{</span><span class="s1">args[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">}</span><span class="s4">': </span><span class="s2">{</span><span class="s1">exc</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+            <span class="s2">raise </span><span class="s1">ex </span><span class="s2">from </span><span class="s1">exc</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s2">def </span><span class="s1">_query_iterator(</span>
+        <span class="s1">cursor</span><span class="s2">,</span>
+        <span class="s1">chunksize: int</span><span class="s2">,</span>
+        <span class="s1">columns</span><span class="s2">,</span>
+        <span class="s1">index_col=</span><span class="s2">None,</span>
+        <span class="s1">coerce_float: bool = </span><span class="s2">True,</span>
+        <span class="s1">parse_dates=</span><span class="s2">None,</span>
+        <span class="s1">dtype: DtypeArg | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot;Return generator through chunked result set&quot;&quot;&quot;</span>
+        <span class="s1">has_read_data = </span><span class="s2">False</span>
+        <span class="s2">while True</span><span class="s1">:</span>
+            <span class="s1">data = cursor.fetchmany(chunksize)</span>
+            <span class="s2">if </span><span class="s1">type(data) == tuple:</span>
+                <span class="s1">data = list(data)</span>
+            <span class="s2">if not </span><span class="s1">data:</span>
+                <span class="s1">cursor.close()</span>
+                <span class="s2">if not </span><span class="s1">has_read_data:</span>
+                    <span class="s2">yield </span><span class="s1">DataFrame.from_records(</span>
+                        <span class="s1">[]</span><span class="s2">, </span><span class="s1">columns=columns</span><span class="s2">, </span><span class="s1">coerce_float=coerce_float</span>
+                    <span class="s1">)</span>
+                <span class="s2">break</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">has_read_data = </span><span class="s2">True</span>
+                <span class="s2">yield </span><span class="s1">_wrap_result(</span>
+                    <span class="s1">data</span><span class="s2">,</span>
+                    <span class="s1">columns</span><span class="s2">,</span>
+                    <span class="s1">index_col=index_col</span><span class="s2">,</span>
+                    <span class="s1">coerce_float=coerce_float</span><span class="s2">,</span>
+                    <span class="s1">parse_dates=parse_dates</span><span class="s2">,</span>
+                    <span class="s1">dtype=dtype</span><span class="s2">,</span>
+                <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">read_query(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">sql</span><span class="s2">,</span>
+        <span class="s1">index_col=</span><span class="s2">None,</span>
+        <span class="s1">coerce_float: bool = </span><span class="s2">True,</span>
+        <span class="s1">params=</span><span class="s2">None,</span>
+        <span class="s1">parse_dates=</span><span class="s2">None,</span>
+        <span class="s1">chunksize: int | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+        <span class="s1">dtype: DtypeArg | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">):</span>
+
+        <span class="s1">args = _convert_params(sql</span><span class="s2">, </span><span class="s1">params)</span>
+        <span class="s1">cursor = self.execute(*args)</span>
+        <span class="s1">columns = [col_desc[</span><span class="s5">0</span><span class="s1">] </span><span class="s2">for </span><span class="s1">col_desc </span><span class="s2">in </span><span class="s1">cursor.description]</span>
+
+        <span class="s2">if </span><span class="s1">chunksize </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">self._query_iterator(</span>
+                <span class="s1">cursor</span><span class="s2">,</span>
+                <span class="s1">chunksize</span><span class="s2">,</span>
+                <span class="s1">columns</span><span class="s2">,</span>
+                <span class="s1">index_col=index_col</span><span class="s2">,</span>
+                <span class="s1">coerce_float=coerce_float</span><span class="s2">,</span>
+                <span class="s1">parse_dates=parse_dates</span><span class="s2">,</span>
+                <span class="s1">dtype=dtype</span><span class="s2">,</span>
+            <span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">data = self._fetchall_as_list(cursor)</span>
+            <span class="s1">cursor.close()</span>
+
+            <span class="s1">frame = _wrap_result(</span>
+                <span class="s1">data</span><span class="s2">,</span>
+                <span class="s1">columns</span><span class="s2">,</span>
+                <span class="s1">index_col=index_col</span><span class="s2">,</span>
+                <span class="s1">coerce_float=coerce_float</span><span class="s2">,</span>
+                <span class="s1">parse_dates=parse_dates</span><span class="s2">,</span>
+                <span class="s1">dtype=dtype</span><span class="s2">,</span>
+            <span class="s1">)</span>
+            <span class="s2">return </span><span class="s1">frame</span>
+
+    <span class="s2">def </span><span class="s1">_fetchall_as_list(self</span><span class="s2">, </span><span class="s1">cur):</span>
+        <span class="s1">result = cur.fetchall()</span>
+        <span class="s2">if not </span><span class="s1">isinstance(result</span><span class="s2">, </span><span class="s1">list):</span>
+            <span class="s1">result = list(result)</span>
+        <span class="s2">return </span><span class="s1">result</span>
+
+    <span class="s2">def </span><span class="s1">to_sql(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">frame</span><span class="s2">,</span>
+        <span class="s1">name</span><span class="s2">,</span>
+        <span class="s1">if_exists=</span><span class="s4">&quot;fail&quot;</span><span class="s2">,</span>
+        <span class="s1">index=</span><span class="s2">True,</span>
+        <span class="s1">index_label=</span><span class="s2">None,</span>
+        <span class="s1">schema=</span><span class="s2">None,</span>
+        <span class="s1">chunksize=</span><span class="s2">None,</span>
+        <span class="s1">dtype: DtypeArg | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+        <span class="s1">method=</span><span class="s2">None,</span>
+        <span class="s1">**kwargs</span><span class="s2">,</span>
+    <span class="s1">) -&gt; int | </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Write records stored in a DataFrame to a SQL database. 
+ 
+        Parameters 
+        ---------- 
+        frame: DataFrame 
+        name: string 
+            Name of SQL table. 
+        if_exists: {'fail', 'replace', 'append'}, default 'fail' 
+            fail: If table exists, do nothing. 
+            replace: If table exists, drop it, recreate it, and insert data. 
+            append: If table exists, insert data. Create if it does not exist. 
+        index : bool, default True 
+            Write DataFrame index as a column 
+        index_label : string or sequence, default None 
+            Column label for index column(s). If None is given (default) and 
+            `index` is True, then the index names are used. 
+            A sequence should be given if the DataFrame uses MultiIndex. 
+        schema : string, default None 
+            Ignored parameter included for compatibility with SQLAlchemy 
+            version of ``to_sql``. 
+        chunksize : int, default None 
+            If not None, then rows will be written in batches of this 
+            size at a time. If None, all rows will be written at once. 
+        dtype : single type or dict of column name to SQL type, default None 
+            Optional specifying the datatype for columns. The SQL type should 
+            be a string. If all columns are of the same type, one single value 
+            can be used. 
+        method : {None, 'multi', callable}, default None 
+            Controls the SQL insertion clause used: 
+ 
+            * None : Uses standard SQL ``INSERT`` clause (one per row). 
+            * 'multi': Pass multiple values in a single ``INSERT`` clause. 
+            * callable with signature ``(pd_table, conn, keys, data_iter)``. 
+ 
+            Details and a sample callable implementation can be found in the 
+            section :ref:`insert method &lt;io.sql.method&gt;`. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">dtype:</span>
+            <span class="s2">if not </span><span class="s1">is_dict_like(dtype):</span>
+                <span class="s3"># error: Value expression in dictionary comprehension has incompatible</span>
+                <span class="s3"># type &quot;Union[ExtensionDtype, str, dtype[Any], Type[object],</span>
+                <span class="s3"># Dict[Hashable, Union[ExtensionDtype, Union[str, dtype[Any]],</span>
+                <span class="s3"># Type[str], Type[float], Type[int], Type[complex], Type[bool],</span>
+                <span class="s3"># Type[object]]]]&quot;; expected type &quot;Union[ExtensionDtype, str,</span>
+                <span class="s3"># dtype[Any], Type[object]]&quot;</span>
+                <span class="s1">dtype = {col_name: dtype </span><span class="s2">for </span><span class="s1">col_name </span><span class="s2">in </span><span class="s1">frame}  </span><span class="s3"># type: ignore[misc]</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">dtype = cast(dict</span><span class="s2">, </span><span class="s1">dtype)</span>
+
+            <span class="s2">for </span><span class="s1">col</span><span class="s2">, </span><span class="s1">my_type </span><span class="s2">in </span><span class="s1">dtype.items():</span>
+                <span class="s2">if not </span><span class="s1">isinstance(my_type</span><span class="s2">, </span><span class="s1">str):</span>
+                    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">f&quot;</span><span class="s2">{</span><span class="s1">col</span><span class="s2">} </span><span class="s4">(</span><span class="s2">{</span><span class="s1">my_type</span><span class="s2">}</span><span class="s4">) not a string&quot;</span><span class="s1">)</span>
+
+        <span class="s1">table = SQLiteTable(</span>
+            <span class="s1">name</span><span class="s2">,</span>
+            <span class="s1">self</span><span class="s2">,</span>
+            <span class="s1">frame=frame</span><span class="s2">,</span>
+            <span class="s1">index=index</span><span class="s2">,</span>
+            <span class="s1">if_exists=if_exists</span><span class="s2">,</span>
+            <span class="s1">index_label=index_label</span><span class="s2">,</span>
+            <span class="s1">dtype=dtype</span><span class="s2">,</span>
+        <span class="s1">)</span>
+        <span class="s1">table.create()</span>
+        <span class="s2">return </span><span class="s1">table.insert(chunksize</span><span class="s2">, </span><span class="s1">method)</span>
+
+    <span class="s2">def </span><span class="s1">has_table(self</span><span class="s2">, </span><span class="s1">name: str</span><span class="s2">, </span><span class="s1">schema: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None</span><span class="s1">):</span>
+
+        <span class="s1">wld = </span><span class="s4">&quot;?&quot;</span>
+        <span class="s1">query = </span><span class="s4">f&quot;SELECT name FROM sqlite_master WHERE type='table' AND name=</span><span class="s2">{</span><span class="s1">wld</span><span class="s2">}</span><span class="s4">;&quot;</span>
+
+        <span class="s2">return </span><span class="s1">len(self.execute(query</span><span class="s2">, </span><span class="s1">[name]).fetchall()) &gt; </span><span class="s5">0</span>
+
+    <span class="s2">def </span><span class="s1">get_table(self</span><span class="s2">, </span><span class="s1">table_name: str</span><span class="s2">, </span><span class="s1">schema: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s2">return None  </span><span class="s3"># not supported in fallback mode</span>
+
+    <span class="s2">def </span><span class="s1">drop_table(self</span><span class="s2">, </span><span class="s1">name: str</span><span class="s2">, </span><span class="s1">schema: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s1">drop_sql = </span><span class="s4">f&quot;DROP TABLE </span><span class="s2">{</span><span class="s1">_get_valid_sqlite_name(name)</span><span class="s2">}</span><span class="s4">&quot;</span>
+        <span class="s1">self.execute(drop_sql)</span>
+
+    <span class="s2">def </span><span class="s1">_create_sql_schema(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">frame</span><span class="s2">,</span>
+        <span class="s1">table_name: str</span><span class="s2">,</span>
+        <span class="s1">keys=</span><span class="s2">None,</span>
+        <span class="s1">dtype: DtypeArg | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+        <span class="s1">schema: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">):</span>
+        <span class="s1">table = SQLiteTable(</span>
+            <span class="s1">table_name</span><span class="s2">,</span>
+            <span class="s1">self</span><span class="s2">,</span>
+            <span class="s1">frame=frame</span><span class="s2">,</span>
+            <span class="s1">index=</span><span class="s2">False,</span>
+            <span class="s1">keys=keys</span><span class="s2">,</span>
+            <span class="s1">dtype=dtype</span><span class="s2">,</span>
+            <span class="s1">schema=schema</span><span class="s2">,</span>
+        <span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">str(table.sql_schema())</span>
+
+
+<span class="s2">def </span><span class="s1">get_schema(</span>
+    <span class="s1">frame</span><span class="s2">,</span>
+    <span class="s1">name: str</span><span class="s2">,</span>
+    <span class="s1">keys=</span><span class="s2">None,</span>
+    <span class="s1">con=</span><span class="s2">None,</span>
+    <span class="s1">dtype: DtypeArg | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">schema: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+<span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Get the SQL db table schema for the given frame. 
+ 
+    Parameters 
+    ---------- 
+    frame : DataFrame 
+    name : str 
+        name of SQL table 
+    keys : string or sequence, default: None 
+        columns to use a primary key 
+    con: an open SQL database connection object or a SQLAlchemy connectable 
+        Using SQLAlchemy makes it possible to use any DB supported by that 
+        library, default: None 
+        If a DBAPI2 object, only sqlite3 is supported. 
+    dtype : dict of column name to SQL type, default None 
+        Optional specifying the datatype for columns. The SQL type should 
+        be a SQLAlchemy type, or a string for sqlite3 fallback connection. 
+    schema: str, default: None 
+        Optional specifying the schema to be used in creating the table. 
+ 
+        .. versionadded:: 1.2.0 
+    &quot;&quot;&quot;</span>
+    <span class="s1">pandas_sql = pandasSQL_builder(con=con)</span>
+    <span class="s2">return </span><span class="s1">pandas_sql._create_sql_schema(</span>
+        <span class="s1">frame</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">keys=keys</span><span class="s2">, </span><span class="s1">dtype=dtype</span><span class="s2">, </span><span class="s1">schema=schema</span>
+    <span class="s1">)</span>
+</pre>
+</body>
+</html>

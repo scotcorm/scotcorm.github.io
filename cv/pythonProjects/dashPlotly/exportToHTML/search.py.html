@@ -1,0 +1,196 @@
+<html>
+<head>
+<title>search.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #808080;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+search.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">logging</span>
+<span class="s0">import </span><span class="s1">shutil</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">import </span><span class="s1">textwrap</span>
+<span class="s0">import </span><span class="s1">xmlrpc.client</span>
+<span class="s0">from </span><span class="s1">collections </span><span class="s0">import </span><span class="s1">OrderedDict</span>
+<span class="s0">from </span><span class="s1">optparse </span><span class="s0">import </span><span class="s1">Values</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">TYPE_CHECKING</span><span class="s0">, </span><span class="s1">Dict</span><span class="s0">, </span><span class="s1">List</span><span class="s0">, </span><span class="s1">Optional</span>
+
+<span class="s0">from </span><span class="s1">pip._vendor.packaging.version </span><span class="s0">import </span><span class="s1">parse </span><span class="s0">as </span><span class="s1">parse_version</span>
+
+<span class="s0">from </span><span class="s1">pip._internal.cli.base_command </span><span class="s0">import </span><span class="s1">Command</span>
+<span class="s0">from </span><span class="s1">pip._internal.cli.req_command </span><span class="s0">import </span><span class="s1">SessionCommandMixin</span>
+<span class="s0">from </span><span class="s1">pip._internal.cli.status_codes </span><span class="s0">import </span><span class="s1">NO_MATCHES_FOUND</span><span class="s0">, </span><span class="s1">SUCCESS</span>
+<span class="s0">from </span><span class="s1">pip._internal.exceptions </span><span class="s0">import </span><span class="s1">CommandError</span>
+<span class="s0">from </span><span class="s1">pip._internal.metadata </span><span class="s0">import </span><span class="s1">get_default_environment</span>
+<span class="s0">from </span><span class="s1">pip._internal.models.index </span><span class="s0">import </span><span class="s1">PyPI</span>
+<span class="s0">from </span><span class="s1">pip._internal.network.xmlrpc </span><span class="s0">import </span><span class="s1">PipXmlrpcTransport</span>
+<span class="s0">from </span><span class="s1">pip._internal.utils.logging </span><span class="s0">import </span><span class="s1">indent_log</span>
+<span class="s0">from </span><span class="s1">pip._internal.utils.misc </span><span class="s0">import </span><span class="s1">write_output</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING:</span>
+    <span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">TypedDict</span>
+
+    <span class="s0">class </span><span class="s1">TransformedHit(TypedDict):</span>
+        <span class="s1">name: str</span>
+        <span class="s1">summary: str</span>
+        <span class="s1">versions: List[str]</span>
+
+
+<span class="s1">logger = logging.getLogger(__name__)</span>
+
+
+<span class="s0">class </span><span class="s1">SearchCommand(Command</span><span class="s0">, </span><span class="s1">SessionCommandMixin):</span>
+    <span class="s2">&quot;&quot;&quot;Search for PyPI packages whose name or summary contains &lt;query&gt;.&quot;&quot;&quot;</span>
+
+    <span class="s1">usage = </span><span class="s3">&quot;&quot;&quot; 
+      %prog [options] &lt;query&gt;&quot;&quot;&quot;</span>
+    <span class="s1">ignore_require_venv = </span><span class="s0">True</span>
+
+    <span class="s0">def </span><span class="s1">add_options(self) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self.cmd_opts.add_option(</span>
+            <span class="s3">&quot;-i&quot;</span><span class="s0">,</span>
+            <span class="s3">&quot;--index&quot;</span><span class="s0">,</span>
+            <span class="s1">dest=</span><span class="s3">&quot;index&quot;</span><span class="s0">,</span>
+            <span class="s1">metavar=</span><span class="s3">&quot;URL&quot;</span><span class="s0">,</span>
+            <span class="s1">default=PyPI.pypi_url</span><span class="s0">,</span>
+            <span class="s1">help=</span><span class="s3">&quot;Base URL of Python Package Index (default %default)&quot;</span><span class="s0">,</span>
+        <span class="s1">)</span>
+
+        <span class="s1">self.parser.insert_option_group(</span><span class="s4">0</span><span class="s0">, </span><span class="s1">self.cmd_opts)</span>
+
+    <span class="s0">def </span><span class="s1">run(self</span><span class="s0">, </span><span class="s1">options: Values</span><span class="s0">, </span><span class="s1">args: List[str]) -&gt; int:</span>
+        <span class="s0">if not </span><span class="s1">args:</span>
+            <span class="s0">raise </span><span class="s1">CommandError(</span><span class="s3">&quot;Missing required argument (search query).&quot;</span><span class="s1">)</span>
+        <span class="s1">query = args</span>
+        <span class="s1">pypi_hits = self.search(query</span><span class="s0">, </span><span class="s1">options)</span>
+        <span class="s1">hits = transform_hits(pypi_hits)</span>
+
+        <span class="s1">terminal_width = </span><span class="s0">None</span>
+        <span class="s0">if </span><span class="s1">sys.stdout.isatty():</span>
+            <span class="s1">terminal_width = shutil.get_terminal_size()[</span><span class="s4">0</span><span class="s1">]</span>
+
+        <span class="s1">print_results(hits</span><span class="s0">, </span><span class="s1">terminal_width=terminal_width)</span>
+        <span class="s0">if </span><span class="s1">pypi_hits:</span>
+            <span class="s0">return </span><span class="s1">SUCCESS</span>
+        <span class="s0">return </span><span class="s1">NO_MATCHES_FOUND</span>
+
+    <span class="s0">def </span><span class="s1">search(self</span><span class="s0">, </span><span class="s1">query: List[str]</span><span class="s0">, </span><span class="s1">options: Values) -&gt; List[Dict[str</span><span class="s0">, </span><span class="s1">str]]:</span>
+        <span class="s1">index_url = options.index</span>
+
+        <span class="s1">session = self.get_default_session(options)</span>
+
+        <span class="s1">transport = PipXmlrpcTransport(index_url</span><span class="s0">, </span><span class="s1">session)</span>
+        <span class="s1">pypi = xmlrpc.client.ServerProxy(index_url</span><span class="s0">, </span><span class="s1">transport)</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">hits = pypi.search({</span><span class="s3">&quot;name&quot;</span><span class="s1">: query</span><span class="s0">, </span><span class="s3">&quot;summary&quot;</span><span class="s1">: query}</span><span class="s0">, </span><span class="s3">&quot;or&quot;</span><span class="s1">)</span>
+        <span class="s0">except </span><span class="s1">xmlrpc.client.Fault </span><span class="s0">as </span><span class="s1">fault:</span>
+            <span class="s1">message = </span><span class="s3">&quot;XMLRPC request failed [code: {code}]</span><span class="s0">\n</span><span class="s3">{string}&quot;</span><span class="s1">.format(</span>
+                <span class="s1">code=fault.faultCode</span><span class="s0">,</span>
+                <span class="s1">string=fault.faultString</span><span class="s0">,</span>
+            <span class="s1">)</span>
+            <span class="s0">raise </span><span class="s1">CommandError(message)</span>
+        <span class="s0">assert </span><span class="s1">isinstance(hits</span><span class="s0">, </span><span class="s1">list)</span>
+        <span class="s0">return </span><span class="s1">hits</span>
+
+
+<span class="s0">def </span><span class="s1">transform_hits(hits: List[Dict[str</span><span class="s0">, </span><span class="s1">str]]) -&gt; List[</span><span class="s3">&quot;TransformedHit&quot;</span><span class="s1">]:</span>
+    <span class="s2">&quot;&quot;&quot; 
+    The list from pypi is really a list of versions. We want a list of 
+    packages with the list of versions stored inline. This converts the 
+    list from pypi into one we can use. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">packages: Dict[str</span><span class="s0">, </span><span class="s3">&quot;TransformedHit&quot;</span><span class="s1">] = OrderedDict()</span>
+    <span class="s0">for </span><span class="s1">hit </span><span class="s0">in </span><span class="s1">hits:</span>
+        <span class="s1">name = hit[</span><span class="s3">&quot;name&quot;</span><span class="s1">]</span>
+        <span class="s1">summary = hit[</span><span class="s3">&quot;summary&quot;</span><span class="s1">]</span>
+        <span class="s1">version = hit[</span><span class="s3">&quot;version&quot;</span><span class="s1">]</span>
+
+        <span class="s0">if </span><span class="s1">name </span><span class="s0">not in </span><span class="s1">packages.keys():</span>
+            <span class="s1">packages[name] = {</span>
+                <span class="s3">&quot;name&quot;</span><span class="s1">: name</span><span class="s0">,</span>
+                <span class="s3">&quot;summary&quot;</span><span class="s1">: summary</span><span class="s0">,</span>
+                <span class="s3">&quot;versions&quot;</span><span class="s1">: [version]</span><span class="s0">,</span>
+            <span class="s1">}</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">packages[name][</span><span class="s3">&quot;versions&quot;</span><span class="s1">].append(version)</span>
+
+            <span class="s5"># if this is the highest version, replace summary and score</span>
+            <span class="s0">if </span><span class="s1">version == highest_version(packages[name][</span><span class="s3">&quot;versions&quot;</span><span class="s1">]):</span>
+                <span class="s1">packages[name][</span><span class="s3">&quot;summary&quot;</span><span class="s1">] = summary</span>
+
+    <span class="s0">return </span><span class="s1">list(packages.values())</span>
+
+
+<span class="s0">def </span><span class="s1">print_dist_installation_info(name: str</span><span class="s0">, </span><span class="s1">latest: str) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+    <span class="s1">env = get_default_environment()</span>
+    <span class="s1">dist = env.get_distribution(name)</span>
+    <span class="s0">if </span><span class="s1">dist </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s0">with </span><span class="s1">indent_log():</span>
+            <span class="s0">if </span><span class="s1">dist.version == latest:</span>
+                <span class="s1">write_output(</span><span class="s3">&quot;INSTALLED: %s (latest)&quot;</span><span class="s0">, </span><span class="s1">dist.version)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">write_output(</span><span class="s3">&quot;INSTALLED: %s&quot;</span><span class="s0">, </span><span class="s1">dist.version)</span>
+                <span class="s0">if </span><span class="s1">parse_version(latest).pre:</span>
+                    <span class="s1">write_output(</span>
+                        <span class="s3">&quot;LATEST:    %s (pre-release; install&quot;</span>
+                        <span class="s3">&quot; with `pip install --pre`)&quot;</span><span class="s0">,</span>
+                        <span class="s1">latest</span><span class="s0">,</span>
+                    <span class="s1">)</span>
+                <span class="s0">else</span><span class="s1">:</span>
+                    <span class="s1">write_output(</span><span class="s3">&quot;LATEST:    %s&quot;</span><span class="s0">, </span><span class="s1">latest)</span>
+
+
+<span class="s0">def </span><span class="s1">print_results(</span>
+    <span class="s1">hits: List[</span><span class="s3">&quot;TransformedHit&quot;</span><span class="s1">]</span><span class="s0">,</span>
+    <span class="s1">name_column_width: Optional[int] = </span><span class="s0">None,</span>
+    <span class="s1">terminal_width: Optional[int] = </span><span class="s0">None,</span>
+<span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+    <span class="s0">if not </span><span class="s1">hits:</span>
+        <span class="s0">return</span>
+    <span class="s0">if </span><span class="s1">name_column_width </span><span class="s0">is None</span><span class="s1">:</span>
+        <span class="s1">name_column_width = (</span>
+            <span class="s1">max(</span>
+                <span class="s1">[</span>
+                    <span class="s1">len(hit[</span><span class="s3">&quot;name&quot;</span><span class="s1">]) + len(highest_version(hit.get(</span><span class="s3">&quot;versions&quot;</span><span class="s0">, </span><span class="s1">[</span><span class="s3">&quot;-&quot;</span><span class="s1">])))</span>
+                    <span class="s0">for </span><span class="s1">hit </span><span class="s0">in </span><span class="s1">hits</span>
+                <span class="s1">]</span>
+            <span class="s1">)</span>
+            <span class="s1">+ </span><span class="s4">4</span>
+        <span class="s1">)</span>
+
+    <span class="s0">for </span><span class="s1">hit </span><span class="s0">in </span><span class="s1">hits:</span>
+        <span class="s1">name = hit[</span><span class="s3">&quot;name&quot;</span><span class="s1">]</span>
+        <span class="s1">summary = hit[</span><span class="s3">&quot;summary&quot;</span><span class="s1">] </span><span class="s0">or </span><span class="s3">&quot;&quot;</span>
+        <span class="s1">latest = highest_version(hit.get(</span><span class="s3">&quot;versions&quot;</span><span class="s0">, </span><span class="s1">[</span><span class="s3">&quot;-&quot;</span><span class="s1">]))</span>
+        <span class="s0">if </span><span class="s1">terminal_width </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">target_width = terminal_width - name_column_width - </span><span class="s4">5</span>
+            <span class="s0">if </span><span class="s1">target_width &gt; </span><span class="s4">10</span><span class="s1">:</span>
+                <span class="s5"># wrap and indent summary to fit terminal</span>
+                <span class="s1">summary_lines = textwrap.wrap(summary</span><span class="s0">, </span><span class="s1">target_width)</span>
+                <span class="s1">summary = (</span><span class="s3">&quot;</span><span class="s0">\n</span><span class="s3">&quot; </span><span class="s1">+ </span><span class="s3">&quot; &quot; </span><span class="s1">* (name_column_width + </span><span class="s4">3</span><span class="s1">)).join(summary_lines)</span>
+
+        <span class="s1">name_latest = </span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">name</span><span class="s0">} </span><span class="s3">(</span><span class="s0">{</span><span class="s1">latest</span><span class="s0">}</span><span class="s3">)&quot;</span>
+        <span class="s1">line = </span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">name_latest</span><span class="s0">:{</span><span class="s1">name_column_width</span><span class="s0">}} </span><span class="s3">- </span><span class="s0">{</span><span class="s1">summary</span><span class="s0">}</span><span class="s3">&quot;</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">write_output(line)</span>
+            <span class="s1">print_dist_installation_info(name</span><span class="s0">, </span><span class="s1">latest)</span>
+        <span class="s0">except </span><span class="s1">UnicodeEncodeError:</span>
+            <span class="s0">pass</span>
+
+
+<span class="s0">def </span><span class="s1">highest_version(versions: List[str]) -&gt; str:</span>
+    <span class="s0">return </span><span class="s1">max(versions</span><span class="s0">, </span><span class="s1">key=parse_version)</span>
+</pre>
+</body>
+</html>

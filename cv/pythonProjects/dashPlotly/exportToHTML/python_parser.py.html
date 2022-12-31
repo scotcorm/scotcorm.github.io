@@ -1,0 +1,1332 @@
+<html>
+<head>
+<title>python_parser.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #6a8759;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+python_parser.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">from </span><span class="s1">collections </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">abc</span><span class="s0">,</span>
+    <span class="s1">defaultdict</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">import </span><span class="s1">csv</span>
+<span class="s0">from </span><span class="s1">io </span><span class="s0">import </span><span class="s1">StringIO</span>
+<span class="s0">import </span><span class="s1">re</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">IO</span><span class="s0">,</span>
+    <span class="s1">DefaultDict</span><span class="s0">,</span>
+    <span class="s1">Hashable</span><span class="s0">,</span>
+    <span class="s1">Iterator</span><span class="s0">,</span>
+    <span class="s1">Literal</span><span class="s0">,</span>
+    <span class="s1">Mapping</span><span class="s0">,</span>
+    <span class="s1">Sequence</span><span class="s0">,</span>
+    <span class="s1">cast</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">import </span><span class="s1">warnings</span>
+
+<span class="s0">import </span><span class="s1">numpy </span><span class="s0">as </span><span class="s1">np</span>
+
+<span class="s0">import </span><span class="s1">pandas._libs.lib </span><span class="s0">as </span><span class="s1">lib</span>
+<span class="s0">from </span><span class="s1">pandas._typing </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">ArrayLike</span><span class="s0">,</span>
+    <span class="s1">ReadCsvBuffer</span><span class="s0">,</span>
+    <span class="s1">Scalar</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.errors </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">EmptyDataError</span><span class="s0">,</span>
+    <span class="s1">ParserError</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.util._exceptions </span><span class="s0">import </span><span class="s1">find_stack_level</span>
+
+<span class="s0">from </span><span class="s1">pandas.core.dtypes.common </span><span class="s0">import </span><span class="s1">is_integer</span>
+<span class="s0">from </span><span class="s1">pandas.core.dtypes.inference </span><span class="s0">import </span><span class="s1">is_dict_like</span>
+
+<span class="s0">from </span><span class="s1">pandas.io.parsers.base_parser </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">ParserBase</span><span class="s0">,</span>
+    <span class="s1">parser_defaults</span><span class="s0">,</span>
+<span class="s1">)</span>
+
+<span class="s2"># BOM character (byte order mark)</span>
+<span class="s2"># This exists at the beginning of a file to indicate endianness</span>
+<span class="s2"># of a file (stream). Unfortunately, this marker screws up parsing,</span>
+<span class="s2"># so we need to remove it if we see it.</span>
+<span class="s1">_BOM = </span><span class="s3">&quot;</span><span class="s0">\ufeff</span><span class="s3">&quot;</span>
+
+
+<span class="s0">class </span><span class="s1">PythonParser(ParserBase):</span>
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">f: ReadCsvBuffer[str] | list</span><span class="s0">, </span><span class="s1">**kwds):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Workhorse function for processing nested list into DataFrame 
+        &quot;&quot;&quot;</span>
+        <span class="s1">super().__init__(kwds)</span>
+
+        <span class="s1">self.data: Iterator[str] | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None</span>
+        <span class="s1">self.buf: list = []</span>
+        <span class="s1">self.pos = </span><span class="s5">0</span>
+        <span class="s1">self.line_pos = </span><span class="s5">0</span>
+
+        <span class="s1">self.skiprows = kwds[</span><span class="s3">&quot;skiprows&quot;</span><span class="s1">]</span>
+
+        <span class="s0">if </span><span class="s1">callable(self.skiprows):</span>
+            <span class="s1">self.skipfunc = self.skiprows</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">self.skipfunc = </span><span class="s0">lambda </span><span class="s1">x: x </span><span class="s0">in </span><span class="s1">self.skiprows</span>
+
+        <span class="s1">self.skipfooter = _validate_skipfooter_arg(kwds[</span><span class="s3">&quot;skipfooter&quot;</span><span class="s1">])</span>
+        <span class="s1">self.delimiter = kwds[</span><span class="s3">&quot;delimiter&quot;</span><span class="s1">]</span>
+
+        <span class="s1">self.quotechar = kwds[</span><span class="s3">&quot;quotechar&quot;</span><span class="s1">]</span>
+        <span class="s0">if </span><span class="s1">isinstance(self.quotechar</span><span class="s0">, </span><span class="s1">str):</span>
+            <span class="s1">self.quotechar = str(self.quotechar)</span>
+
+        <span class="s1">self.escapechar = kwds[</span><span class="s3">&quot;escapechar&quot;</span><span class="s1">]</span>
+        <span class="s1">self.doublequote = kwds[</span><span class="s3">&quot;doublequote&quot;</span><span class="s1">]</span>
+        <span class="s1">self.skipinitialspace = kwds[</span><span class="s3">&quot;skipinitialspace&quot;</span><span class="s1">]</span>
+        <span class="s1">self.lineterminator = kwds[</span><span class="s3">&quot;lineterminator&quot;</span><span class="s1">]</span>
+        <span class="s1">self.quoting = kwds[</span><span class="s3">&quot;quoting&quot;</span><span class="s1">]</span>
+        <span class="s1">self.skip_blank_lines = kwds[</span><span class="s3">&quot;skip_blank_lines&quot;</span><span class="s1">]</span>
+
+        <span class="s1">self.names_passed = kwds[</span><span class="s3">&quot;names&quot;</span><span class="s1">] </span><span class="s0">or None</span>
+
+        <span class="s1">self.has_index_names = </span><span class="s0">False</span>
+        <span class="s0">if </span><span class="s3">&quot;has_index_names&quot; </span><span class="s0">in </span><span class="s1">kwds:</span>
+            <span class="s1">self.has_index_names = kwds[</span><span class="s3">&quot;has_index_names&quot;</span><span class="s1">]</span>
+
+        <span class="s1">self.verbose = kwds[</span><span class="s3">&quot;verbose&quot;</span><span class="s1">]</span>
+        <span class="s1">self.converters = kwds[</span><span class="s3">&quot;converters&quot;</span><span class="s1">]</span>
+
+        <span class="s1">self.thousands = kwds[</span><span class="s3">&quot;thousands&quot;</span><span class="s1">]</span>
+        <span class="s1">self.decimal = kwds[</span><span class="s3">&quot;decimal&quot;</span><span class="s1">]</span>
+
+        <span class="s1">self.comment = kwds[</span><span class="s3">&quot;comment&quot;</span><span class="s1">]</span>
+
+        <span class="s2"># Set self.data to something that can read lines.</span>
+        <span class="s0">if </span><span class="s1">isinstance(f</span><span class="s0">, </span><span class="s1">list):</span>
+            <span class="s2"># read_excel: f is a list</span>
+            <span class="s1">self.data = cast(Iterator[str]</span><span class="s0">, </span><span class="s1">f)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">assert </span><span class="s1">hasattr(f</span><span class="s0">, </span><span class="s3">&quot;readline&quot;</span><span class="s1">)</span>
+            <span class="s1">self._make_reader(f)</span>
+
+        <span class="s2"># Get columns in two steps: infer from data, then</span>
+        <span class="s2"># infer column indices from self.usecols if it is specified.</span>
+        <span class="s1">self._col_indices: list[int] | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None</span>
+        <span class="s1">columns: list[list[Scalar | </span><span class="s0">None</span><span class="s1">]]</span>
+        <span class="s1">(</span>
+            <span class="s1">columns</span><span class="s0">,</span>
+            <span class="s1">self.num_original_columns</span><span class="s0">,</span>
+            <span class="s1">self.unnamed_cols</span><span class="s0">,</span>
+        <span class="s1">) = self._infer_columns()</span>
+
+        <span class="s2"># Now self.columns has the set of columns that we will process.</span>
+        <span class="s2"># The original set is stored in self.original_columns.</span>
+        <span class="s2"># error: Cannot determine type of 'index_names'</span>
+        <span class="s1">self.columns: list[Hashable]</span>
+        <span class="s1">(</span>
+            <span class="s1">self.columns</span><span class="s0">,</span>
+            <span class="s1">self.index_names</span><span class="s0">,</span>
+            <span class="s1">self.col_names</span><span class="s0">,</span>
+            <span class="s1">_</span><span class="s0">,</span>
+        <span class="s1">) = self._extract_multi_indexer_columns(</span>
+            <span class="s1">columns</span><span class="s0">,</span>
+            <span class="s1">self.index_names</span><span class="s0">,  </span><span class="s2"># type: ignore[has-type]</span>
+        <span class="s1">)</span>
+
+        <span class="s2"># get popped off for index</span>
+        <span class="s1">self.orig_names: list[Hashable] = list(self.columns)</span>
+
+        <span class="s2"># needs to be cleaned/refactored</span>
+        <span class="s2"># multiple date column thing turning into a real spaghetti factory</span>
+
+        <span class="s0">if not </span><span class="s1">self._has_complex_date_col:</span>
+            <span class="s1">(index_names</span><span class="s0">, </span><span class="s1">self.orig_names</span><span class="s0">, </span><span class="s1">self.columns) = self._get_index_name(</span>
+                <span class="s1">self.columns</span>
+            <span class="s1">)</span>
+            <span class="s1">self._name_processed = </span><span class="s0">True</span>
+            <span class="s0">if </span><span class="s1">self.index_names </span><span class="s0">is None</span><span class="s1">:</span>
+                <span class="s1">self.index_names = index_names</span>
+
+        <span class="s0">if </span><span class="s1">self._col_indices </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">self._col_indices = list(range(len(self.columns)))</span>
+
+        <span class="s1">self._parse_date_cols = self._validate_parse_dates_presence(self.columns)</span>
+        <span class="s1">no_thousands_columns: set[int] | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None</span>
+        <span class="s0">if </span><span class="s1">self.parse_dates:</span>
+            <span class="s1">no_thousands_columns = self._set_noconvert_dtype_columns(</span>
+                <span class="s1">self._col_indices</span><span class="s0">, </span><span class="s1">self.columns</span>
+            <span class="s1">)</span>
+        <span class="s1">self._no_thousands_columns = no_thousands_columns</span>
+
+        <span class="s0">if </span><span class="s1">len(self.decimal) != </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;Only length-1 decimal markers supported&quot;</span><span class="s1">)</span>
+
+        <span class="s1">decimal = re.escape(self.decimal)</span>
+        <span class="s0">if </span><span class="s1">self.thousands </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">regex = </span><span class="s3">fr&quot;^[\-\+]?[0-9]*(</span><span class="s0">{</span><span class="s1">decimal</span><span class="s0">}</span><span class="s3">[0-9]*)?([0-9]?(E|e)\-?[0-9]+)?$&quot;</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">thousands = re.escape(self.thousands)</span>
+            <span class="s1">regex = (</span>
+                <span class="s3">fr&quot;^[\-\+]?([0-9]+</span><span class="s0">{</span><span class="s1">thousands</span><span class="s0">}</span><span class="s3">|[0-9])*(</span><span class="s0">{</span><span class="s1">decimal</span><span class="s0">}</span><span class="s3">[0-9]*)?&quot;</span>
+                <span class="s3">fr&quot;([0-9]?(E|e)\-?[0-9]+)?$&quot;</span>
+            <span class="s1">)</span>
+        <span class="s1">self.num = re.compile(regex)</span>
+
+    <span class="s0">def </span><span class="s1">_make_reader(self</span><span class="s0">, </span><span class="s1">f) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">sep = self.delimiter</span>
+
+        <span class="s0">if </span><span class="s1">sep </span><span class="s0">is None or </span><span class="s1">len(sep) == </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s0">if </span><span class="s1">self.lineterminator:</span>
+                <span class="s0">raise </span><span class="s1">ValueError(</span>
+                    <span class="s3">&quot;Custom line terminators not supported in python parser (yet)&quot;</span>
+                <span class="s1">)</span>
+
+            <span class="s0">class </span><span class="s1">MyDialect(csv.Dialect):</span>
+                <span class="s1">delimiter = self.delimiter</span>
+                <span class="s1">quotechar = self.quotechar</span>
+                <span class="s1">escapechar = self.escapechar</span>
+                <span class="s1">doublequote = self.doublequote</span>
+                <span class="s1">skipinitialspace = self.skipinitialspace</span>
+                <span class="s1">quoting = self.quoting</span>
+                <span class="s1">lineterminator = </span><span class="s3">&quot;</span><span class="s0">\n</span><span class="s3">&quot;</span>
+
+            <span class="s1">dia = MyDialect</span>
+
+            <span class="s0">if </span><span class="s1">sep </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s1">dia.delimiter = sep</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s2"># attempt to sniff the delimiter from the first valid line,</span>
+                <span class="s2"># i.e. no comment line and not in skiprows</span>
+                <span class="s1">line = f.readline()</span>
+                <span class="s1">lines = self._check_comments([[line]])[</span><span class="s5">0</span><span class="s1">]</span>
+                <span class="s0">while </span><span class="s1">self.skipfunc(self.pos) </span><span class="s0">or not </span><span class="s1">lines:</span>
+                    <span class="s1">self.pos += </span><span class="s5">1</span>
+                    <span class="s1">line = f.readline()</span>
+                    <span class="s1">lines = self._check_comments([[line]])[</span><span class="s5">0</span><span class="s1">]</span>
+
+                <span class="s2"># since `line` was a string, lines will be a list containing</span>
+                <span class="s2"># only a single string</span>
+                <span class="s1">line = lines[</span><span class="s5">0</span><span class="s1">]</span>
+
+                <span class="s1">self.pos += </span><span class="s5">1</span>
+                <span class="s1">self.line_pos += </span><span class="s5">1</span>
+                <span class="s1">sniffed = csv.Sniffer().sniff(line)</span>
+                <span class="s1">dia.delimiter = sniffed.delimiter</span>
+
+                <span class="s2"># Note: encoding is irrelevant here</span>
+                <span class="s1">line_rdr = csv.reader(StringIO(line)</span><span class="s0">, </span><span class="s1">dialect=dia)</span>
+                <span class="s1">self.buf.extend(list(line_rdr))</span>
+
+            <span class="s2"># Note: encoding is irrelevant here</span>
+            <span class="s1">reader = csv.reader(f</span><span class="s0">, </span><span class="s1">dialect=dia</span><span class="s0">, </span><span class="s1">strict=</span><span class="s0">True</span><span class="s1">)</span>
+
+        <span class="s0">else</span><span class="s1">:</span>
+
+            <span class="s0">def </span><span class="s1">_read():</span>
+                <span class="s1">line = f.readline()</span>
+                <span class="s1">pat = re.compile(sep)</span>
+
+                <span class="s0">yield </span><span class="s1">pat.split(line.strip())</span>
+
+                <span class="s0">for </span><span class="s1">line </span><span class="s0">in </span><span class="s1">f:</span>
+                    <span class="s0">yield </span><span class="s1">pat.split(line.strip())</span>
+
+            <span class="s1">reader = _read()</span>
+
+        <span class="s2"># error: Incompatible types in assignment (expression has type &quot;_reader&quot;,</span>
+        <span class="s2"># variable has type &quot;Union[IO[Any], RawIOBase, BufferedIOBase, TextIOBase,</span>
+        <span class="s2"># TextIOWrapper, mmap, None]&quot;)</span>
+        <span class="s1">self.data = reader  </span><span class="s2"># type: ignore[assignment]</span>
+
+    <span class="s0">def </span><span class="s1">read(self</span><span class="s0">, </span><span class="s1">rows: int | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None</span><span class="s1">):</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">content = self._get_lines(rows)</span>
+        <span class="s0">except </span><span class="s1">StopIteration:</span>
+            <span class="s0">if </span><span class="s1">self._first_chunk:</span>
+                <span class="s1">content = []</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">self.close()</span>
+                <span class="s0">raise</span>
+
+        <span class="s2"># done with first read, next time raise StopIteration</span>
+        <span class="s1">self._first_chunk = </span><span class="s0">False</span>
+
+        <span class="s1">columns: Sequence[Hashable] = list(self.orig_names)</span>
+        <span class="s0">if not </span><span class="s1">len(content):  </span><span class="s2"># pragma: no cover</span>
+            <span class="s2"># DataFrame with the right metadata, even though it's length 0</span>
+            <span class="s1">names = self._maybe_dedup_names(self.orig_names)</span>
+            <span class="s2"># error: Cannot determine type of 'index_col'</span>
+            <span class="s1">index</span><span class="s0">, </span><span class="s1">columns</span><span class="s0">, </span><span class="s1">col_dict = self._get_empty_meta(</span>
+                <span class="s1">names</span><span class="s0">,</span>
+                <span class="s1">self.index_col</span><span class="s0">,  </span><span class="s2"># type: ignore[has-type]</span>
+                <span class="s1">self.index_names</span><span class="s0">,</span>
+                <span class="s1">self.dtype</span><span class="s0">,</span>
+            <span class="s1">)</span>
+            <span class="s1">conv_columns = self._maybe_make_multi_index_columns(columns</span><span class="s0">, </span><span class="s1">self.col_names)</span>
+            <span class="s0">return </span><span class="s1">index</span><span class="s0">, </span><span class="s1">conv_columns</span><span class="s0">, </span><span class="s1">col_dict</span>
+
+        <span class="s2"># handle new style for names in index</span>
+        <span class="s1">count_empty_content_vals = count_empty_vals(content[</span><span class="s5">0</span><span class="s1">])</span>
+        <span class="s1">indexnamerow = </span><span class="s0">None</span>
+        <span class="s0">if </span><span class="s1">self.has_index_names </span><span class="s0">and </span><span class="s1">count_empty_content_vals == len(columns):</span>
+            <span class="s1">indexnamerow = content[</span><span class="s5">0</span><span class="s1">]</span>
+            <span class="s1">content = content[</span><span class="s5">1</span><span class="s1">:]</span>
+
+        <span class="s1">alldata = self._rows_to_cols(content)</span>
+        <span class="s1">data</span><span class="s0">, </span><span class="s1">columns = self._exclude_implicit_index(alldata)</span>
+
+        <span class="s1">conv_data = self._convert_data(data)</span>
+        <span class="s1">columns</span><span class="s0">, </span><span class="s1">conv_data = self._do_date_conversions(columns</span><span class="s0">, </span><span class="s1">conv_data)</span>
+
+        <span class="s1">index</span><span class="s0">, </span><span class="s1">columns = self._make_index(conv_data</span><span class="s0">, </span><span class="s1">alldata</span><span class="s0">, </span><span class="s1">columns</span><span class="s0">, </span><span class="s1">indexnamerow)</span>
+
+        <span class="s0">return </span><span class="s1">index</span><span class="s0">, </span><span class="s1">columns</span><span class="s0">, </span><span class="s1">conv_data</span>
+
+    <span class="s0">def </span><span class="s1">_exclude_implicit_index(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">alldata: list[np.ndarray]</span><span class="s0">,</span>
+    <span class="s1">) -&gt; tuple[Mapping[Hashable</span><span class="s0">, </span><span class="s1">np.ndarray]</span><span class="s0">, </span><span class="s1">Sequence[Hashable]]:</span>
+        <span class="s1">names = self._maybe_dedup_names(self.orig_names)</span>
+
+        <span class="s1">offset = </span><span class="s5">0</span>
+        <span class="s0">if </span><span class="s1">self._implicit_index:</span>
+            <span class="s2"># error: Cannot determine type of 'index_col'</span>
+            <span class="s1">offset = len(self.index_col)  </span><span class="s2"># type: ignore[has-type]</span>
+
+        <span class="s1">len_alldata = len(alldata)</span>
+        <span class="s1">self._check_data_length(names</span><span class="s0">, </span><span class="s1">alldata)</span>
+
+        <span class="s0">return </span><span class="s1">{</span>
+            <span class="s1">name: alldata[i + offset] </span><span class="s0">for </span><span class="s1">i</span><span class="s0">, </span><span class="s1">name </span><span class="s0">in </span><span class="s1">enumerate(names) </span><span class="s0">if </span><span class="s1">i &lt; len_alldata</span>
+        <span class="s1">}</span><span class="s0">, </span><span class="s1">names</span>
+
+    <span class="s2"># legacy</span>
+    <span class="s0">def </span><span class="s1">get_chunk(self</span><span class="s0">, </span><span class="s1">size=</span><span class="s0">None</span><span class="s1">):</span>
+        <span class="s0">if </span><span class="s1">size </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s2"># error: &quot;PythonParser&quot; has no attribute &quot;chunksize&quot;</span>
+            <span class="s1">size = self.chunksize  </span><span class="s2"># type: ignore[attr-defined]</span>
+        <span class="s0">return </span><span class="s1">self.read(rows=size)</span>
+
+    <span class="s0">def </span><span class="s1">_convert_data(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">data: Mapping[Hashable</span><span class="s0">, </span><span class="s1">np.ndarray]</span><span class="s0">,</span>
+    <span class="s1">) -&gt; Mapping[Hashable</span><span class="s0">, </span><span class="s1">ArrayLike]:</span>
+        <span class="s2"># apply converters</span>
+        <span class="s1">clean_conv = self._clean_mapping(self.converters)</span>
+        <span class="s1">clean_dtypes = self._clean_mapping(self.dtype)</span>
+
+        <span class="s2"># Apply NA values.</span>
+        <span class="s1">clean_na_values = {}</span>
+        <span class="s1">clean_na_fvalues = {}</span>
+
+        <span class="s0">if </span><span class="s1">isinstance(self.na_values</span><span class="s0">, </span><span class="s1">dict):</span>
+            <span class="s0">for </span><span class="s1">col </span><span class="s0">in </span><span class="s1">self.na_values:</span>
+                <span class="s1">na_value = self.na_values[col]</span>
+                <span class="s1">na_fvalue = self.na_fvalues[col]</span>
+
+                <span class="s0">if </span><span class="s1">isinstance(col</span><span class="s0">, </span><span class="s1">int) </span><span class="s0">and </span><span class="s1">col </span><span class="s0">not in </span><span class="s1">self.orig_names:</span>
+                    <span class="s1">col = self.orig_names[col]</span>
+
+                <span class="s1">clean_na_values[col] = na_value</span>
+                <span class="s1">clean_na_fvalues[col] = na_fvalue</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">clean_na_values = self.na_values</span>
+            <span class="s1">clean_na_fvalues = self.na_fvalues</span>
+
+        <span class="s0">return </span><span class="s1">self._convert_to_ndarrays(</span>
+            <span class="s1">data</span><span class="s0">,</span>
+            <span class="s1">clean_na_values</span><span class="s0">,</span>
+            <span class="s1">clean_na_fvalues</span><span class="s0">,</span>
+            <span class="s1">self.verbose</span><span class="s0">,</span>
+            <span class="s1">clean_conv</span><span class="s0">,</span>
+            <span class="s1">clean_dtypes</span><span class="s0">,</span>
+        <span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">_infer_columns(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+    <span class="s1">) -&gt; tuple[list[list[Scalar | </span><span class="s0">None</span><span class="s1">]]</span><span class="s0">, </span><span class="s1">int</span><span class="s0">, </span><span class="s1">set[Scalar | </span><span class="s0">None</span><span class="s1">]]:</span>
+        <span class="s1">names = self.names</span>
+        <span class="s1">num_original_columns = </span><span class="s5">0</span>
+        <span class="s1">clear_buffer = </span><span class="s0">True</span>
+        <span class="s1">unnamed_cols: set[Scalar | </span><span class="s0">None</span><span class="s1">] = set()</span>
+        <span class="s1">self._header_line = </span><span class="s0">None</span>
+
+        <span class="s0">if </span><span class="s1">self.header </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">header = self.header</span>
+
+            <span class="s0">if </span><span class="s1">isinstance(header</span><span class="s0">, </span><span class="s1">(list</span><span class="s0">, </span><span class="s1">tuple</span><span class="s0">, </span><span class="s1">np.ndarray)):</span>
+                <span class="s1">have_mi_columns = len(header) &gt; </span><span class="s5">1</span>
+                <span class="s2"># we have a mi columns, so read an extra line</span>
+                <span class="s0">if </span><span class="s1">have_mi_columns:</span>
+                    <span class="s1">header = list(header) + [header[-</span><span class="s5">1</span><span class="s1">] + </span><span class="s5">1</span><span class="s1">]</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">have_mi_columns = </span><span class="s0">False</span>
+                <span class="s1">header = [header]</span>
+
+            <span class="s1">columns: list[list[Scalar | </span><span class="s0">None</span><span class="s1">]] = []</span>
+            <span class="s0">for </span><span class="s1">level</span><span class="s0">, </span><span class="s1">hr </span><span class="s0">in </span><span class="s1">enumerate(header):</span>
+                <span class="s0">try</span><span class="s1">:</span>
+                    <span class="s1">line = self._buffered_line()</span>
+
+                    <span class="s0">while </span><span class="s1">self.line_pos &lt;= hr:</span>
+                        <span class="s1">line = self._next_line()</span>
+
+                <span class="s0">except </span><span class="s1">StopIteration </span><span class="s0">as </span><span class="s1">err:</span>
+                    <span class="s0">if </span><span class="s1">self.line_pos &lt; hr:</span>
+                        <span class="s0">raise </span><span class="s1">ValueError(</span>
+                            <span class="s3">f&quot;Passed header=</span><span class="s0">{</span><span class="s1">hr</span><span class="s0">} </span><span class="s3">but only </span><span class="s0">{</span><span class="s1">self.line_pos + </span><span class="s5">1</span><span class="s0">} </span><span class="s3">lines in &quot;</span>
+                            <span class="s3">&quot;file&quot;</span>
+                        <span class="s1">) </span><span class="s0">from </span><span class="s1">err</span>
+
+                    <span class="s2"># We have an empty file, so check</span>
+                    <span class="s2"># if columns are provided. That will</span>
+                    <span class="s2"># serve as the 'line' for parsing</span>
+                    <span class="s0">if </span><span class="s1">have_mi_columns </span><span class="s0">and </span><span class="s1">hr &gt; </span><span class="s5">0</span><span class="s1">:</span>
+                        <span class="s0">if </span><span class="s1">clear_buffer:</span>
+                            <span class="s1">self._clear_buffer()</span>
+                        <span class="s1">columns.append([</span><span class="s0">None</span><span class="s1">] * len(columns[-</span><span class="s5">1</span><span class="s1">]))</span>
+                        <span class="s0">return </span><span class="s1">columns</span><span class="s0">, </span><span class="s1">num_original_columns</span><span class="s0">, </span><span class="s1">unnamed_cols</span>
+
+                    <span class="s0">if not </span><span class="s1">self.names:</span>
+                        <span class="s0">raise </span><span class="s1">EmptyDataError(</span><span class="s3">&quot;No columns to parse from file&quot;</span><span class="s1">) </span><span class="s0">from </span><span class="s1">err</span>
+
+                    <span class="s1">line = self.names[:]</span>
+
+                <span class="s1">this_columns: list[Scalar | </span><span class="s0">None</span><span class="s1">] = []</span>
+                <span class="s1">this_unnamed_cols = []</span>
+
+                <span class="s0">for </span><span class="s1">i</span><span class="s0">, </span><span class="s1">c </span><span class="s0">in </span><span class="s1">enumerate(line):</span>
+                    <span class="s0">if </span><span class="s1">c == </span><span class="s3">&quot;&quot;</span><span class="s1">:</span>
+                        <span class="s0">if </span><span class="s1">have_mi_columns:</span>
+                            <span class="s1">col_name = </span><span class="s3">f&quot;Unnamed: </span><span class="s0">{</span><span class="s1">i</span><span class="s0">}</span><span class="s3">_level_</span><span class="s0">{</span><span class="s1">level</span><span class="s0">}</span><span class="s3">&quot;</span>
+                        <span class="s0">else</span><span class="s1">:</span>
+                            <span class="s1">col_name = </span><span class="s3">f&quot;Unnamed: </span><span class="s0">{</span><span class="s1">i</span><span class="s0">}</span><span class="s3">&quot;</span>
+
+                        <span class="s1">this_unnamed_cols.append(i)</span>
+                        <span class="s1">this_columns.append(col_name)</span>
+                    <span class="s0">else</span><span class="s1">:</span>
+                        <span class="s1">this_columns.append(c)</span>
+
+                <span class="s0">if not </span><span class="s1">have_mi_columns </span><span class="s0">and </span><span class="s1">self.mangle_dupe_cols:</span>
+                    <span class="s1">counts: DefaultDict = defaultdict(int)</span>
+                    <span class="s2"># Ensure that regular columns are used before unnamed ones</span>
+                    <span class="s2"># to keep given names and mangle unnamed columns</span>
+                    <span class="s1">col_loop_order = [</span>
+                        <span class="s1">i</span>
+                        <span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">range(len(this_columns))</span>
+                        <span class="s0">if </span><span class="s1">i </span><span class="s0">not in </span><span class="s1">this_unnamed_cols</span>
+                    <span class="s1">] + this_unnamed_cols</span>
+
+                    <span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">col_loop_order:</span>
+                        <span class="s1">col = this_columns[i]</span>
+                        <span class="s1">old_col = col</span>
+                        <span class="s1">cur_count = counts[col]</span>
+
+                        <span class="s0">if </span><span class="s1">cur_count &gt; </span><span class="s5">0</span><span class="s1">:</span>
+                            <span class="s0">while </span><span class="s1">cur_count &gt; </span><span class="s5">0</span><span class="s1">:</span>
+                                <span class="s1">counts[old_col] = cur_count + </span><span class="s5">1</span>
+                                <span class="s1">col = </span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">old_col</span><span class="s0">}</span><span class="s3">.</span><span class="s0">{</span><span class="s1">cur_count</span><span class="s0">}</span><span class="s3">&quot;</span>
+                                <span class="s0">if </span><span class="s1">col </span><span class="s0">in </span><span class="s1">this_columns:</span>
+                                    <span class="s1">cur_count += </span><span class="s5">1</span>
+                                <span class="s0">else</span><span class="s1">:</span>
+                                    <span class="s1">cur_count = counts[col]</span>
+
+                            <span class="s0">if </span><span class="s1">(</span>
+                                <span class="s1">self.dtype </span><span class="s0">is not None</span>
+                                <span class="s0">and </span><span class="s1">is_dict_like(self.dtype)</span>
+                                <span class="s0">and </span><span class="s1">self.dtype.get(old_col) </span><span class="s0">is not None</span>
+                                <span class="s0">and </span><span class="s1">self.dtype.get(col) </span><span class="s0">is None</span>
+                            <span class="s1">):</span>
+                                <span class="s1">self.dtype.update({col: self.dtype.get(old_col)})</span>
+                        <span class="s1">this_columns[i] = col</span>
+                        <span class="s1">counts[col] = cur_count + </span><span class="s5">1</span>
+                <span class="s0">elif </span><span class="s1">have_mi_columns:</span>
+
+                    <span class="s2"># if we have grabbed an extra line, but its not in our</span>
+                    <span class="s2"># format so save in the buffer, and create an blank extra</span>
+                    <span class="s2"># line for the rest of the parsing code</span>
+                    <span class="s0">if </span><span class="s1">hr == header[-</span><span class="s5">1</span><span class="s1">]:</span>
+                        <span class="s1">lc = len(this_columns)</span>
+                        <span class="s2"># error: Cannot determine type of 'index_col'</span>
+                        <span class="s1">sic = self.index_col  </span><span class="s2"># type: ignore[has-type]</span>
+                        <span class="s1">ic = len(sic) </span><span class="s0">if </span><span class="s1">sic </span><span class="s0">is not None else </span><span class="s5">0</span>
+                        <span class="s1">unnamed_count = len(this_unnamed_cols)</span>
+
+                        <span class="s2"># if wrong number of blanks or no index, not our format</span>
+                        <span class="s0">if </span><span class="s1">(lc != unnamed_count </span><span class="s0">and </span><span class="s1">lc - ic &gt; unnamed_count) </span><span class="s0">or </span><span class="s1">ic == </span><span class="s5">0</span><span class="s1">:</span>
+                            <span class="s1">clear_buffer = </span><span class="s0">False</span>
+                            <span class="s1">this_columns = [</span><span class="s0">None</span><span class="s1">] * lc</span>
+                            <span class="s1">self.buf = [self.buf[-</span><span class="s5">1</span><span class="s1">]]</span>
+
+                <span class="s1">columns.append(this_columns)</span>
+                <span class="s1">unnamed_cols.update({this_columns[i] </span><span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">this_unnamed_cols})</span>
+
+                <span class="s0">if </span><span class="s1">len(columns) == </span><span class="s5">1</span><span class="s1">:</span>
+                    <span class="s1">num_original_columns = len(this_columns)</span>
+
+            <span class="s0">if </span><span class="s1">clear_buffer:</span>
+                <span class="s1">self._clear_buffer()</span>
+
+            <span class="s1">first_line: list[Scalar] | </span><span class="s0">None</span>
+            <span class="s0">if </span><span class="s1">names </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s2"># Read first row after header to check if data are longer</span>
+                <span class="s0">try</span><span class="s1">:</span>
+                    <span class="s1">first_line = self._next_line()</span>
+                <span class="s0">except </span><span class="s1">StopIteration:</span>
+                    <span class="s1">first_line = </span><span class="s0">None</span>
+
+                <span class="s1">len_first_data_row = </span><span class="s5">0 </span><span class="s0">if </span><span class="s1">first_line </span><span class="s0">is None else </span><span class="s1">len(first_line)</span>
+
+                <span class="s0">if </span><span class="s1">len(names) &gt; len(columns[</span><span class="s5">0</span><span class="s1">]) </span><span class="s0">and </span><span class="s1">len(names) &gt; len_first_data_row:</span>
+                    <span class="s0">raise </span><span class="s1">ValueError(</span>
+                        <span class="s3">&quot;Number of passed names did not match &quot;</span>
+                        <span class="s3">&quot;number of header fields in the file&quot;</span>
+                    <span class="s1">)</span>
+                <span class="s0">if </span><span class="s1">len(columns) &gt; </span><span class="s5">1</span><span class="s1">:</span>
+                    <span class="s0">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;Cannot pass names with multi-index columns&quot;</span><span class="s1">)</span>
+
+                <span class="s0">if </span><span class="s1">self.usecols </span><span class="s0">is not None</span><span class="s1">:</span>
+                    <span class="s2"># Set _use_cols. We don't store columns because they are</span>
+                    <span class="s2"># overwritten.</span>
+                    <span class="s1">self._handle_usecols(columns</span><span class="s0">, </span><span class="s1">names</span><span class="s0">, </span><span class="s1">num_original_columns)</span>
+                <span class="s0">else</span><span class="s1">:</span>
+                    <span class="s1">num_original_columns = len(names)</span>
+                <span class="s0">if </span><span class="s1">self._col_indices </span><span class="s0">is not None and </span><span class="s1">len(names) != len(</span>
+                    <span class="s1">self._col_indices</span>
+                <span class="s1">):</span>
+                    <span class="s1">columns = [[names[i] </span><span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">sorted(self._col_indices)]]</span>
+                <span class="s0">else</span><span class="s1">:</span>
+                    <span class="s1">columns = [names]</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">columns = self._handle_usecols(</span>
+                    <span class="s1">columns</span><span class="s0">, </span><span class="s1">columns[</span><span class="s5">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">num_original_columns</span>
+                <span class="s1">)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">line = self._buffered_line()</span>
+
+            <span class="s0">except </span><span class="s1">StopIteration </span><span class="s0">as </span><span class="s1">err:</span>
+                <span class="s0">if not </span><span class="s1">names:</span>
+                    <span class="s0">raise </span><span class="s1">EmptyDataError(</span><span class="s3">&quot;No columns to parse from file&quot;</span><span class="s1">) </span><span class="s0">from </span><span class="s1">err</span>
+
+                <span class="s1">line = names[:]</span>
+
+            <span class="s2"># Store line, otherwise it is lost for guessing the index</span>
+            <span class="s1">self._header_line = line</span>
+            <span class="s1">ncols = len(line)</span>
+            <span class="s1">num_original_columns = ncols</span>
+
+            <span class="s0">if not </span><span class="s1">names:</span>
+                <span class="s0">if </span><span class="s1">self.prefix:</span>
+                    <span class="s1">columns = [[</span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">self.prefix</span><span class="s0">}{</span><span class="s1">i</span><span class="s0">}</span><span class="s3">&quot; </span><span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">range(ncols)]]</span>
+                <span class="s0">else</span><span class="s1">:</span>
+                    <span class="s1">columns = [list(range(ncols))]</span>
+                <span class="s1">columns = self._handle_usecols(</span>
+                    <span class="s1">columns</span><span class="s0">, </span><span class="s1">columns[</span><span class="s5">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">num_original_columns</span>
+                <span class="s1">)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s0">if </span><span class="s1">self.usecols </span><span class="s0">is None or </span><span class="s1">len(names) &gt;= num_original_columns:</span>
+                    <span class="s1">columns = self._handle_usecols([names]</span><span class="s0">, </span><span class="s1">names</span><span class="s0">, </span><span class="s1">num_original_columns)</span>
+                    <span class="s1">num_original_columns = len(names)</span>
+                <span class="s0">else</span><span class="s1">:</span>
+                    <span class="s0">if not </span><span class="s1">callable(self.usecols) </span><span class="s0">and </span><span class="s1">len(names) != len(self.usecols):</span>
+                        <span class="s0">raise </span><span class="s1">ValueError(</span>
+                            <span class="s3">&quot;Number of passed names did not match number of &quot;</span>
+                            <span class="s3">&quot;header fields in the file&quot;</span>
+                        <span class="s1">)</span>
+                    <span class="s2"># Ignore output but set used columns.</span>
+                    <span class="s1">self._handle_usecols([names]</span><span class="s0">, </span><span class="s1">names</span><span class="s0">, </span><span class="s1">ncols)</span>
+                    <span class="s1">columns = [names]</span>
+                    <span class="s1">num_original_columns = ncols</span>
+
+        <span class="s0">return </span><span class="s1">columns</span><span class="s0">, </span><span class="s1">num_original_columns</span><span class="s0">, </span><span class="s1">unnamed_cols</span>
+
+    <span class="s0">def </span><span class="s1">_handle_usecols(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">columns: list[list[Scalar | </span><span class="s0">None</span><span class="s1">]]</span><span class="s0">,</span>
+        <span class="s1">usecols_key: list[Scalar | </span><span class="s0">None</span><span class="s1">]</span><span class="s0">,</span>
+        <span class="s1">num_original_columns: int</span><span class="s0">,</span>
+    <span class="s1">) -&gt; list[list[Scalar | </span><span class="s0">None</span><span class="s1">]]:</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Sets self._col_indices 
+ 
+        usecols_key is used if there are string usecols. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">col_indices: set[int] | list[int]</span>
+        <span class="s0">if </span><span class="s1">self.usecols </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s0">if </span><span class="s1">callable(self.usecols):</span>
+                <span class="s1">col_indices = self._evaluate_usecols(self.usecols</span><span class="s0">, </span><span class="s1">usecols_key)</span>
+            <span class="s0">elif </span><span class="s1">any(isinstance(u</span><span class="s0">, </span><span class="s1">str) </span><span class="s0">for </span><span class="s1">u </span><span class="s0">in </span><span class="s1">self.usecols):</span>
+                <span class="s0">if </span><span class="s1">len(columns) &gt; </span><span class="s5">1</span><span class="s1">:</span>
+                    <span class="s0">raise </span><span class="s1">ValueError(</span>
+                        <span class="s3">&quot;If using multiple headers, usecols must be integers.&quot;</span>
+                    <span class="s1">)</span>
+                <span class="s1">col_indices = []</span>
+
+                <span class="s0">for </span><span class="s1">col </span><span class="s0">in </span><span class="s1">self.usecols:</span>
+                    <span class="s0">if </span><span class="s1">isinstance(col</span><span class="s0">, </span><span class="s1">str):</span>
+                        <span class="s0">try</span><span class="s1">:</span>
+                            <span class="s1">col_indices.append(usecols_key.index(col))</span>
+                        <span class="s0">except </span><span class="s1">ValueError:</span>
+                            <span class="s1">self._validate_usecols_names(self.usecols</span><span class="s0">, </span><span class="s1">usecols_key)</span>
+                    <span class="s0">else</span><span class="s1">:</span>
+                        <span class="s1">col_indices.append(col)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">missing_usecols = [</span>
+                    <span class="s1">col </span><span class="s0">for </span><span class="s1">col </span><span class="s0">in </span><span class="s1">self.usecols </span><span class="s0">if </span><span class="s1">col &gt;= num_original_columns</span>
+                <span class="s1">]</span>
+                <span class="s0">if </span><span class="s1">missing_usecols:</span>
+                    <span class="s1">warnings.warn(</span>
+                        <span class="s3">&quot;Defining usecols with out of bounds indices is deprecated &quot;</span>
+                        <span class="s3">&quot;and will raise a ParserError in a future version.&quot;</span><span class="s0">,</span>
+                        <span class="s1">FutureWarning</span><span class="s0">,</span>
+                        <span class="s1">stacklevel=find_stack_level()</span><span class="s0">,</span>
+                    <span class="s1">)</span>
+                <span class="s1">col_indices = self.usecols</span>
+
+            <span class="s1">columns = [</span>
+                <span class="s1">[n </span><span class="s0">for </span><span class="s1">i</span><span class="s0">, </span><span class="s1">n </span><span class="s0">in </span><span class="s1">enumerate(column) </span><span class="s0">if </span><span class="s1">i </span><span class="s0">in </span><span class="s1">col_indices]</span>
+                <span class="s0">for </span><span class="s1">column </span><span class="s0">in </span><span class="s1">columns</span>
+            <span class="s1">]</span>
+            <span class="s1">self._col_indices = sorted(col_indices)</span>
+        <span class="s0">return </span><span class="s1">columns</span>
+
+    <span class="s0">def </span><span class="s1">_buffered_line(self):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Return a line from buffer, filling buffer if required. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">len(self.buf) &gt; </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">self.buf[</span><span class="s5">0</span><span class="s1">]</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">self._next_line()</span>
+
+    <span class="s0">def </span><span class="s1">_check_for_bom(self</span><span class="s0">, </span><span class="s1">first_row: list[Scalar]) -&gt; list[Scalar]:</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Checks whether the file begins with the BOM character. 
+        If it does, remove it. In addition, if there is quoting 
+        in the field subsequent to the BOM, remove it as well 
+        because it technically takes place at the beginning of 
+        the name, not the middle of it. 
+        &quot;&quot;&quot;</span>
+        <span class="s2"># first_row will be a list, so we need to check</span>
+        <span class="s2"># that that list is not empty before proceeding.</span>
+        <span class="s0">if not </span><span class="s1">first_row:</span>
+            <span class="s0">return </span><span class="s1">first_row</span>
+
+        <span class="s2"># The first element of this row is the one that could have the</span>
+        <span class="s2"># BOM that we want to remove. Check that the first element is a</span>
+        <span class="s2"># string before proceeding.</span>
+        <span class="s0">if not </span><span class="s1">isinstance(first_row[</span><span class="s5">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">str):</span>
+            <span class="s0">return </span><span class="s1">first_row</span>
+
+        <span class="s2"># Check that the string is not empty, as that would</span>
+        <span class="s2"># obviously not have a BOM at the start of it.</span>
+        <span class="s0">if not </span><span class="s1">first_row[</span><span class="s5">0</span><span class="s1">]:</span>
+            <span class="s0">return </span><span class="s1">first_row</span>
+
+        <span class="s2"># Since the string is non-empty, check that it does</span>
+        <span class="s2"># in fact begin with a BOM.</span>
+        <span class="s1">first_elt = first_row[</span><span class="s5">0</span><span class="s1">][</span><span class="s5">0</span><span class="s1">]</span>
+        <span class="s0">if </span><span class="s1">first_elt != _BOM:</span>
+            <span class="s0">return </span><span class="s1">first_row</span>
+
+        <span class="s1">first_row_bom = first_row[</span><span class="s5">0</span><span class="s1">]</span>
+        <span class="s1">new_row: str</span>
+
+        <span class="s0">if </span><span class="s1">len(first_row_bom) &gt; </span><span class="s5">1 </span><span class="s0">and </span><span class="s1">first_row_bom[</span><span class="s5">1</span><span class="s1">] == self.quotechar:</span>
+            <span class="s1">start = </span><span class="s5">2</span>
+            <span class="s1">quote = first_row_bom[</span><span class="s5">1</span><span class="s1">]</span>
+            <span class="s1">end = first_row_bom[</span><span class="s5">2</span><span class="s1">:].index(quote) + </span><span class="s5">2</span>
+
+            <span class="s2"># Extract the data between the quotation marks</span>
+            <span class="s1">new_row = first_row_bom[start:end]</span>
+
+            <span class="s2"># Extract any remaining data after the second</span>
+            <span class="s2"># quotation mark.</span>
+            <span class="s0">if </span><span class="s1">len(first_row_bom) &gt; end + </span><span class="s5">1</span><span class="s1">:</span>
+                <span class="s1">new_row += first_row_bom[end + </span><span class="s5">1 </span><span class="s1">:]</span>
+
+        <span class="s0">else</span><span class="s1">:</span>
+
+            <span class="s2"># No quotation so just remove BOM from first element</span>
+            <span class="s1">new_row = first_row_bom[</span><span class="s5">1</span><span class="s1">:]</span>
+
+        <span class="s1">new_row_list: list[Scalar] = [new_row]</span>
+        <span class="s0">return </span><span class="s1">new_row_list + first_row[</span><span class="s5">1</span><span class="s1">:]</span>
+
+    <span class="s0">def </span><span class="s1">_is_line_empty(self</span><span class="s0">, </span><span class="s1">line: list[Scalar]) -&gt; bool:</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Check if a line is empty or not. 
+ 
+        Parameters 
+        ---------- 
+        line : str, array-like 
+            The line of data to check. 
+ 
+        Returns 
+        ------- 
+        boolean : Whether or not the line is empty. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return not </span><span class="s1">line </span><span class="s0">or </span><span class="s1">all(</span><span class="s0">not </span><span class="s1">x </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">line)</span>
+
+    <span class="s0">def </span><span class="s1">_next_line(self) -&gt; list[Scalar]:</span>
+        <span class="s0">if </span><span class="s1">isinstance(self.data</span><span class="s0">, </span><span class="s1">list):</span>
+            <span class="s0">while </span><span class="s1">self.skipfunc(self.pos):</span>
+                <span class="s1">self.pos += </span><span class="s5">1</span>
+
+            <span class="s0">while True</span><span class="s1">:</span>
+                <span class="s0">try</span><span class="s1">:</span>
+                    <span class="s1">line = self._check_comments([self.data[self.pos]])[</span><span class="s5">0</span><span class="s1">]</span>
+                    <span class="s1">self.pos += </span><span class="s5">1</span>
+                    <span class="s2"># either uncommented or blank to begin with</span>
+                    <span class="s0">if not </span><span class="s1">self.skip_blank_lines </span><span class="s0">and </span><span class="s1">(</span>
+                        <span class="s1">self._is_line_empty(self.data[self.pos - </span><span class="s5">1</span><span class="s1">]) </span><span class="s0">or </span><span class="s1">line</span>
+                    <span class="s1">):</span>
+                        <span class="s0">break</span>
+                    <span class="s0">elif </span><span class="s1">self.skip_blank_lines:</span>
+                        <span class="s1">ret = self._remove_empty_lines([line])</span>
+                        <span class="s0">if </span><span class="s1">ret:</span>
+                            <span class="s1">line = ret[</span><span class="s5">0</span><span class="s1">]</span>
+                            <span class="s0">break</span>
+                <span class="s0">except </span><span class="s1">IndexError:</span>
+                    <span class="s0">raise </span><span class="s1">StopIteration</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">while </span><span class="s1">self.skipfunc(self.pos):</span>
+                <span class="s1">self.pos += </span><span class="s5">1</span>
+                <span class="s2"># assert for mypy, data is Iterator[str] or None, would error in next</span>
+                <span class="s0">assert </span><span class="s1">self.data </span><span class="s0">is not None</span>
+                <span class="s1">next(self.data)</span>
+
+            <span class="s0">while True</span><span class="s1">:</span>
+                <span class="s1">orig_line = self._next_iter_line(row_num=self.pos + </span><span class="s5">1</span><span class="s1">)</span>
+                <span class="s1">self.pos += </span><span class="s5">1</span>
+
+                <span class="s0">if </span><span class="s1">orig_line </span><span class="s0">is not None</span><span class="s1">:</span>
+                    <span class="s1">line = self._check_comments([orig_line])[</span><span class="s5">0</span><span class="s1">]</span>
+
+                    <span class="s0">if </span><span class="s1">self.skip_blank_lines:</span>
+                        <span class="s1">ret = self._remove_empty_lines([line])</span>
+
+                        <span class="s0">if </span><span class="s1">ret:</span>
+                            <span class="s1">line = ret[</span><span class="s5">0</span><span class="s1">]</span>
+                            <span class="s0">break</span>
+                    <span class="s0">elif </span><span class="s1">self._is_line_empty(orig_line) </span><span class="s0">or </span><span class="s1">line:</span>
+                        <span class="s0">break</span>
+
+        <span class="s2"># This was the first line of the file,</span>
+        <span class="s2"># which could contain the BOM at the</span>
+        <span class="s2"># beginning of it.</span>
+        <span class="s0">if </span><span class="s1">self.pos == </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s1">line = self._check_for_bom(line)</span>
+
+        <span class="s1">self.line_pos += </span><span class="s5">1</span>
+        <span class="s1">self.buf.append(line)</span>
+        <span class="s0">return </span><span class="s1">line</span>
+
+    <span class="s0">def </span><span class="s1">_alert_malformed(self</span><span class="s0">, </span><span class="s1">msg: str</span><span class="s0">, </span><span class="s1">row_num: int) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Alert a user about a malformed row, depending on value of 
+        `self.on_bad_lines` enum. 
+ 
+        If `self.on_bad_lines` is ERROR, the alert will be `ParserError`. 
+        If `self.on_bad_lines` is WARN, the alert will be printed out. 
+ 
+        Parameters 
+        ---------- 
+        msg: str 
+            The error message to display. 
+        row_num: int 
+            The row number where the parsing error occurred. 
+            Because this row number is displayed, we 1-index, 
+            even though we 0-index internally. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">self.on_bad_lines == self.BadLineHandleMethod.ERROR:</span>
+            <span class="s0">raise </span><span class="s1">ParserError(msg)</span>
+        <span class="s0">elif </span><span class="s1">self.on_bad_lines == self.BadLineHandleMethod.WARN:</span>
+            <span class="s1">base = </span><span class="s3">f&quot;Skipping line </span><span class="s0">{</span><span class="s1">row_num</span><span class="s0">}</span><span class="s3">: &quot;</span>
+            <span class="s1">sys.stderr.write(base + msg + </span><span class="s3">&quot;</span><span class="s0">\n</span><span class="s3">&quot;</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">_next_iter_line(self</span><span class="s0">, </span><span class="s1">row_num: int) -&gt; list[Scalar] | </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Wrapper around iterating through `self.data` (CSV source). 
+ 
+        When a CSV error is raised, we check for specific 
+        error messages that allow us to customize the 
+        error message displayed to the user. 
+ 
+        Parameters 
+        ---------- 
+        row_num: int 
+            The row number of the line being parsed. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s2"># assert for mypy, data is Iterator[str] or None, would error in next</span>
+            <span class="s0">assert </span><span class="s1">self.data </span><span class="s0">is not None</span>
+            <span class="s1">line = next(self.data)</span>
+            <span class="s2"># for mypy</span>
+            <span class="s0">assert </span><span class="s1">isinstance(line</span><span class="s0">, </span><span class="s1">list)</span>
+            <span class="s0">return </span><span class="s1">line</span>
+        <span class="s0">except </span><span class="s1">csv.Error </span><span class="s0">as </span><span class="s1">e:</span>
+            <span class="s0">if </span><span class="s1">(</span>
+                <span class="s1">self.on_bad_lines == self.BadLineHandleMethod.ERROR</span>
+                <span class="s0">or </span><span class="s1">self.on_bad_lines == self.BadLineHandleMethod.WARN</span>
+            <span class="s1">):</span>
+                <span class="s1">msg = str(e)</span>
+
+                <span class="s0">if </span><span class="s3">&quot;NULL byte&quot; </span><span class="s0">in </span><span class="s1">msg </span><span class="s0">or </span><span class="s3">&quot;line contains NUL&quot; </span><span class="s0">in </span><span class="s1">msg:</span>
+                    <span class="s1">msg = (</span>
+                        <span class="s3">&quot;NULL byte detected. This byte &quot;</span>
+                        <span class="s3">&quot;cannot be processed in Python's &quot;</span>
+                        <span class="s3">&quot;native csv library at the moment, &quot;</span>
+                        <span class="s3">&quot;so please pass in engine='c' instead&quot;</span>
+                    <span class="s1">)</span>
+
+                <span class="s0">if </span><span class="s1">self.skipfooter &gt; </span><span class="s5">0</span><span class="s1">:</span>
+                    <span class="s1">reason = (</span>
+                        <span class="s3">&quot;Error could possibly be due to &quot;</span>
+                        <span class="s3">&quot;parsing errors in the skipped footer rows &quot;</span>
+                        <span class="s3">&quot;(the skipfooter keyword is only applied &quot;</span>
+                        <span class="s3">&quot;after Python's csv library has parsed &quot;</span>
+                        <span class="s3">&quot;all rows).&quot;</span>
+                    <span class="s1">)</span>
+                    <span class="s1">msg += </span><span class="s3">&quot;. &quot; </span><span class="s1">+ reason</span>
+
+                <span class="s1">self._alert_malformed(msg</span><span class="s0">, </span><span class="s1">row_num)</span>
+            <span class="s0">return None</span>
+
+    <span class="s0">def </span><span class="s1">_check_comments(self</span><span class="s0">, </span><span class="s1">lines: list[list[Scalar]]) -&gt; list[list[Scalar]]:</span>
+        <span class="s0">if </span><span class="s1">self.comment </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">lines</span>
+        <span class="s1">ret = []</span>
+        <span class="s0">for </span><span class="s1">line </span><span class="s0">in </span><span class="s1">lines:</span>
+            <span class="s1">rl = []</span>
+            <span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">line:</span>
+                <span class="s0">if </span><span class="s1">(</span>
+                    <span class="s0">not </span><span class="s1">isinstance(x</span><span class="s0">, </span><span class="s1">str)</span>
+                    <span class="s0">or </span><span class="s1">self.comment </span><span class="s0">not in </span><span class="s1">x</span>
+                    <span class="s0">or </span><span class="s1">x </span><span class="s0">in </span><span class="s1">self.na_values</span>
+                <span class="s1">):</span>
+                    <span class="s1">rl.append(x)</span>
+                <span class="s0">else</span><span class="s1">:</span>
+                    <span class="s1">x = x[: x.find(self.comment)]</span>
+                    <span class="s0">if </span><span class="s1">len(x) &gt; </span><span class="s5">0</span><span class="s1">:</span>
+                        <span class="s1">rl.append(x)</span>
+                    <span class="s0">break</span>
+            <span class="s1">ret.append(rl)</span>
+        <span class="s0">return </span><span class="s1">ret</span>
+
+    <span class="s0">def </span><span class="s1">_remove_empty_lines(self</span><span class="s0">, </span><span class="s1">lines: list[list[Scalar]]) -&gt; list[list[Scalar]]:</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Iterate through the lines and remove any that are 
+        either empty or contain only one whitespace value 
+ 
+        Parameters 
+        ---------- 
+        lines : list of list of Scalars 
+            The array of lines that we are to filter. 
+ 
+        Returns 
+        ------- 
+        filtered_lines : list of list of Scalars 
+            The same array of lines with the &quot;empty&quot; ones removed. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">ret = []</span>
+        <span class="s0">for </span><span class="s1">line </span><span class="s0">in </span><span class="s1">lines:</span>
+            <span class="s2"># Remove empty lines and lines with only one whitespace value</span>
+            <span class="s0">if </span><span class="s1">(</span>
+                <span class="s1">len(line) &gt; </span><span class="s5">1</span>
+                <span class="s0">or </span><span class="s1">len(line) == </span><span class="s5">1</span>
+                <span class="s0">and </span><span class="s1">(</span><span class="s0">not </span><span class="s1">isinstance(line[</span><span class="s5">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">str) </span><span class="s0">or </span><span class="s1">line[</span><span class="s5">0</span><span class="s1">].strip())</span>
+            <span class="s1">):</span>
+                <span class="s1">ret.append(line)</span>
+        <span class="s0">return </span><span class="s1">ret</span>
+
+    <span class="s0">def </span><span class="s1">_check_thousands(self</span><span class="s0">, </span><span class="s1">lines: list[list[Scalar]]) -&gt; list[list[Scalar]]:</span>
+        <span class="s0">if </span><span class="s1">self.thousands </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">lines</span>
+
+        <span class="s0">return </span><span class="s1">self._search_replace_num_columns(</span>
+            <span class="s1">lines=lines</span><span class="s0">, </span><span class="s1">search=self.thousands</span><span class="s0">, </span><span class="s1">replace=</span><span class="s3">&quot;&quot;</span>
+        <span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">_search_replace_num_columns(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">lines: list[list[Scalar]]</span><span class="s0">, </span><span class="s1">search: str</span><span class="s0">, </span><span class="s1">replace: str</span>
+    <span class="s1">) -&gt; list[list[Scalar]]:</span>
+        <span class="s1">ret = []</span>
+        <span class="s0">for </span><span class="s1">line </span><span class="s0">in </span><span class="s1">lines:</span>
+            <span class="s1">rl = []</span>
+            <span class="s0">for </span><span class="s1">i</span><span class="s0">, </span><span class="s1">x </span><span class="s0">in </span><span class="s1">enumerate(line):</span>
+                <span class="s0">if </span><span class="s1">(</span>
+                    <span class="s0">not </span><span class="s1">isinstance(x</span><span class="s0">, </span><span class="s1">str)</span>
+                    <span class="s0">or </span><span class="s1">search </span><span class="s0">not in </span><span class="s1">x</span>
+                    <span class="s0">or </span><span class="s1">(self._no_thousands_columns </span><span class="s0">and </span><span class="s1">i </span><span class="s0">in </span><span class="s1">self._no_thousands_columns)</span>
+                    <span class="s0">or not </span><span class="s1">self.num.search(x.strip())</span>
+                <span class="s1">):</span>
+                    <span class="s1">rl.append(x)</span>
+                <span class="s0">else</span><span class="s1">:</span>
+                    <span class="s1">rl.append(x.replace(search</span><span class="s0">, </span><span class="s1">replace))</span>
+            <span class="s1">ret.append(rl)</span>
+        <span class="s0">return </span><span class="s1">ret</span>
+
+    <span class="s0">def </span><span class="s1">_check_decimal(self</span><span class="s0">, </span><span class="s1">lines: list[list[Scalar]]) -&gt; list[list[Scalar]]:</span>
+        <span class="s0">if </span><span class="s1">self.decimal == parser_defaults[</span><span class="s3">&quot;decimal&quot;</span><span class="s1">]:</span>
+            <span class="s0">return </span><span class="s1">lines</span>
+
+        <span class="s0">return </span><span class="s1">self._search_replace_num_columns(</span>
+            <span class="s1">lines=lines</span><span class="s0">, </span><span class="s1">search=self.decimal</span><span class="s0">, </span><span class="s1">replace=</span><span class="s3">&quot;.&quot;</span>
+        <span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">_clear_buffer(self) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self.buf = []</span>
+
+    <span class="s1">_implicit_index = </span><span class="s0">False</span>
+
+    <span class="s0">def </span><span class="s1">_get_index_name(self</span><span class="s0">, </span><span class="s1">columns: list[Hashable]):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Try several cases to get lines: 
+ 
+        0) There are headers on row 0 and row 1 and their 
+        total summed lengths equals the length of the next line. 
+        Treat row 0 as columns and row 1 as indices 
+        1) Look for implicit index: there are more columns 
+        on row 1 than row 0. If this is true, assume that row 
+        1 lists index columns and row 0 lists normal columns. 
+        2) Get index from the columns if it was listed. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">orig_names = list(columns)</span>
+        <span class="s1">columns = list(columns)</span>
+
+        <span class="s1">line: list[Scalar] | </span><span class="s0">None</span>
+        <span class="s0">if </span><span class="s1">self._header_line </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">line = self._header_line</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">line = self._next_line()</span>
+            <span class="s0">except </span><span class="s1">StopIteration:</span>
+                <span class="s1">line = </span><span class="s0">None</span>
+
+        <span class="s1">next_line: list[Scalar] | </span><span class="s0">None</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">next_line = self._next_line()</span>
+        <span class="s0">except </span><span class="s1">StopIteration:</span>
+            <span class="s1">next_line = </span><span class="s0">None</span>
+
+        <span class="s2"># implicitly index_col=0 b/c 1 fewer column names</span>
+        <span class="s1">implicit_first_cols = </span><span class="s5">0</span>
+        <span class="s0">if </span><span class="s1">line </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s2"># leave it 0, #2442</span>
+            <span class="s2"># Case 1</span>
+            <span class="s2"># error: Cannot determine type of 'index_col'</span>
+            <span class="s1">index_col = self.index_col  </span><span class="s2"># type: ignore[has-type]</span>
+            <span class="s0">if </span><span class="s1">index_col </span><span class="s0">is not False</span><span class="s1">:</span>
+                <span class="s1">implicit_first_cols = len(line) - self.num_original_columns</span>
+
+            <span class="s2"># Case 0</span>
+            <span class="s0">if </span><span class="s1">next_line </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s0">if </span><span class="s1">len(next_line) == len(line) + self.num_original_columns:</span>
+                    <span class="s2"># column and index names on diff rows</span>
+                    <span class="s1">self.index_col = list(range(len(line)))</span>
+                    <span class="s1">self.buf = self.buf[</span><span class="s5">1</span><span class="s1">:]</span>
+
+                    <span class="s0">for </span><span class="s1">c </span><span class="s0">in </span><span class="s1">reversed(line):</span>
+                        <span class="s1">columns.insert(</span><span class="s5">0</span><span class="s0">, </span><span class="s1">c)</span>
+
+                    <span class="s2"># Update list of original names to include all indices.</span>
+                    <span class="s1">orig_names = list(columns)</span>
+                    <span class="s1">self.num_original_columns = len(columns)</span>
+                    <span class="s0">return </span><span class="s1">line</span><span class="s0">, </span><span class="s1">orig_names</span><span class="s0">, </span><span class="s1">columns</span>
+
+        <span class="s0">if </span><span class="s1">implicit_first_cols &gt; </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s2"># Case 1</span>
+            <span class="s1">self._implicit_index = </span><span class="s0">True</span>
+            <span class="s0">if </span><span class="s1">self.index_col </span><span class="s0">is None</span><span class="s1">:</span>
+                <span class="s1">self.index_col = list(range(implicit_first_cols))</span>
+
+            <span class="s1">index_name = </span><span class="s0">None</span>
+
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s2"># Case 2</span>
+            <span class="s1">(index_name</span><span class="s0">, </span><span class="s1">columns_</span><span class="s0">, </span><span class="s1">self.index_col) = self._clean_index_names(</span>
+                <span class="s1">columns</span><span class="s0">, </span><span class="s1">self.index_col</span><span class="s0">, </span><span class="s1">self.unnamed_cols</span>
+            <span class="s1">)</span>
+
+        <span class="s0">return </span><span class="s1">index_name</span><span class="s0">, </span><span class="s1">orig_names</span><span class="s0">, </span><span class="s1">columns</span>
+
+    <span class="s0">def </span><span class="s1">_rows_to_cols(self</span><span class="s0">, </span><span class="s1">content: list[list[Scalar]]) -&gt; list[np.ndarray]:</span>
+        <span class="s1">col_len = self.num_original_columns</span>
+
+        <span class="s0">if </span><span class="s1">self._implicit_index:</span>
+            <span class="s1">col_len += len(self.index_col)</span>
+
+        <span class="s1">max_len = max(len(row) </span><span class="s0">for </span><span class="s1">row </span><span class="s0">in </span><span class="s1">content)</span>
+
+        <span class="s2"># Check that there are no rows with too many</span>
+        <span class="s2"># elements in their row (rows with too few</span>
+        <span class="s2"># elements are padded with NaN).</span>
+        <span class="s2"># error: Non-overlapping identity check (left operand type: &quot;List[int]&quot;,</span>
+        <span class="s2"># right operand type: &quot;Literal[False]&quot;)</span>
+        <span class="s0">if </span><span class="s1">(</span>
+            <span class="s1">max_len &gt; col_len</span>
+            <span class="s0">and </span><span class="s1">self.index_col </span><span class="s0">is not False  </span><span class="s2"># type: ignore[comparison-overlap]</span>
+            <span class="s0">and </span><span class="s1">self.usecols </span><span class="s0">is None</span>
+        <span class="s1">):</span>
+
+            <span class="s1">footers = self.skipfooter </span><span class="s0">if </span><span class="s1">self.skipfooter </span><span class="s0">else </span><span class="s5">0</span>
+            <span class="s1">bad_lines = []</span>
+
+            <span class="s1">iter_content = enumerate(content)</span>
+            <span class="s1">content_len = len(content)</span>
+            <span class="s1">content = []</span>
+
+            <span class="s0">for </span><span class="s1">(i</span><span class="s0">, </span><span class="s1">l) </span><span class="s0">in </span><span class="s1">iter_content:</span>
+                <span class="s1">actual_len = len(l)</span>
+
+                <span class="s0">if </span><span class="s1">actual_len &gt; col_len:</span>
+                    <span class="s0">if </span><span class="s1">callable(self.on_bad_lines):</span>
+                        <span class="s1">new_l = self.on_bad_lines(l)</span>
+                        <span class="s0">if </span><span class="s1">new_l </span><span class="s0">is not None</span><span class="s1">:</span>
+                            <span class="s1">content.append(new_l)</span>
+                    <span class="s0">elif </span><span class="s1">(</span>
+                        <span class="s1">self.on_bad_lines == self.BadLineHandleMethod.ERROR</span>
+                        <span class="s0">or </span><span class="s1">self.on_bad_lines == self.BadLineHandleMethod.WARN</span>
+                    <span class="s1">):</span>
+                        <span class="s1">row_num = self.pos - (content_len - i + footers)</span>
+                        <span class="s1">bad_lines.append((row_num</span><span class="s0">, </span><span class="s1">actual_len))</span>
+
+                        <span class="s0">if </span><span class="s1">self.on_bad_lines == self.BadLineHandleMethod.ERROR:</span>
+                            <span class="s0">break</span>
+                <span class="s0">else</span><span class="s1">:</span>
+                    <span class="s1">content.append(l)</span>
+
+            <span class="s0">for </span><span class="s1">row_num</span><span class="s0">, </span><span class="s1">actual_len </span><span class="s0">in </span><span class="s1">bad_lines:</span>
+                <span class="s1">msg = (</span>
+                    <span class="s3">f&quot;Expected </span><span class="s0">{</span><span class="s1">col_len</span><span class="s0">} </span><span class="s3">fields in line </span><span class="s0">{</span><span class="s1">row_num + </span><span class="s5">1</span><span class="s0">}</span><span class="s3">, saw &quot;</span>
+                    <span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">actual_len</span><span class="s0">}</span><span class="s3">&quot;</span>
+                <span class="s1">)</span>
+                <span class="s0">if </span><span class="s1">(</span>
+                    <span class="s1">self.delimiter</span>
+                    <span class="s0">and </span><span class="s1">len(self.delimiter) &gt; </span><span class="s5">1</span>
+                    <span class="s0">and </span><span class="s1">self.quoting != csv.QUOTE_NONE</span>
+                <span class="s1">):</span>
+                    <span class="s2"># see gh-13374</span>
+                    <span class="s1">reason = (</span>
+                        <span class="s3">&quot;Error could possibly be due to quotes being &quot;</span>
+                        <span class="s3">&quot;ignored when a multi-char delimiter is used.&quot;</span>
+                    <span class="s1">)</span>
+                    <span class="s1">msg += </span><span class="s3">&quot;. &quot; </span><span class="s1">+ reason</span>
+
+                <span class="s1">self._alert_malformed(msg</span><span class="s0">, </span><span class="s1">row_num + </span><span class="s5">1</span><span class="s1">)</span>
+
+        <span class="s2"># see gh-13320</span>
+        <span class="s1">zipped_content = list(lib.to_object_array(content</span><span class="s0">, </span><span class="s1">min_width=col_len).T)</span>
+
+        <span class="s0">if </span><span class="s1">self.usecols:</span>
+            <span class="s0">assert </span><span class="s1">self._col_indices </span><span class="s0">is not None</span>
+            <span class="s1">col_indices = self._col_indices</span>
+
+            <span class="s0">if </span><span class="s1">self._implicit_index:</span>
+                <span class="s1">zipped_content = [</span>
+                    <span class="s1">a</span>
+                    <span class="s0">for </span><span class="s1">i</span><span class="s0">, </span><span class="s1">a </span><span class="s0">in </span><span class="s1">enumerate(zipped_content)</span>
+                    <span class="s0">if </span><span class="s1">(</span>
+                        <span class="s1">i &lt; len(self.index_col)</span>
+                        <span class="s0">or </span><span class="s1">i - len(self.index_col) </span><span class="s0">in </span><span class="s1">col_indices</span>
+                    <span class="s1">)</span>
+                <span class="s1">]</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">zipped_content = [</span>
+                    <span class="s1">a </span><span class="s0">for </span><span class="s1">i</span><span class="s0">, </span><span class="s1">a </span><span class="s0">in </span><span class="s1">enumerate(zipped_content) </span><span class="s0">if </span><span class="s1">i </span><span class="s0">in </span><span class="s1">col_indices</span>
+                <span class="s1">]</span>
+        <span class="s0">return </span><span class="s1">zipped_content</span>
+
+    <span class="s0">def </span><span class="s1">_get_lines(self</span><span class="s0">, </span><span class="s1">rows: int | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None</span><span class="s1">):</span>
+        <span class="s1">lines = self.buf</span>
+        <span class="s1">new_rows = </span><span class="s0">None</span>
+
+        <span class="s2"># already fetched some number</span>
+        <span class="s0">if </span><span class="s1">rows </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s2"># we already have the lines in the buffer</span>
+            <span class="s0">if </span><span class="s1">len(self.buf) &gt;= rows:</span>
+                <span class="s1">new_rows</span><span class="s0">, </span><span class="s1">self.buf = self.buf[:rows]</span><span class="s0">, </span><span class="s1">self.buf[rows:]</span>
+
+            <span class="s2"># need some lines</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">rows -= len(self.buf)</span>
+
+        <span class="s0">if </span><span class="s1">new_rows </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s0">if </span><span class="s1">isinstance(self.data</span><span class="s0">, </span><span class="s1">list):</span>
+                <span class="s0">if </span><span class="s1">self.pos &gt; len(self.data):</span>
+                    <span class="s0">raise </span><span class="s1">StopIteration</span>
+                <span class="s0">if </span><span class="s1">rows </span><span class="s0">is None</span><span class="s1">:</span>
+                    <span class="s1">new_rows = self.data[self.pos :]</span>
+                    <span class="s1">new_pos = len(self.data)</span>
+                <span class="s0">else</span><span class="s1">:</span>
+                    <span class="s1">new_rows = self.data[self.pos : self.pos + rows]</span>
+                    <span class="s1">new_pos = self.pos + rows</span>
+
+                <span class="s1">new_rows = self._remove_skipped_rows(new_rows)</span>
+                <span class="s1">lines.extend(new_rows)</span>
+                <span class="s1">self.pos = new_pos</span>
+
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">new_rows = []</span>
+                <span class="s0">try</span><span class="s1">:</span>
+                    <span class="s0">if </span><span class="s1">rows </span><span class="s0">is not None</span><span class="s1">:</span>
+
+                        <span class="s1">rows_to_skip = </span><span class="s5">0</span>
+                        <span class="s0">if </span><span class="s1">self.skiprows </span><span class="s0">is not None and </span><span class="s1">self.pos </span><span class="s0">is not None</span><span class="s1">:</span>
+                            <span class="s2"># Only read additional rows if pos is in skiprows</span>
+                            <span class="s1">rows_to_skip = len(</span>
+                                <span class="s1">set(self.skiprows) - set(range(self.pos))</span>
+                            <span class="s1">)</span>
+
+                        <span class="s0">for </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">range(rows + rows_to_skip):</span>
+                            <span class="s2"># assert for mypy, data is Iterator[str] or None, would</span>
+                            <span class="s2"># error in next</span>
+                            <span class="s0">assert </span><span class="s1">self.data </span><span class="s0">is not None</span>
+                            <span class="s1">new_rows.append(next(self.data))</span>
+
+                        <span class="s1">len_new_rows = len(new_rows)</span>
+                        <span class="s1">new_rows = self._remove_skipped_rows(new_rows)</span>
+                        <span class="s1">lines.extend(new_rows)</span>
+                    <span class="s0">else</span><span class="s1">:</span>
+                        <span class="s1">rows = </span><span class="s5">0</span>
+
+                        <span class="s0">while True</span><span class="s1">:</span>
+                            <span class="s1">new_row = self._next_iter_line(row_num=self.pos + rows + </span><span class="s5">1</span><span class="s1">)</span>
+                            <span class="s1">rows += </span><span class="s5">1</span>
+
+                            <span class="s0">if </span><span class="s1">new_row </span><span class="s0">is not None</span><span class="s1">:</span>
+                                <span class="s1">new_rows.append(new_row)</span>
+                        <span class="s1">len_new_rows = len(new_rows)</span>
+
+                <span class="s0">except </span><span class="s1">StopIteration:</span>
+                    <span class="s1">len_new_rows = len(new_rows)</span>
+                    <span class="s1">new_rows = self._remove_skipped_rows(new_rows)</span>
+                    <span class="s1">lines.extend(new_rows)</span>
+                    <span class="s0">if </span><span class="s1">len(lines) == </span><span class="s5">0</span><span class="s1">:</span>
+                        <span class="s0">raise</span>
+                <span class="s1">self.pos += len_new_rows</span>
+
+            <span class="s1">self.buf = []</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">lines = new_rows</span>
+
+        <span class="s0">if </span><span class="s1">self.skipfooter:</span>
+            <span class="s1">lines = lines[: -self.skipfooter]</span>
+
+        <span class="s1">lines = self._check_comments(lines)</span>
+        <span class="s0">if </span><span class="s1">self.skip_blank_lines:</span>
+            <span class="s1">lines = self._remove_empty_lines(lines)</span>
+        <span class="s1">lines = self._check_thousands(lines)</span>
+        <span class="s0">return </span><span class="s1">self._check_decimal(lines)</span>
+
+    <span class="s0">def </span><span class="s1">_remove_skipped_rows(self</span><span class="s0">, </span><span class="s1">new_rows: list[list[Scalar]]) -&gt; list[list[Scalar]]:</span>
+        <span class="s0">if </span><span class="s1">self.skiprows:</span>
+            <span class="s0">return </span><span class="s1">[</span>
+                <span class="s1">row </span><span class="s0">for </span><span class="s1">i</span><span class="s0">, </span><span class="s1">row </span><span class="s0">in </span><span class="s1">enumerate(new_rows) </span><span class="s0">if not </span><span class="s1">self.skipfunc(i + self.pos)</span>
+            <span class="s1">]</span>
+        <span class="s0">return </span><span class="s1">new_rows</span>
+
+
+<span class="s0">class </span><span class="s1">FixedWidthReader(abc.Iterator):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    A reader of fixed-width lines. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">f: IO[str]</span><span class="s0">,</span>
+        <span class="s1">colspecs: list[tuple[int</span><span class="s0">, </span><span class="s1">int]] | Literal[</span><span class="s3">&quot;infer&quot;</span><span class="s1">]</span><span class="s0">,</span>
+        <span class="s1">delimiter: str | </span><span class="s0">None,</span>
+        <span class="s1">comment: str | </span><span class="s0">None,</span>
+        <span class="s1">skiprows: set[int] | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+        <span class="s1">infer_nrows: int = </span><span class="s5">100</span><span class="s0">,</span>
+    <span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self.f = f</span>
+        <span class="s1">self.buffer: Iterator | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None</span>
+        <span class="s1">self.delimiter = </span><span class="s3">&quot;</span><span class="s0">\r\n</span><span class="s3">&quot; </span><span class="s1">+ delimiter </span><span class="s0">if </span><span class="s1">delimiter </span><span class="s0">else </span><span class="s3">&quot;</span><span class="s0">\n\r\t </span><span class="s3">&quot;</span>
+        <span class="s1">self.comment = comment</span>
+        <span class="s0">if </span><span class="s1">colspecs == </span><span class="s3">&quot;infer&quot;</span><span class="s1">:</span>
+            <span class="s1">self.colspecs = self.detect_colspecs(</span>
+                <span class="s1">infer_nrows=infer_nrows</span><span class="s0">, </span><span class="s1">skiprows=skiprows</span>
+            <span class="s1">)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">self.colspecs = colspecs</span>
+
+        <span class="s0">if not </span><span class="s1">isinstance(self.colspecs</span><span class="s0">, </span><span class="s1">(tuple</span><span class="s0">, </span><span class="s1">list)):</span>
+            <span class="s0">raise </span><span class="s1">TypeError(</span>
+                <span class="s3">&quot;column specifications must be a list or tuple, &quot;</span>
+                <span class="s3">f&quot;input was a </span><span class="s0">{</span><span class="s1">type(colspecs).__name__</span><span class="s0">}</span><span class="s3">&quot;</span>
+            <span class="s1">)</span>
+
+        <span class="s0">for </span><span class="s1">colspec </span><span class="s0">in </span><span class="s1">self.colspecs:</span>
+            <span class="s0">if not </span><span class="s1">(</span>
+                <span class="s1">isinstance(colspec</span><span class="s0">, </span><span class="s1">(tuple</span><span class="s0">, </span><span class="s1">list))</span>
+                <span class="s0">and </span><span class="s1">len(colspec) == </span><span class="s5">2</span>
+                <span class="s0">and </span><span class="s1">isinstance(colspec[</span><span class="s5">0</span><span class="s1">]</span><span class="s0">, </span><span class="s1">(int</span><span class="s0">, </span><span class="s1">np.integer</span><span class="s0">, </span><span class="s1">type(</span><span class="s0">None</span><span class="s1">)))</span>
+                <span class="s0">and </span><span class="s1">isinstance(colspec[</span><span class="s5">1</span><span class="s1">]</span><span class="s0">, </span><span class="s1">(int</span><span class="s0">, </span><span class="s1">np.integer</span><span class="s0">, </span><span class="s1">type(</span><span class="s0">None</span><span class="s1">)))</span>
+            <span class="s1">):</span>
+                <span class="s0">raise </span><span class="s1">TypeError(</span>
+                    <span class="s3">&quot;Each column specification must be &quot;</span>
+                    <span class="s3">&quot;2 element tuple or list of integers&quot;</span>
+                <span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">get_rows(self</span><span class="s0">, </span><span class="s1">infer_nrows: int</span><span class="s0">, </span><span class="s1">skiprows: set[int] | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None</span><span class="s1">) -&gt; list[str]:</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Read rows from self.f, skipping as specified. 
+ 
+        We distinguish buffer_rows (the first &lt;= infer_nrows 
+        lines) from the rows returned to detect_colspecs 
+        because it's simpler to leave the other locations 
+        with skiprows logic alone than to modify them to 
+        deal with the fact we skipped some rows here as 
+        well. 
+ 
+        Parameters 
+        ---------- 
+        infer_nrows : int 
+            Number of rows to read from self.f, not counting 
+            rows that are skipped. 
+        skiprows: set, optional 
+            Indices of rows to skip. 
+ 
+        Returns 
+        ------- 
+        detect_rows : list of str 
+            A list containing the rows to read. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">skiprows </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">skiprows = set()</span>
+        <span class="s1">buffer_rows = []</span>
+        <span class="s1">detect_rows = []</span>
+        <span class="s0">for </span><span class="s1">i</span><span class="s0">, </span><span class="s1">row </span><span class="s0">in </span><span class="s1">enumerate(self.f):</span>
+            <span class="s0">if </span><span class="s1">i </span><span class="s0">not in </span><span class="s1">skiprows:</span>
+                <span class="s1">detect_rows.append(row)</span>
+            <span class="s1">buffer_rows.append(row)</span>
+            <span class="s0">if </span><span class="s1">len(detect_rows) &gt;= infer_nrows:</span>
+                <span class="s0">break</span>
+        <span class="s1">self.buffer = iter(buffer_rows)</span>
+        <span class="s0">return </span><span class="s1">detect_rows</span>
+
+    <span class="s0">def </span><span class="s1">detect_colspecs(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">infer_nrows: int = </span><span class="s5">100</span><span class="s0">, </span><span class="s1">skiprows: set[int] | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None</span>
+    <span class="s1">) -&gt; list[tuple[int</span><span class="s0">, </span><span class="s1">int]]:</span>
+        <span class="s2"># Regex escape the delimiters</span>
+        <span class="s1">delimiters = </span><span class="s3">&quot;&quot;</span><span class="s1">.join([</span><span class="s3">fr&quot;\</span><span class="s0">{</span><span class="s1">x</span><span class="s0">}</span><span class="s3">&quot; </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">self.delimiter])</span>
+        <span class="s1">pattern = re.compile(</span><span class="s3">f&quot;([^</span><span class="s0">{</span><span class="s1">delimiters</span><span class="s0">}</span><span class="s3">]+)&quot;</span><span class="s1">)</span>
+        <span class="s1">rows = self.get_rows(infer_nrows</span><span class="s0">, </span><span class="s1">skiprows)</span>
+        <span class="s0">if not </span><span class="s1">rows:</span>
+            <span class="s0">raise </span><span class="s1">EmptyDataError(</span><span class="s3">&quot;No rows from which to infer column width&quot;</span><span class="s1">)</span>
+        <span class="s1">max_len = max(map(len</span><span class="s0">, </span><span class="s1">rows))</span>
+        <span class="s1">mask = np.zeros(max_len + </span><span class="s5">1</span><span class="s0">, </span><span class="s1">dtype=int)</span>
+        <span class="s0">if </span><span class="s1">self.comment </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">rows = [row.partition(self.comment)[</span><span class="s5">0</span><span class="s1">] </span><span class="s0">for </span><span class="s1">row </span><span class="s0">in </span><span class="s1">rows]</span>
+        <span class="s0">for </span><span class="s1">row </span><span class="s0">in </span><span class="s1">rows:</span>
+            <span class="s0">for </span><span class="s1">m </span><span class="s0">in </span><span class="s1">pattern.finditer(row):</span>
+                <span class="s1">mask[m.start() : m.end()] = </span><span class="s5">1</span>
+        <span class="s1">shifted = np.roll(mask</span><span class="s0">, </span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s1">shifted[</span><span class="s5">0</span><span class="s1">] = </span><span class="s5">0</span>
+        <span class="s1">edges = np.where((mask ^ shifted) == </span><span class="s5">1</span><span class="s1">)[</span><span class="s5">0</span><span class="s1">]</span>
+        <span class="s1">edge_pairs = list(zip(edges[::</span><span class="s5">2</span><span class="s1">]</span><span class="s0">, </span><span class="s1">edges[</span><span class="s5">1</span><span class="s1">::</span><span class="s5">2</span><span class="s1">]))</span>
+        <span class="s0">return </span><span class="s1">edge_pairs</span>
+
+    <span class="s0">def </span><span class="s1">__next__(self) -&gt; list[str]:</span>
+        <span class="s0">if </span><span class="s1">self.buffer </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">line = next(self.buffer)</span>
+            <span class="s0">except </span><span class="s1">StopIteration:</span>
+                <span class="s1">self.buffer = </span><span class="s0">None</span>
+                <span class="s1">line = next(self.f)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">line = next(self.f)</span>
+        <span class="s2"># Note: 'colspecs' is a sequence of half-open intervals.</span>
+        <span class="s0">return </span><span class="s1">[line[fromm:to].strip(self.delimiter) </span><span class="s0">for </span><span class="s1">(fromm</span><span class="s0">, </span><span class="s1">to) </span><span class="s0">in </span><span class="s1">self.colspecs]</span>
+
+
+<span class="s0">class </span><span class="s1">FixedWidthFieldParser(PythonParser):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Specialization that Converts fixed-width fields into DataFrames. 
+    See PythonParser for details. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">f: ReadCsvBuffer[str]</span><span class="s0">, </span><span class="s1">**kwds) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s2"># Support iterators, convert to a list.</span>
+        <span class="s1">self.colspecs = kwds.pop(</span><span class="s3">&quot;colspecs&quot;</span><span class="s1">)</span>
+        <span class="s1">self.infer_nrows = kwds.pop(</span><span class="s3">&quot;infer_nrows&quot;</span><span class="s1">)</span>
+        <span class="s1">PythonParser.__init__(self</span><span class="s0">, </span><span class="s1">f</span><span class="s0">, </span><span class="s1">**kwds)</span>
+
+    <span class="s0">def </span><span class="s1">_make_reader(self</span><span class="s0">, </span><span class="s1">f: IO[str]) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self.data = FixedWidthReader(</span>
+            <span class="s1">f</span><span class="s0">,</span>
+            <span class="s1">self.colspecs</span><span class="s0">,</span>
+            <span class="s1">self.delimiter</span><span class="s0">,</span>
+            <span class="s1">self.comment</span><span class="s0">,</span>
+            <span class="s1">self.skiprows</span><span class="s0">,</span>
+            <span class="s1">self.infer_nrows</span><span class="s0">,</span>
+        <span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">_remove_empty_lines(self</span><span class="s0">, </span><span class="s1">lines: list[list[Scalar]]) -&gt; list[list[Scalar]]:</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Returns the list of lines without the empty ones. With fixed-width 
+        fields, empty lines become arrays of empty strings. 
+ 
+        See PythonParser._remove_empty_lines. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">[</span>
+            <span class="s1">line</span>
+            <span class="s0">for </span><span class="s1">line </span><span class="s0">in </span><span class="s1">lines</span>
+            <span class="s0">if </span><span class="s1">any(</span><span class="s0">not </span><span class="s1">isinstance(e</span><span class="s0">, </span><span class="s1">str) </span><span class="s0">or </span><span class="s1">e.strip() </span><span class="s0">for </span><span class="s1">e </span><span class="s0">in </span><span class="s1">line)</span>
+        <span class="s1">]</span>
+
+
+<span class="s0">def </span><span class="s1">count_empty_vals(vals) -&gt; int:</span>
+    <span class="s0">return </span><span class="s1">sum(</span><span class="s5">1 </span><span class="s0">for </span><span class="s1">v </span><span class="s0">in </span><span class="s1">vals </span><span class="s0">if </span><span class="s1">v == </span><span class="s3">&quot;&quot; </span><span class="s0">or </span><span class="s1">v </span><span class="s0">is None</span><span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">_validate_skipfooter_arg(skipfooter: int) -&gt; int:</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Validate the 'skipfooter' parameter. 
+ 
+    Checks whether 'skipfooter' is a non-negative integer. 
+    Raises a ValueError if that is not the case. 
+ 
+    Parameters 
+    ---------- 
+    skipfooter : non-negative integer 
+        The number of rows to skip at the end of the file. 
+ 
+    Returns 
+    ------- 
+    validated_skipfooter : non-negative integer 
+        The original input if the validation succeeds. 
+ 
+    Raises 
+    ------ 
+    ValueError : 'skipfooter' was not a non-negative integer. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if not </span><span class="s1">is_integer(skipfooter):</span>
+        <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;skipfooter must be an integer&quot;</span><span class="s1">)</span>
+
+    <span class="s0">if </span><span class="s1">skipfooter &lt; </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;skipfooter cannot be negative&quot;</span><span class="s1">)</span>
+
+    <span class="s0">return </span><span class="s1">skipfooter</span>
+</pre>
+</body>
+</html>

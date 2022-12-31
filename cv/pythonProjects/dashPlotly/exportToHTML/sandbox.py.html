@@ -1,0 +1,518 @@
+<html>
+<head>
+<title>sandbox.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6a8759;}
+.s3 { color: #629755; font-style: italic;}
+.s4 { color: #808080;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+sandbox.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">import </span><span class="s1">tempfile</span>
+<span class="s0">import </span><span class="s1">operator</span>
+<span class="s0">import </span><span class="s1">functools</span>
+<span class="s0">import </span><span class="s1">itertools</span>
+<span class="s0">import </span><span class="s1">re</span>
+<span class="s0">import </span><span class="s1">contextlib</span>
+<span class="s0">import </span><span class="s1">pickle</span>
+<span class="s0">import </span><span class="s1">textwrap</span>
+<span class="s0">import </span><span class="s1">builtins</span>
+
+<span class="s0">import </span><span class="s1">pkg_resources</span>
+<span class="s0">from </span><span class="s1">distutils.errors </span><span class="s0">import </span><span class="s1">DistutilsError</span>
+<span class="s0">from </span><span class="s1">pkg_resources </span><span class="s0">import </span><span class="s1">working_set</span>
+
+<span class="s0">if </span><span class="s1">sys.platform.startswith(</span><span class="s2">'java'</span><span class="s1">):</span>
+    <span class="s0">import </span><span class="s1">org.python.modules.posix.PosixModule </span><span class="s0">as </span><span class="s1">_os</span>
+<span class="s0">else</span><span class="s1">:</span>
+    <span class="s1">_os = sys.modules[os.name]</span>
+<span class="s0">try</span><span class="s1">:</span>
+    <span class="s1">_file = file</span>
+<span class="s0">except </span><span class="s1">NameError:</span>
+    <span class="s1">_file = </span><span class="s0">None</span>
+<span class="s1">_open = open</span>
+
+
+<span class="s1">__all__ = [</span>
+    <span class="s2">&quot;AbstractSandbox&quot;</span><span class="s0">, </span><span class="s2">&quot;DirectorySandbox&quot;</span><span class="s0">, </span><span class="s2">&quot;SandboxViolation&quot;</span><span class="s0">, </span><span class="s2">&quot;run_setup&quot;</span><span class="s0">,</span>
+<span class="s1">]</span>
+
+
+<span class="s0">def </span><span class="s1">_execfile(filename</span><span class="s0">, </span><span class="s1">globals</span><span class="s0">, </span><span class="s1">locals=</span><span class="s0">None</span><span class="s1">):</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Python 3 implementation of execfile. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">mode = </span><span class="s2">'rb'</span>
+    <span class="s0">with </span><span class="s1">open(filename</span><span class="s0">, </span><span class="s1">mode) </span><span class="s0">as </span><span class="s1">stream:</span>
+        <span class="s1">script = stream.read()</span>
+    <span class="s0">if </span><span class="s1">locals </span><span class="s0">is None</span><span class="s1">:</span>
+        <span class="s1">locals = globals</span>
+    <span class="s1">code = compile(script</span><span class="s0">, </span><span class="s1">filename</span><span class="s0">, </span><span class="s2">'exec'</span><span class="s1">)</span>
+    <span class="s1">exec(code</span><span class="s0">, </span><span class="s1">globals</span><span class="s0">, </span><span class="s1">locals)</span>
+
+
+<span class="s1">@contextlib.contextmanager</span>
+<span class="s0">def </span><span class="s1">save_argv(repl=</span><span class="s0">None</span><span class="s1">):</span>
+    <span class="s1">saved = sys.argv[:]</span>
+    <span class="s0">if </span><span class="s1">repl </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s1">sys.argv[:] = repl</span>
+    <span class="s0">try</span><span class="s1">:</span>
+        <span class="s0">yield </span><span class="s1">saved</span>
+    <span class="s0">finally</span><span class="s1">:</span>
+        <span class="s1">sys.argv[:] = saved</span>
+
+
+<span class="s1">@contextlib.contextmanager</span>
+<span class="s0">def </span><span class="s1">save_path():</span>
+    <span class="s1">saved = sys.path[:]</span>
+    <span class="s0">try</span><span class="s1">:</span>
+        <span class="s0">yield </span><span class="s1">saved</span>
+    <span class="s0">finally</span><span class="s1">:</span>
+        <span class="s1">sys.path[:] = saved</span>
+
+
+<span class="s1">@contextlib.contextmanager</span>
+<span class="s0">def </span><span class="s1">override_temp(replacement):</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Monkey-patch tempfile.tempdir with replacement, ensuring it exists 
+    &quot;&quot;&quot;</span>
+    <span class="s1">os.makedirs(replacement</span><span class="s0">, </span><span class="s1">exist_ok=</span><span class="s0">True</span><span class="s1">)</span>
+
+    <span class="s1">saved = tempfile.tempdir</span>
+
+    <span class="s1">tempfile.tempdir = replacement</span>
+
+    <span class="s0">try</span><span class="s1">:</span>
+        <span class="s0">yield</span>
+    <span class="s0">finally</span><span class="s1">:</span>
+        <span class="s1">tempfile.tempdir = saved</span>
+
+
+<span class="s1">@contextlib.contextmanager</span>
+<span class="s0">def </span><span class="s1">pushd(target):</span>
+    <span class="s1">saved = os.getcwd()</span>
+    <span class="s1">os.chdir(target)</span>
+    <span class="s0">try</span><span class="s1">:</span>
+        <span class="s0">yield </span><span class="s1">saved</span>
+    <span class="s0">finally</span><span class="s1">:</span>
+        <span class="s1">os.chdir(saved)</span>
+
+
+<span class="s0">class </span><span class="s1">UnpickleableException(Exception):</span>
+    <span class="s3">&quot;&quot;&quot; 
+    An exception representing another Exception that could not be pickled. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s0">def </span><span class="s1">dump(type</span><span class="s0">, </span><span class="s1">exc):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Always return a dumped (pickled) type and exc. If exc can't be pickled, 
+        wrap it in UnpickleableException first. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">pickle.dumps(type)</span><span class="s0">, </span><span class="s1">pickle.dumps(exc)</span>
+        <span class="s0">except </span><span class="s1">Exception:</span>
+            <span class="s4"># get UnpickleableException inside the sandbox</span>
+            <span class="s0">from </span><span class="s1">setuptools.sandbox </span><span class="s0">import </span><span class="s1">UnpickleableException </span><span class="s0">as </span><span class="s1">cls</span>
+            <span class="s0">return </span><span class="s1">cls.dump(cls</span><span class="s0">, </span><span class="s1">cls(repr(exc)))</span>
+
+
+<span class="s0">class </span><span class="s1">ExceptionSaver:</span>
+    <span class="s3">&quot;&quot;&quot; 
+    A Context Manager that will save an exception, serialized, and restore it 
+    later. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__enter__(self):</span>
+        <span class="s0">return </span><span class="s1">self</span>
+
+    <span class="s0">def </span><span class="s1">__exit__(self</span><span class="s0">, </span><span class="s1">type</span><span class="s0">, </span><span class="s1">exc</span><span class="s0">, </span><span class="s1">tb):</span>
+        <span class="s0">if not </span><span class="s1">exc:</span>
+            <span class="s0">return</span>
+
+        <span class="s4"># dump the exception</span>
+        <span class="s1">self._saved = UnpickleableException.dump(type</span><span class="s0">, </span><span class="s1">exc)</span>
+        <span class="s1">self._tb = tb</span>
+
+        <span class="s4"># suppress the exception</span>
+        <span class="s0">return True</span>
+
+    <span class="s0">def </span><span class="s1">resume(self):</span>
+        <span class="s3">&quot;restore and re-raise any exception&quot;</span>
+
+        <span class="s0">if </span><span class="s2">'_saved' </span><span class="s0">not in </span><span class="s1">vars(self):</span>
+            <span class="s0">return</span>
+
+        <span class="s1">type</span><span class="s0">, </span><span class="s1">exc = map(pickle.loads</span><span class="s0">, </span><span class="s1">self._saved)</span>
+        <span class="s0">raise </span><span class="s1">exc.with_traceback(self._tb)</span>
+
+
+<span class="s1">@contextlib.contextmanager</span>
+<span class="s0">def </span><span class="s1">save_modules():</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Context in which imported modules are saved. 
+ 
+    Translates exceptions internal to the context into the equivalent exception 
+    outside the context. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">saved = sys.modules.copy()</span>
+    <span class="s0">with </span><span class="s1">ExceptionSaver() </span><span class="s0">as </span><span class="s1">saved_exc:</span>
+        <span class="s0">yield </span><span class="s1">saved</span>
+
+    <span class="s1">sys.modules.update(saved)</span>
+    <span class="s4"># remove any modules imported since</span>
+    <span class="s1">del_modules = (</span>
+        <span class="s1">mod_name </span><span class="s0">for </span><span class="s1">mod_name </span><span class="s0">in </span><span class="s1">sys.modules</span>
+        <span class="s0">if </span><span class="s1">mod_name </span><span class="s0">not in </span><span class="s1">saved</span>
+        <span class="s4"># exclude any encodings modules. See #285</span>
+        <span class="s0">and not </span><span class="s1">mod_name.startswith(</span><span class="s2">'encodings.'</span><span class="s1">)</span>
+    <span class="s1">)</span>
+    <span class="s1">_clear_modules(del_modules)</span>
+
+    <span class="s1">saved_exc.resume()</span>
+
+
+<span class="s0">def </span><span class="s1">_clear_modules(module_names):</span>
+    <span class="s0">for </span><span class="s1">mod_name </span><span class="s0">in </span><span class="s1">list(module_names):</span>
+        <span class="s0">del </span><span class="s1">sys.modules[mod_name]</span>
+
+
+<span class="s1">@contextlib.contextmanager</span>
+<span class="s0">def </span><span class="s1">save_pkg_resources_state():</span>
+    <span class="s1">saved = pkg_resources.__getstate__()</span>
+    <span class="s0">try</span><span class="s1">:</span>
+        <span class="s0">yield </span><span class="s1">saved</span>
+    <span class="s0">finally</span><span class="s1">:</span>
+        <span class="s1">pkg_resources.__setstate__(saved)</span>
+
+
+<span class="s1">@contextlib.contextmanager</span>
+<span class="s0">def </span><span class="s1">setup_context(setup_dir):</span>
+    <span class="s1">temp_dir = os.path.join(setup_dir</span><span class="s0">, </span><span class="s2">'temp'</span><span class="s1">)</span>
+    <span class="s0">with </span><span class="s1">save_pkg_resources_state():</span>
+        <span class="s0">with </span><span class="s1">save_modules():</span>
+            <span class="s0">with </span><span class="s1">save_path():</span>
+                <span class="s1">hide_setuptools()</span>
+                <span class="s0">with </span><span class="s1">save_argv():</span>
+                    <span class="s0">with </span><span class="s1">override_temp(temp_dir):</span>
+                        <span class="s0">with </span><span class="s1">pushd(setup_dir):</span>
+                            <span class="s4"># ensure setuptools commands are available</span>
+                            <span class="s1">__import__(</span><span class="s2">'setuptools'</span><span class="s1">)</span>
+                            <span class="s0">yield</span>
+
+
+<span class="s1">_MODULES_TO_HIDE = {</span>
+    <span class="s2">'setuptools'</span><span class="s0">,</span>
+    <span class="s2">'distutils'</span><span class="s0">,</span>
+    <span class="s2">'pkg_resources'</span><span class="s0">,</span>
+    <span class="s2">'Cython'</span><span class="s0">,</span>
+    <span class="s2">'_distutils_hack'</span><span class="s0">,</span>
+<span class="s1">}</span>
+
+
+<span class="s0">def </span><span class="s1">_needs_hiding(mod_name):</span>
+    <span class="s3">&quot;&quot;&quot; 
+    &gt;&gt;&gt; _needs_hiding('setuptools') 
+    True 
+    &gt;&gt;&gt; _needs_hiding('pkg_resources') 
+    True 
+    &gt;&gt;&gt; _needs_hiding('setuptools_plugin') 
+    False 
+    &gt;&gt;&gt; _needs_hiding('setuptools.__init__') 
+    True 
+    &gt;&gt;&gt; _needs_hiding('distutils') 
+    True 
+    &gt;&gt;&gt; _needs_hiding('os') 
+    False 
+    &gt;&gt;&gt; _needs_hiding('Cython') 
+    True 
+    &quot;&quot;&quot;</span>
+    <span class="s1">base_module = mod_name.split(</span><span class="s2">'.'</span><span class="s0">, </span><span class="s5">1</span><span class="s1">)[</span><span class="s5">0</span><span class="s1">]</span>
+    <span class="s0">return </span><span class="s1">base_module </span><span class="s0">in </span><span class="s1">_MODULES_TO_HIDE</span>
+
+
+<span class="s0">def </span><span class="s1">hide_setuptools():</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Remove references to setuptools' modules from sys.modules to allow the 
+    invocation to import the most appropriate setuptools. This technique is 
+    necessary to avoid issues such as #315 where setuptools upgrading itself 
+    would fail to find a function declared in the metadata. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">_distutils_hack = sys.modules.get(</span><span class="s2">'_distutils_hack'</span><span class="s0">, None</span><span class="s1">)</span>
+    <span class="s0">if </span><span class="s1">_distutils_hack </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s1">_distutils_hack.remove_shim()</span>
+
+    <span class="s1">modules = filter(_needs_hiding</span><span class="s0">, </span><span class="s1">sys.modules)</span>
+    <span class="s1">_clear_modules(modules)</span>
+
+
+<span class="s0">def </span><span class="s1">run_setup(setup_script</span><span class="s0">, </span><span class="s1">args):</span>
+    <span class="s3">&quot;&quot;&quot;Run a distutils setup script, sandboxed in its directory&quot;&quot;&quot;</span>
+    <span class="s1">setup_dir = os.path.abspath(os.path.dirname(setup_script))</span>
+    <span class="s0">with </span><span class="s1">setup_context(setup_dir):</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">sys.argv[:] = [setup_script] + list(args)</span>
+            <span class="s1">sys.path.insert(</span><span class="s5">0</span><span class="s0">, </span><span class="s1">setup_dir)</span>
+            <span class="s4"># reset to include setup dir, w/clean callback list</span>
+            <span class="s1">working_set.__init__()</span>
+            <span class="s1">working_set.callbacks.append(</span><span class="s0">lambda </span><span class="s1">dist: dist.activate())</span>
+
+            <span class="s0">with </span><span class="s1">DirectorySandbox(setup_dir):</span>
+                <span class="s1">ns = dict(__file__=setup_script</span><span class="s0">, </span><span class="s1">__name__=</span><span class="s2">'__main__'</span><span class="s1">)</span>
+                <span class="s1">_execfile(setup_script</span><span class="s0">, </span><span class="s1">ns)</span>
+        <span class="s0">except </span><span class="s1">SystemExit </span><span class="s0">as </span><span class="s1">v:</span>
+            <span class="s0">if </span><span class="s1">v.args </span><span class="s0">and </span><span class="s1">v.args[</span><span class="s5">0</span><span class="s1">]:</span>
+                <span class="s0">raise</span>
+            <span class="s4"># Normal exit, just return</span>
+
+
+<span class="s0">class </span><span class="s1">AbstractSandbox:</span>
+    <span class="s3">&quot;&quot;&quot;Wrap 'os' module and 'open()' builtin for virtualizing setup scripts&quot;&quot;&quot;</span>
+
+    <span class="s1">_active = </span><span class="s0">False</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self):</span>
+        <span class="s1">self._attrs = [</span>
+            <span class="s1">name </span><span class="s0">for </span><span class="s1">name </span><span class="s0">in </span><span class="s1">dir(_os)</span>
+            <span class="s0">if not </span><span class="s1">name.startswith(</span><span class="s2">'_'</span><span class="s1">) </span><span class="s0">and </span><span class="s1">hasattr(self</span><span class="s0">, </span><span class="s1">name)</span>
+        <span class="s1">]</span>
+
+    <span class="s0">def </span><span class="s1">_copy(self</span><span class="s0">, </span><span class="s1">source):</span>
+        <span class="s0">for </span><span class="s1">name </span><span class="s0">in </span><span class="s1">self._attrs:</span>
+            <span class="s1">setattr(os</span><span class="s0">, </span><span class="s1">name</span><span class="s0">, </span><span class="s1">getattr(source</span><span class="s0">, </span><span class="s1">name))</span>
+
+    <span class="s0">def </span><span class="s1">__enter__(self):</span>
+        <span class="s1">self._copy(self)</span>
+        <span class="s0">if </span><span class="s1">_file:</span>
+            <span class="s1">builtins.file = self._file</span>
+        <span class="s1">builtins.open = self._open</span>
+        <span class="s1">self._active = </span><span class="s0">True</span>
+
+    <span class="s0">def </span><span class="s1">__exit__(self</span><span class="s0">, </span><span class="s1">exc_type</span><span class="s0">, </span><span class="s1">exc_value</span><span class="s0">, </span><span class="s1">traceback):</span>
+        <span class="s1">self._active = </span><span class="s0">False</span>
+        <span class="s0">if </span><span class="s1">_file:</span>
+            <span class="s1">builtins.file = _file</span>
+        <span class="s1">builtins.open = _open</span>
+        <span class="s1">self._copy(_os)</span>
+
+    <span class="s0">def </span><span class="s1">run(self</span><span class="s0">, </span><span class="s1">func):</span>
+        <span class="s3">&quot;&quot;&quot;Run 'func' under os sandboxing&quot;&quot;&quot;</span>
+        <span class="s0">with </span><span class="s1">self:</span>
+            <span class="s0">return </span><span class="s1">func()</span>
+
+    <span class="s0">def </span><span class="s1">_mk_dual_path_wrapper(name):</span>
+        <span class="s1">original = getattr(_os</span><span class="s0">, </span><span class="s1">name)</span>
+
+        <span class="s0">def </span><span class="s1">wrap(self</span><span class="s0">, </span><span class="s1">src</span><span class="s0">, </span><span class="s1">dst</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw):</span>
+            <span class="s0">if </span><span class="s1">self._active:</span>
+                <span class="s1">src</span><span class="s0">, </span><span class="s1">dst = self._remap_pair(name</span><span class="s0">, </span><span class="s1">src</span><span class="s0">, </span><span class="s1">dst</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw)</span>
+            <span class="s0">return </span><span class="s1">original(src</span><span class="s0">, </span><span class="s1">dst</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw)</span>
+
+        <span class="s0">return </span><span class="s1">wrap</span>
+
+    <span class="s0">for </span><span class="s1">name </span><span class="s0">in </span><span class="s1">[</span><span class="s2">&quot;rename&quot;</span><span class="s0">, </span><span class="s2">&quot;link&quot;</span><span class="s0">, </span><span class="s2">&quot;symlink&quot;</span><span class="s1">]:</span>
+        <span class="s0">if </span><span class="s1">hasattr(_os</span><span class="s0">, </span><span class="s1">name):</span>
+            <span class="s1">locals()[name] = _mk_dual_path_wrapper(name)</span>
+
+    <span class="s0">def </span><span class="s1">_mk_single_path_wrapper(name</span><span class="s0">, </span><span class="s1">original=</span><span class="s0">None</span><span class="s1">):</span>
+        <span class="s1">original = original </span><span class="s0">or </span><span class="s1">getattr(_os</span><span class="s0">, </span><span class="s1">name)</span>
+
+        <span class="s0">def </span><span class="s1">wrap(self</span><span class="s0">, </span><span class="s1">path</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw):</span>
+            <span class="s0">if </span><span class="s1">self._active:</span>
+                <span class="s1">path = self._remap_input(name</span><span class="s0">, </span><span class="s1">path</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw)</span>
+            <span class="s0">return </span><span class="s1">original(path</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw)</span>
+
+        <span class="s0">return </span><span class="s1">wrap</span>
+
+    <span class="s0">if </span><span class="s1">_file:</span>
+        <span class="s1">_file = _mk_single_path_wrapper(</span><span class="s2">'file'</span><span class="s0">, </span><span class="s1">_file)</span>
+    <span class="s1">_open = _mk_single_path_wrapper(</span><span class="s2">'open'</span><span class="s0">, </span><span class="s1">_open)</span>
+    <span class="s0">for </span><span class="s1">name </span><span class="s0">in </span><span class="s1">[</span>
+        <span class="s2">&quot;stat&quot;</span><span class="s0">, </span><span class="s2">&quot;listdir&quot;</span><span class="s0">, </span><span class="s2">&quot;chdir&quot;</span><span class="s0">, </span><span class="s2">&quot;open&quot;</span><span class="s0">, </span><span class="s2">&quot;chmod&quot;</span><span class="s0">, </span><span class="s2">&quot;chown&quot;</span><span class="s0">, </span><span class="s2">&quot;mkdir&quot;</span><span class="s0">,</span>
+        <span class="s2">&quot;remove&quot;</span><span class="s0">, </span><span class="s2">&quot;unlink&quot;</span><span class="s0">, </span><span class="s2">&quot;rmdir&quot;</span><span class="s0">, </span><span class="s2">&quot;utime&quot;</span><span class="s0">, </span><span class="s2">&quot;lchown&quot;</span><span class="s0">, </span><span class="s2">&quot;chroot&quot;</span><span class="s0">, </span><span class="s2">&quot;lstat&quot;</span><span class="s0">,</span>
+        <span class="s2">&quot;startfile&quot;</span><span class="s0">, </span><span class="s2">&quot;mkfifo&quot;</span><span class="s0">, </span><span class="s2">&quot;mknod&quot;</span><span class="s0">, </span><span class="s2">&quot;pathconf&quot;</span><span class="s0">, </span><span class="s2">&quot;access&quot;</span>
+    <span class="s1">]:</span>
+        <span class="s0">if </span><span class="s1">hasattr(_os</span><span class="s0">, </span><span class="s1">name):</span>
+            <span class="s1">locals()[name] = _mk_single_path_wrapper(name)</span>
+
+    <span class="s0">def </span><span class="s1">_mk_single_with_return(name):</span>
+        <span class="s1">original = getattr(_os</span><span class="s0">, </span><span class="s1">name)</span>
+
+        <span class="s0">def </span><span class="s1">wrap(self</span><span class="s0">, </span><span class="s1">path</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw):</span>
+            <span class="s0">if </span><span class="s1">self._active:</span>
+                <span class="s1">path = self._remap_input(name</span><span class="s0">, </span><span class="s1">path</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw)</span>
+                <span class="s0">return </span><span class="s1">self._remap_output(name</span><span class="s0">, </span><span class="s1">original(path</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw))</span>
+            <span class="s0">return </span><span class="s1">original(path</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw)</span>
+
+        <span class="s0">return </span><span class="s1">wrap</span>
+
+    <span class="s0">for </span><span class="s1">name </span><span class="s0">in </span><span class="s1">[</span><span class="s2">'readlink'</span><span class="s0">, </span><span class="s2">'tempnam'</span><span class="s1">]:</span>
+        <span class="s0">if </span><span class="s1">hasattr(_os</span><span class="s0">, </span><span class="s1">name):</span>
+            <span class="s1">locals()[name] = _mk_single_with_return(name)</span>
+
+    <span class="s0">def </span><span class="s1">_mk_query(name):</span>
+        <span class="s1">original = getattr(_os</span><span class="s0">, </span><span class="s1">name)</span>
+
+        <span class="s0">def </span><span class="s1">wrap(self</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw):</span>
+            <span class="s1">retval = original(*args</span><span class="s0">, </span><span class="s1">**kw)</span>
+            <span class="s0">if </span><span class="s1">self._active:</span>
+                <span class="s0">return </span><span class="s1">self._remap_output(name</span><span class="s0">, </span><span class="s1">retval)</span>
+            <span class="s0">return </span><span class="s1">retval</span>
+
+        <span class="s0">return </span><span class="s1">wrap</span>
+
+    <span class="s0">for </span><span class="s1">name </span><span class="s0">in </span><span class="s1">[</span><span class="s2">'getcwd'</span><span class="s0">, </span><span class="s2">'tmpnam'</span><span class="s1">]:</span>
+        <span class="s0">if </span><span class="s1">hasattr(_os</span><span class="s0">, </span><span class="s1">name):</span>
+            <span class="s1">locals()[name] = _mk_query(name)</span>
+
+    <span class="s0">def </span><span class="s1">_validate_path(self</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s3">&quot;&quot;&quot;Called to remap or validate any path, whether input or output&quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">path</span>
+
+    <span class="s0">def </span><span class="s1">_remap_input(self</span><span class="s0">, </span><span class="s1">operation</span><span class="s0">, </span><span class="s1">path</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw):</span>
+        <span class="s3">&quot;&quot;&quot;Called for path inputs&quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self._validate_path(path)</span>
+
+    <span class="s0">def </span><span class="s1">_remap_output(self</span><span class="s0">, </span><span class="s1">operation</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s3">&quot;&quot;&quot;Called for path outputs&quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self._validate_path(path)</span>
+
+    <span class="s0">def </span><span class="s1">_remap_pair(self</span><span class="s0">, </span><span class="s1">operation</span><span class="s0">, </span><span class="s1">src</span><span class="s0">, </span><span class="s1">dst</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw):</span>
+        <span class="s3">&quot;&quot;&quot;Called for path pairs like rename, link, and symlink operations&quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">(</span>
+            <span class="s1">self._remap_input(operation + </span><span class="s2">'-from'</span><span class="s0">, </span><span class="s1">src</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw)</span><span class="s0">,</span>
+            <span class="s1">self._remap_input(operation + </span><span class="s2">'-to'</span><span class="s0">, </span><span class="s1">dst</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw)</span>
+        <span class="s1">)</span>
+
+
+<span class="s0">if </span><span class="s1">hasattr(os</span><span class="s0">, </span><span class="s2">'devnull'</span><span class="s1">):</span>
+    <span class="s1">_EXCEPTIONS = [os.devnull]</span>
+<span class="s0">else</span><span class="s1">:</span>
+    <span class="s1">_EXCEPTIONS = []</span>
+
+
+<span class="s0">class </span><span class="s1">DirectorySandbox(AbstractSandbox):</span>
+    <span class="s3">&quot;&quot;&quot;Restrict operations to a single subdirectory - pseudo-chroot&quot;&quot;&quot;</span>
+
+    <span class="s1">write_ops = dict.fromkeys([</span>
+        <span class="s2">&quot;open&quot;</span><span class="s0">, </span><span class="s2">&quot;chmod&quot;</span><span class="s0">, </span><span class="s2">&quot;chown&quot;</span><span class="s0">, </span><span class="s2">&quot;mkdir&quot;</span><span class="s0">, </span><span class="s2">&quot;remove&quot;</span><span class="s0">, </span><span class="s2">&quot;unlink&quot;</span><span class="s0">, </span><span class="s2">&quot;rmdir&quot;</span><span class="s0">,</span>
+        <span class="s2">&quot;utime&quot;</span><span class="s0">, </span><span class="s2">&quot;lchown&quot;</span><span class="s0">, </span><span class="s2">&quot;chroot&quot;</span><span class="s0">, </span><span class="s2">&quot;mkfifo&quot;</span><span class="s0">, </span><span class="s2">&quot;mknod&quot;</span><span class="s0">, </span><span class="s2">&quot;tempnam&quot;</span><span class="s0">,</span>
+    <span class="s1">])</span>
+
+    <span class="s1">_exception_patterns = [</span>
+        <span class="s4"># Allow lib2to3 to attempt to save a pickled grammar object (#121)</span>
+        <span class="s2">r'.*lib2to3.*\.pickle$'</span><span class="s0">,</span>
+    <span class="s1">]</span>
+    <span class="s2">&quot;exempt writing to paths that match the pattern&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">sandbox</span><span class="s0">, </span><span class="s1">exceptions=_EXCEPTIONS):</span>
+        <span class="s1">self._sandbox = os.path.normcase(os.path.realpath(sandbox))</span>
+        <span class="s1">self._prefix = os.path.join(self._sandbox</span><span class="s0">, </span><span class="s2">''</span><span class="s1">)</span>
+        <span class="s1">self._exceptions = [</span>
+            <span class="s1">os.path.normcase(os.path.realpath(path))</span>
+            <span class="s0">for </span><span class="s1">path </span><span class="s0">in </span><span class="s1">exceptions</span>
+        <span class="s1">]</span>
+        <span class="s1">AbstractSandbox.__init__(self)</span>
+
+    <span class="s0">def </span><span class="s1">_violation(self</span><span class="s0">, </span><span class="s1">operation</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw):</span>
+        <span class="s0">from </span><span class="s1">setuptools.sandbox </span><span class="s0">import </span><span class="s1">SandboxViolation</span>
+        <span class="s0">raise </span><span class="s1">SandboxViolation(operation</span><span class="s0">, </span><span class="s1">args</span><span class="s0">, </span><span class="s1">kw)</span>
+
+    <span class="s0">if </span><span class="s1">_file:</span>
+
+        <span class="s0">def </span><span class="s1">_file(self</span><span class="s0">, </span><span class="s1">path</span><span class="s0">, </span><span class="s1">mode=</span><span class="s2">'r'</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw):</span>
+            <span class="s0">if </span><span class="s1">mode </span><span class="s0">not in </span><span class="s1">(</span><span class="s2">'r'</span><span class="s0">, </span><span class="s2">'rt'</span><span class="s0">, </span><span class="s2">'rb'</span><span class="s0">, </span><span class="s2">'rU'</span><span class="s0">, </span><span class="s2">'U'</span><span class="s1">) </span><span class="s0">and not </span><span class="s1">self._ok(path):</span>
+                <span class="s1">self._violation(</span><span class="s2">&quot;file&quot;</span><span class="s0">, </span><span class="s1">path</span><span class="s0">, </span><span class="s1">mode</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw)</span>
+            <span class="s0">return </span><span class="s1">_file(path</span><span class="s0">, </span><span class="s1">mode</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw)</span>
+
+    <span class="s0">def </span><span class="s1">_open(self</span><span class="s0">, </span><span class="s1">path</span><span class="s0">, </span><span class="s1">mode=</span><span class="s2">'r'</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw):</span>
+        <span class="s0">if </span><span class="s1">mode </span><span class="s0">not in </span><span class="s1">(</span><span class="s2">'r'</span><span class="s0">, </span><span class="s2">'rt'</span><span class="s0">, </span><span class="s2">'rb'</span><span class="s0">, </span><span class="s2">'rU'</span><span class="s0">, </span><span class="s2">'U'</span><span class="s1">) </span><span class="s0">and not </span><span class="s1">self._ok(path):</span>
+            <span class="s1">self._violation(</span><span class="s2">&quot;open&quot;</span><span class="s0">, </span><span class="s1">path</span><span class="s0">, </span><span class="s1">mode</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw)</span>
+        <span class="s0">return </span><span class="s1">_open(path</span><span class="s0">, </span><span class="s1">mode</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw)</span>
+
+    <span class="s0">def </span><span class="s1">tmpnam(self):</span>
+        <span class="s1">self._violation(</span><span class="s2">&quot;tmpnam&quot;</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">_ok(self</span><span class="s0">, </span><span class="s1">path):</span>
+        <span class="s1">active = self._active</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">self._active = </span><span class="s0">False</span>
+            <span class="s1">realpath = os.path.normcase(os.path.realpath(path))</span>
+            <span class="s0">return </span><span class="s1">(</span>
+                <span class="s1">self._exempted(realpath)</span>
+                <span class="s0">or </span><span class="s1">realpath == self._sandbox</span>
+                <span class="s0">or </span><span class="s1">realpath.startswith(self._prefix)</span>
+            <span class="s1">)</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">self._active = active</span>
+
+    <span class="s0">def </span><span class="s1">_exempted(self</span><span class="s0">, </span><span class="s1">filepath):</span>
+        <span class="s1">start_matches = (</span>
+            <span class="s1">filepath.startswith(exception)</span>
+            <span class="s0">for </span><span class="s1">exception </span><span class="s0">in </span><span class="s1">self._exceptions</span>
+        <span class="s1">)</span>
+        <span class="s1">pattern_matches = (</span>
+            <span class="s1">re.match(pattern</span><span class="s0">, </span><span class="s1">filepath)</span>
+            <span class="s0">for </span><span class="s1">pattern </span><span class="s0">in </span><span class="s1">self._exception_patterns</span>
+        <span class="s1">)</span>
+        <span class="s1">candidates = itertools.chain(start_matches</span><span class="s0">, </span><span class="s1">pattern_matches)</span>
+        <span class="s0">return </span><span class="s1">any(candidates)</span>
+
+    <span class="s0">def </span><span class="s1">_remap_input(self</span><span class="s0">, </span><span class="s1">operation</span><span class="s0">, </span><span class="s1">path</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw):</span>
+        <span class="s3">&quot;&quot;&quot;Called for path inputs&quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">operation </span><span class="s0">in </span><span class="s1">self.write_ops </span><span class="s0">and not </span><span class="s1">self._ok(path):</span>
+            <span class="s1">self._violation(operation</span><span class="s0">, </span><span class="s1">os.path.realpath(path)</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw)</span>
+        <span class="s0">return </span><span class="s1">path</span>
+
+    <span class="s0">def </span><span class="s1">_remap_pair(self</span><span class="s0">, </span><span class="s1">operation</span><span class="s0">, </span><span class="s1">src</span><span class="s0">, </span><span class="s1">dst</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw):</span>
+        <span class="s3">&quot;&quot;&quot;Called for path pairs like rename, link, and symlink operations&quot;&quot;&quot;</span>
+        <span class="s0">if not </span><span class="s1">self._ok(src) </span><span class="s0">or not </span><span class="s1">self._ok(dst):</span>
+            <span class="s1">self._violation(operation</span><span class="s0">, </span><span class="s1">src</span><span class="s0">, </span><span class="s1">dst</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw)</span>
+        <span class="s0">return </span><span class="s1">(src</span><span class="s0">, </span><span class="s1">dst)</span>
+
+    <span class="s0">def </span><span class="s1">open(self</span><span class="s0">, </span><span class="s1">file</span><span class="s0">, </span><span class="s1">flags</span><span class="s0">, </span><span class="s1">mode=</span><span class="s5">0o777</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw):</span>
+        <span class="s3">&quot;&quot;&quot;Called for low-level os.open()&quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">flags &amp; WRITE_FLAGS </span><span class="s0">and not </span><span class="s1">self._ok(file):</span>
+            <span class="s1">self._violation(</span><span class="s2">&quot;os.open&quot;</span><span class="s0">, </span><span class="s1">file</span><span class="s0">, </span><span class="s1">flags</span><span class="s0">, </span><span class="s1">mode</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw)</span>
+        <span class="s0">return </span><span class="s1">_os.open(file</span><span class="s0">, </span><span class="s1">flags</span><span class="s0">, </span><span class="s1">mode</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kw)</span>
+
+
+<span class="s1">WRITE_FLAGS = functools.reduce(</span>
+    <span class="s1">operator.or_</span><span class="s0">, </span><span class="s1">[</span>
+        <span class="s1">getattr(_os</span><span class="s0">, </span><span class="s1">a</span><span class="s0">, </span><span class="s5">0</span><span class="s1">) </span><span class="s0">for </span><span class="s1">a </span><span class="s0">in</span>
+        <span class="s2">&quot;O_WRONLY O_RDWR O_APPEND O_CREAT O_TRUNC O_TEMPORARY&quot;</span><span class="s1">.split()]</span>
+<span class="s1">)</span>
+
+
+<span class="s0">class </span><span class="s1">SandboxViolation(DistutilsError):</span>
+    <span class="s3">&quot;&quot;&quot;A setup script attempted to modify the filesystem outside the sandbox&quot;&quot;&quot;</span>
+
+    <span class="s1">tmpl = textwrap.dedent(</span><span class="s2">&quot;&quot;&quot; 
+        SandboxViolation: {cmd}{args!r} {kwargs} 
+ 
+        The package setup script has attempted to modify files on your system 
+        that are not within the EasyInstall build area, and has been aborted. 
+ 
+        This package cannot be safely installed by EasyInstall, and may not 
+        support alternate installation locations even if you run its setup 
+        script by hand.  Please inform the package's author and the EasyInstall 
+        maintainers to find out if a fix or workaround is available. 
+        &quot;&quot;&quot;</span><span class="s1">).lstrip()</span>
+
+    <span class="s0">def </span><span class="s1">__str__(self):</span>
+        <span class="s1">cmd</span><span class="s0">, </span><span class="s1">args</span><span class="s0">, </span><span class="s1">kwargs = self.args</span>
+        <span class="s0">return </span><span class="s1">self.tmpl.format(**locals())</span>
+</pre>
+</body>
+</html>

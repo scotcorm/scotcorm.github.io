@@ -1,0 +1,280 @@
+<html>
+<head>
+<title>unpacking.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #808080;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+unpacking.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;Utilities related archives. 
+&quot;&quot;&quot;</span>
+
+<span class="s2">import </span><span class="s1">logging</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">shutil</span>
+<span class="s2">import </span><span class="s1">stat</span>
+<span class="s2">import </span><span class="s1">tarfile</span>
+<span class="s2">import </span><span class="s1">zipfile</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Iterable</span><span class="s2">, </span><span class="s1">List</span><span class="s2">, </span><span class="s1">Optional</span>
+<span class="s2">from </span><span class="s1">zipfile </span><span class="s2">import </span><span class="s1">ZipInfo</span>
+
+<span class="s2">from </span><span class="s1">pip._internal.exceptions </span><span class="s2">import </span><span class="s1">InstallationError</span>
+<span class="s2">from </span><span class="s1">pip._internal.utils.filetypes </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">BZ2_EXTENSIONS</span><span class="s2">,</span>
+    <span class="s1">TAR_EXTENSIONS</span><span class="s2">,</span>
+    <span class="s1">XZ_EXTENSIONS</span><span class="s2">,</span>
+    <span class="s1">ZIP_EXTENSIONS</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pip._internal.utils.misc </span><span class="s2">import </span><span class="s1">ensure_dir</span>
+
+<span class="s1">logger = logging.getLogger(__name__)</span>
+
+
+<span class="s1">SUPPORTED_EXTENSIONS = ZIP_EXTENSIONS + TAR_EXTENSIONS</span>
+
+<span class="s2">try</span><span class="s1">:</span>
+    <span class="s2">import </span><span class="s1">bz2  </span><span class="s3"># noqa</span>
+
+    <span class="s1">SUPPORTED_EXTENSIONS += BZ2_EXTENSIONS</span>
+<span class="s2">except </span><span class="s1">ImportError:</span>
+    <span class="s1">logger.debug(</span><span class="s4">&quot;bz2 module is not available&quot;</span><span class="s1">)</span>
+
+<span class="s2">try</span><span class="s1">:</span>
+    <span class="s3"># Only for Python 3.3+</span>
+    <span class="s2">import </span><span class="s1">lzma  </span><span class="s3"># noqa</span>
+
+    <span class="s1">SUPPORTED_EXTENSIONS += XZ_EXTENSIONS</span>
+<span class="s2">except </span><span class="s1">ImportError:</span>
+    <span class="s1">logger.debug(</span><span class="s4">&quot;lzma module is not available&quot;</span><span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">current_umask() -&gt; int:</span>
+    <span class="s0">&quot;&quot;&quot;Get the current umask which involves having to set it temporarily.&quot;&quot;&quot;</span>
+    <span class="s1">mask = os.umask(</span><span class="s5">0</span><span class="s1">)</span>
+    <span class="s1">os.umask(mask)</span>
+    <span class="s2">return </span><span class="s1">mask</span>
+
+
+<span class="s2">def </span><span class="s1">split_leading_dir(path: str) -&gt; List[str]:</span>
+    <span class="s1">path = path.lstrip(</span><span class="s4">&quot;/&quot;</span><span class="s1">).lstrip(</span><span class="s4">&quot;</span><span class="s2">\\</span><span class="s4">&quot;</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s4">&quot;/&quot; </span><span class="s2">in </span><span class="s1">path </span><span class="s2">and </span><span class="s1">(</span>
+        <span class="s1">(</span><span class="s4">&quot;</span><span class="s2">\\</span><span class="s4">&quot; </span><span class="s2">in </span><span class="s1">path </span><span class="s2">and </span><span class="s1">path.find(</span><span class="s4">&quot;/&quot;</span><span class="s1">) &lt; path.find(</span><span class="s4">&quot;</span><span class="s2">\\</span><span class="s4">&quot;</span><span class="s1">)) </span><span class="s2">or </span><span class="s4">&quot;</span><span class="s2">\\</span><span class="s4">&quot; </span><span class="s2">not in </span><span class="s1">path</span>
+    <span class="s1">):</span>
+        <span class="s2">return </span><span class="s1">path.split(</span><span class="s4">&quot;/&quot;</span><span class="s2">, </span><span class="s5">1</span><span class="s1">)</span>
+    <span class="s2">elif </span><span class="s4">&quot;</span><span class="s2">\\</span><span class="s4">&quot; </span><span class="s2">in </span><span class="s1">path:</span>
+        <span class="s2">return </span><span class="s1">path.split(</span><span class="s4">&quot;</span><span class="s2">\\</span><span class="s4">&quot;</span><span class="s2">, </span><span class="s5">1</span><span class="s1">)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">[path</span><span class="s2">, </span><span class="s4">&quot;&quot;</span><span class="s1">]</span>
+
+
+<span class="s2">def </span><span class="s1">has_leading_dir(paths: Iterable[str]) -&gt; bool:</span>
+    <span class="s0">&quot;&quot;&quot;Returns true if all the paths have the same leading path name 
+    (i.e., everything is in one subdirectory in an archive)&quot;&quot;&quot;</span>
+    <span class="s1">common_prefix = </span><span class="s2">None</span>
+    <span class="s2">for </span><span class="s1">path </span><span class="s2">in </span><span class="s1">paths:</span>
+        <span class="s1">prefix</span><span class="s2">, </span><span class="s1">rest = split_leading_dir(path)</span>
+        <span class="s2">if not </span><span class="s1">prefix:</span>
+            <span class="s2">return False</span>
+        <span class="s2">elif </span><span class="s1">common_prefix </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">common_prefix = prefix</span>
+        <span class="s2">elif </span><span class="s1">prefix != common_prefix:</span>
+            <span class="s2">return False</span>
+    <span class="s2">return True</span>
+
+
+<span class="s2">def </span><span class="s1">is_within_directory(directory: str</span><span class="s2">, </span><span class="s1">target: str) -&gt; bool:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Return true if the absolute path of target is within the directory 
+    &quot;&quot;&quot;</span>
+    <span class="s1">abs_directory = os.path.abspath(directory)</span>
+    <span class="s1">abs_target = os.path.abspath(target)</span>
+
+    <span class="s1">prefix = os.path.commonprefix([abs_directory</span><span class="s2">, </span><span class="s1">abs_target])</span>
+    <span class="s2">return </span><span class="s1">prefix == abs_directory</span>
+
+
+<span class="s2">def </span><span class="s1">set_extracted_file_to_default_mode_plus_executable(path: str) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Make file present at path have execute for user/group/world 
+    (chmod +x) is no-op on windows per python docs 
+    &quot;&quot;&quot;</span>
+    <span class="s1">os.chmod(path</span><span class="s2">, </span><span class="s1">(</span><span class="s5">0o777 </span><span class="s1">&amp; ~current_umask() | </span><span class="s5">0o111</span><span class="s1">))</span>
+
+
+<span class="s2">def </span><span class="s1">zip_item_is_executable(info: ZipInfo) -&gt; bool:</span>
+    <span class="s1">mode = info.external_attr &gt;&gt; </span><span class="s5">16</span>
+    <span class="s3"># if mode and regular file and any execute permissions for</span>
+    <span class="s3"># user/group/world?</span>
+    <span class="s2">return </span><span class="s1">bool(mode </span><span class="s2">and </span><span class="s1">stat.S_ISREG(mode) </span><span class="s2">and </span><span class="s1">mode &amp; </span><span class="s5">0o111</span><span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">unzip_file(filename: str</span><span class="s2">, </span><span class="s1">location: str</span><span class="s2">, </span><span class="s1">flatten: bool = </span><span class="s2">True</span><span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Unzip the file (with path `filename`) to the destination `location`.  All 
+    files are written based on system defaults and umask (i.e. permissions are 
+    not preserved), except that regular file members with any execute 
+    permissions (user, group, or world) have &quot;chmod +x&quot; applied after being 
+    written. Note that for windows, any execute changes using os.chmod are 
+    no-ops per the python docs. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">ensure_dir(location)</span>
+    <span class="s1">zipfp = open(filename</span><span class="s2">, </span><span class="s4">&quot;rb&quot;</span><span class="s1">)</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">zip = zipfile.ZipFile(zipfp</span><span class="s2">, </span><span class="s1">allowZip64=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s1">leading = has_leading_dir(zip.namelist()) </span><span class="s2">and </span><span class="s1">flatten</span>
+        <span class="s2">for </span><span class="s1">info </span><span class="s2">in </span><span class="s1">zip.infolist():</span>
+            <span class="s1">name = info.filename</span>
+            <span class="s1">fn = name</span>
+            <span class="s2">if </span><span class="s1">leading:</span>
+                <span class="s1">fn = split_leading_dir(name)[</span><span class="s5">1</span><span class="s1">]</span>
+            <span class="s1">fn = os.path.join(location</span><span class="s2">, </span><span class="s1">fn)</span>
+            <span class="s1">dir = os.path.dirname(fn)</span>
+            <span class="s2">if not </span><span class="s1">is_within_directory(location</span><span class="s2">, </span><span class="s1">fn):</span>
+                <span class="s1">message = (</span>
+                    <span class="s4">&quot;The zip file ({}) has a file ({}) trying to install &quot;</span>
+                    <span class="s4">&quot;outside target directory ({})&quot;</span>
+                <span class="s1">)</span>
+                <span class="s2">raise </span><span class="s1">InstallationError(message.format(filename</span><span class="s2">, </span><span class="s1">fn</span><span class="s2">, </span><span class="s1">location))</span>
+            <span class="s2">if </span><span class="s1">fn.endswith(</span><span class="s4">&quot;/&quot;</span><span class="s1">) </span><span class="s2">or </span><span class="s1">fn.endswith(</span><span class="s4">&quot;</span><span class="s2">\\</span><span class="s4">&quot;</span><span class="s1">):</span>
+                <span class="s3"># A directory</span>
+                <span class="s1">ensure_dir(fn)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">ensure_dir(dir)</span>
+                <span class="s3"># Don't use read() to avoid allocating an arbitrarily large</span>
+                <span class="s3"># chunk of memory for the file's content</span>
+                <span class="s1">fp = zip.open(name)</span>
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s2">with </span><span class="s1">open(fn</span><span class="s2">, </span><span class="s4">&quot;wb&quot;</span><span class="s1">) </span><span class="s2">as </span><span class="s1">destfp:</span>
+                        <span class="s1">shutil.copyfileobj(fp</span><span class="s2">, </span><span class="s1">destfp)</span>
+                <span class="s2">finally</span><span class="s1">:</span>
+                    <span class="s1">fp.close()</span>
+                    <span class="s2">if </span><span class="s1">zip_item_is_executable(info):</span>
+                        <span class="s1">set_extracted_file_to_default_mode_plus_executable(fn)</span>
+    <span class="s2">finally</span><span class="s1">:</span>
+        <span class="s1">zipfp.close()</span>
+
+
+<span class="s2">def </span><span class="s1">untar_file(filename: str</span><span class="s2">, </span><span class="s1">location: str) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Untar the file (with path `filename`) to the destination `location`. 
+    All files are written based on system defaults and umask (i.e. permissions 
+    are not preserved), except that regular file members with any execute 
+    permissions (user, group, or world) have &quot;chmod +x&quot; applied after being 
+    written.  Note that for windows, any execute changes using os.chmod are 
+    no-ops per the python docs. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">ensure_dir(location)</span>
+    <span class="s2">if </span><span class="s1">filename.lower().endswith(</span><span class="s4">&quot;.gz&quot;</span><span class="s1">) </span><span class="s2">or </span><span class="s1">filename.lower().endswith(</span><span class="s4">&quot;.tgz&quot;</span><span class="s1">):</span>
+        <span class="s1">mode = </span><span class="s4">&quot;r:gz&quot;</span>
+    <span class="s2">elif </span><span class="s1">filename.lower().endswith(BZ2_EXTENSIONS):</span>
+        <span class="s1">mode = </span><span class="s4">&quot;r:bz2&quot;</span>
+    <span class="s2">elif </span><span class="s1">filename.lower().endswith(XZ_EXTENSIONS):</span>
+        <span class="s1">mode = </span><span class="s4">&quot;r:xz&quot;</span>
+    <span class="s2">elif </span><span class="s1">filename.lower().endswith(</span><span class="s4">&quot;.tar&quot;</span><span class="s1">):</span>
+        <span class="s1">mode = </span><span class="s4">&quot;r&quot;</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">logger.warning(</span>
+            <span class="s4">&quot;Cannot determine compression type for file %s&quot;</span><span class="s2">,</span>
+            <span class="s1">filename</span><span class="s2">,</span>
+        <span class="s1">)</span>
+        <span class="s1">mode = </span><span class="s4">&quot;r:*&quot;</span>
+    <span class="s1">tar = tarfile.open(filename</span><span class="s2">, </span><span class="s1">mode</span><span class="s2">, </span><span class="s1">encoding=</span><span class="s4">&quot;utf-8&quot;</span><span class="s1">)</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">leading = has_leading_dir([member.name </span><span class="s2">for </span><span class="s1">member </span><span class="s2">in </span><span class="s1">tar.getmembers()])</span>
+        <span class="s2">for </span><span class="s1">member </span><span class="s2">in </span><span class="s1">tar.getmembers():</span>
+            <span class="s1">fn = member.name</span>
+            <span class="s2">if </span><span class="s1">leading:</span>
+                <span class="s1">fn = split_leading_dir(fn)[</span><span class="s5">1</span><span class="s1">]</span>
+            <span class="s1">path = os.path.join(location</span><span class="s2">, </span><span class="s1">fn)</span>
+            <span class="s2">if not </span><span class="s1">is_within_directory(location</span><span class="s2">, </span><span class="s1">path):</span>
+                <span class="s1">message = (</span>
+                    <span class="s4">&quot;The tar file ({}) has a file ({}) trying to install &quot;</span>
+                    <span class="s4">&quot;outside target directory ({})&quot;</span>
+                <span class="s1">)</span>
+                <span class="s2">raise </span><span class="s1">InstallationError(message.format(filename</span><span class="s2">, </span><span class="s1">path</span><span class="s2">, </span><span class="s1">location))</span>
+            <span class="s2">if </span><span class="s1">member.isdir():</span>
+                <span class="s1">ensure_dir(path)</span>
+            <span class="s2">elif </span><span class="s1">member.issym():</span>
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s3"># https://github.com/python/typeshed/issues/2673</span>
+                    <span class="s1">tar._extract_member(member</span><span class="s2">, </span><span class="s1">path)  </span><span class="s3"># type: ignore</span>
+                <span class="s2">except </span><span class="s1">Exception </span><span class="s2">as </span><span class="s1">exc:</span>
+                    <span class="s3"># Some corrupt tar files seem to produce this</span>
+                    <span class="s3"># (specifically bad symlinks)</span>
+                    <span class="s1">logger.warning(</span>
+                        <span class="s4">&quot;In the tar file %s the member %s is invalid: %s&quot;</span><span class="s2">,</span>
+                        <span class="s1">filename</span><span class="s2">,</span>
+                        <span class="s1">member.name</span><span class="s2">,</span>
+                        <span class="s1">exc</span><span class="s2">,</span>
+                    <span class="s1">)</span>
+                    <span class="s2">continue</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s1">fp = tar.extractfile(member)</span>
+                <span class="s2">except </span><span class="s1">(KeyError</span><span class="s2">, </span><span class="s1">AttributeError) </span><span class="s2">as </span><span class="s1">exc:</span>
+                    <span class="s3"># Some corrupt tar files seem to produce this</span>
+                    <span class="s3"># (specifically bad symlinks)</span>
+                    <span class="s1">logger.warning(</span>
+                        <span class="s4">&quot;In the tar file %s the member %s is invalid: %s&quot;</span><span class="s2">,</span>
+                        <span class="s1">filename</span><span class="s2">,</span>
+                        <span class="s1">member.name</span><span class="s2">,</span>
+                        <span class="s1">exc</span><span class="s2">,</span>
+                    <span class="s1">)</span>
+                    <span class="s2">continue</span>
+                <span class="s1">ensure_dir(os.path.dirname(path))</span>
+                <span class="s2">assert </span><span class="s1">fp </span><span class="s2">is not None</span>
+                <span class="s2">with </span><span class="s1">open(path</span><span class="s2">, </span><span class="s4">&quot;wb&quot;</span><span class="s1">) </span><span class="s2">as </span><span class="s1">destfp:</span>
+                    <span class="s1">shutil.copyfileobj(fp</span><span class="s2">, </span><span class="s1">destfp)</span>
+                <span class="s1">fp.close()</span>
+                <span class="s3"># Update the timestamp (useful for cython compiled files)</span>
+                <span class="s1">tar.utime(member</span><span class="s2">, </span><span class="s1">path)</span>
+                <span class="s3"># member have any execute permissions for user/group/world?</span>
+                <span class="s2">if </span><span class="s1">member.mode &amp; </span><span class="s5">0o111</span><span class="s1">:</span>
+                    <span class="s1">set_extracted_file_to_default_mode_plus_executable(path)</span>
+    <span class="s2">finally</span><span class="s1">:</span>
+        <span class="s1">tar.close()</span>
+
+
+<span class="s2">def </span><span class="s1">unpack_file(</span>
+    <span class="s1">filename: str</span><span class="s2">,</span>
+    <span class="s1">location: str</span><span class="s2">,</span>
+    <span class="s1">content_type: Optional[str] = </span><span class="s2">None,</span>
+<span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+    <span class="s1">filename = os.path.realpath(filename)</span>
+    <span class="s2">if </span><span class="s1">(</span>
+        <span class="s1">content_type == </span><span class="s4">&quot;application/zip&quot;</span>
+        <span class="s2">or </span><span class="s1">filename.lower().endswith(ZIP_EXTENSIONS)</span>
+        <span class="s2">or </span><span class="s1">zipfile.is_zipfile(filename)</span>
+    <span class="s1">):</span>
+        <span class="s1">unzip_file(filename</span><span class="s2">, </span><span class="s1">location</span><span class="s2">, </span><span class="s1">flatten=</span><span class="s2">not </span><span class="s1">filename.endswith(</span><span class="s4">&quot;.whl&quot;</span><span class="s1">))</span>
+    <span class="s2">elif </span><span class="s1">(</span>
+        <span class="s1">content_type == </span><span class="s4">&quot;application/x-gzip&quot;</span>
+        <span class="s2">or </span><span class="s1">tarfile.is_tarfile(filename)</span>
+        <span class="s2">or </span><span class="s1">filename.lower().endswith(TAR_EXTENSIONS + BZ2_EXTENSIONS + XZ_EXTENSIONS)</span>
+    <span class="s1">):</span>
+        <span class="s1">untar_file(filename</span><span class="s2">, </span><span class="s1">location)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s3"># FIXME: handle?</span>
+        <span class="s3"># FIXME: magic signatures?</span>
+        <span class="s1">logger.critical(</span>
+            <span class="s4">&quot;Cannot unpack file %s (downloaded from %s, content-type: %s); &quot;</span>
+            <span class="s4">&quot;cannot detect archive format&quot;</span><span class="s2">,</span>
+            <span class="s1">filename</span><span class="s2">,</span>
+            <span class="s1">location</span><span class="s2">,</span>
+            <span class="s1">content_type</span><span class="s2">,</span>
+        <span class="s1">)</span>
+        <span class="s2">raise </span><span class="s1">InstallationError(</span><span class="s4">f&quot;Cannot determine archive format of </span><span class="s2">{</span><span class="s1">location</span><span class="s2">}</span><span class="s4">&quot;</span><span class="s1">)</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,247 @@
+<html>
+<head>
+<title>arrays.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #808080;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+arrays.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+Rudimentary Apache Arrow-backed ExtensionArray. 
+ 
+At the moment, just a boolean array / type is implemented. 
+Eventually, we'll want to parametrize the type and support 
+multiple dtypes. Not all methods are implemented yet, and the 
+current implementation is not efficient. 
+&quot;&quot;&quot;</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">copy</span>
+<span class="s2">import </span><span class="s1">itertools</span>
+<span class="s2">import </span><span class="s1">operator</span>
+
+<span class="s2">import </span><span class="s1">numpy </span><span class="s2">as </span><span class="s1">np</span>
+<span class="s2">import </span><span class="s1">pyarrow </span><span class="s2">as </span><span class="s1">pa</span>
+
+<span class="s2">from </span><span class="s1">pandas._typing </span><span class="s2">import </span><span class="s1">type_t</span>
+
+<span class="s2">import </span><span class="s1">pandas </span><span class="s2">as </span><span class="s1">pd</span>
+<span class="s2">from </span><span class="s1">pandas.api.extensions </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">ExtensionArray</span><span class="s2">,</span>
+    <span class="s1">ExtensionDtype</span><span class="s2">,</span>
+    <span class="s1">register_extension_dtype</span><span class="s2">,</span>
+    <span class="s1">take</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas.api.types </span><span class="s2">import </span><span class="s1">is_scalar</span>
+<span class="s2">from </span><span class="s1">pandas.core.arraylike </span><span class="s2">import </span><span class="s1">OpsMixin</span>
+<span class="s2">from </span><span class="s1">pandas.core.construction </span><span class="s2">import </span><span class="s1">extract_array</span>
+
+
+<span class="s1">@register_extension_dtype</span>
+<span class="s2">class </span><span class="s1">ArrowBoolDtype(ExtensionDtype):</span>
+
+    <span class="s1">type = np.bool_</span>
+    <span class="s1">kind = </span><span class="s3">&quot;b&quot;</span>
+    <span class="s1">name = </span><span class="s3">&quot;arrow_bool&quot;</span>
+    <span class="s1">na_value = pa.NULL</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">construct_array_type(cls) -&gt; type_t[ArrowBoolArray]:</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Return the array type associated with this dtype. 
+ 
+        Returns 
+        ------- 
+        type 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">ArrowBoolArray</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">_is_boolean(self) -&gt; bool:</span>
+        <span class="s2">return True</span>
+
+
+<span class="s1">@register_extension_dtype</span>
+<span class="s2">class </span><span class="s1">ArrowStringDtype(ExtensionDtype):</span>
+
+    <span class="s1">type = str</span>
+    <span class="s1">kind = </span><span class="s3">&quot;U&quot;</span>
+    <span class="s1">name = </span><span class="s3">&quot;arrow_string&quot;</span>
+    <span class="s1">na_value = pa.NULL</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">construct_array_type(cls) -&gt; type_t[ArrowStringArray]:</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Return the array type associated with this dtype. 
+ 
+        Returns 
+        ------- 
+        type 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">ArrowStringArray</span>
+
+
+<span class="s2">class </span><span class="s1">ArrowExtensionArray(OpsMixin</span><span class="s2">, </span><span class="s1">ExtensionArray):</span>
+    <span class="s1">_data: pa.ChunkedArray</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">from_scalars(cls</span><span class="s2">, </span><span class="s1">values):</span>
+        <span class="s2">if </span><span class="s1">isinstance(values</span><span class="s2">, </span><span class="s1">cls):</span>
+            <span class="s4"># in particular for empty cases the pa.array(np.asarray(...))</span>
+            <span class="s4">#  does not round-trip</span>
+            <span class="s2">return </span><span class="s1">cls(values._data)</span>
+
+        <span class="s2">elif not </span><span class="s1">len(values):</span>
+            <span class="s2">if </span><span class="s1">isinstance(values</span><span class="s2">, </span><span class="s1">list):</span>
+                <span class="s1">dtype = bool </span><span class="s2">if </span><span class="s1">cls </span><span class="s2">is </span><span class="s1">ArrowBoolArray </span><span class="s2">else </span><span class="s1">str</span>
+                <span class="s1">values = np.array([]</span><span class="s2">, </span><span class="s1">dtype=dtype)</span>
+
+        <span class="s1">arr = pa.chunked_array([pa.array(np.asarray(values))])</span>
+        <span class="s2">return </span><span class="s1">cls(arr)</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">from_array(cls</span><span class="s2">, </span><span class="s1">arr):</span>
+        <span class="s2">assert </span><span class="s1">isinstance(arr</span><span class="s2">, </span><span class="s1">pa.Array)</span>
+        <span class="s2">return </span><span class="s1">cls(pa.chunked_array([arr]))</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">_from_sequence(cls</span><span class="s2">, </span><span class="s1">scalars</span><span class="s2">, </span><span class="s1">dtype=</span><span class="s2">None, </span><span class="s1">copy=</span><span class="s2">False</span><span class="s1">):</span>
+        <span class="s2">return </span><span class="s1">cls.from_scalars(scalars)</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self):</span>
+        <span class="s2">return </span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">type(self).__name__</span><span class="s2">}</span><span class="s3">(</span><span class="s2">{</span><span class="s1">repr(self._data)</span><span class="s2">}</span><span class="s3">)&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__contains__(self</span><span class="s2">, </span><span class="s1">obj) -&gt; bool:</span>
+        <span class="s2">if </span><span class="s1">obj </span><span class="s2">is None or </span><span class="s1">obj </span><span class="s2">is </span><span class="s1">self.dtype.na_value:</span>
+            <span class="s4"># None -&gt; EA.__contains__ only checks for self._dtype.na_value, not</span>
+            <span class="s4">#  any compatible NA value.</span>
+            <span class="s4"># self.dtype.na_value -&gt; &lt;pa.NullScalar:None&gt; isn't recognized by pd.isna</span>
+            <span class="s2">return </span><span class="s1">bool(self.isna().any())</span>
+        <span class="s2">return </span><span class="s1">bool(super().__contains__(obj))</span>
+
+    <span class="s2">def </span><span class="s1">__getitem__(self</span><span class="s2">, </span><span class="s1">item):</span>
+        <span class="s2">if </span><span class="s1">is_scalar(item):</span>
+            <span class="s2">return </span><span class="s1">self._data.to_pandas()[item]</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">vals = self._data.to_pandas()[item]</span>
+            <span class="s2">return </span><span class="s1">type(self).from_scalars(vals)</span>
+
+    <span class="s2">def </span><span class="s1">__len__(self):</span>
+        <span class="s2">return </span><span class="s1">len(self._data)</span>
+
+    <span class="s2">def </span><span class="s1">astype(self</span><span class="s2">, </span><span class="s1">dtype</span><span class="s2">, </span><span class="s1">copy=</span><span class="s2">True</span><span class="s1">):</span>
+        <span class="s4"># needed to fix this astype for the Series constructor.</span>
+        <span class="s2">if </span><span class="s1">isinstance(dtype</span><span class="s2">, </span><span class="s1">type(self.dtype)) </span><span class="s2">and </span><span class="s1">dtype == self.dtype:</span>
+            <span class="s2">if </span><span class="s1">copy:</span>
+                <span class="s2">return </span><span class="s1">self.copy()</span>
+            <span class="s2">return </span><span class="s1">self</span>
+        <span class="s2">return </span><span class="s1">super().astype(dtype</span><span class="s2">, </span><span class="s1">copy)</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">dtype(self):</span>
+        <span class="s2">return </span><span class="s1">self._dtype</span>
+
+    <span class="s2">def </span><span class="s1">_logical_method(self</span><span class="s2">, </span><span class="s1">other</span><span class="s2">, </span><span class="s1">op):</span>
+        <span class="s2">if not </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">type(self)):</span>
+            <span class="s2">raise </span><span class="s1">NotImplementedError()</span>
+
+        <span class="s1">result = op(np.array(self._data)</span><span class="s2">, </span><span class="s1">np.array(other._data))</span>
+        <span class="s2">return </span><span class="s1">ArrowBoolArray(</span>
+            <span class="s1">pa.chunked_array([pa.array(result</span><span class="s2">, </span><span class="s1">mask=pd.isna(self._data.to_pandas()))])</span>
+        <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">__eq__(self</span><span class="s2">, </span><span class="s1">other):</span>
+        <span class="s2">if not </span><span class="s1">isinstance(other</span><span class="s2">, </span><span class="s1">type(self)):</span>
+            <span class="s4"># TODO: use some pyarrow function here?</span>
+            <span class="s2">return </span><span class="s1">np.asarray(self).__eq__(other)</span>
+
+        <span class="s2">return </span><span class="s1">self._logical_method(other</span><span class="s2">, </span><span class="s1">operator.eq)</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">nbytes(self) -&gt; int:</span>
+        <span class="s2">return </span><span class="s1">sum(</span>
+            <span class="s1">x.size</span>
+            <span class="s2">for </span><span class="s1">chunk </span><span class="s2">in </span><span class="s1">self._data.chunks</span>
+            <span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">chunk.buffers()</span>
+            <span class="s2">if </span><span class="s1">x </span><span class="s2">is not None</span>
+        <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">isna(self):</span>
+        <span class="s1">nas = pd.isna(self._data.to_pandas())</span>
+        <span class="s2">return </span><span class="s1">type(self).from_scalars(nas)</span>
+
+    <span class="s2">def </span><span class="s1">take(self</span><span class="s2">, </span><span class="s1">indices</span><span class="s2">, </span><span class="s1">allow_fill=</span><span class="s2">False, </span><span class="s1">fill_value=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s1">data = self._data.to_pandas()</span>
+        <span class="s1">data = extract_array(data</span><span class="s2">, </span><span class="s1">extract_numpy=</span><span class="s2">True</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">allow_fill </span><span class="s2">and </span><span class="s1">fill_value </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">fill_value = self.dtype.na_value</span>
+
+        <span class="s1">result = take(data</span><span class="s2">, </span><span class="s1">indices</span><span class="s2">, </span><span class="s1">fill_value=fill_value</span><span class="s2">, </span><span class="s1">allow_fill=allow_fill)</span>
+        <span class="s2">return </span><span class="s1">self._from_sequence(result</span><span class="s2">, </span><span class="s1">dtype=self.dtype)</span>
+
+    <span class="s2">def </span><span class="s1">copy(self):</span>
+        <span class="s2">return </span><span class="s1">type(self)(copy.copy(self._data))</span>
+
+    <span class="s1">@classmethod</span>
+    <span class="s2">def </span><span class="s1">_concat_same_type(cls</span><span class="s2">, </span><span class="s1">to_concat):</span>
+        <span class="s1">chunks = list(itertools.chain.from_iterable(x._data.chunks </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">to_concat))</span>
+        <span class="s1">arr = pa.chunked_array(chunks)</span>
+        <span class="s2">return </span><span class="s1">cls(arr)</span>
+
+    <span class="s2">def </span><span class="s1">__invert__(self):</span>
+        <span class="s2">return </span><span class="s1">type(self).from_scalars(~self._data.to_pandas())</span>
+
+    <span class="s2">def </span><span class="s1">_reduce(self</span><span class="s2">, </span><span class="s1">name: str</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">skipna: bool = </span><span class="s2">True, </span><span class="s1">**kwargs):</span>
+        <span class="s2">if </span><span class="s1">skipna:</span>
+            <span class="s1">arr = self[~self.isna()]</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">arr = self</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">op = getattr(arr</span><span class="s2">, </span><span class="s1">name)</span>
+        <span class="s2">except </span><span class="s1">AttributeError </span><span class="s2">as </span><span class="s1">err:</span>
+            <span class="s2">raise </span><span class="s1">TypeError </span><span class="s2">from </span><span class="s1">err</span>
+        <span class="s2">return </span><span class="s1">op(**kwargs)</span>
+
+    <span class="s2">def </span><span class="s1">any(self</span><span class="s2">, </span><span class="s1">axis=</span><span class="s5">0</span><span class="s2">, </span><span class="s1">out=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s4"># Explicitly return a plain bool to reproduce GH-34660</span>
+        <span class="s2">return </span><span class="s1">bool(self._data.to_pandas().any())</span>
+
+    <span class="s2">def </span><span class="s1">all(self</span><span class="s2">, </span><span class="s1">axis=</span><span class="s5">0</span><span class="s2">, </span><span class="s1">out=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s4"># Explicitly return a plain bool to reproduce GH-34660</span>
+        <span class="s2">return </span><span class="s1">bool(self._data.to_pandas().all())</span>
+
+
+<span class="s2">class </span><span class="s1">ArrowBoolArray(ArrowExtensionArray):</span>
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">values):</span>
+        <span class="s2">if not </span><span class="s1">isinstance(values</span><span class="s2">, </span><span class="s1">pa.ChunkedArray):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span>
+
+        <span class="s2">assert </span><span class="s1">values.type == pa.bool_()</span>
+        <span class="s1">self._data = values</span>
+        <span class="s1">self._dtype = ArrowBoolDtype()</span>
+
+
+<span class="s2">class </span><span class="s1">ArrowStringArray(ArrowExtensionArray):</span>
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">values):</span>
+        <span class="s2">if not </span><span class="s1">isinstance(values</span><span class="s2">, </span><span class="s1">pa.ChunkedArray):</span>
+            <span class="s2">raise </span><span class="s1">ValueError</span>
+
+        <span class="s2">assert </span><span class="s1">values.type == pa.string()</span>
+        <span class="s1">self._data = values</span>
+        <span class="s1">self._dtype = ArrowStringDtype()</span>
+</pre>
+</body>
+</html>

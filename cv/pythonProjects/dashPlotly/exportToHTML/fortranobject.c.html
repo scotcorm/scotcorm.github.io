@@ -1,0 +1,1220 @@
+<html>
+<head>
+<title>fortranobject.c</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6a8759;}
+.s3 { color: #808080;}
+.s4 { color: #4646f1;}
+.s5 { color: #6897bb;}
+.s6 { color: #0f9795;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+fortranobject.c</font>
+</center></td></tr></table>
+<pre><span class="s0">#define </span><span class="s1">FORTRANOBJECT_C</span>
+<span class="s0">#include </span><span class="s2">&quot;fortranobject.h&quot;</span>
+
+<span class="s0">#ifdef </span><span class="s1">__cplusplus</span>
+<span class="s0">extern </span><span class="s2">&quot;C&quot; </span><span class="s1">{</span>
+<span class="s0">#endif</span>
+
+<span class="s0">#include </span><span class="s1">&lt;stdlib.h&gt;</span>
+<span class="s0">#include </span><span class="s1">&lt;string.h&gt;</span>
+
+<span class="s3">/* 
+  This file implements: FortranObject, array_from_pyobj, copy_ND_array 
+ 
+  Author: Pearu Peterson &lt;pearu@cens.ioc.ee&gt; 
+  $Revision: 1.52 $ 
+  $Date: 2005/07/11 07:44:20 $ 
+*/</span>
+
+<span class="s0">int</span>
+<span class="s1">F2PyDict_SetItemString(PyObject *dict, </span><span class="s0">char </span><span class="s1">*name, PyObject *obj)</span>
+<span class="s1">{</span>
+    <span class="s0">if </span><span class="s1">(obj == NULL) {</span>
+        <span class="s1">fprintf(stderr, </span><span class="s2">&quot;Error loading %s</span><span class="s4">\n</span><span class="s2">&quot;</span><span class="s1">, name);</span>
+        <span class="s0">if </span><span class="s1">(PyErr_Occurred()) {</span>
+            <span class="s1">PyErr_Print();</span>
+            <span class="s1">PyErr_Clear();</span>
+        <span class="s1">}</span>
+        <span class="s0">return </span><span class="s1">-</span><span class="s5">1</span><span class="s1">;</span>
+    <span class="s1">}</span>
+    <span class="s0">return </span><span class="s1">PyDict_SetItemString(dict, name, obj);</span>
+<span class="s1">}</span>
+
+<span class="s3">/* 
+ * Python-only fallback for thread-local callback pointers 
+ */</span>
+<span class="s0">void </span><span class="s1">*</span>
+<span class="s1">F2PySwapThreadLocalCallbackPtr(</span><span class="s0">char </span><span class="s1">*key, </span><span class="s0">void </span><span class="s1">*ptr)</span>
+<span class="s1">{</span>
+    <span class="s1">PyObject *local_dict, *value;</span>
+    <span class="s0">void </span><span class="s1">*prev;</span>
+
+    <span class="s1">local_dict = PyThreadState_GetDict();</span>
+    <span class="s0">if </span><span class="s1">(local_dict == NULL) {</span>
+        <span class="s1">Py_FatalError(</span>
+                <span class="s2">&quot;F2PySwapThreadLocalCallbackPtr: PyThreadState_GetDict &quot;</span>
+                <span class="s2">&quot;failed&quot;</span><span class="s1">);</span>
+    <span class="s1">}</span>
+
+    <span class="s1">value = PyDict_GetItemString(local_dict, key);</span>
+    <span class="s0">if </span><span class="s1">(value != NULL) {</span>
+        <span class="s1">prev = PyLong_AsVoidPtr(value);</span>
+        <span class="s0">if </span><span class="s1">(PyErr_Occurred()) {</span>
+            <span class="s1">Py_FatalError(</span>
+                    <span class="s2">&quot;F2PySwapThreadLocalCallbackPtr: PyLong_AsVoidPtr failed&quot;</span><span class="s1">);</span>
+        <span class="s1">}</span>
+    <span class="s1">}</span>
+    <span class="s0">else </span><span class="s1">{</span>
+        <span class="s1">prev = NULL;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">value = PyLong_FromVoidPtr((</span><span class="s0">void </span><span class="s1">*)ptr);</span>
+    <span class="s0">if </span><span class="s1">(value == NULL) {</span>
+        <span class="s1">Py_FatalError(</span>
+                <span class="s2">&quot;F2PySwapThreadLocalCallbackPtr: PyLong_FromVoidPtr failed&quot;</span><span class="s1">);</span>
+    <span class="s1">}</span>
+
+    <span class="s0">if </span><span class="s1">(PyDict_SetItemString(local_dict, key, value) != </span><span class="s5">0</span><span class="s1">) {</span>
+        <span class="s1">Py_FatalError(</span>
+                <span class="s2">&quot;F2PySwapThreadLocalCallbackPtr: PyDict_SetItemString failed&quot;</span><span class="s1">);</span>
+    <span class="s1">}</span>
+
+    <span class="s1">Py_DECREF(value);</span>
+
+    <span class="s0">return </span><span class="s1">prev;</span>
+<span class="s1">}</span>
+
+<span class="s0">void </span><span class="s1">*</span>
+<span class="s1">F2PyGetThreadLocalCallbackPtr(</span><span class="s0">char </span><span class="s1">*key)</span>
+<span class="s1">{</span>
+    <span class="s1">PyObject *local_dict, *value;</span>
+    <span class="s0">void </span><span class="s1">*prev;</span>
+
+    <span class="s1">local_dict = PyThreadState_GetDict();</span>
+    <span class="s0">if </span><span class="s1">(local_dict == NULL) {</span>
+        <span class="s1">Py_FatalError(</span>
+                <span class="s2">&quot;F2PyGetThreadLocalCallbackPtr: PyThreadState_GetDict failed&quot;</span><span class="s1">);</span>
+    <span class="s1">}</span>
+
+    <span class="s1">value = PyDict_GetItemString(local_dict, key);</span>
+    <span class="s0">if </span><span class="s1">(value != NULL) {</span>
+        <span class="s1">prev = PyLong_AsVoidPtr(value);</span>
+        <span class="s0">if </span><span class="s1">(PyErr_Occurred()) {</span>
+            <span class="s1">Py_FatalError(</span>
+                    <span class="s2">&quot;F2PyGetThreadLocalCallbackPtr: PyLong_AsVoidPtr failed&quot;</span><span class="s1">);</span>
+        <span class="s1">}</span>
+    <span class="s1">}</span>
+    <span class="s0">else </span><span class="s1">{</span>
+        <span class="s1">prev = NULL;</span>
+    <span class="s1">}</span>
+
+    <span class="s0">return </span><span class="s1">prev;</span>
+<span class="s1">}</span>
+
+<span class="s3">/************************* FortranObject *******************************/</span>
+
+<span class="s0">typedef </span><span class="s1">PyObject *(*fortranfunc)(PyObject *, PyObject *, PyObject *, </span><span class="s0">void </span><span class="s1">*);</span>
+
+<span class="s1">PyObject *</span>
+<span class="s1">PyFortranObject_New(FortranDataDef *defs, f2py_void_func init)</span>
+<span class="s1">{</span>
+    <span class="s0">int </span><span class="s1">i;</span>
+    <span class="s1">PyFortranObject *fp = NULL;</span>
+    <span class="s1">PyObject *v = NULL;</span>
+    <span class="s0">if </span><span class="s1">(init != NULL) { </span><span class="s3">/* Initialize F90 module objects */</span>
+        <span class="s1">(*(init))();</span>
+    <span class="s1">}</span>
+    <span class="s1">fp = PyObject_New(PyFortranObject, &amp;PyFortran_Type);</span>
+    <span class="s0">if </span><span class="s1">(fp == NULL) {</span>
+        <span class="s0">return </span><span class="s1">NULL;</span>
+    <span class="s1">}</span>
+    <span class="s0">if </span><span class="s1">((fp</span><span class="s6">-&gt;</span><span class="s1">dict = PyDict_New()) == NULL) {</span>
+        <span class="s1">Py_DECREF(fp);</span>
+        <span class="s0">return </span><span class="s1">NULL;</span>
+    <span class="s1">}</span>
+    <span class="s1">fp</span><span class="s6">-&gt;</span><span class="s1">len = </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s0">while </span><span class="s1">(defs[fp</span><span class="s6">-&gt;</span><span class="s1">len].name != NULL) {</span>
+        <span class="s1">fp</span><span class="s6">-&gt;</span><span class="s1">len++;</span>
+    <span class="s1">}</span>
+    <span class="s0">if </span><span class="s1">(fp</span><span class="s6">-&gt;</span><span class="s1">len == </span><span class="s5">0</span><span class="s1">) {</span>
+        <span class="s0">goto </span><span class="s1">fail;</span>
+    <span class="s1">}</span>
+    <span class="s1">fp</span><span class="s6">-&gt;</span><span class="s1">defs = defs;</span>
+    <span class="s0">for </span><span class="s1">(i = </span><span class="s5">0</span><span class="s1">; i &lt; fp</span><span class="s6">-&gt;</span><span class="s1">len; i++) {</span>
+        <span class="s0">if </span><span class="s1">(fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].rank == -</span><span class="s5">1</span><span class="s1">) { </span><span class="s3">/* Is Fortran routine */</span>
+            <span class="s1">v = PyFortranObject_NewAsAttr(&amp;(fp</span><span class="s6">-&gt;</span><span class="s1">defs[i]));</span>
+            <span class="s0">if </span><span class="s1">(v == NULL) {</span>
+                <span class="s0">goto </span><span class="s1">fail;</span>
+            <span class="s1">}</span>
+            <span class="s1">PyDict_SetItemString(fp</span><span class="s6">-&gt;</span><span class="s1">dict, fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].name, v);</span>
+            <span class="s1">Py_XDECREF(v);</span>
+        <span class="s1">}</span>
+        <span class="s0">else if </span><span class="s1">((fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].data) !=</span>
+                 <span class="s1">NULL) { </span><span class="s3">/* Is Fortran variable or array (not allocatable) */</span>
+            <span class="s0">if </span><span class="s1">(fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].type == NPY_STRING) {</span>
+                <span class="s1">npy_intp n = fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].rank - </span><span class="s5">1</span><span class="s1">;</span>
+                <span class="s1">v = PyArray_New(&amp;PyArray_Type, n, fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].dims.d,</span>
+                                <span class="s1">NPY_STRING, NULL, fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].data,</span>
+                                <span class="s1">fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].dims.d[n], NPY_ARRAY_FARRAY, NULL);</span>
+            <span class="s1">}</span>
+            <span class="s0">else </span><span class="s1">{</span>
+                <span class="s1">v = PyArray_New(&amp;PyArray_Type, fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].rank,</span>
+                                <span class="s1">fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].dims.d, fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].type, NULL,</span>
+                                <span class="s1">fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].data, </span><span class="s5">0</span><span class="s1">, NPY_ARRAY_FARRAY, NULL);</span>
+            <span class="s1">}</span>
+            <span class="s0">if </span><span class="s1">(v == NULL) {</span>
+                <span class="s0">goto </span><span class="s1">fail;</span>
+            <span class="s1">}</span>
+            <span class="s1">PyDict_SetItemString(fp</span><span class="s6">-&gt;</span><span class="s1">dict, fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].name, v);</span>
+            <span class="s1">Py_XDECREF(v);</span>
+        <span class="s1">}</span>
+    <span class="s1">}</span>
+    <span class="s0">return </span><span class="s1">(PyObject *)fp;</span>
+<span class="s1">fail:</span>
+    <span class="s1">Py_XDECREF(fp);</span>
+    <span class="s0">return </span><span class="s1">NULL;</span>
+<span class="s1">}</span>
+
+<span class="s1">PyObject *</span>
+<span class="s1">PyFortranObject_NewAsAttr(FortranDataDef *defs)</span>
+<span class="s1">{ </span><span class="s3">/* used for calling F90 module routines */</span>
+    <span class="s1">PyFortranObject *fp = NULL;</span>
+    <span class="s1">fp = PyObject_New(PyFortranObject, &amp;PyFortran_Type);</span>
+    <span class="s0">if </span><span class="s1">(fp == NULL)</span>
+        <span class="s0">return </span><span class="s1">NULL;</span>
+    <span class="s0">if </span><span class="s1">((fp</span><span class="s6">-&gt;</span><span class="s1">dict = PyDict_New()) == NULL) {</span>
+        <span class="s1">PyObject_Del(fp);</span>
+        <span class="s0">return </span><span class="s1">NULL;</span>
+    <span class="s1">}</span>
+    <span class="s1">fp</span><span class="s6">-&gt;</span><span class="s1">len = </span><span class="s5">1</span><span class="s1">;</span>
+    <span class="s1">fp</span><span class="s6">-&gt;</span><span class="s1">defs = defs;</span>
+    <span class="s0">return </span><span class="s1">(PyObject *)fp;</span>
+<span class="s1">}</span>
+
+<span class="s3">/* Fortran methods */</span>
+
+<span class="s0">static void</span>
+<span class="s1">fortran_dealloc(PyFortranObject *fp)</span>
+<span class="s1">{</span>
+    <span class="s1">Py_XDECREF(fp</span><span class="s6">-&gt;</span><span class="s1">dict);</span>
+    <span class="s1">PyObject_Del(fp);</span>
+<span class="s1">}</span>
+
+<span class="s3">/* Returns number of bytes consumed from buf, or -1 on error. */</span>
+<span class="s0">static </span><span class="s1">Py_ssize_t</span>
+<span class="s1">format_def(</span><span class="s0">char </span><span class="s1">*buf, Py_ssize_t size, FortranDataDef def)</span>
+<span class="s1">{</span>
+    <span class="s0">char </span><span class="s1">*p = buf;</span>
+    <span class="s0">int </span><span class="s1">i;</span>
+    <span class="s1">npy_intp n;</span>
+
+    <span class="s1">n = PyOS_snprintf(p, size, </span><span class="s2">&quot;array(%&quot; </span><span class="s1">NPY_INTP_FMT, def.dims.d[</span><span class="s5">0</span><span class="s1">]);</span>
+    <span class="s0">if </span><span class="s1">(n &lt; </span><span class="s5">0 </span><span class="s1">|| n &gt;= size) {</span>
+        <span class="s0">return </span><span class="s1">-</span><span class="s5">1</span><span class="s1">;</span>
+    <span class="s1">}</span>
+    <span class="s1">p += n;</span>
+    <span class="s1">size -= n;</span>
+
+    <span class="s0">for </span><span class="s1">(i = </span><span class="s5">1</span><span class="s1">; i &lt; def.rank; i++) {</span>
+        <span class="s1">n = PyOS_snprintf(p, size, </span><span class="s2">&quot;,%&quot; </span><span class="s1">NPY_INTP_FMT, def.dims.d[i]);</span>
+        <span class="s0">if </span><span class="s1">(n &lt; </span><span class="s5">0 </span><span class="s1">|| n &gt;= size) {</span>
+            <span class="s0">return </span><span class="s1">-</span><span class="s5">1</span><span class="s1">;</span>
+        <span class="s1">}</span>
+        <span class="s1">p += n;</span>
+        <span class="s1">size -= n;</span>
+    <span class="s1">}</span>
+
+    <span class="s0">if </span><span class="s1">(size &lt;= </span><span class="s5">0</span><span class="s1">) {</span>
+        <span class="s0">return </span><span class="s1">-</span><span class="s5">1</span><span class="s1">;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">*p++ = </span><span class="s2">')'</span><span class="s1">;</span>
+    <span class="s1">size--;</span>
+
+    <span class="s0">if </span><span class="s1">(def.data == NULL) {</span>
+        <span class="s0">static const char </span><span class="s1">notalloc[] = </span><span class="s2">&quot;, not allocated&quot;</span><span class="s1">;</span>
+        <span class="s0">if </span><span class="s1">((size_t)size &lt; </span><span class="s0">sizeof</span><span class="s1">(notalloc)) {</span>
+            <span class="s0">return </span><span class="s1">-</span><span class="s5">1</span><span class="s1">;</span>
+        <span class="s1">}</span>
+        <span class="s1">memcpy(p, notalloc, </span><span class="s0">sizeof</span><span class="s1">(notalloc));</span>
+        <span class="s1">p += </span><span class="s0">sizeof</span><span class="s1">(notalloc);</span>
+        <span class="s1">size -= </span><span class="s0">sizeof</span><span class="s1">(notalloc);</span>
+    <span class="s1">}</span>
+
+    <span class="s0">return </span><span class="s1">p - buf;</span>
+<span class="s1">}</span>
+
+<span class="s0">static </span><span class="s1">PyObject *</span>
+<span class="s1">fortran_doc(FortranDataDef def)</span>
+<span class="s1">{</span>
+    <span class="s0">char </span><span class="s1">*buf, *p;</span>
+    <span class="s1">PyObject *s = NULL;</span>
+    <span class="s1">Py_ssize_t n, origsize, size = </span><span class="s5">100</span><span class="s1">;</span>
+
+    <span class="s0">if </span><span class="s1">(def.doc != NULL) {</span>
+        <span class="s1">size += strlen(def.doc);</span>
+    <span class="s1">}</span>
+    <span class="s1">origsize = size;</span>
+    <span class="s1">buf = p = (</span><span class="s0">char </span><span class="s1">*)PyMem_Malloc(size);</span>
+    <span class="s0">if </span><span class="s1">(buf == NULL) {</span>
+        <span class="s0">return </span><span class="s1">PyErr_NoMemory();</span>
+    <span class="s1">}</span>
+
+    <span class="s0">if </span><span class="s1">(def.rank == -</span><span class="s5">1</span><span class="s1">) {</span>
+        <span class="s0">if </span><span class="s1">(def.doc) {</span>
+            <span class="s1">n = strlen(def.doc);</span>
+            <span class="s0">if </span><span class="s1">(n &gt; size) {</span>
+                <span class="s0">goto </span><span class="s1">fail;</span>
+            <span class="s1">}</span>
+            <span class="s1">memcpy(p, def.doc, n);</span>
+            <span class="s1">p += n;</span>
+            <span class="s1">size -= n;</span>
+        <span class="s1">}</span>
+        <span class="s0">else </span><span class="s1">{</span>
+            <span class="s1">n = PyOS_snprintf(p, size, </span><span class="s2">&quot;%s - no docs available&quot;</span><span class="s1">, def.name);</span>
+            <span class="s0">if </span><span class="s1">(n &lt; </span><span class="s5">0 </span><span class="s1">|| n &gt;= size) {</span>
+                <span class="s0">goto </span><span class="s1">fail;</span>
+            <span class="s1">}</span>
+            <span class="s1">p += n;</span>
+            <span class="s1">size -= n;</span>
+        <span class="s1">}</span>
+    <span class="s1">}</span>
+    <span class="s0">else </span><span class="s1">{</span>
+        <span class="s1">PyArray_Descr *d = PyArray_DescrFromType(def.type);</span>
+        <span class="s1">n = PyOS_snprintf(p, size, </span><span class="s2">&quot;%s : '%c'-&quot;</span><span class="s1">, def.name, d</span><span class="s6">-&gt;</span><span class="s1">type);</span>
+        <span class="s1">Py_DECREF(d);</span>
+        <span class="s0">if </span><span class="s1">(n &lt; </span><span class="s5">0 </span><span class="s1">|| n &gt;= size) {</span>
+            <span class="s0">goto </span><span class="s1">fail;</span>
+        <span class="s1">}</span>
+        <span class="s1">p += n;</span>
+        <span class="s1">size -= n;</span>
+
+        <span class="s0">if </span><span class="s1">(def.data == NULL) {</span>
+            <span class="s1">n = format_def(p, size, def);</span>
+            <span class="s0">if </span><span class="s1">(n &lt; </span><span class="s5">0</span><span class="s1">) {</span>
+                <span class="s0">goto </span><span class="s1">fail;</span>
+            <span class="s1">}</span>
+            <span class="s1">p += n;</span>
+            <span class="s1">size -= n;</span>
+        <span class="s1">}</span>
+        <span class="s0">else if </span><span class="s1">(def.rank &gt; </span><span class="s5">0</span><span class="s1">) {</span>
+            <span class="s1">n = format_def(p, size, def);</span>
+            <span class="s0">if </span><span class="s1">(n &lt; </span><span class="s5">0</span><span class="s1">) {</span>
+                <span class="s0">goto </span><span class="s1">fail;</span>
+            <span class="s1">}</span>
+            <span class="s1">p += n;</span>
+            <span class="s1">size -= n;</span>
+        <span class="s1">}</span>
+        <span class="s0">else </span><span class="s1">{</span>
+            <span class="s1">n = strlen(</span><span class="s2">&quot;scalar&quot;</span><span class="s1">);</span>
+            <span class="s0">if </span><span class="s1">(size &lt; n) {</span>
+                <span class="s0">goto </span><span class="s1">fail;</span>
+            <span class="s1">}</span>
+            <span class="s1">memcpy(p, </span><span class="s2">&quot;scalar&quot;</span><span class="s1">, n);</span>
+            <span class="s1">p += n;</span>
+            <span class="s1">size -= n;</span>
+        <span class="s1">}</span>
+    <span class="s1">}</span>
+    <span class="s0">if </span><span class="s1">(size &lt;= </span><span class="s5">1</span><span class="s1">) {</span>
+        <span class="s0">goto </span><span class="s1">fail;</span>
+    <span class="s1">}</span>
+    <span class="s1">*p++ = </span><span class="s2">'</span><span class="s4">\n</span><span class="s2">'</span><span class="s1">;</span>
+    <span class="s1">size--;</span>
+
+    <span class="s3">/* p now points one beyond the last character of the string in buf */</span>
+    <span class="s1">s = PyUnicode_FromStringAndSize(buf, p - buf);</span>
+
+    <span class="s1">PyMem_Free(buf);</span>
+    <span class="s0">return </span><span class="s1">s;</span>
+
+<span class="s1">fail:</span>
+    <span class="s1">fprintf(stderr,</span>
+            <span class="s2">&quot;fortranobject.c: fortran_doc: len(p)=%zd&gt;%zd=size:&quot;</span>
+            <span class="s2">&quot; too long docstring required, increase size</span><span class="s4">\n</span><span class="s2">&quot;</span><span class="s1">,</span>
+            <span class="s1">p - buf, origsize);</span>
+    <span class="s1">PyMem_Free(buf);</span>
+    <span class="s0">return </span><span class="s1">NULL;</span>
+<span class="s1">}</span>
+
+<span class="s0">static </span><span class="s1">FortranDataDef *save_def; </span><span class="s3">/* save pointer of an allocatable array */</span>
+<span class="s0">static void</span>
+<span class="s1">set_data(</span><span class="s0">char </span><span class="s1">*d, npy_intp *f)</span>
+<span class="s1">{           </span><span class="s3">/* callback from Fortran */</span>
+    <span class="s0">if </span><span class="s1">(*f) </span><span class="s3">/* In fortran f=allocated(d) */</span>
+        <span class="s1">save_def</span><span class="s6">-&gt;</span><span class="s1">data = d;</span>
+    <span class="s0">else</span>
+        <span class="s1">save_def</span><span class="s6">-&gt;</span><span class="s1">data = NULL;</span>
+    <span class="s3">/* printf(&quot;set_data: d=%p,f=%d\n&quot;,d,*f); */</span>
+<span class="s1">}</span>
+
+<span class="s0">static </span><span class="s1">PyObject *</span>
+<span class="s1">fortran_getattr(PyFortranObject *fp, </span><span class="s0">char </span><span class="s1">*name)</span>
+<span class="s1">{</span>
+    <span class="s0">int </span><span class="s1">i, j, k, flag;</span>
+    <span class="s0">if </span><span class="s1">(fp</span><span class="s6">-&gt;</span><span class="s1">dict != NULL) {</span>
+        <span class="s1">PyObject *v = _PyDict_GetItemStringWithError(fp</span><span class="s6">-&gt;</span><span class="s1">dict, name);</span>
+        <span class="s0">if </span><span class="s1">(v == NULL &amp;&amp; PyErr_Occurred()) {</span>
+            <span class="s0">return </span><span class="s1">NULL;</span>
+        <span class="s1">}</span>
+        <span class="s0">else if </span><span class="s1">(v != NULL) {</span>
+            <span class="s1">Py_INCREF(v);</span>
+            <span class="s0">return </span><span class="s1">v;</span>
+        <span class="s1">}</span>
+    <span class="s1">}</span>
+    <span class="s0">for </span><span class="s1">(i = </span><span class="s5">0</span><span class="s1">, j = </span><span class="s5">1</span><span class="s1">; i &lt; fp</span><span class="s6">-&gt;</span><span class="s1">len &amp;&amp; (j = strcmp(name, fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].name));</span>
+         <span class="s1">i++)</span>
+        <span class="s1">;</span>
+    <span class="s0">if </span><span class="s1">(j == </span><span class="s5">0</span><span class="s1">)</span>
+        <span class="s0">if </span><span class="s1">(fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].rank != -</span><span class="s5">1</span><span class="s1">) { </span><span class="s3">/* F90 allocatable array */</span>
+            <span class="s0">if </span><span class="s1">(fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].func == NULL)</span>
+                <span class="s0">return </span><span class="s1">NULL;</span>
+            <span class="s0">for </span><span class="s1">(k = </span><span class="s5">0</span><span class="s1">; k &lt; fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].rank; ++k) fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].dims.d[k] = -</span><span class="s5">1</span><span class="s1">;</span>
+            <span class="s1">save_def = &amp;fp</span><span class="s6">-&gt;</span><span class="s1">defs[i];</span>
+            <span class="s1">(*(fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].func))(&amp;fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].rank, fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].dims.d,</span>
+                                  <span class="s1">set_data, &amp;flag);</span>
+            <span class="s0">if </span><span class="s1">(flag == </span><span class="s5">2</span><span class="s1">)</span>
+                <span class="s1">k = fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].rank + </span><span class="s5">1</span><span class="s1">;</span>
+            <span class="s0">else</span>
+                <span class="s1">k = fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].rank;</span>
+            <span class="s0">if </span><span class="s1">(fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].data != NULL) { </span><span class="s3">/* array is allocated */</span>
+                <span class="s1">PyObject *v = PyArray_New(</span>
+                        <span class="s1">&amp;PyArray_Type, k, fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].dims.d, fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].type,</span>
+                        <span class="s1">NULL, fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].data, </span><span class="s5">0</span><span class="s1">, NPY_ARRAY_FARRAY, NULL);</span>
+                <span class="s0">if </span><span class="s1">(v == NULL)</span>
+                    <span class="s0">return </span><span class="s1">NULL;</span>
+                <span class="s3">/* Py_INCREF(v); */</span>
+                <span class="s0">return </span><span class="s1">v;</span>
+            <span class="s1">}</span>
+            <span class="s0">else </span><span class="s1">{ </span><span class="s3">/* array is not allocated */</span>
+                <span class="s1">Py_RETURN_NONE;</span>
+            <span class="s1">}</span>
+        <span class="s1">}</span>
+    <span class="s0">if </span><span class="s1">(strcmp(name, </span><span class="s2">&quot;__dict__&quot;</span><span class="s1">) == </span><span class="s5">0</span><span class="s1">) {</span>
+        <span class="s1">Py_INCREF(fp</span><span class="s6">-&gt;</span><span class="s1">dict);</span>
+        <span class="s0">return </span><span class="s1">fp</span><span class="s6">-&gt;</span><span class="s1">dict;</span>
+    <span class="s1">}</span>
+    <span class="s0">if </span><span class="s1">(strcmp(name, </span><span class="s2">&quot;__doc__&quot;</span><span class="s1">) == </span><span class="s5">0</span><span class="s1">) {</span>
+        <span class="s1">PyObject *s = PyUnicode_FromString(</span><span class="s2">&quot;&quot;</span><span class="s1">), *s2, *s3;</span>
+        <span class="s0">for </span><span class="s1">(i = </span><span class="s5">0</span><span class="s1">; i &lt; fp</span><span class="s6">-&gt;</span><span class="s1">len; i++) {</span>
+            <span class="s1">s2 = fortran_doc(fp</span><span class="s6">-&gt;</span><span class="s1">defs[i]);</span>
+            <span class="s1">s3 = PyUnicode_Concat(s, s2);</span>
+            <span class="s1">Py_DECREF(s2);</span>
+            <span class="s1">Py_DECREF(s);</span>
+            <span class="s1">s = s3;</span>
+        <span class="s1">}</span>
+        <span class="s0">if </span><span class="s1">(PyDict_SetItemString(fp</span><span class="s6">-&gt;</span><span class="s1">dict, name, s))</span>
+            <span class="s0">return </span><span class="s1">NULL;</span>
+        <span class="s0">return </span><span class="s1">s;</span>
+    <span class="s1">}</span>
+    <span class="s0">if </span><span class="s1">((strcmp(name, </span><span class="s2">&quot;_cpointer&quot;</span><span class="s1">) == </span><span class="s5">0</span><span class="s1">) &amp;&amp; (fp</span><span class="s6">-&gt;</span><span class="s1">len == </span><span class="s5">1</span><span class="s1">)) {</span>
+        <span class="s1">PyObject *cobj =</span>
+                <span class="s1">F2PyCapsule_FromVoidPtr((</span><span class="s0">void </span><span class="s1">*)(fp</span><span class="s6">-&gt;</span><span class="s1">defs[</span><span class="s5">0</span><span class="s1">].data), NULL);</span>
+        <span class="s0">if </span><span class="s1">(PyDict_SetItemString(fp</span><span class="s6">-&gt;</span><span class="s1">dict, name, cobj))</span>
+            <span class="s0">return </span><span class="s1">NULL;</span>
+        <span class="s0">return </span><span class="s1">cobj;</span>
+    <span class="s1">}</span>
+    <span class="s1">PyObject *str, *ret;</span>
+    <span class="s1">str = PyUnicode_FromString(name);</span>
+    <span class="s1">ret = PyObject_GenericGetAttr((PyObject *)fp, str);</span>
+    <span class="s1">Py_DECREF(str);</span>
+    <span class="s0">return </span><span class="s1">ret;</span>
+<span class="s1">}</span>
+
+<span class="s0">static int</span>
+<span class="s1">fortran_setattr(PyFortranObject *fp, </span><span class="s0">char </span><span class="s1">*name, PyObject *v)</span>
+<span class="s1">{</span>
+    <span class="s0">int </span><span class="s1">i, j, flag;</span>
+    <span class="s1">PyArrayObject *arr = NULL;</span>
+    <span class="s0">for </span><span class="s1">(i = </span><span class="s5">0</span><span class="s1">, j = </span><span class="s5">1</span><span class="s1">; i &lt; fp</span><span class="s6">-&gt;</span><span class="s1">len &amp;&amp; (j = strcmp(name, fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].name));</span>
+         <span class="s1">i++)</span>
+        <span class="s1">;</span>
+    <span class="s0">if </span><span class="s1">(j == </span><span class="s5">0</span><span class="s1">) {</span>
+        <span class="s0">if </span><span class="s1">(fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].rank == -</span><span class="s5">1</span><span class="s1">) {</span>
+            <span class="s1">PyErr_SetString(PyExc_AttributeError,</span>
+                            <span class="s2">&quot;over-writing fortran routine&quot;</span><span class="s1">);</span>
+            <span class="s0">return </span><span class="s1">-</span><span class="s5">1</span><span class="s1">;</span>
+        <span class="s1">}</span>
+        <span class="s0">if </span><span class="s1">(fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].func != NULL) { </span><span class="s3">/* is allocatable array */</span>
+            <span class="s1">npy_intp dims[F2PY_MAX_DIMS];</span>
+            <span class="s0">int </span><span class="s1">k;</span>
+            <span class="s1">save_def = &amp;fp</span><span class="s6">-&gt;</span><span class="s1">defs[i];</span>
+            <span class="s0">if </span><span class="s1">(v != Py_None) { </span><span class="s3">/* set new value (reallocate if needed -- 
+                                   see f2py generated code for more 
+                                   details ) */</span>
+                <span class="s0">for </span><span class="s1">(k = </span><span class="s5">0</span><span class="s1">; k &lt; fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].rank; k++) dims[k] = -</span><span class="s5">1</span><span class="s1">;</span>
+                <span class="s0">if </span><span class="s1">((arr = array_from_pyobj(fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].type, dims,</span>
+                                            <span class="s1">fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].rank, F2PY_INTENT_IN,</span>
+                                            <span class="s1">v)) == NULL)</span>
+                    <span class="s0">return </span><span class="s1">-</span><span class="s5">1</span><span class="s1">;</span>
+                <span class="s1">(*(fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].func))(&amp;fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].rank, PyArray_DIMS(arr),</span>
+                                      <span class="s1">set_data, &amp;flag);</span>
+            <span class="s1">}</span>
+            <span class="s0">else </span><span class="s1">{ </span><span class="s3">/* deallocate */</span>
+                <span class="s0">for </span><span class="s1">(k = </span><span class="s5">0</span><span class="s1">; k &lt; fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].rank; k++) dims[k] = </span><span class="s5">0</span><span class="s1">;</span>
+                <span class="s1">(*(fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].func))(&amp;fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].rank, dims, set_data,</span>
+                                      <span class="s1">&amp;flag);</span>
+                <span class="s0">for </span><span class="s1">(k = </span><span class="s5">0</span><span class="s1">; k &lt; fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].rank; k++) dims[k] = -</span><span class="s5">1</span><span class="s1">;</span>
+            <span class="s1">}</span>
+            <span class="s1">memcpy(fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].dims.d, dims,</span>
+                   <span class="s1">fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].rank * </span><span class="s0">sizeof</span><span class="s1">(npy_intp));</span>
+        <span class="s1">}</span>
+        <span class="s0">else </span><span class="s1">{ </span><span class="s3">/* not allocatable array */</span>
+            <span class="s0">if </span><span class="s1">((arr = array_from_pyobj(fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].type, fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].dims.d,</span>
+                                        <span class="s1">fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].rank, F2PY_INTENT_IN,</span>
+                                        <span class="s1">v)) == NULL)</span>
+                <span class="s0">return </span><span class="s1">-</span><span class="s5">1</span><span class="s1">;</span>
+        <span class="s1">}</span>
+        <span class="s0">if </span><span class="s1">(fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].data !=</span>
+            <span class="s1">NULL) { </span><span class="s3">/* copy Python object to Fortran array */</span>
+            <span class="s1">npy_intp s = PyArray_MultiplyList(fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].dims.d,</span>
+                                              <span class="s1">PyArray_NDIM(arr));</span>
+            <span class="s0">if </span><span class="s1">(s == -</span><span class="s5">1</span><span class="s1">)</span>
+                <span class="s1">s = PyArray_MultiplyList(PyArray_DIMS(arr), PyArray_NDIM(arr));</span>
+            <span class="s0">if </span><span class="s1">(s &lt; </span><span class="s5">0 </span><span class="s1">|| (memcpy(fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].data, PyArray_DATA(arr),</span>
+                                 <span class="s1">s * PyArray_ITEMSIZE(arr))) == NULL) {</span>
+                <span class="s0">if </span><span class="s1">((PyObject *)arr != v) {</span>
+                    <span class="s1">Py_DECREF(arr);</span>
+                <span class="s1">}</span>
+                <span class="s0">return </span><span class="s1">-</span><span class="s5">1</span><span class="s1">;</span>
+            <span class="s1">}</span>
+            <span class="s0">if </span><span class="s1">((PyObject *)arr != v) {</span>
+                <span class="s1">Py_DECREF(arr);</span>
+            <span class="s1">}</span>
+        <span class="s1">}</span>
+        <span class="s0">else</span>
+            <span class="s0">return </span><span class="s1">(fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].func == NULL ? -</span><span class="s5">1 </span><span class="s1">: </span><span class="s5">0</span><span class="s1">);</span>
+        <span class="s0">return </span><span class="s5">0</span><span class="s1">; </span><span class="s3">/* successful */</span>
+    <span class="s1">}</span>
+    <span class="s0">if </span><span class="s1">(fp</span><span class="s6">-&gt;</span><span class="s1">dict == NULL) {</span>
+        <span class="s1">fp</span><span class="s6">-&gt;</span><span class="s1">dict = PyDict_New();</span>
+        <span class="s0">if </span><span class="s1">(fp</span><span class="s6">-&gt;</span><span class="s1">dict == NULL)</span>
+            <span class="s0">return </span><span class="s1">-</span><span class="s5">1</span><span class="s1">;</span>
+    <span class="s1">}</span>
+    <span class="s0">if </span><span class="s1">(v == NULL) {</span>
+        <span class="s0">int </span><span class="s1">rv = PyDict_DelItemString(fp</span><span class="s6">-&gt;</span><span class="s1">dict, name);</span>
+        <span class="s0">if </span><span class="s1">(rv &lt; </span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s1">PyErr_SetString(PyExc_AttributeError,</span>
+                            <span class="s2">&quot;delete non-existing fortran attribute&quot;</span><span class="s1">);</span>
+        <span class="s0">return </span><span class="s1">rv;</span>
+    <span class="s1">}</span>
+    <span class="s0">else</span>
+        <span class="s0">return </span><span class="s1">PyDict_SetItemString(fp</span><span class="s6">-&gt;</span><span class="s1">dict, name, v);</span>
+<span class="s1">}</span>
+
+<span class="s0">static </span><span class="s1">PyObject *</span>
+<span class="s1">fortran_call(PyFortranObject *fp, PyObject *arg, PyObject *kw)</span>
+<span class="s1">{</span>
+    <span class="s0">int </span><span class="s1">i = </span><span class="s5">0</span><span class="s1">;</span>
+    <span class="s3">/*  printf(&quot;fortran call 
+        name=%s,func=%p,data=%p,%p\n&quot;,fp-&gt;defs[i].name, 
+        fp-&gt;defs[i].func,fp-&gt;defs[i].data,&amp;fp-&gt;defs[i].data); */</span>
+    <span class="s0">if </span><span class="s1">(fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].rank == -</span><span class="s5">1</span><span class="s1">) { </span><span class="s3">/* is Fortran routine */</span>
+        <span class="s0">if </span><span class="s1">(fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].func == NULL) {</span>
+            <span class="s1">PyErr_Format(PyExc_RuntimeError, </span><span class="s2">&quot;no function to call&quot;</span><span class="s1">);</span>
+            <span class="s0">return </span><span class="s1">NULL;</span>
+        <span class="s1">}</span>
+        <span class="s0">else if </span><span class="s1">(fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].data == NULL)</span>
+            <span class="s3">/* dummy routine */</span>
+            <span class="s0">return </span><span class="s1">(*((fortranfunc)(fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].func)))((PyObject *)fp, arg,</span>
+                                                        <span class="s1">kw, NULL);</span>
+        <span class="s0">else</span>
+            <span class="s0">return </span><span class="s1">(*((fortranfunc)(fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].func)))(</span>
+                    <span class="s1">(PyObject *)fp, arg, kw, (</span><span class="s0">void </span><span class="s1">*)fp</span><span class="s6">-&gt;</span><span class="s1">defs[i].data);</span>
+    <span class="s1">}</span>
+    <span class="s1">PyErr_Format(PyExc_TypeError, </span><span class="s2">&quot;this fortran object is not callable&quot;</span><span class="s1">);</span>
+    <span class="s0">return </span><span class="s1">NULL;</span>
+<span class="s1">}</span>
+
+<span class="s0">static </span><span class="s1">PyObject *</span>
+<span class="s1">fortran_repr(PyFortranObject *fp)</span>
+<span class="s1">{</span>
+    <span class="s1">PyObject *name = NULL, *repr = NULL;</span>
+    <span class="s1">name = PyObject_GetAttrString((PyObject *)fp, </span><span class="s2">&quot;__name__&quot;</span><span class="s1">);</span>
+    <span class="s1">PyErr_Clear();</span>
+    <span class="s0">if </span><span class="s1">(name != NULL &amp;&amp; PyUnicode_Check(name)) {</span>
+        <span class="s1">repr = PyUnicode_FromFormat(</span><span class="s2">&quot;&lt;fortran %U&gt;&quot;</span><span class="s1">, name);</span>
+    <span class="s1">}</span>
+    <span class="s0">else </span><span class="s1">{</span>
+        <span class="s1">repr = PyUnicode_FromString(</span><span class="s2">&quot;&lt;fortran object&gt;&quot;</span><span class="s1">);</span>
+    <span class="s1">}</span>
+    <span class="s1">Py_XDECREF(name);</span>
+    <span class="s0">return </span><span class="s1">repr;</span>
+<span class="s1">}</span>
+
+<span class="s1">PyTypeObject PyFortran_Type = {</span>
+        <span class="s1">PyVarObject_HEAD_INIT(NULL, </span><span class="s5">0</span><span class="s1">).tp_name = </span><span class="s2">&quot;fortran&quot;</span><span class="s1">,</span>
+        <span class="s1">.tp_basicsize = </span><span class="s0">sizeof</span><span class="s1">(PyFortranObject),</span>
+        <span class="s1">.tp_dealloc = (destructor)fortran_dealloc,</span>
+        <span class="s1">.tp_getattr = (getattrfunc)fortran_getattr,</span>
+        <span class="s1">.tp_setattr = (setattrfunc)fortran_setattr,</span>
+        <span class="s1">.tp_repr = (reprfunc)fortran_repr,</span>
+        <span class="s1">.tp_call = (ternaryfunc)fortran_call,</span>
+<span class="s1">};</span>
+
+<span class="s3">/************************* f2py_report_atexit *******************************/</span>
+
+<span class="s0">#ifdef </span><span class="s1">F2PY_REPORT_ATEXIT</span>
+<span class="s0">static int </span><span class="s1">passed_time = </span><span class="s5">0</span><span class="s1">;</span>
+<span class="s0">static int </span><span class="s1">passed_counter = </span><span class="s5">0</span><span class="s1">;</span>
+<span class="s0">static int </span><span class="s1">passed_call_time = </span><span class="s5">0</span><span class="s1">;</span>
+<span class="s0">static struct </span><span class="s1">timeb start_time;</span>
+<span class="s0">static struct </span><span class="s1">timeb stop_time;</span>
+<span class="s0">static struct </span><span class="s1">timeb start_call_time;</span>
+<span class="s0">static struct </span><span class="s1">timeb stop_call_time;</span>
+<span class="s0">static int </span><span class="s1">cb_passed_time = </span><span class="s5">0</span><span class="s1">;</span>
+<span class="s0">static int </span><span class="s1">cb_passed_counter = </span><span class="s5">0</span><span class="s1">;</span>
+<span class="s0">static int </span><span class="s1">cb_passed_call_time = </span><span class="s5">0</span><span class="s1">;</span>
+<span class="s0">static struct </span><span class="s1">timeb cb_start_time;</span>
+<span class="s0">static struct </span><span class="s1">timeb cb_stop_time;</span>
+<span class="s0">static struct </span><span class="s1">timeb cb_start_call_time;</span>
+<span class="s0">static struct </span><span class="s1">timeb cb_stop_call_time;</span>
+
+<span class="s0">extern void</span>
+<span class="s1">f2py_start_clock(</span><span class="s0">void</span><span class="s1">)</span>
+<span class="s1">{</span>
+    <span class="s1">ftime(&amp;start_time);</span>
+<span class="s1">}</span>
+<span class="s0">extern void</span>
+<span class="s1">f2py_start_call_clock(</span><span class="s0">void</span><span class="s1">)</span>
+<span class="s1">{</span>
+    <span class="s1">f2py_stop_clock();</span>
+    <span class="s1">ftime(&amp;start_call_time);</span>
+<span class="s1">}</span>
+<span class="s0">extern void</span>
+<span class="s1">f2py_stop_clock(</span><span class="s0">void</span><span class="s1">)</span>
+<span class="s1">{</span>
+    <span class="s1">ftime(&amp;stop_time);</span>
+    <span class="s1">passed_time += </span><span class="s5">1000 </span><span class="s1">* (stop_time.time - start_time.time);</span>
+    <span class="s1">passed_time += stop_time.millitm - start_time.millitm;</span>
+<span class="s1">}</span>
+<span class="s0">extern void</span>
+<span class="s1">f2py_stop_call_clock(</span><span class="s0">void</span><span class="s1">)</span>
+<span class="s1">{</span>
+    <span class="s1">ftime(&amp;stop_call_time);</span>
+    <span class="s1">passed_call_time += </span><span class="s5">1000 </span><span class="s1">* (stop_call_time.time - start_call_time.time);</span>
+    <span class="s1">passed_call_time += stop_call_time.millitm - start_call_time.millitm;</span>
+    <span class="s1">passed_counter += </span><span class="s5">1</span><span class="s1">;</span>
+    <span class="s1">f2py_start_clock();</span>
+<span class="s1">}</span>
+
+<span class="s0">extern void</span>
+<span class="s1">f2py_cb_start_clock(</span><span class="s0">void</span><span class="s1">)</span>
+<span class="s1">{</span>
+    <span class="s1">ftime(&amp;cb_start_time);</span>
+<span class="s1">}</span>
+<span class="s0">extern void</span>
+<span class="s1">f2py_cb_start_call_clock(</span><span class="s0">void</span><span class="s1">)</span>
+<span class="s1">{</span>
+    <span class="s1">f2py_cb_stop_clock();</span>
+    <span class="s1">ftime(&amp;cb_start_call_time);</span>
+<span class="s1">}</span>
+<span class="s0">extern void</span>
+<span class="s1">f2py_cb_stop_clock(</span><span class="s0">void</span><span class="s1">)</span>
+<span class="s1">{</span>
+    <span class="s1">ftime(&amp;cb_stop_time);</span>
+    <span class="s1">cb_passed_time += </span><span class="s5">1000 </span><span class="s1">* (cb_stop_time.time - cb_start_time.time);</span>
+    <span class="s1">cb_passed_time += cb_stop_time.millitm - cb_start_time.millitm;</span>
+<span class="s1">}</span>
+<span class="s0">extern void</span>
+<span class="s1">f2py_cb_stop_call_clock(</span><span class="s0">void</span><span class="s1">)</span>
+<span class="s1">{</span>
+    <span class="s1">ftime(&amp;cb_stop_call_time);</span>
+    <span class="s1">cb_passed_call_time +=</span>
+            <span class="s5">1000 </span><span class="s1">* (cb_stop_call_time.time - cb_start_call_time.time);</span>
+    <span class="s1">cb_passed_call_time +=</span>
+            <span class="s1">cb_stop_call_time.millitm - cb_start_call_time.millitm;</span>
+    <span class="s1">cb_passed_counter += </span><span class="s5">1</span><span class="s1">;</span>
+    <span class="s1">f2py_cb_start_clock();</span>
+<span class="s1">}</span>
+
+<span class="s0">static int </span><span class="s1">f2py_report_on_exit_been_here = </span><span class="s5">0</span><span class="s1">;</span>
+<span class="s0">extern void</span>
+<span class="s1">f2py_report_on_exit(</span><span class="s0">int </span><span class="s1">exit_flag, </span><span class="s0">void </span><span class="s1">*name)</span>
+<span class="s1">{</span>
+    <span class="s0">if </span><span class="s1">(f2py_report_on_exit_been_here) {</span>
+        <span class="s1">fprintf(stderr, </span><span class="s2">&quot;             %s</span><span class="s4">\n</span><span class="s2">&quot;</span><span class="s1">, (</span><span class="s0">char </span><span class="s1">*)name);</span>
+        <span class="s0">return</span><span class="s1">;</span>
+    <span class="s1">}</span>
+    <span class="s1">f2py_report_on_exit_been_here = </span><span class="s5">1</span><span class="s1">;</span>
+    <span class="s1">fprintf(stderr, </span><span class="s2">&quot;                      /-----------------------</span><span class="s4">\\\n</span><span class="s2">&quot;</span><span class="s1">);</span>
+    <span class="s1">fprintf(stderr, </span><span class="s2">&quot;                     &lt; F2PY performance report &gt;</span><span class="s4">\n</span><span class="s2">&quot;</span><span class="s1">);</span>
+    <span class="s1">fprintf(stderr, </span><span class="s2">&quot;                      </span><span class="s4">\\</span><span class="s2">-----------------------/</span><span class="s4">\n</span><span class="s2">&quot;</span><span class="s1">);</span>
+    <span class="s1">fprintf(stderr, </span><span class="s2">&quot;Overall time spent in ...</span><span class="s4">\n</span><span class="s2">&quot;</span><span class="s1">);</span>
+    <span class="s1">fprintf(stderr, </span><span class="s2">&quot;(a) wrapped (Fortran/C) functions           : %8d msec</span><span class="s4">\n</span><span class="s2">&quot;</span><span class="s1">,</span>
+            <span class="s1">passed_call_time);</span>
+    <span class="s1">fprintf(stderr, </span><span class="s2">&quot;(b) f2py interface,           %6d calls  : %8d msec</span><span class="s4">\n</span><span class="s2">&quot;</span><span class="s1">,</span>
+            <span class="s1">passed_counter, passed_time);</span>
+    <span class="s1">fprintf(stderr, </span><span class="s2">&quot;(c) call-back (Python) functions            : %8d msec</span><span class="s4">\n</span><span class="s2">&quot;</span><span class="s1">,</span>
+            <span class="s1">cb_passed_call_time);</span>
+    <span class="s1">fprintf(stderr, </span><span class="s2">&quot;(d) f2py call-back interface, %6d calls  : %8d msec</span><span class="s4">\n</span><span class="s2">&quot;</span><span class="s1">,</span>
+            <span class="s1">cb_passed_counter, cb_passed_time);</span>
+
+    <span class="s1">fprintf(stderr,</span>
+            <span class="s2">&quot;(e) wrapped (Fortran/C) functions (actual) : %8d msec</span><span class="s4">\n\n</span><span class="s2">&quot;</span><span class="s1">,</span>
+            <span class="s1">passed_call_time - cb_passed_call_time - cb_passed_time);</span>
+    <span class="s1">fprintf(stderr,</span>
+            <span class="s2">&quot;Use -DF2PY_REPORT_ATEXIT_DISABLE to disable this message.</span><span class="s4">\n</span><span class="s2">&quot;</span><span class="s1">);</span>
+    <span class="s1">fprintf(stderr, </span><span class="s2">&quot;Exit status: %d</span><span class="s4">\n</span><span class="s2">&quot;</span><span class="s1">, exit_flag);</span>
+    <span class="s1">fprintf(stderr, </span><span class="s2">&quot;Modules    : %s</span><span class="s4">\n</span><span class="s2">&quot;</span><span class="s1">, (</span><span class="s0">char </span><span class="s1">*)name);</span>
+<span class="s1">}</span>
+<span class="s0">#endif</span>
+
+<span class="s3">/********************** report on array copy ****************************/</span>
+
+<span class="s0">#ifdef </span><span class="s1">F2PY_REPORT_ON_ARRAY_COPY</span>
+<span class="s0">static void</span>
+<span class="s1">f2py_report_on_array_copy(PyArrayObject *arr)</span>
+<span class="s1">{</span>
+    <span class="s0">const </span><span class="s1">npy_intp arr_size = PyArray_Size((PyObject *)arr);</span>
+    <span class="s0">if </span><span class="s1">(arr_size &gt; F2PY_REPORT_ON_ARRAY_COPY) {</span>
+        <span class="s1">fprintf(stderr,</span>
+                <span class="s2">&quot;copied an array: size=%ld, elsize=%&quot; </span><span class="s1">NPY_INTP_FMT </span><span class="s2">&quot;</span><span class="s4">\n</span><span class="s2">&quot;</span><span class="s1">,</span>
+                <span class="s1">arr_size, (npy_intp)PyArray_ITEMSIZE(arr));</span>
+    <span class="s1">}</span>
+<span class="s1">}</span>
+<span class="s0">static void</span>
+<span class="s1">f2py_report_on_array_copy_fromany(</span><span class="s0">void</span><span class="s1">)</span>
+<span class="s1">{</span>
+    <span class="s1">fprintf(stderr, </span><span class="s2">&quot;created an array from object</span><span class="s4">\n</span><span class="s2">&quot;</span><span class="s1">);</span>
+<span class="s1">}</span>
+
+<span class="s0">#define </span><span class="s1">F2PY_REPORT_ON_ARRAY_COPY_FROMARR \</span>
+    <span class="s1">f2py_report_on_array_copy((PyArrayObject *)arr)</span>
+<span class="s0">#define </span><span class="s1">F2PY_REPORT_ON_ARRAY_COPY_FROMANY f2py_report_on_array_copy_fromany()</span>
+<span class="s0">#else</span>
+<span class="s0">#define </span><span class="s1">F2PY_REPORT_ON_ARRAY_COPY_FROMARR</span>
+<span class="s0">#define </span><span class="s1">F2PY_REPORT_ON_ARRAY_COPY_FROMANY</span>
+<span class="s0">#endif</span>
+
+<span class="s3">/************************* array_from_obj *******************************/</span>
+
+<span class="s3">/* 
+ * File: array_from_pyobj.c 
+ * 
+ * Description: 
+ * ------------ 
+ * Provides array_from_pyobj function that returns a contiguous array 
+ * object with the given dimensions and required storage order, either 
+ * in row-major (C) or column-major (Fortran) order. The function 
+ * array_from_pyobj is very flexible about its Python object argument 
+ * that can be any number, list, tuple, or array. 
+ * 
+ * array_from_pyobj is used in f2py generated Python extension 
+ * modules. 
+ * 
+ * Author: Pearu Peterson &lt;pearu@cens.ioc.ee&gt; 
+ * Created: 13-16 January 2002 
+ * $Id: fortranobject.c,v 1.52 2005/07/11 07:44:20 pearu Exp $ 
+ */</span>
+
+<span class="s0">static int</span>
+<span class="s1">check_and_fix_dimensions(</span><span class="s0">const </span><span class="s1">PyArrayObject *arr, </span><span class="s0">const int </span><span class="s1">rank,</span>
+                         <span class="s1">npy_intp *dims);</span>
+
+<span class="s0">static int</span>
+<span class="s1">find_first_negative_dimension(</span><span class="s0">const int </span><span class="s1">rank, </span><span class="s0">const </span><span class="s1">npy_intp *dims)</span>
+<span class="s1">{</span>
+    <span class="s0">for </span><span class="s1">(</span><span class="s0">int </span><span class="s1">i = </span><span class="s5">0</span><span class="s1">; i &lt; rank; ++i) {</span>
+        <span class="s0">if </span><span class="s1">(dims[i] &lt; </span><span class="s5">0</span><span class="s1">) {</span>
+            <span class="s0">return </span><span class="s1">i;</span>
+        <span class="s1">}</span>
+    <span class="s1">}</span>
+    <span class="s0">return </span><span class="s1">-</span><span class="s5">1</span><span class="s1">;</span>
+<span class="s1">}</span>
+
+<span class="s0">#ifdef </span><span class="s1">DEBUG_COPY_ND_ARRAY</span>
+<span class="s0">void</span>
+<span class="s1">dump_dims(</span><span class="s0">int </span><span class="s1">rank, npy_intp </span><span class="s0">const </span><span class="s1">*dims)</span>
+<span class="s1">{</span>
+    <span class="s0">int </span><span class="s1">i;</span>
+    <span class="s1">printf(</span><span class="s2">&quot;[&quot;</span><span class="s1">);</span>
+    <span class="s0">for </span><span class="s1">(i = </span><span class="s5">0</span><span class="s1">; i &lt; rank; ++i) {</span>
+        <span class="s1">printf(</span><span class="s2">&quot;%3&quot; </span><span class="s1">NPY_INTP_FMT, dims[i]);</span>
+    <span class="s1">}</span>
+    <span class="s1">printf(</span><span class="s2">&quot;]</span><span class="s4">\n</span><span class="s2">&quot;</span><span class="s1">);</span>
+<span class="s1">}</span>
+<span class="s0">void</span>
+<span class="s1">dump_attrs(</span><span class="s0">const </span><span class="s1">PyArrayObject *obj)</span>
+<span class="s1">{</span>
+    <span class="s0">const </span><span class="s1">PyArrayObject_fields *arr = (</span><span class="s0">const </span><span class="s1">PyArrayObject_fields *)obj;</span>
+    <span class="s0">int </span><span class="s1">rank = PyArray_NDIM(arr);</span>
+    <span class="s1">npy_intp size = PyArray_Size((PyObject *)arr);</span>
+    <span class="s1">printf(</span><span class="s2">&quot;</span><span class="s4">\t</span><span class="s2">rank = %d, flags = %d, size = %&quot; </span><span class="s1">NPY_INTP_FMT </span><span class="s2">&quot;</span><span class="s4">\n</span><span class="s2">&quot;</span><span class="s1">, rank,</span>
+           <span class="s1">arr</span><span class="s6">-&gt;</span><span class="s1">flags, size);</span>
+    <span class="s1">printf(</span><span class="s2">&quot;</span><span class="s4">\t</span><span class="s2">strides = &quot;</span><span class="s1">);</span>
+    <span class="s1">dump_dims(rank, arr</span><span class="s6">-&gt;</span><span class="s1">strides);</span>
+    <span class="s1">printf(</span><span class="s2">&quot;</span><span class="s4">\t</span><span class="s2">dimensions = &quot;</span><span class="s1">);</span>
+    <span class="s1">dump_dims(rank, arr</span><span class="s6">-&gt;</span><span class="s1">dimensions);</span>
+<span class="s1">}</span>
+<span class="s0">#endif</span>
+
+<span class="s0">#define </span><span class="s1">SWAPTYPE(a, b, t) \</span>
+    <span class="s1">{                     \</span>
+        <span class="s1">t c;              \</span>
+        <span class="s1">c = (a);          \</span>
+        <span class="s1">(a) = (b);        \</span>
+        <span class="s1">(b) = c;          \</span>
+    <span class="s1">}</span>
+
+<span class="s0">static int</span>
+<span class="s1">swap_arrays(PyArrayObject *obj1, PyArrayObject *obj2)</span>
+<span class="s1">{</span>
+    <span class="s1">PyArrayObject_fields *arr1 = (PyArrayObject_fields *)obj1,</span>
+                         <span class="s1">*arr2 = (PyArrayObject_fields *)obj2;</span>
+    <span class="s1">SWAPTYPE(arr1</span><span class="s6">-&gt;</span><span class="s1">data, arr2</span><span class="s6">-&gt;</span><span class="s1">data, </span><span class="s0">char </span><span class="s1">*);</span>
+    <span class="s1">SWAPTYPE(arr1</span><span class="s6">-&gt;</span><span class="s1">nd, arr2</span><span class="s6">-&gt;</span><span class="s1">nd, </span><span class="s0">int</span><span class="s1">);</span>
+    <span class="s1">SWAPTYPE(arr1</span><span class="s6">-&gt;</span><span class="s1">dimensions, arr2</span><span class="s6">-&gt;</span><span class="s1">dimensions, npy_intp *);</span>
+    <span class="s1">SWAPTYPE(arr1</span><span class="s6">-&gt;</span><span class="s1">strides, arr2</span><span class="s6">-&gt;</span><span class="s1">strides, npy_intp *);</span>
+    <span class="s1">SWAPTYPE(arr1</span><span class="s6">-&gt;</span><span class="s1">base, arr2</span><span class="s6">-&gt;</span><span class="s1">base, PyObject *);</span>
+    <span class="s1">SWAPTYPE(arr1</span><span class="s6">-&gt;</span><span class="s1">descr, arr2</span><span class="s6">-&gt;</span><span class="s1">descr, PyArray_Descr *);</span>
+    <span class="s1">SWAPTYPE(arr1</span><span class="s6">-&gt;</span><span class="s1">flags, arr2</span><span class="s6">-&gt;</span><span class="s1">flags, </span><span class="s0">int</span><span class="s1">);</span>
+    <span class="s3">/* SWAPTYPE(arr1-&gt;weakreflist,arr2-&gt;weakreflist,PyObject*); */</span>
+    <span class="s0">return </span><span class="s5">0</span><span class="s1">;</span>
+<span class="s1">}</span>
+
+<span class="s0">#define </span><span class="s1">ARRAY_ISCOMPATIBLE(arr, type_num)                         \</span>
+    <span class="s1">((PyArray_ISINTEGER(arr) &amp;&amp; PyTypeNum_ISINTEGER(type_num)) || \</span>
+     <span class="s1">(PyArray_ISFLOAT(arr) &amp;&amp; PyTypeNum_ISFLOAT(type_num)) ||     \</span>
+     <span class="s1">(PyArray_ISCOMPLEX(arr) &amp;&amp; PyTypeNum_ISCOMPLEX(type_num)) || \</span>
+     <span class="s1">(PyArray_ISBOOL(arr) &amp;&amp; PyTypeNum_ISBOOL(type_num)))</span>
+
+<span class="s0">extern </span><span class="s1">PyArrayObject *</span>
+<span class="s1">array_from_pyobj(</span><span class="s0">const int </span><span class="s1">type_num, npy_intp *dims, </span><span class="s0">const int </span><span class="s1">rank,</span>
+                 <span class="s0">const int </span><span class="s1">intent, PyObject *obj)</span>
+<span class="s1">{</span>
+    <span class="s3">/* 
+     * Note about reference counting 
+     *  ----------------------------- 
+     * If the caller returns the array to Python, it must be done with 
+     * Py_BuildValue(&quot;N&quot;,arr). 
+     * Otherwise, if obj!=arr then the caller must call Py_DECREF(arr). 
+     * 
+     * Note on intent(cache,out,..) 
+     * --------------------- 
+     * Don't expect correct data when returning intent(cache) array. 
+     * 
+     */</span>
+    <span class="s0">char </span><span class="s1">mess[</span><span class="s5">200</span><span class="s1">];</span>
+    <span class="s1">PyArrayObject *arr = NULL;</span>
+    <span class="s1">PyArray_Descr *descr;</span>
+    <span class="s0">char </span><span class="s1">typechar;</span>
+    <span class="s0">int </span><span class="s1">elsize;</span>
+
+    <span class="s0">if </span><span class="s1">((intent &amp; F2PY_INTENT_HIDE) ||</span>
+        <span class="s1">((intent &amp; F2PY_INTENT_CACHE) &amp;&amp; (obj == Py_None)) ||</span>
+        <span class="s1">((intent &amp; F2PY_OPTIONAL) &amp;&amp; (obj == Py_None))) {</span>
+        <span class="s3">/* intent(cache), optional, intent(hide) */</span>
+        <span class="s0">int </span><span class="s1">i = find_first_negative_dimension(rank, dims);</span>
+        <span class="s0">if </span><span class="s1">(i &gt;= </span><span class="s5">0</span><span class="s1">) {</span>
+            <span class="s1">PyErr_Format(PyExc_ValueError,</span>
+                         <span class="s2">&quot;failed to create intent(cache|hide)|optional array&quot;</span>
+                         <span class="s2">&quot; -- must have defined dimensions, but dims[%d] = %&quot;</span>
+                         <span class="s1">NPY_INTP_FMT, i, dims[i]);</span>
+            <span class="s0">return </span><span class="s1">NULL;</span>
+        <span class="s1">}</span>
+        <span class="s1">arr = (PyArrayObject *)PyArray_New(&amp;PyArray_Type, rank, dims, type_num,</span>
+                                           <span class="s1">NULL, NULL, </span><span class="s5">1</span><span class="s1">,</span>
+                                           <span class="s1">!(intent &amp; F2PY_INTENT_C), NULL);</span>
+        <span class="s0">if </span><span class="s1">(arr == NULL)</span>
+            <span class="s0">return </span><span class="s1">NULL;</span>
+        <span class="s0">if </span><span class="s1">(!(intent &amp; F2PY_INTENT_CACHE))</span>
+            <span class="s1">PyArray_FILLWBYTE(arr, </span><span class="s5">0</span><span class="s1">);</span>
+        <span class="s0">return </span><span class="s1">arr;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">descr = PyArray_DescrFromType(type_num);</span>
+    <span class="s3">/* compatibility with NPY_CHAR */</span>
+    <span class="s0">if </span><span class="s1">(type_num == NPY_STRING) {</span>
+        <span class="s1">PyArray_DESCR_REPLACE(descr);</span>
+        <span class="s0">if </span><span class="s1">(descr == NULL) {</span>
+            <span class="s0">return </span><span class="s1">NULL;</span>
+        <span class="s1">}</span>
+        <span class="s1">descr</span><span class="s6">-&gt;</span><span class="s1">elsize = </span><span class="s5">1</span><span class="s1">;</span>
+        <span class="s1">descr</span><span class="s6">-&gt;</span><span class="s1">type = NPY_CHARLTR;</span>
+    <span class="s1">}</span>
+    <span class="s1">elsize = descr</span><span class="s6">-&gt;</span><span class="s1">elsize;</span>
+    <span class="s1">typechar = descr</span><span class="s6">-&gt;</span><span class="s1">type;</span>
+    <span class="s1">Py_DECREF(descr);</span>
+    <span class="s0">if </span><span class="s1">(PyArray_Check(obj)) {</span>
+        <span class="s1">arr = (PyArrayObject *)obj;</span>
+
+        <span class="s0">if </span><span class="s1">(intent &amp; F2PY_INTENT_CACHE) {</span>
+            <span class="s3">/* intent(cache) */</span>
+            <span class="s0">if </span><span class="s1">(PyArray_ISONESEGMENT(arr) &amp;&amp; PyArray_ITEMSIZE(arr) &gt;= elsize) {</span>
+                <span class="s0">if </span><span class="s1">(check_and_fix_dimensions(arr, rank, dims)) {</span>
+                    <span class="s0">return </span><span class="s1">NULL;</span>
+                <span class="s1">}</span>
+                <span class="s0">if </span><span class="s1">(intent &amp; F2PY_INTENT_OUT)</span>
+                    <span class="s1">Py_INCREF(arr);</span>
+                <span class="s0">return </span><span class="s1">arr;</span>
+            <span class="s1">}</span>
+            <span class="s1">strcpy(mess, </span><span class="s2">&quot;failed to initialize intent(cache) array&quot;</span><span class="s1">);</span>
+            <span class="s0">if </span><span class="s1">(!PyArray_ISONESEGMENT(arr))</span>
+                <span class="s1">strcat(mess, </span><span class="s2">&quot; -- input must be in one segment&quot;</span><span class="s1">);</span>
+            <span class="s0">if </span><span class="s1">(PyArray_ITEMSIZE(arr) &lt; elsize)</span>
+                <span class="s1">sprintf(mess + strlen(mess),</span>
+                        <span class="s2">&quot; -- expected at least elsize=%d but got &quot;</span>
+                        <span class="s2">&quot;%&quot; </span><span class="s1">NPY_INTP_FMT,</span>
+                        <span class="s1">elsize, (npy_intp)PyArray_ITEMSIZE(arr));</span>
+            <span class="s1">PyErr_SetString(PyExc_ValueError, mess);</span>
+            <span class="s0">return </span><span class="s1">NULL;</span>
+        <span class="s1">}</span>
+
+        <span class="s3">/* here we have always intent(in) or intent(inout) or intent(inplace) 
+         */</span>
+
+        <span class="s0">if </span><span class="s1">(check_and_fix_dimensions(arr, rank, dims)) {</span>
+            <span class="s0">return </span><span class="s1">NULL;</span>
+        <span class="s1">}</span>
+        <span class="s3">/* 
+        printf(&quot;intent alignment=%d\n&quot;, F2PY_GET_ALIGNMENT(intent)); 
+        printf(&quot;alignment check=%d\n&quot;, F2PY_CHECK_ALIGNMENT(arr, intent)); 
+        int i; 
+        for (i=1;i&lt;=16;i++) 
+          printf(&quot;i=%d isaligned=%d\n&quot;, i, ARRAY_ISALIGNED(arr, i)); 
+        */</span>
+        <span class="s0">if </span><span class="s1">((!(intent &amp; F2PY_INTENT_COPY)) &amp;&amp;</span>
+            <span class="s1">PyArray_ITEMSIZE(arr) == elsize &amp;&amp;</span>
+            <span class="s1">ARRAY_ISCOMPATIBLE(arr, type_num) &amp;&amp;</span>
+            <span class="s1">F2PY_CHECK_ALIGNMENT(arr, intent)) {</span>
+            <span class="s0">if </span><span class="s1">((intent &amp; F2PY_INTENT_C) ? PyArray_ISCARRAY_RO(arr)</span>
+                                         <span class="s1">: PyArray_ISFARRAY_RO(arr)) {</span>
+                <span class="s0">if </span><span class="s1">((intent &amp; F2PY_INTENT_OUT)) {</span>
+                    <span class="s1">Py_INCREF(arr);</span>
+                <span class="s1">}</span>
+                <span class="s3">/* Returning input array */</span>
+                <span class="s0">return </span><span class="s1">arr;</span>
+            <span class="s1">}</span>
+        <span class="s1">}</span>
+        <span class="s0">if </span><span class="s1">(intent &amp; F2PY_INTENT_INOUT) {</span>
+            <span class="s1">strcpy(mess, </span><span class="s2">&quot;failed to initialize intent(inout) array&quot;</span><span class="s1">);</span>
+            <span class="s3">/* Must use PyArray_IS*ARRAY because intent(inout) requires 
+             * writable input */</span>
+            <span class="s0">if </span><span class="s1">((intent &amp; F2PY_INTENT_C) &amp;&amp; !PyArray_ISCARRAY(arr))</span>
+                <span class="s1">strcat(mess, </span><span class="s2">&quot; -- input not contiguous&quot;</span><span class="s1">);</span>
+            <span class="s0">if </span><span class="s1">(!(intent &amp; F2PY_INTENT_C) &amp;&amp; !PyArray_ISFARRAY(arr))</span>
+                <span class="s1">strcat(mess, </span><span class="s2">&quot; -- input not fortran contiguous&quot;</span><span class="s1">);</span>
+            <span class="s0">if </span><span class="s1">(PyArray_ITEMSIZE(arr) != elsize)</span>
+                <span class="s1">sprintf(mess + strlen(mess),</span>
+                        <span class="s2">&quot; -- expected elsize=%d but got %&quot; </span><span class="s1">NPY_INTP_FMT,</span>
+                        <span class="s1">elsize, (npy_intp)PyArray_ITEMSIZE(arr));</span>
+            <span class="s0">if </span><span class="s1">(!(ARRAY_ISCOMPATIBLE(arr, type_num)))</span>
+                <span class="s1">sprintf(mess + strlen(mess),</span>
+                        <span class="s2">&quot; -- input '%c' not compatible to '%c'&quot;</span><span class="s1">,</span>
+                        <span class="s1">PyArray_DESCR(arr)</span><span class="s6">-&gt;</span><span class="s1">type, typechar);</span>
+            <span class="s0">if </span><span class="s1">(!(F2PY_CHECK_ALIGNMENT(arr, intent)))</span>
+                <span class="s1">sprintf(mess + strlen(mess), </span><span class="s2">&quot; -- input not %d-aligned&quot;</span><span class="s1">,</span>
+                        <span class="s1">F2PY_GET_ALIGNMENT(intent));</span>
+            <span class="s1">PyErr_SetString(PyExc_ValueError, mess);</span>
+            <span class="s0">return </span><span class="s1">NULL;</span>
+        <span class="s1">}</span>
+
+        <span class="s3">/* here we have always intent(in) or intent(inplace) */</span>
+
+        <span class="s1">{</span>
+            <span class="s1">PyArrayObject *retarr;</span>
+            <span class="s1">retarr = (PyArrayObject *)PyArray_New(</span>
+                    <span class="s1">&amp;PyArray_Type, PyArray_NDIM(arr), PyArray_DIMS(arr),</span>
+                    <span class="s1">type_num, NULL, NULL, </span><span class="s5">1</span><span class="s1">, !(intent &amp; F2PY_INTENT_C), NULL);</span>
+            <span class="s0">if </span><span class="s1">(retarr == NULL)</span>
+                <span class="s0">return </span><span class="s1">NULL;</span>
+            <span class="s1">F2PY_REPORT_ON_ARRAY_COPY_FROMARR;</span>
+            <span class="s0">if </span><span class="s1">(PyArray_CopyInto(retarr, arr)) {</span>
+                <span class="s1">Py_DECREF(retarr);</span>
+                <span class="s0">return </span><span class="s1">NULL;</span>
+            <span class="s1">}</span>
+            <span class="s0">if </span><span class="s1">(intent &amp; F2PY_INTENT_INPLACE) {</span>
+                <span class="s0">if </span><span class="s1">(swap_arrays(arr, retarr))</span>
+                    <span class="s0">return </span><span class="s1">NULL; </span><span class="s3">/* XXX: set exception */</span>
+                <span class="s1">Py_XDECREF(retarr);</span>
+                <span class="s0">if </span><span class="s1">(intent &amp; F2PY_INTENT_OUT)</span>
+                    <span class="s1">Py_INCREF(arr);</span>
+            <span class="s1">}</span>
+            <span class="s0">else </span><span class="s1">{</span>
+                <span class="s1">arr = retarr;</span>
+            <span class="s1">}</span>
+        <span class="s1">}</span>
+        <span class="s0">return </span><span class="s1">arr;</span>
+    <span class="s1">}</span>
+
+    <span class="s0">if </span><span class="s1">((intent &amp; F2PY_INTENT_INOUT) || (intent &amp; F2PY_INTENT_INPLACE) ||</span>
+        <span class="s1">(intent &amp; F2PY_INTENT_CACHE)) {</span>
+        <span class="s1">PyErr_Format(PyExc_TypeError,</span>
+                     <span class="s2">&quot;failed to initialize intent(inout|inplace|cache) &quot;</span>
+                     <span class="s2">&quot;array, input '%s' object is not an array&quot;</span><span class="s1">,</span>
+                     <span class="s1">Py_TYPE(obj)</span><span class="s6">-&gt;</span><span class="s1">tp_name);</span>
+        <span class="s0">return </span><span class="s1">NULL;</span>
+    <span class="s1">}</span>
+
+    <span class="s1">{</span>
+        <span class="s1">PyArray_Descr *descr = PyArray_DescrFromType(type_num);</span>
+        <span class="s3">/* compatibility with NPY_CHAR */</span>
+        <span class="s0">if </span><span class="s1">(type_num == NPY_STRING) {</span>
+            <span class="s1">PyArray_DESCR_REPLACE(descr);</span>
+            <span class="s0">if </span><span class="s1">(descr == NULL) {</span>
+                <span class="s0">return </span><span class="s1">NULL;</span>
+            <span class="s1">}</span>
+            <span class="s1">descr</span><span class="s6">-&gt;</span><span class="s1">elsize = </span><span class="s5">1</span><span class="s1">;</span>
+            <span class="s1">descr</span><span class="s6">-&gt;</span><span class="s1">type = NPY_CHARLTR;</span>
+        <span class="s1">}</span>
+        <span class="s1">F2PY_REPORT_ON_ARRAY_COPY_FROMANY;</span>
+        <span class="s1">arr = (PyArrayObject *)PyArray_FromAny(</span>
+                <span class="s1">obj, descr, </span><span class="s5">0</span><span class="s1">, </span><span class="s5">0</span><span class="s1">,</span>
+                <span class="s1">((intent &amp; F2PY_INTENT_C) ? NPY_ARRAY_CARRAY</span>
+                                          <span class="s1">: NPY_ARRAY_FARRAY) |</span>
+                        <span class="s1">NPY_ARRAY_FORCECAST,</span>
+                <span class="s1">NULL);</span>
+        <span class="s0">if </span><span class="s1">(arr == NULL)</span>
+            <span class="s0">return </span><span class="s1">NULL;</span>
+        <span class="s0">if </span><span class="s1">(check_and_fix_dimensions(arr, rank, dims)) {</span>
+            <span class="s0">return </span><span class="s1">NULL;</span>
+        <span class="s1">}</span>
+        <span class="s0">return </span><span class="s1">arr;</span>
+    <span class="s1">}</span>
+<span class="s1">}</span>
+
+<span class="s3">/*****************************************/</span>
+<span class="s3">/* Helper functions for array_from_pyobj */</span>
+<span class="s3">/*****************************************/</span>
+
+<span class="s0">static int</span>
+<span class="s1">check_and_fix_dimensions(</span><span class="s0">const </span><span class="s1">PyArrayObject *arr, </span><span class="s0">const int </span><span class="s1">rank,</span>
+                         <span class="s1">npy_intp *dims)</span>
+<span class="s1">{</span>
+    <span class="s3">/* 
+     * This function fills in blanks (that are -1's) in dims list using 
+     * the dimensions from arr. It also checks that non-blank dims will 
+     * match with the corresponding values in arr dimensions. 
+     * 
+     * Returns 0 if the function is successful. 
+     * 
+     * If an error condition is detected, an exception is set and 1 is 
+     * returned. 
+     */</span>
+    <span class="s0">const </span><span class="s1">npy_intp arr_size =</span>
+            <span class="s1">(PyArray_NDIM(arr)) ? PyArray_Size((PyObject *)arr) : </span><span class="s5">1</span><span class="s1">;</span>
+<span class="s0">#ifdef </span><span class="s1">DEBUG_COPY_ND_ARRAY</span>
+    <span class="s1">dump_attrs(arr);</span>
+    <span class="s1">printf(</span><span class="s2">&quot;check_and_fix_dimensions:init: dims=&quot;</span><span class="s1">);</span>
+    <span class="s1">dump_dims(rank, dims);</span>
+<span class="s0">#endif</span>
+    <span class="s0">if </span><span class="s1">(rank &gt; PyArray_NDIM(arr)) { </span><span class="s3">/* [1,2] -&gt; [[1],[2]]; 1 -&gt; [[1]]  */</span>
+        <span class="s1">npy_intp new_size = </span><span class="s5">1</span><span class="s1">;</span>
+        <span class="s0">int </span><span class="s1">free_axe = -</span><span class="s5">1</span><span class="s1">;</span>
+        <span class="s0">int </span><span class="s1">i;</span>
+        <span class="s1">npy_intp d;</span>
+        <span class="s3">/* Fill dims where -1 or 0; check dimensions; calc new_size; */</span>
+        <span class="s0">for </span><span class="s1">(i = </span><span class="s5">0</span><span class="s1">; i &lt; PyArray_NDIM(arr); ++i) {</span>
+            <span class="s1">d = PyArray_DIM(arr, i);</span>
+            <span class="s0">if </span><span class="s1">(dims[i] &gt;= </span><span class="s5">0</span><span class="s1">) {</span>
+                <span class="s0">if </span><span class="s1">(d &gt; </span><span class="s5">1 </span><span class="s1">&amp;&amp; dims[i] != d) {</span>
+                    <span class="s1">PyErr_Format(</span>
+                            <span class="s1">PyExc_ValueError,</span>
+                            <span class="s2">&quot;%d-th dimension must be fixed to %&quot; </span><span class="s1">NPY_INTP_FMT</span>
+                            <span class="s2">&quot; but got %&quot; </span><span class="s1">NPY_INTP_FMT </span><span class="s2">&quot;</span><span class="s4">\n</span><span class="s2">&quot;</span><span class="s1">,</span>
+                            <span class="s1">i, dims[i], d);</span>
+                    <span class="s0">return </span><span class="s5">1</span><span class="s1">;</span>
+                <span class="s1">}</span>
+                <span class="s0">if </span><span class="s1">(!dims[i])</span>
+                    <span class="s1">dims[i] = </span><span class="s5">1</span><span class="s1">;</span>
+            <span class="s1">}</span>
+            <span class="s0">else </span><span class="s1">{</span>
+                <span class="s1">dims[i] = d ? d : </span><span class="s5">1</span><span class="s1">;</span>
+            <span class="s1">}</span>
+            <span class="s1">new_size *= dims[i];</span>
+        <span class="s1">}</span>
+        <span class="s0">for </span><span class="s1">(i = PyArray_NDIM(arr); i &lt; rank; ++i)</span>
+            <span class="s0">if </span><span class="s1">(dims[i] &gt; </span><span class="s5">1</span><span class="s1">) {</span>
+                <span class="s1">PyErr_Format(PyExc_ValueError,</span>
+                             <span class="s2">&quot;%d-th dimension must be %&quot; </span><span class="s1">NPY_INTP_FMT</span>
+                             <span class="s2">&quot; but got 0 (not defined).</span><span class="s4">\n</span><span class="s2">&quot;</span><span class="s1">,</span>
+                             <span class="s1">i, dims[i]);</span>
+                <span class="s0">return </span><span class="s5">1</span><span class="s1">;</span>
+            <span class="s1">}</span>
+            <span class="s0">else if </span><span class="s1">(free_axe &lt; </span><span class="s5">0</span><span class="s1">)</span>
+                <span class="s1">free_axe = i;</span>
+            <span class="s0">else</span>
+                <span class="s1">dims[i] = </span><span class="s5">1</span><span class="s1">;</span>
+        <span class="s0">if </span><span class="s1">(free_axe &gt;= </span><span class="s5">0</span><span class="s1">) {</span>
+            <span class="s1">dims[free_axe] = arr_size / new_size;</span>
+            <span class="s1">new_size *= dims[free_axe];</span>
+        <span class="s1">}</span>
+        <span class="s0">if </span><span class="s1">(new_size != arr_size) {</span>
+            <span class="s1">PyErr_Format(PyExc_ValueError,</span>
+                         <span class="s2">&quot;unexpected array size: new_size=%&quot; </span><span class="s1">NPY_INTP_FMT</span>
+                         <span class="s2">&quot;, got array with arr_size=%&quot; </span><span class="s1">NPY_INTP_FMT</span>
+                         <span class="s2">&quot; (maybe too many free indices)</span><span class="s4">\n</span><span class="s2">&quot;</span><span class="s1">,</span>
+                         <span class="s1">new_size, arr_size);</span>
+            <span class="s0">return </span><span class="s5">1</span><span class="s1">;</span>
+        <span class="s1">}</span>
+    <span class="s1">}</span>
+    <span class="s0">else if </span><span class="s1">(rank == PyArray_NDIM(arr)) {</span>
+        <span class="s1">npy_intp new_size = </span><span class="s5">1</span><span class="s1">;</span>
+        <span class="s0">int </span><span class="s1">i;</span>
+        <span class="s1">npy_intp d;</span>
+        <span class="s0">for </span><span class="s1">(i = </span><span class="s5">0</span><span class="s1">; i &lt; rank; ++i) {</span>
+            <span class="s1">d = PyArray_DIM(arr, i);</span>
+            <span class="s0">if </span><span class="s1">(dims[i] &gt;= </span><span class="s5">0</span><span class="s1">) {</span>
+                <span class="s0">if </span><span class="s1">(d &gt; </span><span class="s5">1 </span><span class="s1">&amp;&amp; d != dims[i]) {</span>
+                    <span class="s1">PyErr_Format(</span>
+                            <span class="s1">PyExc_ValueError,</span>
+                            <span class="s2">&quot;%d-th dimension must be fixed to %&quot; </span><span class="s1">NPY_INTP_FMT</span>
+                            <span class="s2">&quot; but got %&quot; </span><span class="s1">NPY_INTP_FMT </span><span class="s2">&quot;</span><span class="s4">\n</span><span class="s2">&quot;</span><span class="s1">,</span>
+                            <span class="s1">i, dims[i], d);</span>
+                    <span class="s0">return </span><span class="s5">1</span><span class="s1">;</span>
+                <span class="s1">}</span>
+                <span class="s0">if </span><span class="s1">(!dims[i])</span>
+                    <span class="s1">dims[i] = </span><span class="s5">1</span><span class="s1">;</span>
+            <span class="s1">}</span>
+            <span class="s0">else</span>
+                <span class="s1">dims[i] = d;</span>
+            <span class="s1">new_size *= dims[i];</span>
+        <span class="s1">}</span>
+        <span class="s0">if </span><span class="s1">(new_size != arr_size) {</span>
+            <span class="s1">PyErr_Format(PyExc_ValueError,</span>
+                         <span class="s2">&quot;unexpected array size: new_size=%&quot; </span><span class="s1">NPY_INTP_FMT</span>
+                         <span class="s2">&quot;, got array with arr_size=%&quot; </span><span class="s1">NPY_INTP_FMT </span><span class="s2">&quot;</span><span class="s4">\n</span><span class="s2">&quot;</span><span class="s1">,</span>
+                         <span class="s1">new_size, arr_size);</span>
+            <span class="s0">return </span><span class="s5">1</span><span class="s1">;</span>
+        <span class="s1">}</span>
+    <span class="s1">}</span>
+    <span class="s0">else </span><span class="s1">{ </span><span class="s3">/* [[1,2]] -&gt; [[1],[2]] */</span>
+        <span class="s0">int </span><span class="s1">i, j;</span>
+        <span class="s1">npy_intp d;</span>
+        <span class="s0">int </span><span class="s1">effrank;</span>
+        <span class="s1">npy_intp size;</span>
+        <span class="s0">for </span><span class="s1">(i = </span><span class="s5">0</span><span class="s1">, effrank = </span><span class="s5">0</span><span class="s1">; i &lt; PyArray_NDIM(arr); ++i)</span>
+            <span class="s0">if </span><span class="s1">(PyArray_DIM(arr, i) &gt; </span><span class="s5">1</span><span class="s1">)</span>
+                <span class="s1">++effrank;</span>
+        <span class="s0">if </span><span class="s1">(dims[rank - </span><span class="s5">1</span><span class="s1">] &gt;= </span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s0">if </span><span class="s1">(effrank &gt; rank) {</span>
+                <span class="s1">PyErr_Format(PyExc_ValueError,</span>
+                             <span class="s2">&quot;too many axes: %d (effrank=%d), &quot;</span>
+                             <span class="s2">&quot;expected rank=%d</span><span class="s4">\n</span><span class="s2">&quot;</span><span class="s1">,</span>
+                             <span class="s1">PyArray_NDIM(arr), effrank, rank);</span>
+                <span class="s0">return </span><span class="s5">1</span><span class="s1">;</span>
+            <span class="s1">}</span>
+
+        <span class="s0">for </span><span class="s1">(i = </span><span class="s5">0</span><span class="s1">, j = </span><span class="s5">0</span><span class="s1">; i &lt; rank; ++i) {</span>
+            <span class="s0">while </span><span class="s1">(j &lt; PyArray_NDIM(arr) &amp;&amp; PyArray_DIM(arr, j) &lt; </span><span class="s5">2</span><span class="s1">) ++j;</span>
+            <span class="s0">if </span><span class="s1">(j &gt;= PyArray_NDIM(arr))</span>
+                <span class="s1">d = </span><span class="s5">1</span><span class="s1">;</span>
+            <span class="s0">else</span>
+                <span class="s1">d = PyArray_DIM(arr, j++);</span>
+            <span class="s0">if </span><span class="s1">(dims[i] &gt;= </span><span class="s5">0</span><span class="s1">) {</span>
+                <span class="s0">if </span><span class="s1">(d &gt; </span><span class="s5">1 </span><span class="s1">&amp;&amp; d != dims[i]) {</span>
+                    <span class="s1">PyErr_Format(</span>
+                            <span class="s1">PyExc_ValueError,</span>
+                            <span class="s2">&quot;%d-th dimension must be fixed to %&quot; </span><span class="s1">NPY_INTP_FMT</span>
+                            <span class="s2">&quot; but got %&quot; </span><span class="s1">NPY_INTP_FMT </span><span class="s2">&quot; (real index=%d)</span><span class="s4">\n</span><span class="s2">&quot;</span><span class="s1">,</span>
+                            <span class="s1">i, dims[i], d, j - </span><span class="s5">1</span><span class="s1">);</span>
+                    <span class="s0">return </span><span class="s5">1</span><span class="s1">;</span>
+                <span class="s1">}</span>
+                <span class="s0">if </span><span class="s1">(!dims[i])</span>
+                    <span class="s1">dims[i] = </span><span class="s5">1</span><span class="s1">;</span>
+            <span class="s1">}</span>
+            <span class="s0">else</span>
+                <span class="s1">dims[i] = d;</span>
+        <span class="s1">}</span>
+
+        <span class="s0">for </span><span class="s1">(i = rank; i &lt; PyArray_NDIM(arr);</span>
+             <span class="s1">++i) { </span><span class="s3">/* [[1,2],[3,4]] -&gt; [1,2,3,4] */</span>
+            <span class="s0">while </span><span class="s1">(j &lt; PyArray_NDIM(arr) &amp;&amp; PyArray_DIM(arr, j) &lt; </span><span class="s5">2</span><span class="s1">) ++j;</span>
+            <span class="s0">if </span><span class="s1">(j &gt;= PyArray_NDIM(arr))</span>
+                <span class="s1">d = </span><span class="s5">1</span><span class="s1">;</span>
+            <span class="s0">else</span>
+                <span class="s1">d = PyArray_DIM(arr, j++);</span>
+            <span class="s1">dims[rank - </span><span class="s5">1</span><span class="s1">] *= d;</span>
+        <span class="s1">}</span>
+        <span class="s0">for </span><span class="s1">(i = </span><span class="s5">0</span><span class="s1">, size = </span><span class="s5">1</span><span class="s1">; i &lt; rank; ++i) size *= dims[i];</span>
+        <span class="s0">if </span><span class="s1">(size != arr_size) {</span>
+            <span class="s0">char </span><span class="s1">msg[</span><span class="s5">200</span><span class="s1">];</span>
+            <span class="s0">int </span><span class="s1">len;</span>
+            <span class="s1">snprintf(msg, </span><span class="s0">sizeof</span><span class="s1">(msg),</span>
+                     <span class="s2">&quot;unexpected array size: size=%&quot; </span><span class="s1">NPY_INTP_FMT</span>
+                     <span class="s2">&quot;, arr_size=%&quot; </span><span class="s1">NPY_INTP_FMT</span>
+                     <span class="s2">&quot;, rank=%d, effrank=%d, arr.nd=%d, dims=[&quot;</span><span class="s1">,</span>
+                     <span class="s1">size, arr_size, rank, effrank, PyArray_NDIM(arr));</span>
+            <span class="s0">for </span><span class="s1">(i = </span><span class="s5">0</span><span class="s1">; i &lt; rank; ++i) {</span>
+                <span class="s1">len = strlen(msg);</span>
+                <span class="s1">snprintf(msg + len, </span><span class="s0">sizeof</span><span class="s1">(msg) - len, </span><span class="s2">&quot; %&quot; </span><span class="s1">NPY_INTP_FMT,</span>
+                         <span class="s1">dims[i]);</span>
+            <span class="s1">}</span>
+            <span class="s1">len = strlen(msg);</span>
+            <span class="s1">snprintf(msg + len, </span><span class="s0">sizeof</span><span class="s1">(msg) - len, </span><span class="s2">&quot; ], arr.dims=[&quot;</span><span class="s1">);</span>
+            <span class="s0">for </span><span class="s1">(i = </span><span class="s5">0</span><span class="s1">; i &lt; PyArray_NDIM(arr); ++i) {</span>
+                <span class="s1">len = strlen(msg);</span>
+                <span class="s1">snprintf(msg + len, </span><span class="s0">sizeof</span><span class="s1">(msg) - len, </span><span class="s2">&quot; %&quot; </span><span class="s1">NPY_INTP_FMT,</span>
+                         <span class="s1">PyArray_DIM(arr, i));</span>
+            <span class="s1">}</span>
+            <span class="s1">len = strlen(msg);</span>
+            <span class="s1">snprintf(msg + len, </span><span class="s0">sizeof</span><span class="s1">(msg) - len, </span><span class="s2">&quot; ]</span><span class="s4">\n</span><span class="s2">&quot;</span><span class="s1">);</span>
+            <span class="s1">PyErr_SetString(PyExc_ValueError, msg);</span>
+            <span class="s0">return </span><span class="s5">1</span><span class="s1">;</span>
+        <span class="s1">}</span>
+    <span class="s1">}</span>
+<span class="s0">#ifdef </span><span class="s1">DEBUG_COPY_ND_ARRAY</span>
+    <span class="s1">printf(</span><span class="s2">&quot;check_and_fix_dimensions:end: dims=&quot;</span><span class="s1">);</span>
+    <span class="s1">dump_dims(rank, dims);</span>
+<span class="s0">#endif</span>
+    <span class="s0">return </span><span class="s5">0</span><span class="s1">;</span>
+<span class="s1">}</span>
+
+<span class="s3">/* End of file: array_from_pyobj.c */</span>
+
+<span class="s3">/************************* copy_ND_array *******************************/</span>
+
+<span class="s0">extern int</span>
+<span class="s1">copy_ND_array(</span><span class="s0">const </span><span class="s1">PyArrayObject *arr, PyArrayObject *out)</span>
+<span class="s1">{</span>
+    <span class="s1">F2PY_REPORT_ON_ARRAY_COPY_FROMARR;</span>
+    <span class="s0">return </span><span class="s1">PyArray_CopyInto(out, (PyArrayObject *)arr);</span>
+<span class="s1">}</span>
+
+<span class="s3">/*********************************************/</span>
+<span class="s3">/* Compatibility functions for Python &gt;= 3.0 */</span>
+<span class="s3">/*********************************************/</span>
+
+<span class="s1">PyObject *</span>
+<span class="s1">F2PyCapsule_FromVoidPtr(</span><span class="s0">void </span><span class="s1">*ptr, </span><span class="s0">void </span><span class="s1">(*dtor)(PyObject *))</span>
+<span class="s1">{</span>
+    <span class="s1">PyObject *ret = PyCapsule_New(ptr, NULL, dtor);</span>
+    <span class="s0">if </span><span class="s1">(ret == NULL) {</span>
+        <span class="s1">PyErr_Clear();</span>
+    <span class="s1">}</span>
+    <span class="s0">return </span><span class="s1">ret;</span>
+<span class="s1">}</span>
+
+<span class="s0">void </span><span class="s1">*</span>
+<span class="s1">F2PyCapsule_AsVoidPtr(PyObject *obj)</span>
+<span class="s1">{</span>
+    <span class="s0">void </span><span class="s1">*ret = PyCapsule_GetPointer(obj, NULL);</span>
+    <span class="s0">if </span><span class="s1">(ret == NULL) {</span>
+        <span class="s1">PyErr_Clear();</span>
+    <span class="s1">}</span>
+    <span class="s0">return </span><span class="s1">ret;</span>
+<span class="s1">}</span>
+
+<span class="s0">int</span>
+<span class="s1">F2PyCapsule_Check(PyObject *ptr)</span>
+<span class="s1">{</span>
+    <span class="s0">return </span><span class="s1">PyCapsule_CheckExact(ptr);</span>
+<span class="s1">}</span>
+
+<span class="s0">#ifdef </span><span class="s1">__cplusplus</span>
+<span class="s1">}</span>
+<span class="s0">#endif</span>
+<span class="s3">/************************* EOF fortranobject.c *******************************/</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,675 @@
+<html>
+<head>
+<title>pytables.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #808080;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+pytables.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; manage PyTables query interface via Expressions &quot;&quot;&quot;</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">ast</span>
+<span class="s2">from </span><span class="s1">functools </span><span class="s2">import </span><span class="s1">partial</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Any</span>
+
+<span class="s2">import </span><span class="s1">numpy </span><span class="s2">as </span><span class="s1">np</span>
+
+<span class="s2">from </span><span class="s1">pandas._libs.tslibs </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">Timedelta</span><span class="s2">,</span>
+    <span class="s1">Timestamp</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas._typing </span><span class="s2">import </span><span class="s1">npt</span>
+<span class="s2">from </span><span class="s1">pandas.compat.chainmap </span><span class="s2">import </span><span class="s1">DeepChainMap</span>
+
+<span class="s2">from </span><span class="s1">pandas.core.dtypes.common </span><span class="s2">import </span><span class="s1">is_list_like</span>
+
+<span class="s2">import </span><span class="s1">pandas.core.common </span><span class="s2">as </span><span class="s1">com</span>
+<span class="s2">from </span><span class="s1">pandas.core.computation </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">expr</span><span class="s2">,</span>
+    <span class="s1">ops</span><span class="s2">,</span>
+    <span class="s1">scope </span><span class="s2">as </span><span class="s1">_scope</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas.core.computation.common </span><span class="s2">import </span><span class="s1">ensure_decoded</span>
+<span class="s2">from </span><span class="s1">pandas.core.computation.expr </span><span class="s2">import </span><span class="s1">BaseExprVisitor</span>
+<span class="s2">from </span><span class="s1">pandas.core.computation.ops </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">UndefinedVariableError</span><span class="s2">,</span>
+    <span class="s1">is_term</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas.core.construction </span><span class="s2">import </span><span class="s1">extract_array</span>
+<span class="s2">from </span><span class="s1">pandas.core.indexes.base </span><span class="s2">import </span><span class="s1">Index</span>
+
+<span class="s2">from </span><span class="s1">pandas.io.formats.printing </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">pprint_thing</span><span class="s2">,</span>
+    <span class="s1">pprint_thing_encoded</span><span class="s2">,</span>
+<span class="s1">)</span>
+
+
+<span class="s2">class </span><span class="s1">PyTablesScope(_scope.Scope):</span>
+    <span class="s1">__slots__ = (</span><span class="s3">&quot;queryables&quot;</span><span class="s2">,</span><span class="s1">)</span>
+
+    <span class="s1">queryables: dict[str</span><span class="s2">, </span><span class="s1">Any]</span>
+
+    <span class="s2">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">level: int</span><span class="s2">,</span>
+        <span class="s1">global_dict=</span><span class="s2">None,</span>
+        <span class="s1">local_dict=</span><span class="s2">None,</span>
+        <span class="s1">queryables: dict[str</span><span class="s2">, </span><span class="s1">Any] | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">):</span>
+        <span class="s1">super().__init__(level + </span><span class="s4">1</span><span class="s2">, </span><span class="s1">global_dict=global_dict</span><span class="s2">, </span><span class="s1">local_dict=local_dict)</span>
+        <span class="s1">self.queryables = queryables </span><span class="s2">or </span><span class="s1">{}</span>
+
+
+<span class="s2">class </span><span class="s1">Term(ops.Term):</span>
+    <span class="s1">env: PyTablesScope</span>
+
+    <span class="s2">def </span><span class="s1">__new__(cls</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">env</span><span class="s2">, </span><span class="s1">side=</span><span class="s2">None, </span><span class="s1">encoding=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s2">if </span><span class="s1">isinstance(name</span><span class="s2">, </span><span class="s1">str):</span>
+            <span class="s1">klass = cls</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">klass = Constant</span>
+        <span class="s2">return </span><span class="s1">object.__new__(klass)</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">env: PyTablesScope</span><span class="s2">, </span><span class="s1">side=</span><span class="s2">None, </span><span class="s1">encoding=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s1">super().__init__(name</span><span class="s2">, </span><span class="s1">env</span><span class="s2">, </span><span class="s1">side=side</span><span class="s2">, </span><span class="s1">encoding=encoding)</span>
+
+    <span class="s2">def </span><span class="s1">_resolve_name(self):</span>
+        <span class="s5"># must be a queryables</span>
+        <span class="s2">if </span><span class="s1">self.side == </span><span class="s3">&quot;left&quot;</span><span class="s1">:</span>
+            <span class="s5"># Note: The behavior of __new__ ensures that self.name is a str here</span>
+            <span class="s2">if </span><span class="s1">self.name </span><span class="s2">not in </span><span class="s1">self.env.queryables:</span>
+                <span class="s2">raise </span><span class="s1">NameError(</span><span class="s3">f&quot;name </span><span class="s2">{</span><span class="s1">repr(self.name)</span><span class="s2">} </span><span class="s3">is not defined&quot;</span><span class="s1">)</span>
+            <span class="s2">return </span><span class="s1">self.name</span>
+
+        <span class="s5"># resolve the rhs (and allow it to be None)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">self.env.resolve(self.name</span><span class="s2">, </span><span class="s1">is_local=</span><span class="s2">False</span><span class="s1">)</span>
+        <span class="s2">except </span><span class="s1">UndefinedVariableError:</span>
+            <span class="s2">return </span><span class="s1">self.name</span>
+
+    <span class="s5"># read-only property overwriting read/write property</span>
+    <span class="s1">@property  </span><span class="s5"># type: ignore[misc]</span>
+    <span class="s2">def </span><span class="s1">value(self):</span>
+        <span class="s2">return </span><span class="s1">self._value</span>
+
+
+<span class="s2">class </span><span class="s1">Constant(Term):</span>
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">value</span><span class="s2">, </span><span class="s1">env: PyTablesScope</span><span class="s2">, </span><span class="s1">side=</span><span class="s2">None, </span><span class="s1">encoding=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s2">assert </span><span class="s1">isinstance(env</span><span class="s2">, </span><span class="s1">PyTablesScope)</span><span class="s2">, </span><span class="s1">type(env)</span>
+        <span class="s1">super().__init__(value</span><span class="s2">, </span><span class="s1">env</span><span class="s2">, </span><span class="s1">side=side</span><span class="s2">, </span><span class="s1">encoding=encoding)</span>
+
+    <span class="s2">def </span><span class="s1">_resolve_name(self):</span>
+        <span class="s2">return </span><span class="s1">self._name</span>
+
+
+<span class="s2">class </span><span class="s1">BinOp(ops.BinOp):</span>
+
+    <span class="s1">_max_selectors = </span><span class="s4">31</span>
+
+    <span class="s1">op: str</span>
+    <span class="s1">queryables: dict[str</span><span class="s2">, </span><span class="s1">Any]</span>
+    <span class="s1">condition: str | </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">op: str</span><span class="s2">, </span><span class="s1">lhs</span><span class="s2">, </span><span class="s1">rhs</span><span class="s2">, </span><span class="s1">queryables: dict[str</span><span class="s2">, </span><span class="s1">Any]</span><span class="s2">, </span><span class="s1">encoding):</span>
+        <span class="s1">super().__init__(op</span><span class="s2">, </span><span class="s1">lhs</span><span class="s2">, </span><span class="s1">rhs)</span>
+        <span class="s1">self.queryables = queryables</span>
+        <span class="s1">self.encoding = encoding</span>
+        <span class="s1">self.condition = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">_disallow_scalar_only_bool_ops(self):</span>
+        <span class="s2">pass</span>
+
+    <span class="s2">def </span><span class="s1">prune(self</span><span class="s2">, </span><span class="s1">klass):</span>
+        <span class="s2">def </span><span class="s1">pr(left</span><span class="s2">, </span><span class="s1">right):</span>
+            <span class="s0">&quot;&quot;&quot;create and return a new specialized BinOp from myself&quot;&quot;&quot;</span>
+            <span class="s2">if </span><span class="s1">left </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">right</span>
+            <span class="s2">elif </span><span class="s1">right </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">left</span>
+
+            <span class="s1">k = klass</span>
+            <span class="s2">if </span><span class="s1">isinstance(left</span><span class="s2">, </span><span class="s1">ConditionBinOp):</span>
+                <span class="s2">if </span><span class="s1">isinstance(right</span><span class="s2">, </span><span class="s1">ConditionBinOp):</span>
+                    <span class="s1">k = JointConditionBinOp</span>
+                <span class="s2">elif </span><span class="s1">isinstance(left</span><span class="s2">, </span><span class="s1">k):</span>
+                    <span class="s2">return </span><span class="s1">left</span>
+                <span class="s2">elif </span><span class="s1">isinstance(right</span><span class="s2">, </span><span class="s1">k):</span>
+                    <span class="s2">return </span><span class="s1">right</span>
+
+            <span class="s2">elif </span><span class="s1">isinstance(left</span><span class="s2">, </span><span class="s1">FilterBinOp):</span>
+                <span class="s2">if </span><span class="s1">isinstance(right</span><span class="s2">, </span><span class="s1">FilterBinOp):</span>
+                    <span class="s1">k = JointFilterBinOp</span>
+                <span class="s2">elif </span><span class="s1">isinstance(left</span><span class="s2">, </span><span class="s1">k):</span>
+                    <span class="s2">return </span><span class="s1">left</span>
+                <span class="s2">elif </span><span class="s1">isinstance(right</span><span class="s2">, </span><span class="s1">k):</span>
+                    <span class="s2">return </span><span class="s1">right</span>
+
+            <span class="s2">return </span><span class="s1">k(</span>
+                <span class="s1">self.op</span><span class="s2">, </span><span class="s1">left</span><span class="s2">, </span><span class="s1">right</span><span class="s2">, </span><span class="s1">queryables=self.queryables</span><span class="s2">, </span><span class="s1">encoding=self.encoding</span>
+            <span class="s1">).evaluate()</span>
+
+        <span class="s1">left</span><span class="s2">, </span><span class="s1">right = self.lhs</span><span class="s2">, </span><span class="s1">self.rhs</span>
+
+        <span class="s2">if </span><span class="s1">is_term(left) </span><span class="s2">and </span><span class="s1">is_term(right):</span>
+            <span class="s1">res = pr(left.value</span><span class="s2">, </span><span class="s1">right.value)</span>
+        <span class="s2">elif not </span><span class="s1">is_term(left) </span><span class="s2">and </span><span class="s1">is_term(right):</span>
+            <span class="s1">res = pr(left.prune(klass)</span><span class="s2">, </span><span class="s1">right.value)</span>
+        <span class="s2">elif </span><span class="s1">is_term(left) </span><span class="s2">and not </span><span class="s1">is_term(right):</span>
+            <span class="s1">res = pr(left.value</span><span class="s2">, </span><span class="s1">right.prune(klass))</span>
+        <span class="s2">elif not </span><span class="s1">(is_term(left) </span><span class="s2">or </span><span class="s1">is_term(right)):</span>
+            <span class="s1">res = pr(left.prune(klass)</span><span class="s2">, </span><span class="s1">right.prune(klass))</span>
+
+        <span class="s2">return </span><span class="s1">res</span>
+
+    <span class="s2">def </span><span class="s1">conform(self</span><span class="s2">, </span><span class="s1">rhs):</span>
+        <span class="s0">&quot;&quot;&quot;inplace conform rhs&quot;&quot;&quot;</span>
+        <span class="s2">if not </span><span class="s1">is_list_like(rhs):</span>
+            <span class="s1">rhs = [rhs]</span>
+        <span class="s2">if </span><span class="s1">isinstance(rhs</span><span class="s2">, </span><span class="s1">np.ndarray):</span>
+            <span class="s1">rhs = rhs.ravel()</span>
+        <span class="s2">return </span><span class="s1">rhs</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">is_valid(self) -&gt; bool:</span>
+        <span class="s0">&quot;&quot;&quot;return True if this is a valid field&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self.lhs </span><span class="s2">in </span><span class="s1">self.queryables</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">is_in_table(self) -&gt; bool:</span>
+        <span class="s0">&quot;&quot;&quot; 
+        return True if this is a valid column name for generation (e.g. an 
+        actual column in the table) 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self.queryables.get(self.lhs) </span><span class="s2">is not None</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">kind(self):</span>
+        <span class="s0">&quot;&quot;&quot;the kind of my field&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">getattr(self.queryables.get(self.lhs)</span><span class="s2">, </span><span class="s3">&quot;kind&quot;</span><span class="s2">, None</span><span class="s1">)</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">meta(self):</span>
+        <span class="s0">&quot;&quot;&quot;the meta of my field&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">getattr(self.queryables.get(self.lhs)</span><span class="s2">, </span><span class="s3">&quot;meta&quot;</span><span class="s2">, None</span><span class="s1">)</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">metadata(self):</span>
+        <span class="s0">&quot;&quot;&quot;the metadata of my field&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">getattr(self.queryables.get(self.lhs)</span><span class="s2">, </span><span class="s3">&quot;metadata&quot;</span><span class="s2">, None</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">generate(self</span><span class="s2">, </span><span class="s1">v) -&gt; str:</span>
+        <span class="s0">&quot;&quot;&quot;create and return the op string for this TermValue&quot;&quot;&quot;</span>
+        <span class="s1">val = v.tostring(self.encoding)</span>
+        <span class="s2">return </span><span class="s3">f&quot;(</span><span class="s2">{</span><span class="s1">self.lhs</span><span class="s2">} {</span><span class="s1">self.op</span><span class="s2">} {</span><span class="s1">val</span><span class="s2">}</span><span class="s3">)&quot;</span>
+
+    <span class="s2">def </span><span class="s1">convert_value(self</span><span class="s2">, </span><span class="s1">v) -&gt; TermValue:</span>
+        <span class="s0">&quot;&quot;&quot; 
+        convert the expression that is in the term to something that is 
+        accepted by pytables 
+        &quot;&quot;&quot;</span>
+
+        <span class="s2">def </span><span class="s1">stringify(value):</span>
+            <span class="s2">if </span><span class="s1">self.encoding </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">pprint_thing_encoded(value</span><span class="s2">, </span><span class="s1">encoding=self.encoding)</span>
+            <span class="s2">return </span><span class="s1">pprint_thing(value)</span>
+
+        <span class="s1">kind = ensure_decoded(self.kind)</span>
+        <span class="s1">meta = ensure_decoded(self.meta)</span>
+        <span class="s2">if </span><span class="s1">kind == </span><span class="s3">&quot;datetime64&quot; </span><span class="s2">or </span><span class="s1">kind == </span><span class="s3">&quot;datetime&quot;</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">isinstance(v</span><span class="s2">, </span><span class="s1">(int</span><span class="s2">, </span><span class="s1">float)):</span>
+                <span class="s1">v = stringify(v)</span>
+            <span class="s1">v = ensure_decoded(v)</span>
+            <span class="s1">v = Timestamp(v)</span>
+            <span class="s2">if </span><span class="s1">v.tz </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s1">v = v.tz_convert(</span><span class="s3">&quot;UTC&quot;</span><span class="s1">)</span>
+            <span class="s2">return </span><span class="s1">TermValue(v</span><span class="s2">, </span><span class="s1">v.value</span><span class="s2">, </span><span class="s1">kind)</span>
+        <span class="s2">elif </span><span class="s1">kind == </span><span class="s3">&quot;timedelta64&quot; </span><span class="s2">or </span><span class="s1">kind == </span><span class="s3">&quot;timedelta&quot;</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">isinstance(v</span><span class="s2">, </span><span class="s1">str):</span>
+                <span class="s1">v = Timedelta(v).value</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">v = Timedelta(v</span><span class="s2">, </span><span class="s1">unit=</span><span class="s3">&quot;s&quot;</span><span class="s1">).value</span>
+            <span class="s2">return </span><span class="s1">TermValue(int(v)</span><span class="s2">, </span><span class="s1">v</span><span class="s2">, </span><span class="s1">kind)</span>
+        <span class="s2">elif </span><span class="s1">meta == </span><span class="s3">&quot;category&quot;</span><span class="s1">:</span>
+            <span class="s1">metadata = extract_array(self.metadata</span><span class="s2">, </span><span class="s1">extract_numpy=</span><span class="s2">True</span><span class="s1">)</span>
+            <span class="s1">result: npt.NDArray[np.intp] | np.intp | int</span>
+            <span class="s2">if </span><span class="s1">v </span><span class="s2">not in </span><span class="s1">metadata:</span>
+                <span class="s1">result = -</span><span class="s4">1</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">result = metadata.searchsorted(v</span><span class="s2">, </span><span class="s1">side=</span><span class="s3">&quot;left&quot;</span><span class="s1">)</span>
+            <span class="s2">return </span><span class="s1">TermValue(result</span><span class="s2">, </span><span class="s1">result</span><span class="s2">, </span><span class="s3">&quot;integer&quot;</span><span class="s1">)</span>
+        <span class="s2">elif </span><span class="s1">kind == </span><span class="s3">&quot;integer&quot;</span><span class="s1">:</span>
+            <span class="s1">v = int(float(v))</span>
+            <span class="s2">return </span><span class="s1">TermValue(v</span><span class="s2">, </span><span class="s1">v</span><span class="s2">, </span><span class="s1">kind)</span>
+        <span class="s2">elif </span><span class="s1">kind == </span><span class="s3">&quot;float&quot;</span><span class="s1">:</span>
+            <span class="s1">v = float(v)</span>
+            <span class="s2">return </span><span class="s1">TermValue(v</span><span class="s2">, </span><span class="s1">v</span><span class="s2">, </span><span class="s1">kind)</span>
+        <span class="s2">elif </span><span class="s1">kind == </span><span class="s3">&quot;bool&quot;</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">isinstance(v</span><span class="s2">, </span><span class="s1">str):</span>
+                <span class="s1">v = </span><span class="s2">not </span><span class="s1">v.strip().lower() </span><span class="s2">in </span><span class="s1">[</span>
+                    <span class="s3">&quot;false&quot;</span><span class="s2">,</span>
+                    <span class="s3">&quot;f&quot;</span><span class="s2">,</span>
+                    <span class="s3">&quot;no&quot;</span><span class="s2">,</span>
+                    <span class="s3">&quot;n&quot;</span><span class="s2">,</span>
+                    <span class="s3">&quot;none&quot;</span><span class="s2">,</span>
+                    <span class="s3">&quot;0&quot;</span><span class="s2">,</span>
+                    <span class="s3">&quot;[]&quot;</span><span class="s2">,</span>
+                    <span class="s3">&quot;{}&quot;</span><span class="s2">,</span>
+                    <span class="s3">&quot;&quot;</span><span class="s2">,</span>
+                <span class="s1">]</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">v = bool(v)</span>
+            <span class="s2">return </span><span class="s1">TermValue(v</span><span class="s2">, </span><span class="s1">v</span><span class="s2">, </span><span class="s1">kind)</span>
+        <span class="s2">elif </span><span class="s1">isinstance(v</span><span class="s2">, </span><span class="s1">str):</span>
+            <span class="s5"># string quoting</span>
+            <span class="s2">return </span><span class="s1">TermValue(v</span><span class="s2">, </span><span class="s1">stringify(v)</span><span class="s2">, </span><span class="s3">&quot;string&quot;</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">f&quot;Cannot compare </span><span class="s2">{</span><span class="s1">v</span><span class="s2">} </span><span class="s3">of type </span><span class="s2">{</span><span class="s1">type(v)</span><span class="s2">} </span><span class="s3">to </span><span class="s2">{</span><span class="s1">kind</span><span class="s2">} </span><span class="s3">column&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">convert_values(self):</span>
+        <span class="s2">pass</span>
+
+
+<span class="s2">class </span><span class="s1">FilterBinOp(BinOp):</span>
+    <span class="s1">filter: tuple[Any</span><span class="s2">, </span><span class="s1">Any</span><span class="s2">, </span><span class="s1">Index] | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self) -&gt; str:</span>
+        <span class="s2">if </span><span class="s1">self.filter </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s3">&quot;Filter: Not Initialized&quot;</span>
+        <span class="s2">return </span><span class="s1">pprint_thing(</span><span class="s3">f&quot;[Filter : [</span><span class="s2">{</span><span class="s1">self.filter[</span><span class="s4">0</span><span class="s1">]</span><span class="s2">}</span><span class="s3">] -&gt; [</span><span class="s2">{</span><span class="s1">self.filter[</span><span class="s4">1</span><span class="s1">]</span><span class="s2">}</span><span class="s3">]&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">invert(self):</span>
+        <span class="s0">&quot;&quot;&quot;invert the filter&quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self.filter </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self.filter = (</span>
+                <span class="s1">self.filter[</span><span class="s4">0</span><span class="s1">]</span><span class="s2">,</span>
+                <span class="s1">self.generate_filter_op(invert=</span><span class="s2">True</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">self.filter[</span><span class="s4">2</span><span class="s1">]</span><span class="s2">,</span>
+            <span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">self</span>
+
+    <span class="s2">def </span><span class="s1">format(self):</span>
+        <span class="s0">&quot;&quot;&quot;return the actual filter format&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">[self.filter]</span>
+
+    <span class="s2">def </span><span class="s1">evaluate(self):</span>
+
+        <span class="s2">if not </span><span class="s1">self.is_valid:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">f&quot;query term is not valid [</span><span class="s2">{</span><span class="s1">self</span><span class="s2">}</span><span class="s3">]&quot;</span><span class="s1">)</span>
+
+        <span class="s1">rhs = self.conform(self.rhs)</span>
+        <span class="s1">values = list(rhs)</span>
+
+        <span class="s2">if </span><span class="s1">self.is_in_table:</span>
+
+            <span class="s5"># if too many values to create the expression, use a filter instead</span>
+            <span class="s2">if </span><span class="s1">self.op </span><span class="s2">in </span><span class="s1">[</span><span class="s3">&quot;==&quot;</span><span class="s2">, </span><span class="s3">&quot;!=&quot;</span><span class="s1">] </span><span class="s2">and </span><span class="s1">len(values) &gt; self._max_selectors:</span>
+
+                <span class="s1">filter_op = self.generate_filter_op()</span>
+                <span class="s1">self.filter = (self.lhs</span><span class="s2">, </span><span class="s1">filter_op</span><span class="s2">, </span><span class="s1">Index(values))</span>
+
+                <span class="s2">return </span><span class="s1">self</span>
+            <span class="s2">return None</span>
+
+        <span class="s5"># equality conditions</span>
+        <span class="s2">if </span><span class="s1">self.op </span><span class="s2">in </span><span class="s1">[</span><span class="s3">&quot;==&quot;</span><span class="s2">, </span><span class="s3">&quot;!=&quot;</span><span class="s1">]:</span>
+
+            <span class="s1">filter_op = self.generate_filter_op()</span>
+            <span class="s1">self.filter = (self.lhs</span><span class="s2">, </span><span class="s1">filter_op</span><span class="s2">, </span><span class="s1">Index(values))</span>
+
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span>
+                <span class="s3">f&quot;passing a filterable condition to a non-table indexer [</span><span class="s2">{</span><span class="s1">self</span><span class="s2">}</span><span class="s3">]&quot;</span>
+            <span class="s1">)</span>
+
+        <span class="s2">return </span><span class="s1">self</span>
+
+    <span class="s2">def </span><span class="s1">generate_filter_op(self</span><span class="s2">, </span><span class="s1">invert: bool = </span><span class="s2">False</span><span class="s1">):</span>
+        <span class="s2">if </span><span class="s1">(self.op == </span><span class="s3">&quot;!=&quot; </span><span class="s2">and not </span><span class="s1">invert) </span><span class="s2">or </span><span class="s1">(self.op == </span><span class="s3">&quot;==&quot; </span><span class="s2">and </span><span class="s1">invert):</span>
+            <span class="s2">return lambda </span><span class="s1">axis</span><span class="s2">, </span><span class="s1">vals: ~axis.isin(vals)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return lambda </span><span class="s1">axis</span><span class="s2">, </span><span class="s1">vals: axis.isin(vals)</span>
+
+
+<span class="s2">class </span><span class="s1">JointFilterBinOp(FilterBinOp):</span>
+    <span class="s2">def </span><span class="s1">format(self):</span>
+        <span class="s2">raise </span><span class="s1">NotImplementedError(</span><span class="s3">&quot;unable to collapse Joint Filters&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">evaluate(self):</span>
+        <span class="s2">return </span><span class="s1">self</span>
+
+
+<span class="s2">class </span><span class="s1">ConditionBinOp(BinOp):</span>
+    <span class="s2">def </span><span class="s1">__repr__(self) -&gt; str:</span>
+        <span class="s2">return </span><span class="s1">pprint_thing(</span><span class="s3">f&quot;[Condition : [</span><span class="s2">{</span><span class="s1">self.condition</span><span class="s2">}</span><span class="s3">]]&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">invert(self):</span>
+        <span class="s0">&quot;&quot;&quot;invert the condition&quot;&quot;&quot;</span>
+        <span class="s5"># if self.condition is not None:</span>
+        <span class="s5">#    self.condition = &quot;~(%s)&quot; % self.condition</span>
+        <span class="s5"># return self</span>
+        <span class="s2">raise </span><span class="s1">NotImplementedError(</span>
+            <span class="s3">&quot;cannot use an invert condition when passing to numexpr&quot;</span>
+        <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">format(self):</span>
+        <span class="s0">&quot;&quot;&quot;return the actual ne format&quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">self.condition</span>
+
+    <span class="s2">def </span><span class="s1">evaluate(self):</span>
+
+        <span class="s2">if not </span><span class="s1">self.is_valid:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">f&quot;query term is not valid [</span><span class="s2">{</span><span class="s1">self</span><span class="s2">}</span><span class="s3">]&quot;</span><span class="s1">)</span>
+
+        <span class="s5"># convert values if we are in the table</span>
+        <span class="s2">if not </span><span class="s1">self.is_in_table:</span>
+            <span class="s2">return None</span>
+
+        <span class="s1">rhs = self.conform(self.rhs)</span>
+        <span class="s1">values = [self.convert_value(v) </span><span class="s2">for </span><span class="s1">v </span><span class="s2">in </span><span class="s1">rhs]</span>
+
+        <span class="s5"># equality conditions</span>
+        <span class="s2">if </span><span class="s1">self.op </span><span class="s2">in </span><span class="s1">[</span><span class="s3">&quot;==&quot;</span><span class="s2">, </span><span class="s3">&quot;!=&quot;</span><span class="s1">]:</span>
+
+            <span class="s5"># too many values to create the expression?</span>
+            <span class="s2">if </span><span class="s1">len(values) &lt;= self._max_selectors:</span>
+                <span class="s1">vs = [self.generate(v) </span><span class="s2">for </span><span class="s1">v </span><span class="s2">in </span><span class="s1">values]</span>
+                <span class="s1">self.condition = </span><span class="s3">f&quot;(</span><span class="s2">{</span><span class="s3">' | '</span><span class="s1">.join(vs)</span><span class="s2">}</span><span class="s3">)&quot;</span>
+
+            <span class="s5"># use a filter after reading</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">return None</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.condition = self.generate(values[</span><span class="s4">0</span><span class="s1">])</span>
+
+        <span class="s2">return </span><span class="s1">self</span>
+
+
+<span class="s2">class </span><span class="s1">JointConditionBinOp(ConditionBinOp):</span>
+    <span class="s2">def </span><span class="s1">evaluate(self):</span>
+        <span class="s1">self.condition = </span><span class="s3">f&quot;(</span><span class="s2">{</span><span class="s1">self.lhs.condition</span><span class="s2">} {</span><span class="s1">self.op</span><span class="s2">} {</span><span class="s1">self.rhs.condition</span><span class="s2">}</span><span class="s3">)&quot;</span>
+        <span class="s2">return </span><span class="s1">self</span>
+
+
+<span class="s2">class </span><span class="s1">UnaryOp(ops.UnaryOp):</span>
+    <span class="s2">def </span><span class="s1">prune(self</span><span class="s2">, </span><span class="s1">klass):</span>
+
+        <span class="s2">if </span><span class="s1">self.op != </span><span class="s3">&quot;~&quot;</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">NotImplementedError(</span><span class="s3">&quot;UnaryOp only support invert type ops&quot;</span><span class="s1">)</span>
+
+        <span class="s1">operand = self.operand</span>
+        <span class="s1">operand = operand.prune(klass)</span>
+
+        <span class="s2">if </span><span class="s1">operand </span><span class="s2">is not None and </span><span class="s1">(</span>
+            <span class="s1">issubclass(klass</span><span class="s2">, </span><span class="s1">ConditionBinOp)</span>
+            <span class="s2">and </span><span class="s1">operand.condition </span><span class="s2">is not None</span>
+            <span class="s2">or not </span><span class="s1">issubclass(klass</span><span class="s2">, </span><span class="s1">ConditionBinOp)</span>
+            <span class="s2">and </span><span class="s1">issubclass(klass</span><span class="s2">, </span><span class="s1">FilterBinOp)</span>
+            <span class="s2">and </span><span class="s1">operand.filter </span><span class="s2">is not None</span>
+        <span class="s1">):</span>
+            <span class="s2">return </span><span class="s1">operand.invert()</span>
+        <span class="s2">return None</span>
+
+
+<span class="s2">class </span><span class="s1">PyTablesExprVisitor(BaseExprVisitor):</span>
+    <span class="s1">const_type = Constant</span>
+    <span class="s1">term_type = Term</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">env</span><span class="s2">, </span><span class="s1">engine</span><span class="s2">, </span><span class="s1">parser</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">super().__init__(env</span><span class="s2">, </span><span class="s1">engine</span><span class="s2">, </span><span class="s1">parser)</span>
+        <span class="s2">for </span><span class="s1">bin_op </span><span class="s2">in </span><span class="s1">self.binary_ops:</span>
+            <span class="s1">bin_node = self.binary_op_nodes_map[bin_op]</span>
+            <span class="s1">setattr(</span>
+                <span class="s1">self</span><span class="s2">,</span>
+                <span class="s3">f&quot;visit_</span><span class="s2">{</span><span class="s1">bin_node</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s2">,</span>
+                <span class="s2">lambda </span><span class="s1">node</span><span class="s2">, </span><span class="s1">bin_op=bin_op: partial(BinOp</span><span class="s2">, </span><span class="s1">bin_op</span><span class="s2">, </span><span class="s1">**kwargs)</span><span class="s2">,</span>
+            <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">visit_UnaryOp(self</span><span class="s2">, </span><span class="s1">node</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+        <span class="s2">if </span><span class="s1">isinstance(node.op</span><span class="s2">, </span><span class="s1">(ast.Not</span><span class="s2">, </span><span class="s1">ast.Invert)):</span>
+            <span class="s2">return </span><span class="s1">UnaryOp(</span><span class="s3">&quot;~&quot;</span><span class="s2">, </span><span class="s1">self.visit(node.operand))</span>
+        <span class="s2">elif </span><span class="s1">isinstance(node.op</span><span class="s2">, </span><span class="s1">ast.USub):</span>
+            <span class="s2">return </span><span class="s1">self.const_type(-self.visit(node.operand).value</span><span class="s2">, </span><span class="s1">self.env)</span>
+        <span class="s2">elif </span><span class="s1">isinstance(node.op</span><span class="s2">, </span><span class="s1">ast.UAdd):</span>
+            <span class="s2">raise </span><span class="s1">NotImplementedError(</span><span class="s3">&quot;Unary addition not supported&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">visit_Index(self</span><span class="s2">, </span><span class="s1">node</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+        <span class="s2">return </span><span class="s1">self.visit(node.value).value</span>
+
+    <span class="s2">def </span><span class="s1">visit_Assign(self</span><span class="s2">, </span><span class="s1">node</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">cmpr = ast.Compare(</span>
+            <span class="s1">ops=[ast.Eq()]</span><span class="s2">, </span><span class="s1">left=node.targets[</span><span class="s4">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">comparators=[node.value]</span>
+        <span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">self.visit(cmpr)</span>
+
+    <span class="s2">def </span><span class="s1">visit_Subscript(self</span><span class="s2">, </span><span class="s1">node</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+        <span class="s5"># only allow simple subscripts</span>
+
+        <span class="s1">value = self.visit(node.value)</span>
+        <span class="s1">slobj = self.visit(node.slice)</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">value = value.value</span>
+        <span class="s2">except </span><span class="s1">AttributeError:</span>
+            <span class="s2">pass</span>
+
+        <span class="s2">if </span><span class="s1">isinstance(slobj</span><span class="s2">, </span><span class="s1">Term):</span>
+            <span class="s5"># In py39 np.ndarray lookups with Term containing int raise</span>
+            <span class="s1">slobj = slobj.value</span>
+
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">self.const_type(value[slobj]</span><span class="s2">, </span><span class="s1">self.env)</span>
+        <span class="s2">except </span><span class="s1">TypeError </span><span class="s2">as </span><span class="s1">err:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span>
+                <span class="s3">f&quot;cannot subscript </span><span class="s2">{</span><span class="s1">repr(value)</span><span class="s2">} </span><span class="s3">with </span><span class="s2">{</span><span class="s1">repr(slobj)</span><span class="s2">}</span><span class="s3">&quot;</span>
+            <span class="s1">) </span><span class="s2">from </span><span class="s1">err</span>
+
+    <span class="s2">def </span><span class="s1">visit_Attribute(self</span><span class="s2">, </span><span class="s1">node</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">attr = node.attr</span>
+        <span class="s1">value = node.value</span>
+
+        <span class="s1">ctx = type(node.ctx)</span>
+        <span class="s2">if </span><span class="s1">ctx == ast.Load:</span>
+            <span class="s5"># resolve the value</span>
+            <span class="s1">resolved = self.visit(value)</span>
+
+            <span class="s5"># try to get the value to see if we are another expression</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">resolved = resolved.value</span>
+            <span class="s2">except </span><span class="s1">(AttributeError):</span>
+                <span class="s2">pass</span>
+
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">self.term_type(getattr(resolved</span><span class="s2">, </span><span class="s1">attr)</span><span class="s2">, </span><span class="s1">self.env)</span>
+            <span class="s2">except </span><span class="s1">AttributeError:</span>
+
+                <span class="s5"># something like datetime.datetime where scope is overridden</span>
+                <span class="s2">if </span><span class="s1">isinstance(value</span><span class="s2">, </span><span class="s1">ast.Name) </span><span class="s2">and </span><span class="s1">value.id == attr:</span>
+                    <span class="s2">return </span><span class="s1">resolved</span>
+
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">f&quot;Invalid Attribute context </span><span class="s2">{</span><span class="s1">ctx.__name__</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">translate_In(self</span><span class="s2">, </span><span class="s1">op):</span>
+        <span class="s2">return </span><span class="s1">ast.Eq() </span><span class="s2">if </span><span class="s1">isinstance(op</span><span class="s2">, </span><span class="s1">ast.In) </span><span class="s2">else </span><span class="s1">op</span>
+
+    <span class="s2">def </span><span class="s1">_rewrite_membership_op(self</span><span class="s2">, </span><span class="s1">node</span><span class="s2">, </span><span class="s1">left</span><span class="s2">, </span><span class="s1">right):</span>
+        <span class="s2">return </span><span class="s1">self.visit(node.op)</span><span class="s2">, </span><span class="s1">node.op</span><span class="s2">, </span><span class="s1">left</span><span class="s2">, </span><span class="s1">right</span>
+
+
+<span class="s2">def </span><span class="s1">_validate_where(w):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Validate that the where statement is of the right type. 
+ 
+    The type may either be String, Expr, or list-like of Exprs. 
+ 
+    Parameters 
+    ---------- 
+    w : String term expression, Expr, or list-like of Exprs. 
+ 
+    Returns 
+    ------- 
+    where : The original where clause if the check was successful. 
+ 
+    Raises 
+    ------ 
+    TypeError : An invalid data type was passed in for w (e.g. dict). 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if not </span><span class="s1">(isinstance(w</span><span class="s2">, </span><span class="s1">(PyTablesExpr</span><span class="s2">, </span><span class="s1">str)) </span><span class="s2">or </span><span class="s1">is_list_like(w)):</span>
+        <span class="s2">raise </span><span class="s1">TypeError(</span>
+            <span class="s3">&quot;where must be passed as a string, PyTablesExpr, &quot;</span>
+            <span class="s3">&quot;or list-like of PyTablesExpr&quot;</span>
+        <span class="s1">)</span>
+
+    <span class="s2">return </span><span class="s1">w</span>
+
+
+<span class="s2">class </span><span class="s1">PyTablesExpr(expr.Expr):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Hold a pytables-like expression, comprised of possibly multiple 'terms'. 
+ 
+    Parameters 
+    ---------- 
+    where : string term expression, PyTablesExpr, or list-like of PyTablesExprs 
+    queryables : a &quot;kinds&quot; map (dict of column name -&gt; kind), or None if column 
+        is non-indexable 
+    encoding : an encoding that will encode the query terms 
+ 
+    Returns 
+    ------- 
+    a PyTablesExpr object 
+ 
+    Examples 
+    -------- 
+    'index&gt;=date' 
+    &quot;columns=['A', 'D']&quot; 
+    'columns=A' 
+    'columns==A' 
+    &quot;~(columns=['A','B'])&quot; 
+    'index&gt;df.index[3] &amp; string=&quot;bar&quot;' 
+    '(index&gt;df.index[3] &amp; index&lt;=df.index[6]) | string=&quot;bar&quot;' 
+    &quot;ts&gt;=Timestamp('2012-02-01')&quot; 
+    &quot;major_axis&gt;=20130101&quot; 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">_visitor: PyTablesExprVisitor | </span><span class="s2">None</span>
+    <span class="s1">env: PyTablesScope</span>
+    <span class="s1">expr: str</span>
+
+    <span class="s2">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">where</span><span class="s2">,</span>
+        <span class="s1">queryables: dict[str</span><span class="s2">, </span><span class="s1">Any] | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+        <span class="s1">encoding=</span><span class="s2">None,</span>
+        <span class="s1">scope_level: int = </span><span class="s4">0</span><span class="s2">,</span>
+    <span class="s1">):</span>
+
+        <span class="s1">where = _validate_where(where)</span>
+
+        <span class="s1">self.encoding = encoding</span>
+        <span class="s1">self.condition = </span><span class="s2">None</span>
+        <span class="s1">self.filter = </span><span class="s2">None</span>
+        <span class="s1">self.terms = </span><span class="s2">None</span>
+        <span class="s1">self._visitor = </span><span class="s2">None</span>
+
+        <span class="s5"># capture the environment if needed</span>
+        <span class="s1">local_dict: DeepChainMap[Any</span><span class="s2">, </span><span class="s1">Any] = DeepChainMap()</span>
+
+        <span class="s2">if </span><span class="s1">isinstance(where</span><span class="s2">, </span><span class="s1">PyTablesExpr):</span>
+            <span class="s1">local_dict = where.env.scope</span>
+            <span class="s1">_where = where.expr</span>
+
+        <span class="s2">elif </span><span class="s1">is_list_like(where):</span>
+            <span class="s1">where = list(where)</span>
+            <span class="s2">for </span><span class="s1">idx</span><span class="s2">, </span><span class="s1">w </span><span class="s2">in </span><span class="s1">enumerate(where):</span>
+                <span class="s2">if </span><span class="s1">isinstance(w</span><span class="s2">, </span><span class="s1">PyTablesExpr):</span>
+                    <span class="s1">local_dict = w.env.scope</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">w = _validate_where(w)</span>
+                    <span class="s1">where[idx] = w</span>
+            <span class="s1">_where = </span><span class="s3">&quot; &amp; &quot;</span><span class="s1">.join([</span><span class="s3">f&quot;(</span><span class="s2">{</span><span class="s1">w</span><span class="s2">}</span><span class="s3">)&quot; </span><span class="s2">for </span><span class="s1">w </span><span class="s2">in </span><span class="s1">com.flatten(where)])</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s5"># _validate_where ensures we otherwise have a string</span>
+            <span class="s1">_where = where</span>
+
+        <span class="s1">self.expr = _where</span>
+        <span class="s1">self.env = PyTablesScope(scope_level + </span><span class="s4">1</span><span class="s2">, </span><span class="s1">local_dict=local_dict)</span>
+
+        <span class="s2">if </span><span class="s1">queryables </span><span class="s2">is not None and </span><span class="s1">isinstance(self.expr</span><span class="s2">, </span><span class="s1">str):</span>
+            <span class="s1">self.env.queryables.update(queryables)</span>
+            <span class="s1">self._visitor = PyTablesExprVisitor(</span>
+                <span class="s1">self.env</span><span class="s2">,</span>
+                <span class="s1">queryables=queryables</span><span class="s2">,</span>
+                <span class="s1">parser=</span><span class="s3">&quot;pytables&quot;</span><span class="s2">,</span>
+                <span class="s1">engine=</span><span class="s3">&quot;pytables&quot;</span><span class="s2">,</span>
+                <span class="s1">encoding=encoding</span><span class="s2">,</span>
+            <span class="s1">)</span>
+            <span class="s1">self.terms = self.parse()</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self) -&gt; str:</span>
+        <span class="s2">if </span><span class="s1">self.terms </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">pprint_thing(self.terms)</span>
+        <span class="s2">return </span><span class="s1">pprint_thing(self.expr)</span>
+
+    <span class="s2">def </span><span class="s1">evaluate(self):</span>
+        <span class="s0">&quot;&quot;&quot;create and return the numexpr condition and filter&quot;&quot;&quot;</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">self.condition = self.terms.prune(ConditionBinOp)</span>
+        <span class="s2">except </span><span class="s1">AttributeError </span><span class="s2">as </span><span class="s1">err:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span>
+                <span class="s3">f&quot;cannot process expression [</span><span class="s2">{</span><span class="s1">self.expr</span><span class="s2">}</span><span class="s3">], [</span><span class="s2">{</span><span class="s1">self</span><span class="s2">}</span><span class="s3">] &quot;</span>
+                <span class="s3">&quot;is not a valid condition&quot;</span>
+            <span class="s1">) </span><span class="s2">from </span><span class="s1">err</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">self.filter = self.terms.prune(FilterBinOp)</span>
+        <span class="s2">except </span><span class="s1">AttributeError </span><span class="s2">as </span><span class="s1">err:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span>
+                <span class="s3">f&quot;cannot process expression [</span><span class="s2">{</span><span class="s1">self.expr</span><span class="s2">}</span><span class="s3">], [</span><span class="s2">{</span><span class="s1">self</span><span class="s2">}</span><span class="s3">] &quot;</span>
+                <span class="s3">&quot;is not a valid filter&quot;</span>
+            <span class="s1">) </span><span class="s2">from </span><span class="s1">err</span>
+
+        <span class="s2">return </span><span class="s1">self.condition</span><span class="s2">, </span><span class="s1">self.filter</span>
+
+
+<span class="s2">class </span><span class="s1">TermValue:</span>
+    <span class="s0">&quot;&quot;&quot;hold a term value the we use to construct a condition/filter&quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">value</span><span class="s2">, </span><span class="s1">converted</span><span class="s2">, </span><span class="s1">kind: str):</span>
+        <span class="s2">assert </span><span class="s1">isinstance(kind</span><span class="s2">, </span><span class="s1">str)</span><span class="s2">, </span><span class="s1">kind</span>
+        <span class="s1">self.value = value</span>
+        <span class="s1">self.converted = converted</span>
+        <span class="s1">self.kind = kind</span>
+
+    <span class="s2">def </span><span class="s1">tostring(self</span><span class="s2">, </span><span class="s1">encoding) -&gt; str:</span>
+        <span class="s0">&quot;&quot;&quot;quote the string if not encoded else encode and return&quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self.kind == </span><span class="s3">&quot;string&quot;</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">encoding </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s1">str(self.converted)</span>
+            <span class="s2">return </span><span class="s3">f'&quot;</span><span class="s2">{</span><span class="s1">self.converted</span><span class="s2">}</span><span class="s3">&quot;'</span>
+        <span class="s2">elif </span><span class="s1">self.kind == </span><span class="s3">&quot;float&quot;</span><span class="s1">:</span>
+            <span class="s5"># python 2 str(float) is not always</span>
+            <span class="s5"># round-trippable so use repr()</span>
+            <span class="s2">return </span><span class="s1">repr(self.converted)</span>
+        <span class="s2">return </span><span class="s1">str(self.converted)</span>
+
+
+<span class="s2">def </span><span class="s1">maybe_expression(s) -&gt; bool:</span>
+    <span class="s0">&quot;&quot;&quot;loose checking if s is a pytables-acceptable expression&quot;&quot;&quot;</span>
+    <span class="s2">if not </span><span class="s1">isinstance(s</span><span class="s2">, </span><span class="s1">str):</span>
+        <span class="s2">return False</span>
+    <span class="s1">ops = PyTablesExprVisitor.binary_ops + PyTablesExprVisitor.unary_ops + (</span><span class="s3">&quot;=&quot;</span><span class="s2">,</span><span class="s1">)</span>
+
+    <span class="s5"># make sure we have an op at least</span>
+    <span class="s2">return </span><span class="s1">any(op </span><span class="s2">in </span><span class="s1">s </span><span class="s2">for </span><span class="s1">op </span><span class="s2">in </span><span class="s1">ops)</span>
+</pre>
+</body>
+</html>

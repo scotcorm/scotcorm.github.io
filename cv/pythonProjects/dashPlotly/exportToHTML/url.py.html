@@ -1,0 +1,455 @@
+<html>
+<head>
+<title>url.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6a8759;}
+.s3 { color: #808080;}
+.s4 { color: #6897bb;}
+.s5 { color: #629755; font-style: italic;}
+.s6 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+url.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">absolute_import</span>
+
+<span class="s0">import </span><span class="s1">re</span>
+<span class="s0">from </span><span class="s1">collections </span><span class="s0">import </span><span class="s1">namedtuple</span>
+
+<span class="s0">from </span><span class="s1">..exceptions </span><span class="s0">import </span><span class="s1">LocationParseError</span>
+<span class="s0">from </span><span class="s1">..packages </span><span class="s0">import </span><span class="s1">six</span>
+
+<span class="s1">url_attrs = [</span><span class="s2">&quot;scheme&quot;</span><span class="s0">, </span><span class="s2">&quot;auth&quot;</span><span class="s0">, </span><span class="s2">&quot;host&quot;</span><span class="s0">, </span><span class="s2">&quot;port&quot;</span><span class="s0">, </span><span class="s2">&quot;path&quot;</span><span class="s0">, </span><span class="s2">&quot;query&quot;</span><span class="s0">, </span><span class="s2">&quot;fragment&quot;</span><span class="s1">]</span>
+
+<span class="s3"># We only want to normalize urls with an HTTP(S) scheme.</span>
+<span class="s3"># urllib3 infers URLs without a scheme (None) to be http.</span>
+<span class="s1">NORMALIZABLE_SCHEMES = (</span><span class="s2">&quot;http&quot;</span><span class="s0">, </span><span class="s2">&quot;https&quot;</span><span class="s0">, None</span><span class="s1">)</span>
+
+<span class="s3"># Almost all of these patterns were derived from the</span>
+<span class="s3"># 'rfc3986' module: https://github.com/python-hyper/rfc3986</span>
+<span class="s1">PERCENT_RE = re.compile(</span><span class="s2">r&quot;%[a-fA-F0-9]{2}&quot;</span><span class="s1">)</span>
+<span class="s1">SCHEME_RE = re.compile(</span><span class="s2">r&quot;^(?:[a-zA-Z][a-zA-Z0-9+-]*:|/)&quot;</span><span class="s1">)</span>
+<span class="s1">URI_RE = re.compile(</span>
+    <span class="s2">r&quot;^(?:([a-zA-Z][a-zA-Z0-9+.-]*):)?&quot;</span>
+    <span class="s2">r&quot;(?://([^\\/?#]*))?&quot;</span>
+    <span class="s2">r&quot;([^?#]*)&quot;</span>
+    <span class="s2">r&quot;(?:\?([^#]*))?&quot;</span>
+    <span class="s2">r&quot;(?:#(.*))?$&quot;</span><span class="s0">,</span>
+    <span class="s1">re.UNICODE | re.DOTALL</span><span class="s0">,</span>
+<span class="s1">)</span>
+
+<span class="s1">IPV4_PAT = </span><span class="s2">r&quot;(?:[0-9]{1,3}\.){3}[0-9]{1,3}&quot;</span>
+<span class="s1">HEX_PAT = </span><span class="s2">&quot;[0-9A-Fa-f]{1,4}&quot;</span>
+<span class="s1">LS32_PAT = </span><span class="s2">&quot;(?:{hex}:{hex}|{ipv4})&quot;</span><span class="s1">.format(hex=HEX_PAT</span><span class="s0">, </span><span class="s1">ipv4=IPV4_PAT)</span>
+<span class="s1">_subs = {</span><span class="s2">&quot;hex&quot;</span><span class="s1">: HEX_PAT</span><span class="s0">, </span><span class="s2">&quot;ls32&quot;</span><span class="s1">: LS32_PAT}</span>
+<span class="s1">_variations = [</span>
+    <span class="s3">#                            6( h16 &quot;:&quot; ) ls32</span>
+    <span class="s2">&quot;(?:%(hex)s:){6}%(ls32)s&quot;</span><span class="s0">,</span>
+    <span class="s3">#                       &quot;::&quot; 5( h16 &quot;:&quot; ) ls32</span>
+    <span class="s2">&quot;::(?:%(hex)s:){5}%(ls32)s&quot;</span><span class="s0">,</span>
+    <span class="s3"># [               h16 ] &quot;::&quot; 4( h16 &quot;:&quot; ) ls32</span>
+    <span class="s2">&quot;(?:%(hex)s)?::(?:%(hex)s:){4}%(ls32)s&quot;</span><span class="s0">,</span>
+    <span class="s3"># [ *1( h16 &quot;:&quot; ) h16 ] &quot;::&quot; 3( h16 &quot;:&quot; ) ls32</span>
+    <span class="s2">&quot;(?:(?:%(hex)s:)?%(hex)s)?::(?:%(hex)s:){3}%(ls32)s&quot;</span><span class="s0">,</span>
+    <span class="s3"># [ *2( h16 &quot;:&quot; ) h16 ] &quot;::&quot; 2( h16 &quot;:&quot; ) ls32</span>
+    <span class="s2">&quot;(?:(?:%(hex)s:){0,2}%(hex)s)?::(?:%(hex)s:){2}%(ls32)s&quot;</span><span class="s0">,</span>
+    <span class="s3"># [ *3( h16 &quot;:&quot; ) h16 ] &quot;::&quot;    h16 &quot;:&quot;   ls32</span>
+    <span class="s2">&quot;(?:(?:%(hex)s:){0,3}%(hex)s)?::%(hex)s:%(ls32)s&quot;</span><span class="s0">,</span>
+    <span class="s3"># [ *4( h16 &quot;:&quot; ) h16 ] &quot;::&quot;              ls32</span>
+    <span class="s2">&quot;(?:(?:%(hex)s:){0,4}%(hex)s)?::%(ls32)s&quot;</span><span class="s0">,</span>
+    <span class="s3"># [ *5( h16 &quot;:&quot; ) h16 ] &quot;::&quot;              h16</span>
+    <span class="s2">&quot;(?:(?:%(hex)s:){0,5}%(hex)s)?::%(hex)s&quot;</span><span class="s0">,</span>
+    <span class="s3"># [ *6( h16 &quot;:&quot; ) h16 ] &quot;::&quot;</span>
+    <span class="s2">&quot;(?:(?:%(hex)s:){0,6}%(hex)s)?::&quot;</span><span class="s0">,</span>
+<span class="s1">]</span>
+
+<span class="s1">UNRESERVED_PAT = </span><span class="s2">r&quot;ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._!\-~&quot;</span>
+<span class="s1">IPV6_PAT = </span><span class="s2">&quot;(?:&quot; </span><span class="s1">+ </span><span class="s2">&quot;|&quot;</span><span class="s1">.join([x % _subs </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">_variations]) + </span><span class="s2">&quot;)&quot;</span>
+<span class="s1">ZONE_ID_PAT = </span><span class="s2">&quot;(?:%25|%)(?:[&quot; </span><span class="s1">+ UNRESERVED_PAT + </span><span class="s2">&quot;]|%[a-fA-F0-9]{2})+&quot;</span>
+<span class="s1">IPV6_ADDRZ_PAT = </span><span class="s2">r&quot;\[&quot; </span><span class="s1">+ IPV6_PAT + </span><span class="s2">r&quot;(?:&quot; </span><span class="s1">+ ZONE_ID_PAT + </span><span class="s2">r&quot;)?\]&quot;</span>
+<span class="s1">REG_NAME_PAT = </span><span class="s2">r&quot;(?:[^\[\]%:/?#]|%[a-fA-F0-9]{2})*&quot;</span>
+<span class="s1">TARGET_RE = re.compile(</span><span class="s2">r&quot;^(/[^?#]*)(?:\?([^#]*))?(?:#.*)?$&quot;</span><span class="s1">)</span>
+
+<span class="s1">IPV4_RE = re.compile(</span><span class="s2">&quot;^&quot; </span><span class="s1">+ IPV4_PAT + </span><span class="s2">&quot;$&quot;</span><span class="s1">)</span>
+<span class="s1">IPV6_RE = re.compile(</span><span class="s2">&quot;^&quot; </span><span class="s1">+ IPV6_PAT + </span><span class="s2">&quot;$&quot;</span><span class="s1">)</span>
+<span class="s1">IPV6_ADDRZ_RE = re.compile(</span><span class="s2">&quot;^&quot; </span><span class="s1">+ IPV6_ADDRZ_PAT + </span><span class="s2">&quot;$&quot;</span><span class="s1">)</span>
+<span class="s1">BRACELESS_IPV6_ADDRZ_RE = re.compile(</span><span class="s2">&quot;^&quot; </span><span class="s1">+ IPV6_ADDRZ_PAT[</span><span class="s4">2</span><span class="s1">:-</span><span class="s4">2</span><span class="s1">] + </span><span class="s2">&quot;$&quot;</span><span class="s1">)</span>
+<span class="s1">ZONE_ID_RE = re.compile(</span><span class="s2">&quot;(&quot; </span><span class="s1">+ ZONE_ID_PAT + </span><span class="s2">r&quot;)\]$&quot;</span><span class="s1">)</span>
+
+<span class="s1">_HOST_PORT_PAT = (</span><span class="s2">&quot;^(%s|%s|%s)(?::([0-9]{0,5}))?$&quot;</span><span class="s1">) % (</span>
+    <span class="s1">REG_NAME_PAT</span><span class="s0">,</span>
+    <span class="s1">IPV4_PAT</span><span class="s0">,</span>
+    <span class="s1">IPV6_ADDRZ_PAT</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s1">_HOST_PORT_RE = re.compile(_HOST_PORT_PAT</span><span class="s0">, </span><span class="s1">re.UNICODE | re.DOTALL)</span>
+
+<span class="s1">UNRESERVED_CHARS = set(</span>
+    <span class="s2">&quot;ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-~&quot;</span>
+<span class="s1">)</span>
+<span class="s1">SUB_DELIM_CHARS = set(</span><span class="s2">&quot;!$&amp;'()*+,;=&quot;</span><span class="s1">)</span>
+<span class="s1">USERINFO_CHARS = UNRESERVED_CHARS | SUB_DELIM_CHARS | {</span><span class="s2">&quot;:&quot;</span><span class="s1">}</span>
+<span class="s1">PATH_CHARS = USERINFO_CHARS | {</span><span class="s2">&quot;@&quot;</span><span class="s0">, </span><span class="s2">&quot;/&quot;</span><span class="s1">}</span>
+<span class="s1">QUERY_CHARS = FRAGMENT_CHARS = PATH_CHARS | {</span><span class="s2">&quot;?&quot;</span><span class="s1">}</span>
+
+
+<span class="s0">class </span><span class="s1">Url(namedtuple(</span><span class="s2">&quot;Url&quot;</span><span class="s0">, </span><span class="s1">url_attrs)):</span>
+    <span class="s5">&quot;&quot;&quot; 
+    Data structure for representing an HTTP URL. Used as a return value for 
+    :func:`parse_url`. Both the scheme and host are normalized as they are 
+    both case-insensitive according to RFC 3986. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">__slots__ = ()</span>
+
+    <span class="s0">def </span><span class="s1">__new__(</span>
+        <span class="s1">cls</span><span class="s0">,</span>
+        <span class="s1">scheme=</span><span class="s0">None,</span>
+        <span class="s1">auth=</span><span class="s0">None,</span>
+        <span class="s1">host=</span><span class="s0">None,</span>
+        <span class="s1">port=</span><span class="s0">None,</span>
+        <span class="s1">path=</span><span class="s0">None,</span>
+        <span class="s1">query=</span><span class="s0">None,</span>
+        <span class="s1">fragment=</span><span class="s0">None,</span>
+    <span class="s1">):</span>
+        <span class="s0">if </span><span class="s1">path </span><span class="s0">and not </span><span class="s1">path.startswith(</span><span class="s2">&quot;/&quot;</span><span class="s1">):</span>
+            <span class="s1">path = </span><span class="s2">&quot;/&quot; </span><span class="s1">+ path</span>
+        <span class="s0">if </span><span class="s1">scheme </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">scheme = scheme.lower()</span>
+        <span class="s0">return </span><span class="s1">super(Url</span><span class="s0">, </span><span class="s1">cls).__new__(</span>
+            <span class="s1">cls</span><span class="s0">, </span><span class="s1">scheme</span><span class="s0">, </span><span class="s1">auth</span><span class="s0">, </span><span class="s1">host</span><span class="s0">, </span><span class="s1">port</span><span class="s0">, </span><span class="s1">path</span><span class="s0">, </span><span class="s1">query</span><span class="s0">, </span><span class="s1">fragment</span>
+        <span class="s1">)</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">hostname(self):</span>
+        <span class="s5">&quot;&quot;&quot;For backwards-compatibility with urlparse. We're nice like that.&quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self.host</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">request_uri(self):</span>
+        <span class="s5">&quot;&quot;&quot;Absolute path including the query string.&quot;&quot;&quot;</span>
+        <span class="s1">uri = self.path </span><span class="s0">or </span><span class="s2">&quot;/&quot;</span>
+
+        <span class="s0">if </span><span class="s1">self.query </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">uri += </span><span class="s2">&quot;?&quot; </span><span class="s1">+ self.query</span>
+
+        <span class="s0">return </span><span class="s1">uri</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">netloc(self):</span>
+        <span class="s5">&quot;&quot;&quot;Network location including host and port&quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">self.port:</span>
+            <span class="s0">return </span><span class="s2">&quot;%s:%d&quot; </span><span class="s1">% (self.host</span><span class="s0">, </span><span class="s1">self.port)</span>
+        <span class="s0">return </span><span class="s1">self.host</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">url(self):</span>
+        <span class="s5">&quot;&quot;&quot; 
+        Convert self into a url 
+ 
+        This function should more or less round-trip with :func:`.parse_url`. The 
+        returned url may not be exactly the same as the url inputted to 
+        :func:`.parse_url`, but it should be equivalent by the RFC (e.g., urls 
+        with a blank port will have : removed). 
+ 
+        Example: :: 
+ 
+            &gt;&gt;&gt; U = parse_url('http://google.com/mail/') 
+            &gt;&gt;&gt; U.url 
+            'http://google.com/mail/' 
+            &gt;&gt;&gt; Url('http', 'username:password', 'host.com', 80, 
+            ... '/path', 'query', 'fragment').url 
+            'http://username:password@host.com:80/path?query#fragment' 
+        &quot;&quot;&quot;</span>
+        <span class="s1">scheme</span><span class="s0">, </span><span class="s1">auth</span><span class="s0">, </span><span class="s1">host</span><span class="s0">, </span><span class="s1">port</span><span class="s0">, </span><span class="s1">path</span><span class="s0">, </span><span class="s1">query</span><span class="s0">, </span><span class="s1">fragment = self</span>
+        <span class="s1">url = </span><span class="s2">u&quot;&quot;</span>
+
+        <span class="s3"># We use &quot;is not None&quot; we want things to happen with empty strings (or 0 port)</span>
+        <span class="s0">if </span><span class="s1">scheme </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">url += scheme + </span><span class="s2">u&quot;://&quot;</span>
+        <span class="s0">if </span><span class="s1">auth </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">url += auth + </span><span class="s2">u&quot;@&quot;</span>
+        <span class="s0">if </span><span class="s1">host </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">url += host</span>
+        <span class="s0">if </span><span class="s1">port </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">url += </span><span class="s2">u&quot;:&quot; </span><span class="s1">+ str(port)</span>
+        <span class="s0">if </span><span class="s1">path </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">url += path</span>
+        <span class="s0">if </span><span class="s1">query </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">url += </span><span class="s2">u&quot;?&quot; </span><span class="s1">+ query</span>
+        <span class="s0">if </span><span class="s1">fragment </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">url += </span><span class="s2">u&quot;#&quot; </span><span class="s1">+ fragment</span>
+
+        <span class="s0">return </span><span class="s1">url</span>
+
+    <span class="s0">def </span><span class="s1">__str__(self):</span>
+        <span class="s0">return </span><span class="s1">self.url</span>
+
+
+<span class="s0">def </span><span class="s1">split_first(s</span><span class="s0">, </span><span class="s1">delims):</span>
+    <span class="s5">&quot;&quot;&quot; 
+    .. deprecated:: 1.25 
+ 
+    Given a string and an iterable of delimiters, split on the first found 
+    delimiter. Return two split parts and the matched delimiter. 
+ 
+    If not found, then the first part is the full input string. 
+ 
+    Example:: 
+ 
+        &gt;&gt;&gt; split_first('foo/bar?baz', '?/=') 
+        ('foo', 'bar?baz', '/') 
+        &gt;&gt;&gt; split_first('foo/bar?baz', '123') 
+        ('foo/bar?baz', '', None) 
+ 
+    Scales linearly with number of delims. Not ideal for large number of delims. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">min_idx = </span><span class="s0">None</span>
+    <span class="s1">min_delim = </span><span class="s0">None</span>
+    <span class="s0">for </span><span class="s1">d </span><span class="s0">in </span><span class="s1">delims:</span>
+        <span class="s1">idx = s.find(d)</span>
+        <span class="s0">if </span><span class="s1">idx &lt; </span><span class="s4">0</span><span class="s1">:</span>
+            <span class="s0">continue</span>
+
+        <span class="s0">if </span><span class="s1">min_idx </span><span class="s0">is None or </span><span class="s1">idx &lt; min_idx:</span>
+            <span class="s1">min_idx = idx</span>
+            <span class="s1">min_delim = d</span>
+
+    <span class="s0">if </span><span class="s1">min_idx </span><span class="s0">is None or </span><span class="s1">min_idx &lt; </span><span class="s4">0</span><span class="s1">:</span>
+        <span class="s0">return </span><span class="s1">s</span><span class="s0">, </span><span class="s2">&quot;&quot;</span><span class="s0">, None</span>
+
+    <span class="s0">return </span><span class="s1">s[:min_idx]</span><span class="s0">, </span><span class="s1">s[min_idx + </span><span class="s4">1 </span><span class="s1">:]</span><span class="s0">, </span><span class="s1">min_delim</span>
+
+
+<span class="s0">def </span><span class="s1">_encode_invalid_chars(component</span><span class="s0">, </span><span class="s1">allowed_chars</span><span class="s0">, </span><span class="s1">encoding=</span><span class="s2">&quot;utf-8&quot;</span><span class="s1">):</span>
+    <span class="s5">&quot;&quot;&quot;Percent-encodes a URI component without reapplying 
+    onto an already percent-encoded component. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">component </span><span class="s0">is None</span><span class="s1">:</span>
+        <span class="s0">return </span><span class="s1">component</span>
+
+    <span class="s1">component = six.ensure_text(component)</span>
+
+    <span class="s3"># Normalize existing percent-encoded bytes.</span>
+    <span class="s3"># Try to see if the component we're encoding is already percent-encoded</span>
+    <span class="s3"># so we can skip all '%' characters but still encode all others.</span>
+    <span class="s1">component</span><span class="s0">, </span><span class="s1">percent_encodings = PERCENT_RE.subn(</span>
+        <span class="s0">lambda </span><span class="s1">match: match.group(</span><span class="s4">0</span><span class="s1">).upper()</span><span class="s0">, </span><span class="s1">component</span>
+    <span class="s1">)</span>
+
+    <span class="s1">uri_bytes = component.encode(</span><span class="s2">&quot;utf-8&quot;</span><span class="s0">, </span><span class="s2">&quot;surrogatepass&quot;</span><span class="s1">)</span>
+    <span class="s1">is_percent_encoded = percent_encodings == uri_bytes.count(</span><span class="s6">b&quot;%&quot;</span><span class="s1">)</span>
+    <span class="s1">encoded_component = bytearray()</span>
+
+    <span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">range(</span><span class="s4">0</span><span class="s0">, </span><span class="s1">len(uri_bytes)):</span>
+        <span class="s3"># Will return a single character bytestring on both Python 2 &amp; 3</span>
+        <span class="s1">byte = uri_bytes[i : i + </span><span class="s4">1</span><span class="s1">]</span>
+        <span class="s1">byte_ord = ord(byte)</span>
+        <span class="s0">if </span><span class="s1">(is_percent_encoded </span><span class="s0">and </span><span class="s1">byte == </span><span class="s6">b&quot;%&quot;</span><span class="s1">) </span><span class="s0">or </span><span class="s1">(</span>
+            <span class="s1">byte_ord &lt; </span><span class="s4">128 </span><span class="s0">and </span><span class="s1">byte.decode() </span><span class="s0">in </span><span class="s1">allowed_chars</span>
+        <span class="s1">):</span>
+            <span class="s1">encoded_component += byte</span>
+            <span class="s0">continue</span>
+        <span class="s1">encoded_component.extend(</span><span class="s6">b&quot;%&quot; </span><span class="s1">+ (hex(byte_ord)[</span><span class="s4">2</span><span class="s1">:].encode().zfill(</span><span class="s4">2</span><span class="s1">).upper()))</span>
+
+    <span class="s0">return </span><span class="s1">encoded_component.decode(encoding)</span>
+
+
+<span class="s0">def </span><span class="s1">_remove_path_dot_segments(path):</span>
+    <span class="s3"># See http://tools.ietf.org/html/rfc3986#section-5.2.4 for pseudo-code</span>
+    <span class="s1">segments = path.split(</span><span class="s2">&quot;/&quot;</span><span class="s1">)  </span><span class="s3"># Turn the path into a list of segments</span>
+    <span class="s1">output = []  </span><span class="s3"># Initialize the variable to use to store output</span>
+
+    <span class="s0">for </span><span class="s1">segment </span><span class="s0">in </span><span class="s1">segments:</span>
+        <span class="s3"># '.' is the current directory, so ignore it, it is superfluous</span>
+        <span class="s0">if </span><span class="s1">segment == </span><span class="s2">&quot;.&quot;</span><span class="s1">:</span>
+            <span class="s0">continue</span>
+        <span class="s3"># Anything other than '..', should be appended to the output</span>
+        <span class="s0">elif </span><span class="s1">segment != </span><span class="s2">&quot;..&quot;</span><span class="s1">:</span>
+            <span class="s1">output.append(segment)</span>
+        <span class="s3"># In this case segment == '..', if we can, we should pop the last</span>
+        <span class="s3"># element</span>
+        <span class="s0">elif </span><span class="s1">output:</span>
+            <span class="s1">output.pop()</span>
+
+    <span class="s3"># If the path starts with '/' and the output is empty or the first string</span>
+    <span class="s3"># is non-empty</span>
+    <span class="s0">if </span><span class="s1">path.startswith(</span><span class="s2">&quot;/&quot;</span><span class="s1">) </span><span class="s0">and </span><span class="s1">(</span><span class="s0">not </span><span class="s1">output </span><span class="s0">or </span><span class="s1">output[</span><span class="s4">0</span><span class="s1">]):</span>
+        <span class="s1">output.insert(</span><span class="s4">0</span><span class="s0">, </span><span class="s2">&quot;&quot;</span><span class="s1">)</span>
+
+    <span class="s3"># If the path starts with '/.' or '/..' ensure we add one more empty</span>
+    <span class="s3"># string to add a trailing '/'</span>
+    <span class="s0">if </span><span class="s1">path.endswith((</span><span class="s2">&quot;/.&quot;</span><span class="s0">, </span><span class="s2">&quot;/..&quot;</span><span class="s1">)):</span>
+        <span class="s1">output.append(</span><span class="s2">&quot;&quot;</span><span class="s1">)</span>
+
+    <span class="s0">return </span><span class="s2">&quot;/&quot;</span><span class="s1">.join(output)</span>
+
+
+<span class="s0">def </span><span class="s1">_normalize_host(host</span><span class="s0">, </span><span class="s1">scheme):</span>
+    <span class="s0">if </span><span class="s1">host:</span>
+        <span class="s0">if </span><span class="s1">isinstance(host</span><span class="s0">, </span><span class="s1">six.binary_type):</span>
+            <span class="s1">host = six.ensure_str(host)</span>
+
+        <span class="s0">if </span><span class="s1">scheme </span><span class="s0">in </span><span class="s1">NORMALIZABLE_SCHEMES:</span>
+            <span class="s1">is_ipv6 = IPV6_ADDRZ_RE.match(host)</span>
+            <span class="s0">if </span><span class="s1">is_ipv6:</span>
+                <span class="s1">match = ZONE_ID_RE.search(host)</span>
+                <span class="s0">if </span><span class="s1">match:</span>
+                    <span class="s1">start</span><span class="s0">, </span><span class="s1">end = match.span(</span><span class="s4">1</span><span class="s1">)</span>
+                    <span class="s1">zone_id = host[start:end]</span>
+
+                    <span class="s0">if </span><span class="s1">zone_id.startswith(</span><span class="s2">&quot;%25&quot;</span><span class="s1">) </span><span class="s0">and </span><span class="s1">zone_id != </span><span class="s2">&quot;%25&quot;</span><span class="s1">:</span>
+                        <span class="s1">zone_id = zone_id[</span><span class="s4">3</span><span class="s1">:]</span>
+                    <span class="s0">else</span><span class="s1">:</span>
+                        <span class="s1">zone_id = zone_id[</span><span class="s4">1</span><span class="s1">:]</span>
+                    <span class="s1">zone_id = </span><span class="s2">&quot;%&quot; </span><span class="s1">+ _encode_invalid_chars(zone_id</span><span class="s0">, </span><span class="s1">UNRESERVED_CHARS)</span>
+                    <span class="s0">return </span><span class="s1">host[:start].lower() + zone_id + host[end:]</span>
+                <span class="s0">else</span><span class="s1">:</span>
+                    <span class="s0">return </span><span class="s1">host.lower()</span>
+            <span class="s0">elif not </span><span class="s1">IPV4_RE.match(host):</span>
+                <span class="s0">return </span><span class="s1">six.ensure_str(</span>
+                    <span class="s6">b&quot;.&quot;</span><span class="s1">.join([_idna_encode(label) </span><span class="s0">for </span><span class="s1">label </span><span class="s0">in </span><span class="s1">host.split(</span><span class="s2">&quot;.&quot;</span><span class="s1">)])</span>
+                <span class="s1">)</span>
+    <span class="s0">return </span><span class="s1">host</span>
+
+
+<span class="s0">def </span><span class="s1">_idna_encode(name):</span>
+    <span class="s0">if </span><span class="s1">name </span><span class="s0">and </span><span class="s1">any([ord(x) &gt; </span><span class="s4">128 </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">name]):</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">from </span><span class="s1">pip._vendor </span><span class="s0">import </span><span class="s1">idna</span>
+        <span class="s0">except </span><span class="s1">ImportError:</span>
+            <span class="s1">six.raise_from(</span>
+                <span class="s1">LocationParseError(</span><span class="s2">&quot;Unable to parse URL without the 'idna' module&quot;</span><span class="s1">)</span><span class="s0">,</span>
+                <span class="s0">None,</span>
+            <span class="s1">)</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">idna.encode(name.lower()</span><span class="s0">, </span><span class="s1">strict=</span><span class="s0">True, </span><span class="s1">std3_rules=</span><span class="s0">True</span><span class="s1">)</span>
+        <span class="s0">except </span><span class="s1">idna.IDNAError:</span>
+            <span class="s1">six.raise_from(</span>
+                <span class="s1">LocationParseError(</span><span class="s2">u&quot;Name '%s' is not a valid IDNA label&quot; </span><span class="s1">% name)</span><span class="s0">, None</span>
+            <span class="s1">)</span>
+    <span class="s0">return </span><span class="s1">name.lower().encode(</span><span class="s2">&quot;ascii&quot;</span><span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">_encode_target(target):</span>
+    <span class="s5">&quot;&quot;&quot;Percent-encodes a request target so that there are no invalid characters&quot;&quot;&quot;</span>
+    <span class="s1">path</span><span class="s0">, </span><span class="s1">query = TARGET_RE.match(target).groups()</span>
+    <span class="s1">target = _encode_invalid_chars(path</span><span class="s0">, </span><span class="s1">PATH_CHARS)</span>
+    <span class="s1">query = _encode_invalid_chars(query</span><span class="s0">, </span><span class="s1">QUERY_CHARS)</span>
+    <span class="s0">if </span><span class="s1">query </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s1">target += </span><span class="s2">&quot;?&quot; </span><span class="s1">+ query</span>
+    <span class="s0">return </span><span class="s1">target</span>
+
+
+<span class="s0">def </span><span class="s1">parse_url(url):</span>
+    <span class="s5">&quot;&quot;&quot; 
+    Given a url, return a parsed :class:`.Url` namedtuple. Best-effort is 
+    performed to parse incomplete urls. Fields not provided will be None. 
+    This parser is RFC 3986 compliant. 
+ 
+    The parser logic and helper functions are based heavily on 
+    work done in the ``rfc3986`` module. 
+ 
+    :param str url: URL to parse into a :class:`.Url` namedtuple. 
+ 
+    Partly backwards-compatible with :mod:`urlparse`. 
+ 
+    Example:: 
+ 
+        &gt;&gt;&gt; parse_url('http://google.com/mail/') 
+        Url(scheme='http', host='google.com', port=None, path='/mail/', ...) 
+        &gt;&gt;&gt; parse_url('google.com:80') 
+        Url(scheme=None, host='google.com', port=80, path=None, ...) 
+        &gt;&gt;&gt; parse_url('/foo?bar') 
+        Url(scheme=None, host=None, port=None, path='/foo', query='bar', ...) 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if not </span><span class="s1">url:</span>
+        <span class="s3"># Empty</span>
+        <span class="s0">return </span><span class="s1">Url()</span>
+
+    <span class="s1">source_url = url</span>
+    <span class="s0">if not </span><span class="s1">SCHEME_RE.search(url):</span>
+        <span class="s1">url = </span><span class="s2">&quot;//&quot; </span><span class="s1">+ url</span>
+
+    <span class="s0">try</span><span class="s1">:</span>
+        <span class="s1">scheme</span><span class="s0">, </span><span class="s1">authority</span><span class="s0">, </span><span class="s1">path</span><span class="s0">, </span><span class="s1">query</span><span class="s0">, </span><span class="s1">fragment = URI_RE.match(url).groups()</span>
+        <span class="s1">normalize_uri = scheme </span><span class="s0">is None or </span><span class="s1">scheme.lower() </span><span class="s0">in </span><span class="s1">NORMALIZABLE_SCHEMES</span>
+
+        <span class="s0">if </span><span class="s1">scheme:</span>
+            <span class="s1">scheme = scheme.lower()</span>
+
+        <span class="s0">if </span><span class="s1">authority:</span>
+            <span class="s1">auth</span><span class="s0">, </span><span class="s1">_</span><span class="s0">, </span><span class="s1">host_port = authority.rpartition(</span><span class="s2">&quot;@&quot;</span><span class="s1">)</span>
+            <span class="s1">auth = auth </span><span class="s0">or None</span>
+            <span class="s1">host</span><span class="s0">, </span><span class="s1">port = _HOST_PORT_RE.match(host_port).groups()</span>
+            <span class="s0">if </span><span class="s1">auth </span><span class="s0">and </span><span class="s1">normalize_uri:</span>
+                <span class="s1">auth = _encode_invalid_chars(auth</span><span class="s0">, </span><span class="s1">USERINFO_CHARS)</span>
+            <span class="s0">if </span><span class="s1">port == </span><span class="s2">&quot;&quot;</span><span class="s1">:</span>
+                <span class="s1">port = </span><span class="s0">None</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">auth</span><span class="s0">, </span><span class="s1">host</span><span class="s0">, </span><span class="s1">port = </span><span class="s0">None, None, None</span>
+
+        <span class="s0">if </span><span class="s1">port </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">port = int(port)</span>
+            <span class="s0">if not </span><span class="s1">(</span><span class="s4">0 </span><span class="s1">&lt;= port &lt;= </span><span class="s4">65535</span><span class="s1">):</span>
+                <span class="s0">raise </span><span class="s1">LocationParseError(url)</span>
+
+        <span class="s1">host = _normalize_host(host</span><span class="s0">, </span><span class="s1">scheme)</span>
+
+        <span class="s0">if </span><span class="s1">normalize_uri </span><span class="s0">and </span><span class="s1">path:</span>
+            <span class="s1">path = _remove_path_dot_segments(path)</span>
+            <span class="s1">path = _encode_invalid_chars(path</span><span class="s0">, </span><span class="s1">PATH_CHARS)</span>
+        <span class="s0">if </span><span class="s1">normalize_uri </span><span class="s0">and </span><span class="s1">query:</span>
+            <span class="s1">query = _encode_invalid_chars(query</span><span class="s0">, </span><span class="s1">QUERY_CHARS)</span>
+        <span class="s0">if </span><span class="s1">normalize_uri </span><span class="s0">and </span><span class="s1">fragment:</span>
+            <span class="s1">fragment = _encode_invalid_chars(fragment</span><span class="s0">, </span><span class="s1">FRAGMENT_CHARS)</span>
+
+    <span class="s0">except </span><span class="s1">(ValueError</span><span class="s0">, </span><span class="s1">AttributeError):</span>
+        <span class="s0">return </span><span class="s1">six.raise_from(LocationParseError(source_url)</span><span class="s0">, None</span><span class="s1">)</span>
+
+    <span class="s3"># For the sake of backwards compatibility we put empty</span>
+    <span class="s3"># string values for path if there are any defined values</span>
+    <span class="s3"># beyond the path in the URL.</span>
+    <span class="s3"># TODO: Remove this when we break backwards compatibility.</span>
+    <span class="s0">if not </span><span class="s1">path:</span>
+        <span class="s0">if </span><span class="s1">query </span><span class="s0">is not None or </span><span class="s1">fragment </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">path = </span><span class="s2">&quot;&quot;</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">path = </span><span class="s0">None</span>
+
+    <span class="s3"># Ensure that each part of the URL is a `str` for</span>
+    <span class="s3"># backwards compatibility.</span>
+    <span class="s0">if </span><span class="s1">isinstance(url</span><span class="s0">, </span><span class="s1">six.text_type):</span>
+        <span class="s1">ensure_func = six.ensure_text</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">ensure_func = six.ensure_str</span>
+
+    <span class="s0">def </span><span class="s1">ensure_type(x):</span>
+        <span class="s0">return </span><span class="s1">x </span><span class="s0">if </span><span class="s1">x </span><span class="s0">is None else </span><span class="s1">ensure_func(x)</span>
+
+    <span class="s0">return </span><span class="s1">Url(</span>
+        <span class="s1">scheme=ensure_type(scheme)</span><span class="s0">,</span>
+        <span class="s1">auth=ensure_type(auth)</span><span class="s0">,</span>
+        <span class="s1">host=ensure_type(host)</span><span class="s0">,</span>
+        <span class="s1">port=port</span><span class="s0">,</span>
+        <span class="s1">path=ensure_type(path)</span><span class="s0">,</span>
+        <span class="s1">query=ensure_type(query)</span><span class="s0">,</span>
+        <span class="s1">fragment=ensure_type(fragment)</span><span class="s0">,</span>
+    <span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">get_host(url):</span>
+    <span class="s5">&quot;&quot;&quot; 
+    Deprecated. Use :func:`parse_url` instead. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">p = parse_url(url)</span>
+    <span class="s0">return </span><span class="s1">p.scheme </span><span class="s0">or </span><span class="s2">&quot;http&quot;</span><span class="s0">, </span><span class="s1">p.hostname</span><span class="s0">, </span><span class="s1">p.port</span>
+</pre>
+</body>
+</html>

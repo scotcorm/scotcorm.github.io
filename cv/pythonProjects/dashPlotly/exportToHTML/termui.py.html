@@ -1,0 +1,831 @@
+<html>
+<head>
+<title>termui.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6a8759;}
+.s3 { color: #808080;}
+.s4 { color: #6897bb;}
+.s5 { color: #629755; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+termui.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">inspect</span>
+<span class="s0">import </span><span class="s1">io</span>
+<span class="s0">import </span><span class="s1">itertools</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">import </span><span class="s1">typing</span>
+<span class="s0">import </span><span class="s1">typing </span><span class="s0">as </span><span class="s1">t</span>
+<span class="s0">from </span><span class="s1">gettext </span><span class="s0">import </span><span class="s1">gettext </span><span class="s0">as </span><span class="s1">_</span>
+
+<span class="s0">from </span><span class="s1">._compat </span><span class="s0">import </span><span class="s1">isatty</span>
+<span class="s0">from </span><span class="s1">._compat </span><span class="s0">import </span><span class="s1">strip_ansi</span>
+<span class="s0">from </span><span class="s1">._compat </span><span class="s0">import </span><span class="s1">WIN</span>
+<span class="s0">from </span><span class="s1">.exceptions </span><span class="s0">import </span><span class="s1">Abort</span>
+<span class="s0">from </span><span class="s1">.exceptions </span><span class="s0">import </span><span class="s1">UsageError</span>
+<span class="s0">from </span><span class="s1">.globals </span><span class="s0">import </span><span class="s1">resolve_color_default</span>
+<span class="s0">from </span><span class="s1">.types </span><span class="s0">import </span><span class="s1">Choice</span>
+<span class="s0">from </span><span class="s1">.types </span><span class="s0">import </span><span class="s1">convert_type</span>
+<span class="s0">from </span><span class="s1">.types </span><span class="s0">import </span><span class="s1">ParamType</span>
+<span class="s0">from </span><span class="s1">.utils </span><span class="s0">import </span><span class="s1">echo</span>
+<span class="s0">from </span><span class="s1">.utils </span><span class="s0">import </span><span class="s1">LazyFile</span>
+
+<span class="s0">if </span><span class="s1">t.TYPE_CHECKING:</span>
+    <span class="s0">from </span><span class="s1">._termui_impl </span><span class="s0">import </span><span class="s1">ProgressBar</span>
+
+<span class="s1">V = t.TypeVar(</span><span class="s2">&quot;V&quot;</span><span class="s1">)</span>
+
+<span class="s3"># The prompt functions to use.  The doc tools currently override these</span>
+<span class="s3"># functions to customize how they work.</span>
+<span class="s1">visible_prompt_func: t.Callable[[str]</span><span class="s0">, </span><span class="s1">str] = input</span>
+
+<span class="s1">_ansi_colors = {</span>
+    <span class="s2">&quot;black&quot;</span><span class="s1">: </span><span class="s4">30</span><span class="s0">,</span>
+    <span class="s2">&quot;red&quot;</span><span class="s1">: </span><span class="s4">31</span><span class="s0">,</span>
+    <span class="s2">&quot;green&quot;</span><span class="s1">: </span><span class="s4">32</span><span class="s0">,</span>
+    <span class="s2">&quot;yellow&quot;</span><span class="s1">: </span><span class="s4">33</span><span class="s0">,</span>
+    <span class="s2">&quot;blue&quot;</span><span class="s1">: </span><span class="s4">34</span><span class="s0">,</span>
+    <span class="s2">&quot;magenta&quot;</span><span class="s1">: </span><span class="s4">35</span><span class="s0">,</span>
+    <span class="s2">&quot;cyan&quot;</span><span class="s1">: </span><span class="s4">36</span><span class="s0">,</span>
+    <span class="s2">&quot;white&quot;</span><span class="s1">: </span><span class="s4">37</span><span class="s0">,</span>
+    <span class="s2">&quot;reset&quot;</span><span class="s1">: </span><span class="s4">39</span><span class="s0">,</span>
+    <span class="s2">&quot;bright_black&quot;</span><span class="s1">: </span><span class="s4">90</span><span class="s0">,</span>
+    <span class="s2">&quot;bright_red&quot;</span><span class="s1">: </span><span class="s4">91</span><span class="s0">,</span>
+    <span class="s2">&quot;bright_green&quot;</span><span class="s1">: </span><span class="s4">92</span><span class="s0">,</span>
+    <span class="s2">&quot;bright_yellow&quot;</span><span class="s1">: </span><span class="s4">93</span><span class="s0">,</span>
+    <span class="s2">&quot;bright_blue&quot;</span><span class="s1">: </span><span class="s4">94</span><span class="s0">,</span>
+    <span class="s2">&quot;bright_magenta&quot;</span><span class="s1">: </span><span class="s4">95</span><span class="s0">,</span>
+    <span class="s2">&quot;bright_cyan&quot;</span><span class="s1">: </span><span class="s4">96</span><span class="s0">,</span>
+    <span class="s2">&quot;bright_white&quot;</span><span class="s1">: </span><span class="s4">97</span><span class="s0">,</span>
+<span class="s1">}</span>
+<span class="s1">_ansi_reset_all = </span><span class="s2">&quot;</span><span class="s0">\033</span><span class="s2">[0m&quot;</span>
+
+
+<span class="s0">def </span><span class="s1">hidden_prompt_func(prompt: str) -&gt; str:</span>
+    <span class="s0">import </span><span class="s1">getpass</span>
+
+    <span class="s0">return </span><span class="s1">getpass.getpass(prompt)</span>
+
+
+<span class="s0">def </span><span class="s1">_build_prompt(</span>
+    <span class="s1">text: str</span><span class="s0">,</span>
+    <span class="s1">suffix: str</span><span class="s0">,</span>
+    <span class="s1">show_default: bool = </span><span class="s0">False,</span>
+    <span class="s1">default: t.Optional[t.Any] = </span><span class="s0">None,</span>
+    <span class="s1">show_choices: bool = </span><span class="s0">True,</span>
+    <span class="s1">type: t.Optional[ParamType] = </span><span class="s0">None,</span>
+<span class="s1">) -&gt; str:</span>
+    <span class="s1">prompt = text</span>
+    <span class="s0">if </span><span class="s1">type </span><span class="s0">is not None and </span><span class="s1">show_choices </span><span class="s0">and </span><span class="s1">isinstance(type</span><span class="s0">, </span><span class="s1">Choice):</span>
+        <span class="s1">prompt += </span><span class="s2">f&quot; (</span><span class="s0">{</span><span class="s2">', '</span><span class="s1">.join(map(str</span><span class="s0">, </span><span class="s1">type.choices))</span><span class="s0">}</span><span class="s2">)&quot;</span>
+    <span class="s0">if </span><span class="s1">default </span><span class="s0">is not None and </span><span class="s1">show_default:</span>
+        <span class="s1">prompt = </span><span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">prompt</span><span class="s0">} </span><span class="s2">[</span><span class="s0">{</span><span class="s1">_format_default(default)</span><span class="s0">}</span><span class="s2">]&quot;</span>
+    <span class="s0">return </span><span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">prompt</span><span class="s0">}{</span><span class="s1">suffix</span><span class="s0">}</span><span class="s2">&quot;</span>
+
+
+<span class="s0">def </span><span class="s1">_format_default(default: t.Any) -&gt; t.Any:</span>
+    <span class="s0">if </span><span class="s1">isinstance(default</span><span class="s0">, </span><span class="s1">(io.IOBase</span><span class="s0">, </span><span class="s1">LazyFile)) </span><span class="s0">and </span><span class="s1">hasattr(default</span><span class="s0">, </span><span class="s2">&quot;name&quot;</span><span class="s1">):</span>
+        <span class="s0">return </span><span class="s1">default.name  </span><span class="s3"># type: ignore</span>
+
+    <span class="s0">return </span><span class="s1">default</span>
+
+
+<span class="s0">def </span><span class="s1">prompt(</span>
+    <span class="s1">text: str</span><span class="s0">,</span>
+    <span class="s1">default: t.Optional[t.Any] = </span><span class="s0">None,</span>
+    <span class="s1">hide_input: bool = </span><span class="s0">False,</span>
+    <span class="s1">confirmation_prompt: t.Union[bool</span><span class="s0">, </span><span class="s1">str] = </span><span class="s0">False,</span>
+    <span class="s1">type: t.Optional[t.Union[ParamType</span><span class="s0">, </span><span class="s1">t.Any]] = </span><span class="s0">None,</span>
+    <span class="s1">value_proc: t.Optional[t.Callable[[str]</span><span class="s0">, </span><span class="s1">t.Any]] = </span><span class="s0">None,</span>
+    <span class="s1">prompt_suffix: str = </span><span class="s2">&quot;: &quot;</span><span class="s0">,</span>
+    <span class="s1">show_default: bool = </span><span class="s0">True,</span>
+    <span class="s1">err: bool = </span><span class="s0">False,</span>
+    <span class="s1">show_choices: bool = </span><span class="s0">True,</span>
+<span class="s1">) -&gt; t.Any:</span>
+    <span class="s5">&quot;&quot;&quot;Prompts a user for input.  This is a convenience function that can 
+    be used to prompt a user for input later. 
+ 
+    If the user aborts the input by sending a interrupt signal, this 
+    function will catch it and raise a :exc:`Abort` exception. 
+ 
+    :param text: the text to show for the prompt. 
+    :param default: the default value to use if no input happens.  If this 
+                    is not given it will prompt until it's aborted. 
+    :param hide_input: if this is set to true then the input value will 
+                       be hidden. 
+    :param confirmation_prompt: Prompt a second time to confirm the 
+        value. Can be set to a string instead of ``True`` to customize 
+        the message. 
+    :param type: the type to use to check the value against. 
+    :param value_proc: if this parameter is provided it's a function that 
+                       is invoked instead of the type conversion to 
+                       convert a value. 
+    :param prompt_suffix: a suffix that should be added to the prompt. 
+    :param show_default: shows or hides the default value in the prompt. 
+    :param err: if set to true the file defaults to ``stderr`` instead of 
+                ``stdout``, the same as with echo. 
+    :param show_choices: Show or hide choices if the passed type is a Choice. 
+                         For example if type is a Choice of either day or week, 
+                         show_choices is true and text is &quot;Group by&quot; then the 
+                         prompt will be &quot;Group by (day, week): &quot;. 
+ 
+    .. versionadded:: 8.0 
+        ``confirmation_prompt`` can be a custom string. 
+ 
+    .. versionadded:: 7.0 
+        Added the ``show_choices`` parameter. 
+ 
+    .. versionadded:: 6.0 
+        Added unicode support for cmd.exe on Windows. 
+ 
+    .. versionadded:: 4.0 
+        Added the `err` parameter. 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">prompt_func(text: str) -&gt; str:</span>
+        <span class="s1">f = hidden_prompt_func </span><span class="s0">if </span><span class="s1">hide_input </span><span class="s0">else </span><span class="s1">visible_prompt_func</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s3"># Write the prompt separately so that we get nice</span>
+            <span class="s3"># coloring through colorama on Windows</span>
+            <span class="s1">echo(text.rstrip(</span><span class="s2">&quot; &quot;</span><span class="s1">)</span><span class="s0">, </span><span class="s1">nl=</span><span class="s0">False, </span><span class="s1">err=err)</span>
+            <span class="s3"># Echo a space to stdout to work around an issue where</span>
+            <span class="s3"># readline causes backspace to clear the whole line.</span>
+            <span class="s0">return </span><span class="s1">f(</span><span class="s2">&quot; &quot;</span><span class="s1">)</span>
+        <span class="s0">except </span><span class="s1">(KeyboardInterrupt</span><span class="s0">, </span><span class="s1">EOFError):</span>
+            <span class="s3"># getpass doesn't print a newline if the user aborts input with ^C.</span>
+            <span class="s3"># Allegedly this behavior is inherited from getpass(3).</span>
+            <span class="s3"># A doc bug has been filed at https://bugs.python.org/issue24711</span>
+            <span class="s0">if </span><span class="s1">hide_input:</span>
+                <span class="s1">echo(</span><span class="s0">None, </span><span class="s1">err=err)</span>
+            <span class="s0">raise </span><span class="s1">Abort() </span><span class="s0">from None</span>
+
+    <span class="s0">if </span><span class="s1">value_proc </span><span class="s0">is None</span><span class="s1">:</span>
+        <span class="s1">value_proc = convert_type(type</span><span class="s0">, </span><span class="s1">default)</span>
+
+    <span class="s1">prompt = _build_prompt(</span>
+        <span class="s1">text</span><span class="s0">, </span><span class="s1">prompt_suffix</span><span class="s0">, </span><span class="s1">show_default</span><span class="s0">, </span><span class="s1">default</span><span class="s0">, </span><span class="s1">show_choices</span><span class="s0">, </span><span class="s1">type</span>
+    <span class="s1">)</span>
+
+    <span class="s0">if </span><span class="s1">confirmation_prompt:</span>
+        <span class="s0">if </span><span class="s1">confirmation_prompt </span><span class="s0">is True</span><span class="s1">:</span>
+            <span class="s1">confirmation_prompt = _(</span><span class="s2">&quot;Repeat for confirmation&quot;</span><span class="s1">)</span>
+
+        <span class="s1">confirmation_prompt = t.cast(str</span><span class="s0">, </span><span class="s1">confirmation_prompt)</span>
+        <span class="s1">confirmation_prompt = _build_prompt(confirmation_prompt</span><span class="s0">, </span><span class="s1">prompt_suffix)</span>
+
+    <span class="s0">while True</span><span class="s1">:</span>
+        <span class="s0">while True</span><span class="s1">:</span>
+            <span class="s1">value = prompt_func(prompt)</span>
+            <span class="s0">if </span><span class="s1">value:</span>
+                <span class="s0">break</span>
+            <span class="s0">elif </span><span class="s1">default </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s1">value = default</span>
+                <span class="s0">break</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">result = value_proc(value)</span>
+        <span class="s0">except </span><span class="s1">UsageError </span><span class="s0">as </span><span class="s1">e:</span>
+            <span class="s0">if </span><span class="s1">hide_input:</span>
+                <span class="s1">echo(_(</span><span class="s2">&quot;Error: The value you entered was invalid.&quot;</span><span class="s1">)</span><span class="s0">, </span><span class="s1">err=err)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">echo(_(</span><span class="s2">&quot;Error: {e.message}&quot;</span><span class="s1">).format(e=e)</span><span class="s0">, </span><span class="s1">err=err)  </span><span class="s3"># noqa: B306</span>
+            <span class="s0">continue</span>
+        <span class="s0">if not </span><span class="s1">confirmation_prompt:</span>
+            <span class="s0">return </span><span class="s1">result</span>
+        <span class="s0">while True</span><span class="s1">:</span>
+            <span class="s1">confirmation_prompt = t.cast(str</span><span class="s0">, </span><span class="s1">confirmation_prompt)</span>
+            <span class="s1">value2 = prompt_func(confirmation_prompt)</span>
+            <span class="s0">if </span><span class="s1">value2:</span>
+                <span class="s0">break</span>
+        <span class="s0">if </span><span class="s1">value == value2:</span>
+            <span class="s0">return </span><span class="s1">result</span>
+        <span class="s1">echo(_(</span><span class="s2">&quot;Error: The two entered values do not match.&quot;</span><span class="s1">)</span><span class="s0">, </span><span class="s1">err=err)</span>
+
+
+<span class="s0">def </span><span class="s1">confirm(</span>
+    <span class="s1">text: str</span><span class="s0">,</span>
+    <span class="s1">default: t.Optional[bool] = </span><span class="s0">False,</span>
+    <span class="s1">abort: bool = </span><span class="s0">False,</span>
+    <span class="s1">prompt_suffix: str = </span><span class="s2">&quot;: &quot;</span><span class="s0">,</span>
+    <span class="s1">show_default: bool = </span><span class="s0">True,</span>
+    <span class="s1">err: bool = </span><span class="s0">False,</span>
+<span class="s1">) -&gt; bool:</span>
+    <span class="s5">&quot;&quot;&quot;Prompts for confirmation (yes/no question). 
+ 
+    If the user aborts the input by sending a interrupt signal this 
+    function will catch it and raise a :exc:`Abort` exception. 
+ 
+    :param text: the question to ask. 
+    :param default: The default value to use when no input is given. If 
+        ``None``, repeat until input is given. 
+    :param abort: if this is set to `True` a negative answer aborts the 
+                  exception by raising :exc:`Abort`. 
+    :param prompt_suffix: a suffix that should be added to the prompt. 
+    :param show_default: shows or hides the default value in the prompt. 
+    :param err: if set to true the file defaults to ``stderr`` instead of 
+                ``stdout``, the same as with echo. 
+ 
+    .. versionchanged:: 8.0 
+        Repeat until input is given if ``default`` is ``None``. 
+ 
+    .. versionadded:: 4.0 
+        Added the ``err`` parameter. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">prompt = _build_prompt(</span>
+        <span class="s1">text</span><span class="s0">,</span>
+        <span class="s1">prompt_suffix</span><span class="s0">,</span>
+        <span class="s1">show_default</span><span class="s0">,</span>
+        <span class="s2">&quot;y/n&quot; </span><span class="s0">if </span><span class="s1">default </span><span class="s0">is None else </span><span class="s1">(</span><span class="s2">&quot;Y/n&quot; </span><span class="s0">if </span><span class="s1">default </span><span class="s0">else </span><span class="s2">&quot;y/N&quot;</span><span class="s1">)</span><span class="s0">,</span>
+    <span class="s1">)</span>
+
+    <span class="s0">while True</span><span class="s1">:</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s3"># Write the prompt separately so that we get nice</span>
+            <span class="s3"># coloring through colorama on Windows</span>
+            <span class="s1">echo(prompt.rstrip(</span><span class="s2">&quot; &quot;</span><span class="s1">)</span><span class="s0">, </span><span class="s1">nl=</span><span class="s0">False, </span><span class="s1">err=err)</span>
+            <span class="s3"># Echo a space to stdout to work around an issue where</span>
+            <span class="s3"># readline causes backspace to clear the whole line.</span>
+            <span class="s1">value = visible_prompt_func(</span><span class="s2">&quot; &quot;</span><span class="s1">).lower().strip()</span>
+        <span class="s0">except </span><span class="s1">(KeyboardInterrupt</span><span class="s0">, </span><span class="s1">EOFError):</span>
+            <span class="s0">raise </span><span class="s1">Abort() </span><span class="s0">from None</span>
+        <span class="s0">if </span><span class="s1">value </span><span class="s0">in </span><span class="s1">(</span><span class="s2">&quot;y&quot;</span><span class="s0">, </span><span class="s2">&quot;yes&quot;</span><span class="s1">):</span>
+            <span class="s1">rv = </span><span class="s0">True</span>
+        <span class="s0">elif </span><span class="s1">value </span><span class="s0">in </span><span class="s1">(</span><span class="s2">&quot;n&quot;</span><span class="s0">, </span><span class="s2">&quot;no&quot;</span><span class="s1">):</span>
+            <span class="s1">rv = </span><span class="s0">False</span>
+        <span class="s0">elif </span><span class="s1">default </span><span class="s0">is not None and </span><span class="s1">value == </span><span class="s2">&quot;&quot;</span><span class="s1">:</span>
+            <span class="s1">rv = default</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">echo(_(</span><span class="s2">&quot;Error: invalid input&quot;</span><span class="s1">)</span><span class="s0">, </span><span class="s1">err=err)</span>
+            <span class="s0">continue</span>
+        <span class="s0">break</span>
+    <span class="s0">if </span><span class="s1">abort </span><span class="s0">and not </span><span class="s1">rv:</span>
+        <span class="s0">raise </span><span class="s1">Abort()</span>
+    <span class="s0">return </span><span class="s1">rv</span>
+
+
+<span class="s0">def </span><span class="s1">get_terminal_size() -&gt; os.terminal_size:</span>
+    <span class="s5">&quot;&quot;&quot;Returns the current size of the terminal as tuple in the form 
+    ``(width, height)`` in columns and rows. 
+ 
+    .. deprecated:: 8.0 
+        Will be removed in Click 8.1. Use 
+        :func:`shutil.get_terminal_size` instead. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">import </span><span class="s1">shutil</span>
+    <span class="s0">import </span><span class="s1">warnings</span>
+
+    <span class="s1">warnings.warn(</span>
+        <span class="s2">&quot;'click.get_terminal_size()' is deprecated and will be removed&quot;</span>
+        <span class="s2">&quot; in Click 8.1. Use 'shutil.get_terminal_size()' instead.&quot;</span><span class="s0">,</span>
+        <span class="s1">DeprecationWarning</span><span class="s0">,</span>
+        <span class="s1">stacklevel=</span><span class="s4">2</span><span class="s0">,</span>
+    <span class="s1">)</span>
+    <span class="s0">return </span><span class="s1">shutil.get_terminal_size()</span>
+
+
+<span class="s0">def </span><span class="s1">echo_via_pager(</span>
+    <span class="s1">text_or_generator: t.Union[t.Iterable[str]</span><span class="s0">, </span><span class="s1">t.Callable[[]</span><span class="s0">, </span><span class="s1">t.Iterable[str]]</span><span class="s0">, </span><span class="s1">str]</span><span class="s0">,</span>
+    <span class="s1">color: t.Optional[bool] = </span><span class="s0">None,</span>
+<span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+    <span class="s5">&quot;&quot;&quot;This function takes a text and shows it via an environment specific 
+    pager on stdout. 
+ 
+    .. versionchanged:: 3.0 
+       Added the `color` flag. 
+ 
+    :param text_or_generator: the text to page, or alternatively, a 
+                              generator emitting the text to page. 
+    :param color: controls if the pager supports ANSI colors or not.  The 
+                  default is autodetection. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">color = resolve_color_default(color)</span>
+
+    <span class="s0">if </span><span class="s1">inspect.isgeneratorfunction(text_or_generator):</span>
+        <span class="s1">i = t.cast(t.Callable[[]</span><span class="s0">, </span><span class="s1">t.Iterable[str]]</span><span class="s0">, </span><span class="s1">text_or_generator)()</span>
+    <span class="s0">elif </span><span class="s1">isinstance(text_or_generator</span><span class="s0">, </span><span class="s1">str):</span>
+        <span class="s1">i = [text_or_generator]</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">i = iter(t.cast(t.Iterable[str]</span><span class="s0">, </span><span class="s1">text_or_generator))</span>
+
+    <span class="s3"># convert every element of i to a text type if necessary</span>
+    <span class="s1">text_generator = (el </span><span class="s0">if </span><span class="s1">isinstance(el</span><span class="s0">, </span><span class="s1">str) </span><span class="s0">else </span><span class="s1">str(el) </span><span class="s0">for </span><span class="s1">el </span><span class="s0">in </span><span class="s1">i)</span>
+
+    <span class="s0">from </span><span class="s1">._termui_impl </span><span class="s0">import </span><span class="s1">pager</span>
+
+    <span class="s0">return </span><span class="s1">pager(itertools.chain(text_generator</span><span class="s0">, </span><span class="s2">&quot;</span><span class="s0">\n</span><span class="s2">&quot;</span><span class="s1">)</span><span class="s0">, </span><span class="s1">color)</span>
+
+
+<span class="s0">def </span><span class="s1">progressbar(</span>
+    <span class="s1">iterable: t.Optional[t.Iterable[V]] = </span><span class="s0">None,</span>
+    <span class="s1">length: t.Optional[int] = </span><span class="s0">None,</span>
+    <span class="s1">label: t.Optional[str] = </span><span class="s0">None,</span>
+    <span class="s1">show_eta: bool = </span><span class="s0">True,</span>
+    <span class="s1">show_percent: t.Optional[bool] = </span><span class="s0">None,</span>
+    <span class="s1">show_pos: bool = </span><span class="s0">False,</span>
+    <span class="s1">item_show_func: t.Optional[t.Callable[[t.Optional[V]]</span><span class="s0">, </span><span class="s1">t.Optional[str]]] = </span><span class="s0">None,</span>
+    <span class="s1">fill_char: str = </span><span class="s2">&quot;#&quot;</span><span class="s0">,</span>
+    <span class="s1">empty_char: str = </span><span class="s2">&quot;-&quot;</span><span class="s0">,</span>
+    <span class="s1">bar_template: str = </span><span class="s2">&quot;%(label)s  [%(bar)s]  %(info)s&quot;</span><span class="s0">,</span>
+    <span class="s1">info_sep: str = </span><span class="s2">&quot;  &quot;</span><span class="s0">,</span>
+    <span class="s1">width: int = </span><span class="s4">36</span><span class="s0">,</span>
+    <span class="s1">file: t.Optional[t.TextIO] = </span><span class="s0">None,</span>
+    <span class="s1">color: t.Optional[bool] = </span><span class="s0">None,</span>
+    <span class="s1">update_min_steps: int = </span><span class="s4">1</span><span class="s0">,</span>
+<span class="s1">) -&gt; </span><span class="s2">&quot;ProgressBar[V]&quot;</span><span class="s1">:</span>
+    <span class="s5">&quot;&quot;&quot;This function creates an iterable context manager that can be used 
+    to iterate over something while showing a progress bar.  It will 
+    either iterate over the `iterable` or `length` items (that are counted 
+    up).  While iteration happens, this function will print a rendered 
+    progress bar to the given `file` (defaults to stdout) and will attempt 
+    to calculate remaining time and more.  By default, this progress bar 
+    will not be rendered if the file is not a terminal. 
+ 
+    The context manager creates the progress bar.  When the context 
+    manager is entered the progress bar is already created.  With every 
+    iteration over the progress bar, the iterable passed to the bar is 
+    advanced and the bar is updated.  When the context manager exits, 
+    a newline is printed and the progress bar is finalized on screen. 
+ 
+    Note: The progress bar is currently designed for use cases where the 
+    total progress can be expected to take at least several seconds. 
+    Because of this, the ProgressBar class object won't display 
+    progress that is considered too fast, and progress where the time 
+    between steps is less than a second. 
+ 
+    No printing must happen or the progress bar will be unintentionally 
+    destroyed. 
+ 
+    Example usage:: 
+ 
+        with progressbar(items) as bar: 
+            for item in bar: 
+                do_something_with(item) 
+ 
+    Alternatively, if no iterable is specified, one can manually update the 
+    progress bar through the `update()` method instead of directly 
+    iterating over the progress bar.  The update method accepts the number 
+    of steps to increment the bar with:: 
+ 
+        with progressbar(length=chunks.total_bytes) as bar: 
+            for chunk in chunks: 
+                process_chunk(chunk) 
+                bar.update(chunks.bytes) 
+ 
+    The ``update()`` method also takes an optional value specifying the 
+    ``current_item`` at the new position. This is useful when used 
+    together with ``item_show_func`` to customize the output for each 
+    manual step:: 
+ 
+        with click.progressbar( 
+            length=total_size, 
+            label='Unzipping archive', 
+            item_show_func=lambda a: a.filename 
+        ) as bar: 
+            for archive in zip_file: 
+                archive.extract() 
+                bar.update(archive.size, archive) 
+ 
+    :param iterable: an iterable to iterate over.  If not provided the length 
+                     is required. 
+    :param length: the number of items to iterate over.  By default the 
+                   progressbar will attempt to ask the iterator about its 
+                   length, which might or might not work.  If an iterable is 
+                   also provided this parameter can be used to override the 
+                   length.  If an iterable is not provided the progress bar 
+                   will iterate over a range of that length. 
+    :param label: the label to show next to the progress bar. 
+    :param show_eta: enables or disables the estimated time display.  This is 
+                     automatically disabled if the length cannot be 
+                     determined. 
+    :param show_percent: enables or disables the percentage display.  The 
+                         default is `True` if the iterable has a length or 
+                         `False` if not. 
+    :param show_pos: enables or disables the absolute position display.  The 
+                     default is `False`. 
+    :param item_show_func: A function called with the current item which 
+        can return a string to show next to the progress bar. If the 
+        function returns ``None`` nothing is shown. The current item can 
+        be ``None``, such as when entering and exiting the bar. 
+    :param fill_char: the character to use to show the filled part of the 
+                      progress bar. 
+    :param empty_char: the character to use to show the non-filled part of 
+                       the progress bar. 
+    :param bar_template: the format string to use as template for the bar. 
+                         The parameters in it are ``label`` for the label, 
+                         ``bar`` for the progress bar and ``info`` for the 
+                         info section. 
+    :param info_sep: the separator between multiple info items (eta etc.) 
+    :param width: the width of the progress bar in characters, 0 means full 
+                  terminal width 
+    :param file: The file to write to. If this is not a terminal then 
+        only the label is printed. 
+    :param color: controls if the terminal supports ANSI colors or not.  The 
+                  default is autodetection.  This is only needed if ANSI 
+                  codes are included anywhere in the progress bar output 
+                  which is not the case by default. 
+    :param update_min_steps: Render only when this many updates have 
+        completed. This allows tuning for very fast iterators. 
+ 
+    .. versionchanged:: 8.0 
+        Output is shown even if execution time is less than 0.5 seconds. 
+ 
+    .. versionchanged:: 8.0 
+        ``item_show_func`` shows the current item, not the previous one. 
+ 
+    .. versionchanged:: 8.0 
+        Labels are echoed if the output is not a TTY. Reverts a change 
+        in 7.0 that removed all output. 
+ 
+    .. versionadded:: 8.0 
+       Added the ``update_min_steps`` parameter. 
+ 
+    .. versionchanged:: 4.0 
+        Added the ``color`` parameter. Added the ``update`` method to 
+        the object. 
+ 
+    .. versionadded:: 2.0 
+    &quot;&quot;&quot;</span>
+    <span class="s0">from </span><span class="s1">._termui_impl </span><span class="s0">import </span><span class="s1">ProgressBar</span>
+
+    <span class="s1">color = resolve_color_default(color)</span>
+    <span class="s0">return </span><span class="s1">ProgressBar(</span>
+        <span class="s1">iterable=iterable</span><span class="s0">,</span>
+        <span class="s1">length=length</span><span class="s0">,</span>
+        <span class="s1">show_eta=show_eta</span><span class="s0">,</span>
+        <span class="s1">show_percent=show_percent</span><span class="s0">,</span>
+        <span class="s1">show_pos=show_pos</span><span class="s0">,</span>
+        <span class="s1">item_show_func=item_show_func</span><span class="s0">,</span>
+        <span class="s1">fill_char=fill_char</span><span class="s0">,</span>
+        <span class="s1">empty_char=empty_char</span><span class="s0">,</span>
+        <span class="s1">bar_template=bar_template</span><span class="s0">,</span>
+        <span class="s1">info_sep=info_sep</span><span class="s0">,</span>
+        <span class="s1">file=file</span><span class="s0">,</span>
+        <span class="s1">label=label</span><span class="s0">,</span>
+        <span class="s1">width=width</span><span class="s0">,</span>
+        <span class="s1">color=color</span><span class="s0">,</span>
+        <span class="s1">update_min_steps=update_min_steps</span><span class="s0">,</span>
+    <span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">clear() -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+    <span class="s5">&quot;&quot;&quot;Clears the terminal screen.  This will have the effect of clearing 
+    the whole visible space of the terminal and moving the cursor to the 
+    top left.  This does not do anything if not connected to a terminal. 
+ 
+    .. versionadded:: 2.0 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if not </span><span class="s1">isatty(sys.stdout):</span>
+        <span class="s0">return</span>
+    <span class="s0">if </span><span class="s1">WIN:</span>
+        <span class="s1">os.system(</span><span class="s2">&quot;cls&quot;</span><span class="s1">)</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">sys.stdout.write(</span><span class="s2">&quot;</span><span class="s0">\033</span><span class="s2">[2J</span><span class="s0">\033</span><span class="s2">[1;1H&quot;</span><span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">_interpret_color(</span>
+    <span class="s1">color: t.Union[int</span><span class="s0">, </span><span class="s1">t.Tuple[int</span><span class="s0">, </span><span class="s1">int</span><span class="s0">, </span><span class="s1">int]</span><span class="s0">, </span><span class="s1">str]</span><span class="s0">, </span><span class="s1">offset: int = </span><span class="s4">0</span>
+<span class="s1">) -&gt; str:</span>
+    <span class="s0">if </span><span class="s1">isinstance(color</span><span class="s0">, </span><span class="s1">int):</span>
+        <span class="s0">return </span><span class="s2">f&quot;</span><span class="s0">{</span><span class="s4">38 </span><span class="s1">+ offset</span><span class="s0">}</span><span class="s2">;5;</span><span class="s0">{</span><span class="s1">color</span><span class="s0">:</span><span class="s2">d</span><span class="s0">}</span><span class="s2">&quot;</span>
+
+    <span class="s0">if </span><span class="s1">isinstance(color</span><span class="s0">, </span><span class="s1">(tuple</span><span class="s0">, </span><span class="s1">list)):</span>
+        <span class="s1">r</span><span class="s0">, </span><span class="s1">g</span><span class="s0">, </span><span class="s1">b = color</span>
+        <span class="s0">return </span><span class="s2">f&quot;</span><span class="s0">{</span><span class="s4">38 </span><span class="s1">+ offset</span><span class="s0">}</span><span class="s2">;2;</span><span class="s0">{</span><span class="s1">r</span><span class="s0">:</span><span class="s2">d</span><span class="s0">}</span><span class="s2">;</span><span class="s0">{</span><span class="s1">g</span><span class="s0">:</span><span class="s2">d</span><span class="s0">}</span><span class="s2">;</span><span class="s0">{</span><span class="s1">b</span><span class="s0">:</span><span class="s2">d</span><span class="s0">}</span><span class="s2">&quot;</span>
+
+    <span class="s0">return </span><span class="s1">str(_ansi_colors[color] + offset)</span>
+
+
+<span class="s0">def </span><span class="s1">style(</span>
+    <span class="s1">text: t.Any</span><span class="s0">,</span>
+    <span class="s1">fg: t.Optional[t.Union[int</span><span class="s0">, </span><span class="s1">t.Tuple[int</span><span class="s0">, </span><span class="s1">int</span><span class="s0">, </span><span class="s1">int]</span><span class="s0">, </span><span class="s1">str]] = </span><span class="s0">None,</span>
+    <span class="s1">bg: t.Optional[t.Union[int</span><span class="s0">, </span><span class="s1">t.Tuple[int</span><span class="s0">, </span><span class="s1">int</span><span class="s0">, </span><span class="s1">int]</span><span class="s0">, </span><span class="s1">str]] = </span><span class="s0">None,</span>
+    <span class="s1">bold: t.Optional[bool] = </span><span class="s0">None,</span>
+    <span class="s1">dim: t.Optional[bool] = </span><span class="s0">None,</span>
+    <span class="s1">underline: t.Optional[bool] = </span><span class="s0">None,</span>
+    <span class="s1">overline: t.Optional[bool] = </span><span class="s0">None,</span>
+    <span class="s1">italic: t.Optional[bool] = </span><span class="s0">None,</span>
+    <span class="s1">blink: t.Optional[bool] = </span><span class="s0">None,</span>
+    <span class="s1">reverse: t.Optional[bool] = </span><span class="s0">None,</span>
+    <span class="s1">strikethrough: t.Optional[bool] = </span><span class="s0">None,</span>
+    <span class="s1">reset: bool = </span><span class="s0">True,</span>
+<span class="s1">) -&gt; str:</span>
+    <span class="s5">&quot;&quot;&quot;Styles a text with ANSI styles and returns the new string.  By 
+    default the styling is self contained which means that at the end 
+    of the string a reset code is issued.  This can be prevented by 
+    passing ``reset=False``. 
+ 
+    Examples:: 
+ 
+        click.echo(click.style('Hello World!', fg='green')) 
+        click.echo(click.style('ATTENTION!', blink=True)) 
+        click.echo(click.style('Some things', reverse=True, fg='cyan')) 
+        click.echo(click.style('More colors', fg=(255, 12, 128), bg=117)) 
+ 
+    Supported color names: 
+ 
+    * ``black`` (might be a gray) 
+    * ``red`` 
+    * ``green`` 
+    * ``yellow`` (might be an orange) 
+    * ``blue`` 
+    * ``magenta`` 
+    * ``cyan`` 
+    * ``white`` (might be light gray) 
+    * ``bright_black`` 
+    * ``bright_red`` 
+    * ``bright_green`` 
+    * ``bright_yellow`` 
+    * ``bright_blue`` 
+    * ``bright_magenta`` 
+    * ``bright_cyan`` 
+    * ``bright_white`` 
+    * ``reset`` (reset the color code only) 
+ 
+    If the terminal supports it, color may also be specified as: 
+ 
+    -   An integer in the interval [0, 255]. The terminal must support 
+        8-bit/256-color mode. 
+    -   An RGB tuple of three integers in [0, 255]. The terminal must 
+        support 24-bit/true-color mode. 
+ 
+    See https://en.wikipedia.org/wiki/ANSI_color and 
+    https://gist.github.com/XVilka/8346728 for more information. 
+ 
+    :param text: the string to style with ansi codes. 
+    :param fg: if provided this will become the foreground color. 
+    :param bg: if provided this will become the background color. 
+    :param bold: if provided this will enable or disable bold mode. 
+    :param dim: if provided this will enable or disable dim mode.  This is 
+                badly supported. 
+    :param underline: if provided this will enable or disable underline. 
+    :param overline: if provided this will enable or disable overline. 
+    :param italic: if provided this will enable or disable italic. 
+    :param blink: if provided this will enable or disable blinking. 
+    :param reverse: if provided this will enable or disable inverse 
+                    rendering (foreground becomes background and the 
+                    other way round). 
+    :param strikethrough: if provided this will enable or disable 
+        striking through text. 
+    :param reset: by default a reset-all code is added at the end of the 
+                  string which means that styles do not carry over.  This 
+                  can be disabled to compose styles. 
+ 
+    .. versionchanged:: 8.0 
+        A non-string ``message`` is converted to a string. 
+ 
+    .. versionchanged:: 8.0 
+       Added support for 256 and RGB color codes. 
+ 
+    .. versionchanged:: 8.0 
+        Added the ``strikethrough``, ``italic``, and ``overline`` 
+        parameters. 
+ 
+    .. versionchanged:: 7.0 
+        Added support for bright colors. 
+ 
+    .. versionadded:: 2.0 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if not </span><span class="s1">isinstance(text</span><span class="s0">, </span><span class="s1">str):</span>
+        <span class="s1">text = str(text)</span>
+
+    <span class="s1">bits = []</span>
+
+    <span class="s0">if </span><span class="s1">fg:</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">bits.append(</span><span class="s2">f&quot;</span><span class="s0">\033</span><span class="s2">[</span><span class="s0">{</span><span class="s1">_interpret_color(fg)</span><span class="s0">}</span><span class="s2">m&quot;</span><span class="s1">)</span>
+        <span class="s0">except </span><span class="s1">KeyError:</span>
+            <span class="s0">raise </span><span class="s1">TypeError(</span><span class="s2">f&quot;Unknown color </span><span class="s0">{</span><span class="s1">fg</span><span class="s0">!r}</span><span class="s2">&quot;</span><span class="s1">) </span><span class="s0">from None</span>
+
+    <span class="s0">if </span><span class="s1">bg:</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">bits.append(</span><span class="s2">f&quot;</span><span class="s0">\033</span><span class="s2">[</span><span class="s0">{</span><span class="s1">_interpret_color(bg</span><span class="s0">, </span><span class="s4">10</span><span class="s1">)</span><span class="s0">}</span><span class="s2">m&quot;</span><span class="s1">)</span>
+        <span class="s0">except </span><span class="s1">KeyError:</span>
+            <span class="s0">raise </span><span class="s1">TypeError(</span><span class="s2">f&quot;Unknown color </span><span class="s0">{</span><span class="s1">bg</span><span class="s0">!r}</span><span class="s2">&quot;</span><span class="s1">) </span><span class="s0">from None</span>
+
+    <span class="s0">if </span><span class="s1">bold </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s1">bits.append(</span><span class="s2">f&quot;</span><span class="s0">\033</span><span class="s2">[</span><span class="s0">{</span><span class="s4">1 </span><span class="s0">if </span><span class="s1">bold </span><span class="s0">else </span><span class="s4">22</span><span class="s0">}</span><span class="s2">m&quot;</span><span class="s1">)</span>
+    <span class="s0">if </span><span class="s1">dim </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s1">bits.append(</span><span class="s2">f&quot;</span><span class="s0">\033</span><span class="s2">[</span><span class="s0">{</span><span class="s4">2 </span><span class="s0">if </span><span class="s1">dim </span><span class="s0">else </span><span class="s4">22</span><span class="s0">}</span><span class="s2">m&quot;</span><span class="s1">)</span>
+    <span class="s0">if </span><span class="s1">underline </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s1">bits.append(</span><span class="s2">f&quot;</span><span class="s0">\033</span><span class="s2">[</span><span class="s0">{</span><span class="s4">4 </span><span class="s0">if </span><span class="s1">underline </span><span class="s0">else </span><span class="s4">24</span><span class="s0">}</span><span class="s2">m&quot;</span><span class="s1">)</span>
+    <span class="s0">if </span><span class="s1">overline </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s1">bits.append(</span><span class="s2">f&quot;</span><span class="s0">\033</span><span class="s2">[</span><span class="s0">{</span><span class="s4">53 </span><span class="s0">if </span><span class="s1">overline </span><span class="s0">else </span><span class="s4">55</span><span class="s0">}</span><span class="s2">m&quot;</span><span class="s1">)</span>
+    <span class="s0">if </span><span class="s1">italic </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s1">bits.append(</span><span class="s2">f&quot;</span><span class="s0">\033</span><span class="s2">[</span><span class="s0">{</span><span class="s4">3 </span><span class="s0">if </span><span class="s1">italic </span><span class="s0">else </span><span class="s4">23</span><span class="s0">}</span><span class="s2">m&quot;</span><span class="s1">)</span>
+    <span class="s0">if </span><span class="s1">blink </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s1">bits.append(</span><span class="s2">f&quot;</span><span class="s0">\033</span><span class="s2">[</span><span class="s0">{</span><span class="s4">5 </span><span class="s0">if </span><span class="s1">blink </span><span class="s0">else </span><span class="s4">25</span><span class="s0">}</span><span class="s2">m&quot;</span><span class="s1">)</span>
+    <span class="s0">if </span><span class="s1">reverse </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s1">bits.append(</span><span class="s2">f&quot;</span><span class="s0">\033</span><span class="s2">[</span><span class="s0">{</span><span class="s4">7 </span><span class="s0">if </span><span class="s1">reverse </span><span class="s0">else </span><span class="s4">27</span><span class="s0">}</span><span class="s2">m&quot;</span><span class="s1">)</span>
+    <span class="s0">if </span><span class="s1">strikethrough </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s1">bits.append(</span><span class="s2">f&quot;</span><span class="s0">\033</span><span class="s2">[</span><span class="s0">{</span><span class="s4">9 </span><span class="s0">if </span><span class="s1">strikethrough </span><span class="s0">else </span><span class="s4">29</span><span class="s0">}</span><span class="s2">m&quot;</span><span class="s1">)</span>
+    <span class="s1">bits.append(text)</span>
+    <span class="s0">if </span><span class="s1">reset:</span>
+        <span class="s1">bits.append(_ansi_reset_all)</span>
+    <span class="s0">return </span><span class="s2">&quot;&quot;</span><span class="s1">.join(bits)</span>
+
+
+<span class="s0">def </span><span class="s1">unstyle(text: str) -&gt; str:</span>
+    <span class="s5">&quot;&quot;&quot;Removes ANSI styling information from a string.  Usually it's not 
+    necessary to use this function as Click's echo function will 
+    automatically remove styling if necessary. 
+ 
+    .. versionadded:: 2.0 
+ 
+    :param text: the text to remove style information from. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">return </span><span class="s1">strip_ansi(text)</span>
+
+
+<span class="s0">def </span><span class="s1">secho(</span>
+    <span class="s1">message: t.Optional[t.Any] = </span><span class="s0">None,</span>
+    <span class="s1">file: t.Optional[t.IO] = </span><span class="s0">None,</span>
+    <span class="s1">nl: bool = </span><span class="s0">True,</span>
+    <span class="s1">err: bool = </span><span class="s0">False,</span>
+    <span class="s1">color: t.Optional[bool] = </span><span class="s0">None,</span>
+    <span class="s1">**styles: t.Any</span><span class="s0">,</span>
+<span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+    <span class="s5">&quot;&quot;&quot;This function combines :func:`echo` and :func:`style` into one 
+    call.  As such the following two calls are the same:: 
+ 
+        click.secho('Hello World!', fg='green') 
+        click.echo(click.style('Hello World!', fg='green')) 
+ 
+    All keyword arguments are forwarded to the underlying functions 
+    depending on which one they go with. 
+ 
+    Non-string types will be converted to :class:`str`. However, 
+    :class:`bytes` are passed directly to :meth:`echo` without applying 
+    style. If you want to style bytes that represent text, call 
+    :meth:`bytes.decode` first. 
+ 
+    .. versionchanged:: 8.0 
+        A non-string ``message`` is converted to a string. Bytes are 
+        passed through without style applied. 
+ 
+    .. versionadded:: 2.0 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">message </span><span class="s0">is not None and not </span><span class="s1">isinstance(message</span><span class="s0">, </span><span class="s1">(bytes</span><span class="s0">, </span><span class="s1">bytearray)):</span>
+        <span class="s1">message = style(message</span><span class="s0">, </span><span class="s1">**styles)</span>
+
+    <span class="s0">return </span><span class="s1">echo(message</span><span class="s0">, </span><span class="s1">file=file</span><span class="s0">, </span><span class="s1">nl=nl</span><span class="s0">, </span><span class="s1">err=err</span><span class="s0">, </span><span class="s1">color=color)</span>
+
+
+<span class="s0">def </span><span class="s1">edit(</span>
+    <span class="s1">text: t.Optional[t.AnyStr] = </span><span class="s0">None,</span>
+    <span class="s1">editor: t.Optional[str] = </span><span class="s0">None,</span>
+    <span class="s1">env: t.Optional[t.Mapping[str</span><span class="s0">, </span><span class="s1">str]] = </span><span class="s0">None,</span>
+    <span class="s1">require_save: bool = </span><span class="s0">True,</span>
+    <span class="s1">extension: str = </span><span class="s2">&quot;.txt&quot;</span><span class="s0">,</span>
+    <span class="s1">filename: t.Optional[str] = </span><span class="s0">None,</span>
+<span class="s1">) -&gt; t.Optional[t.AnyStr]:</span>
+    <span class="s5">r&quot;&quot;&quot;Edits the given text in the defined editor.  If an editor is given 
+    (should be the full path to the executable but the regular operating 
+    system search path is used for finding the executable) it overrides 
+    the detected editor.  Optionally, some environment variables can be 
+    used.  If the editor is closed without changes, `None` is returned.  In 
+    case a file is edited directly the return value is always `None` and 
+    `require_save` and `extension` are ignored. 
+ 
+    If the editor cannot be opened a :exc:`UsageError` is raised. 
+ 
+    Note for Windows: to simplify cross-platform usage, the newlines are 
+    automatically converted from POSIX to Windows and vice versa.  As such, 
+    the message here will have ``\n`` as newline markers. 
+ 
+    :param text: the text to edit. 
+    :param editor: optionally the editor to use.  Defaults to automatic 
+                   detection. 
+    :param env: environment variables to forward to the editor. 
+    :param require_save: if this is true, then not saving in the editor 
+                         will make the return value become `None`. 
+    :param extension: the extension to tell the editor about.  This defaults 
+                      to `.txt` but changing this might change syntax 
+                      highlighting. 
+    :param filename: if provided it will edit this file instead of the 
+                     provided text contents.  It will not use a temporary 
+                     file as an indirection in that case. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">from </span><span class="s1">._termui_impl </span><span class="s0">import </span><span class="s1">Editor</span>
+
+    <span class="s1">ed = Editor(editor=editor</span><span class="s0">, </span><span class="s1">env=env</span><span class="s0">, </span><span class="s1">require_save=require_save</span><span class="s0">, </span><span class="s1">extension=extension)</span>
+
+    <span class="s0">if </span><span class="s1">filename </span><span class="s0">is None</span><span class="s1">:</span>
+        <span class="s0">return </span><span class="s1">ed.edit(text)</span>
+
+    <span class="s1">ed.edit_file(filename)</span>
+    <span class="s0">return None</span>
+
+
+<span class="s0">def </span><span class="s1">launch(url: str</span><span class="s0">, </span><span class="s1">wait: bool = </span><span class="s0">False, </span><span class="s1">locate: bool = </span><span class="s0">False</span><span class="s1">) -&gt; int:</span>
+    <span class="s5">&quot;&quot;&quot;This function launches the given URL (or filename) in the default 
+    viewer application for this file type.  If this is an executable, it 
+    might launch the executable in a new session.  The return value is 
+    the exit code of the launched application.  Usually, ``0`` indicates 
+    success. 
+ 
+    Examples:: 
+ 
+        click.launch('https://click.palletsprojects.com/') 
+        click.launch('/my/downloaded/file', locate=True) 
+ 
+    .. versionadded:: 2.0 
+ 
+    :param url: URL or filename of the thing to launch. 
+    :param wait: Wait for the program to exit before returning. This 
+        only works if the launched program blocks. In particular, 
+        ``xdg-open`` on Linux does not block. 
+    :param locate: if this is set to `True` then instead of launching the 
+                   application associated with the URL it will attempt to 
+                   launch a file manager with the file located.  This 
+                   might have weird effects if the URL does not point to 
+                   the filesystem. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">from </span><span class="s1">._termui_impl </span><span class="s0">import </span><span class="s1">open_url</span>
+
+    <span class="s0">return </span><span class="s1">open_url(url</span><span class="s0">, </span><span class="s1">wait=wait</span><span class="s0">, </span><span class="s1">locate=locate)</span>
+
+
+<span class="s3"># If this is provided, getchar() calls into this instead.  This is used</span>
+<span class="s3"># for unittesting purposes.</span>
+<span class="s1">_getchar: t.Optional[t.Callable[[bool]</span><span class="s0">, </span><span class="s1">str]] = </span><span class="s0">None</span>
+
+
+<span class="s0">def </span><span class="s1">getchar(echo: bool = </span><span class="s0">False</span><span class="s1">) -&gt; str:</span>
+    <span class="s5">&quot;&quot;&quot;Fetches a single character from the terminal and returns it.  This 
+    will always return a unicode character and under certain rare 
+    circumstances this might return more than one character.  The 
+    situations which more than one character is returned is when for 
+    whatever reason multiple characters end up in the terminal buffer or 
+    standard input was not actually a terminal. 
+ 
+    Note that this will always read from the terminal, even if something 
+    is piped into the standard input. 
+ 
+    Note for Windows: in rare cases when typing non-ASCII characters, this 
+    function might wait for a second character and then return both at once. 
+    This is because certain Unicode characters look like special-key markers. 
+ 
+    .. versionadded:: 2.0 
+ 
+    :param echo: if set to `True`, the character read will also show up on 
+                 the terminal.  The default is to not show it. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">global </span><span class="s1">_getchar</span>
+
+    <span class="s0">if </span><span class="s1">_getchar </span><span class="s0">is None</span><span class="s1">:</span>
+        <span class="s0">from </span><span class="s1">._termui_impl </span><span class="s0">import </span><span class="s1">getchar </span><span class="s0">as </span><span class="s1">f</span>
+
+        <span class="s1">_getchar = f</span>
+
+    <span class="s0">return </span><span class="s1">_getchar(echo)</span>
+
+
+<span class="s0">def </span><span class="s1">raw_terminal() -&gt; t.ContextManager[int]:</span>
+    <span class="s0">from </span><span class="s1">._termui_impl </span><span class="s0">import </span><span class="s1">raw_terminal </span><span class="s0">as </span><span class="s1">f</span>
+
+    <span class="s0">return </span><span class="s1">f()</span>
+
+
+<span class="s0">def </span><span class="s1">pause(info: t.Optional[str] = </span><span class="s0">None, </span><span class="s1">err: bool = </span><span class="s0">False</span><span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+    <span class="s5">&quot;&quot;&quot;This command stops execution and waits for the user to press any 
+    key to continue.  This is similar to the Windows batch &quot;pause&quot; 
+    command.  If the program is not run through a terminal, this command 
+    will instead do nothing. 
+ 
+    .. versionadded:: 2.0 
+ 
+    .. versionadded:: 4.0 
+       Added the `err` parameter. 
+ 
+    :param info: The message to print before pausing. Defaults to 
+        ``&quot;Press any key to continue...&quot;``. 
+    :param err: if set to message goes to ``stderr`` instead of 
+                ``stdout``, the same as with echo. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if not </span><span class="s1">isatty(sys.stdin) </span><span class="s0">or not </span><span class="s1">isatty(sys.stdout):</span>
+        <span class="s0">return</span>
+
+    <span class="s0">if </span><span class="s1">info </span><span class="s0">is None</span><span class="s1">:</span>
+        <span class="s1">info = _(</span><span class="s2">&quot;Press any key to continue...&quot;</span><span class="s1">)</span>
+
+    <span class="s0">try</span><span class="s1">:</span>
+        <span class="s0">if </span><span class="s1">info:</span>
+            <span class="s1">echo(info</span><span class="s0">, </span><span class="s1">nl=</span><span class="s0">False, </span><span class="s1">err=err)</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">getchar()</span>
+        <span class="s0">except </span><span class="s1">(KeyboardInterrupt</span><span class="s0">, </span><span class="s1">EOFError):</span>
+            <span class="s0">pass</span>
+    <span class="s0">finally</span><span class="s1">:</span>
+        <span class="s0">if </span><span class="s1">info:</span>
+            <span class="s1">echo(err=err)</span>
+</pre>
+</body>
+</html>

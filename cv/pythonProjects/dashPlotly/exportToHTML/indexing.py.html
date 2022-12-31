@@ -1,0 +1,324 @@
+<html>
+<head>
+<title>indexing.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+indexing.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">TYPE_CHECKING</span><span class="s0">,</span>
+    <span class="s1">Iterable</span><span class="s0">,</span>
+    <span class="s1">Literal</span><span class="s0">,</span>
+    <span class="s1">cast</span><span class="s0">,</span>
+<span class="s1">)</span>
+
+<span class="s0">import </span><span class="s1">numpy </span><span class="s0">as </span><span class="s1">np</span>
+
+<span class="s0">from </span><span class="s1">pandas._typing </span><span class="s0">import </span><span class="s1">PositionalIndexer</span>
+<span class="s0">from </span><span class="s1">pandas.util._decorators </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">cache_readonly</span><span class="s0">,</span>
+    <span class="s1">doc</span><span class="s0">,</span>
+<span class="s1">)</span>
+
+<span class="s0">from </span><span class="s1">pandas.core.dtypes.common </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">is_integer</span><span class="s0">,</span>
+    <span class="s1">is_list_like</span><span class="s0">,</span>
+<span class="s1">)</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING:</span>
+    <span class="s0">from </span><span class="s1">pandas </span><span class="s0">import </span><span class="s1">(</span>
+        <span class="s1">DataFrame</span><span class="s0">,</span>
+        <span class="s1">Series</span><span class="s0">,</span>
+    <span class="s1">)</span>
+    <span class="s0">from </span><span class="s1">pandas.core.groupby </span><span class="s0">import </span><span class="s1">groupby</span>
+
+
+<span class="s0">class </span><span class="s1">GroupByIndexingMixin:</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Mixin for adding ._positional_selector to GroupBy. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">@cache_readonly</span>
+    <span class="s0">def </span><span class="s1">_positional_selector(self) -&gt; GroupByPositionalSelector:</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return positional selection for each group. 
+ 
+        ``groupby._positional_selector[i:j]`` is similar to 
+        ``groupby.apply(lambda x: x.iloc[i:j])`` 
+        but much faster and preserves the original index and order. 
+ 
+        ``_positional_selector[]`` is compatible with and extends :meth:`~GroupBy.head` 
+        and :meth:`~GroupBy.tail`. For example: 
+ 
+        - ``head(5)`` 
+        - ``_positional_selector[5:-5]`` 
+        - ``tail(5)`` 
+ 
+        together return all the rows. 
+ 
+        Allowed inputs for the index are: 
+ 
+        - An integer valued iterable, e.g. ``range(2, 4)``. 
+        - A comma separated list of integers and slices, e.g. ``5``, ``2, 4``, ``2:4``. 
+ 
+        The output format is the same as :meth:`~GroupBy.head` and 
+        :meth:`~GroupBy.tail`, namely 
+        a subset of the ``DataFrame`` or ``Series`` with the index and order preserved. 
+ 
+        Returns 
+        ------- 
+        Series 
+            The filtered subset of the original Series. 
+        DataFrame 
+            The filtered subset of the original DataFrame. 
+ 
+        See Also 
+        -------- 
+        DataFrame.iloc : Purely integer-location based indexing for selection by 
+            position. 
+        GroupBy.head : Return first n rows of each group. 
+        GroupBy.tail : Return last n rows of each group. 
+        GroupBy.nth : Take the nth row from each group if n is an int, or a 
+            subset of rows, if n is a list of ints. 
+ 
+        Notes 
+        ----- 
+        - The slice step cannot be negative. 
+        - If the index specification results in overlaps, the item is not duplicated. 
+        - If the index specification changes the order of items, then 
+          they are returned in their original order. 
+          By contrast, ``DataFrame.iloc`` can change the row order. 
+        - ``groupby()`` parameters such as as_index and dropna are ignored. 
+ 
+        The differences between ``_positional_selector[]`` and :meth:`~GroupBy.nth` 
+        with ``as_index=False`` are: 
+ 
+        - Input to ``_positional_selector`` can include 
+          one or more slices whereas ``nth`` 
+          just handles an integer or a list of integers. 
+        - ``_positional_selector`` can  accept a slice relative to the 
+          last row of each group. 
+        - ``_positional_selector`` does not have an equivalent to the 
+          ``nth()`` ``dropna`` parameter. 
+ 
+        Examples 
+        -------- 
+        &gt;&gt;&gt; df = pd.DataFrame([[&quot;a&quot;, 1], [&quot;a&quot;, 2], [&quot;a&quot;, 3], [&quot;b&quot;, 4], [&quot;b&quot;, 5]], 
+        ...                   columns=[&quot;A&quot;, &quot;B&quot;]) 
+        &gt;&gt;&gt; df.groupby(&quot;A&quot;)._positional_selector[1:2] 
+           A  B 
+        1  a  2 
+        4  b  5 
+ 
+        &gt;&gt;&gt; df.groupby(&quot;A&quot;)._positional_selector[1, -1] 
+           A  B 
+        1  a  2 
+        2  a  3 
+        4  b  5 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">TYPE_CHECKING:</span>
+            <span class="s1">groupby_self = cast(groupby.GroupBy</span><span class="s0">, </span><span class="s1">self)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">groupby_self = self</span>
+
+        <span class="s0">return </span><span class="s1">GroupByPositionalSelector(groupby_self)</span>
+
+    <span class="s0">def </span><span class="s1">_make_mask_from_positional_indexer(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">arg: PositionalIndexer | tuple</span><span class="s0">,</span>
+    <span class="s1">) -&gt; np.ndarray:</span>
+        <span class="s0">if </span><span class="s1">is_list_like(arg):</span>
+            <span class="s0">if </span><span class="s1">all(is_integer(i) </span><span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">cast(Iterable</span><span class="s0">, </span><span class="s1">arg)):</span>
+                <span class="s1">mask = self._make_mask_from_list(cast(Iterable[int]</span><span class="s0">, </span><span class="s1">arg))</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">mask = self._make_mask_from_tuple(cast(tuple</span><span class="s0">, </span><span class="s1">arg))</span>
+
+        <span class="s0">elif </span><span class="s1">isinstance(arg</span><span class="s0">, </span><span class="s1">slice):</span>
+            <span class="s1">mask = self._make_mask_from_slice(arg)</span>
+        <span class="s0">elif </span><span class="s1">is_integer(arg):</span>
+            <span class="s1">mask = self._make_mask_from_int(cast(int</span><span class="s0">, </span><span class="s1">arg))</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">TypeError(</span>
+                <span class="s3">f&quot;Invalid index </span><span class="s0">{</span><span class="s1">type(arg)</span><span class="s0">}</span><span class="s3">. &quot;</span>
+                <span class="s3">&quot;Must be integer, list-like, slice or a tuple of &quot;</span>
+                <span class="s3">&quot;integers and slices&quot;</span>
+            <span class="s1">)</span>
+
+        <span class="s0">if </span><span class="s1">isinstance(mask</span><span class="s0">, </span><span class="s1">bool):</span>
+            <span class="s0">if </span><span class="s1">mask:</span>
+                <span class="s1">mask = self._ascending_count &gt;= </span><span class="s4">0</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">mask = self._ascending_count &lt; </span><span class="s4">0</span>
+
+        <span class="s0">return </span><span class="s1">cast(np.ndarray</span><span class="s0">, </span><span class="s1">mask)</span>
+
+    <span class="s0">def </span><span class="s1">_make_mask_from_int(self</span><span class="s0">, </span><span class="s1">arg: int) -&gt; np.ndarray:</span>
+        <span class="s0">if </span><span class="s1">arg &gt;= </span><span class="s4">0</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">self._ascending_count == arg</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">self._descending_count == (-arg - </span><span class="s4">1</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">_make_mask_from_list(self</span><span class="s0">, </span><span class="s1">args: Iterable[int]) -&gt; bool | np.ndarray:</span>
+        <span class="s1">positive = [arg </span><span class="s0">for </span><span class="s1">arg </span><span class="s0">in </span><span class="s1">args </span><span class="s0">if </span><span class="s1">arg &gt;= </span><span class="s4">0</span><span class="s1">]</span>
+        <span class="s1">negative = [-arg - </span><span class="s4">1 </span><span class="s0">for </span><span class="s1">arg </span><span class="s0">in </span><span class="s1">args </span><span class="s0">if </span><span class="s1">arg &lt; </span><span class="s4">0</span><span class="s1">]</span>
+
+        <span class="s1">mask: bool | np.ndarray = </span><span class="s0">False</span>
+
+        <span class="s0">if </span><span class="s1">positive:</span>
+            <span class="s1">mask |= np.isin(self._ascending_count</span><span class="s0">, </span><span class="s1">positive)</span>
+
+        <span class="s0">if </span><span class="s1">negative:</span>
+            <span class="s1">mask |= np.isin(self._descending_count</span><span class="s0">, </span><span class="s1">negative)</span>
+
+        <span class="s0">return </span><span class="s1">mask</span>
+
+    <span class="s0">def </span><span class="s1">_make_mask_from_tuple(self</span><span class="s0">, </span><span class="s1">args: tuple) -&gt; bool | np.ndarray:</span>
+        <span class="s1">mask: bool | np.ndarray = </span><span class="s0">False</span>
+
+        <span class="s0">for </span><span class="s1">arg </span><span class="s0">in </span><span class="s1">args:</span>
+            <span class="s0">if </span><span class="s1">is_integer(arg):</span>
+                <span class="s1">mask |= self._make_mask_from_int(cast(int</span><span class="s0">, </span><span class="s1">arg))</span>
+            <span class="s0">elif </span><span class="s1">isinstance(arg</span><span class="s0">, </span><span class="s1">slice):</span>
+                <span class="s1">mask |= self._make_mask_from_slice(arg)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s0">raise </span><span class="s1">ValueError(</span>
+                    <span class="s3">f&quot;Invalid argument </span><span class="s0">{</span><span class="s1">type(arg)</span><span class="s0">}</span><span class="s3">. Should be int or slice.&quot;</span>
+                <span class="s1">)</span>
+
+        <span class="s0">return </span><span class="s1">mask</span>
+
+    <span class="s0">def </span><span class="s1">_make_mask_from_slice(self</span><span class="s0">, </span><span class="s1">arg: slice) -&gt; bool | np.ndarray:</span>
+        <span class="s1">start = arg.start</span>
+        <span class="s1">stop = arg.stop</span>
+        <span class="s1">step = arg.step</span>
+
+        <span class="s0">if </span><span class="s1">step </span><span class="s0">is not None and </span><span class="s1">step &lt; </span><span class="s4">0</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s3">f&quot;Invalid step </span><span class="s0">{</span><span class="s1">step</span><span class="s0">}</span><span class="s3">. Must be non-negative&quot;</span><span class="s1">)</span>
+
+        <span class="s1">mask: bool | np.ndarray = </span><span class="s0">True</span>
+
+        <span class="s0">if </span><span class="s1">step </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">step = </span><span class="s4">1</span>
+
+        <span class="s0">if </span><span class="s1">start </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s0">if </span><span class="s1">step &gt; </span><span class="s4">1</span><span class="s1">:</span>
+                <span class="s1">mask &amp;= self._ascending_count % step == </span><span class="s4">0</span>
+
+        <span class="s0">elif </span><span class="s1">start &gt;= </span><span class="s4">0</span><span class="s1">:</span>
+            <span class="s1">mask &amp;= self._ascending_count &gt;= start</span>
+
+            <span class="s0">if </span><span class="s1">step &gt; </span><span class="s4">1</span><span class="s1">:</span>
+                <span class="s1">mask &amp;= (self._ascending_count - start) % step == </span><span class="s4">0</span>
+
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">mask &amp;= self._descending_count &lt; -start</span>
+
+            <span class="s1">offset_array = self._descending_count + start + </span><span class="s4">1</span>
+            <span class="s1">limit_array = (</span>
+                <span class="s1">self._ascending_count + self._descending_count + (start + </span><span class="s4">1</span><span class="s1">)</span>
+            <span class="s1">) &lt; </span><span class="s4">0</span>
+            <span class="s1">offset_array = np.where(limit_array</span><span class="s0">, </span><span class="s1">self._ascending_count</span><span class="s0">, </span><span class="s1">offset_array)</span>
+
+            <span class="s1">mask &amp;= offset_array % step == </span><span class="s4">0</span>
+
+        <span class="s0">if </span><span class="s1">stop </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s0">if </span><span class="s1">stop &gt;= </span><span class="s4">0</span><span class="s1">:</span>
+                <span class="s1">mask &amp;= self._ascending_count &lt; stop</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">mask &amp;= self._descending_count &gt;= -stop</span>
+
+        <span class="s0">return </span><span class="s1">mask</span>
+
+    <span class="s1">@cache_readonly</span>
+    <span class="s0">def </span><span class="s1">_ascending_count(self) -&gt; np.ndarray:</span>
+        <span class="s0">if </span><span class="s1">TYPE_CHECKING:</span>
+            <span class="s1">groupby_self = cast(groupby.GroupBy</span><span class="s0">, </span><span class="s1">self)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">groupby_self = self</span>
+
+        <span class="s0">return </span><span class="s1">groupby_self._cumcount_array()</span>
+
+    <span class="s1">@cache_readonly</span>
+    <span class="s0">def </span><span class="s1">_descending_count(self) -&gt; np.ndarray:</span>
+        <span class="s0">if </span><span class="s1">TYPE_CHECKING:</span>
+            <span class="s1">groupby_self = cast(groupby.GroupBy</span><span class="s0">, </span><span class="s1">self)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">groupby_self = self</span>
+
+        <span class="s0">return </span><span class="s1">groupby_self._cumcount_array(ascending=</span><span class="s0">False</span><span class="s1">)</span>
+
+
+<span class="s1">@doc(GroupByIndexingMixin._positional_selector)</span>
+<span class="s0">class </span><span class="s1">GroupByPositionalSelector:</span>
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">groupby_object: groupby.GroupBy):</span>
+        <span class="s1">self.groupby_object = groupby_object</span>
+
+    <span class="s0">def </span><span class="s1">__getitem__(self</span><span class="s0">, </span><span class="s1">arg: PositionalIndexer | tuple) -&gt; DataFrame | Series:</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Select by positional index per group. 
+ 
+        Implements GroupBy._positional_selector 
+ 
+        Parameters 
+        ---------- 
+        arg : PositionalIndexer | tuple 
+            Allowed values are: 
+            - int 
+            - int valued iterable such as list or range 
+            - slice with step either None or positive 
+            - tuple of integers and slices 
+ 
+        Returns 
+        ------- 
+        Series 
+            The filtered subset of the original groupby Series. 
+        DataFrame 
+            The filtered subset of the original groupby DataFrame. 
+ 
+        See Also 
+        -------- 
+        DataFrame.iloc : Integer-location based indexing for selection by position. 
+        GroupBy.head : Return first n rows of each group. 
+        GroupBy.tail : Return last n rows of each group. 
+        GroupBy._positional_selector : Return positional selection for each group. 
+        GroupBy.nth : Take the nth row from each group if n is an int, or a 
+            subset of rows, if n is a list of ints. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.groupby_object._reset_group_selection()</span>
+        <span class="s1">mask = self.groupby_object._make_mask_from_positional_indexer(arg)</span>
+        <span class="s0">return </span><span class="s1">self.groupby_object._mask_selected_obj(mask)</span>
+
+
+<span class="s0">class </span><span class="s1">GroupByNthSelector:</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Dynamically substituted for GroupBy.nth to enable both call and index 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">groupby_object: groupby.GroupBy):</span>
+        <span class="s1">self.groupby_object = groupby_object</span>
+
+    <span class="s0">def </span><span class="s1">__call__(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">n: PositionalIndexer | tuple</span><span class="s0">,</span>
+        <span class="s1">dropna: Literal[</span><span class="s3">&quot;any&quot;</span><span class="s0">, </span><span class="s3">&quot;all&quot;</span><span class="s0">, None</span><span class="s1">] = </span><span class="s0">None,</span>
+    <span class="s1">) -&gt; DataFrame | Series:</span>
+        <span class="s0">return </span><span class="s1">self.groupby_object.nth_actual(n</span><span class="s0">, </span><span class="s1">dropna)</span>
+
+    <span class="s0">def </span><span class="s1">__getitem__(self</span><span class="s0">, </span><span class="s1">n: PositionalIndexer | tuple) -&gt; DataFrame | Series:</span>
+        <span class="s0">return </span><span class="s1">self.groupby_object.nth_actual(n)</span>
+</pre>
+</body>
+</html>

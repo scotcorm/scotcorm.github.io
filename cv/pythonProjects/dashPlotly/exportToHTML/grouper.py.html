@@ -1,0 +1,1013 @@
+<html>
+<head>
+<title>grouper.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #808080;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+grouper.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+Provide user facing operators for doing the split part of the 
+split-apply-combine paradigm. 
+&quot;&quot;&quot;</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">TYPE_CHECKING</span><span class="s2">,</span>
+    <span class="s1">Any</span><span class="s2">,</span>
+    <span class="s1">Hashable</span><span class="s2">,</span>
+    <span class="s1">final</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">import </span><span class="s1">warnings</span>
+
+<span class="s2">import </span><span class="s1">numpy </span><span class="s2">as </span><span class="s1">np</span>
+
+<span class="s2">from </span><span class="s1">pandas._typing </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">ArrayLike</span><span class="s2">,</span>
+    <span class="s1">NDFrameT</span><span class="s2">,</span>
+    <span class="s1">npt</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas.errors </span><span class="s2">import </span><span class="s1">InvalidIndexError</span>
+<span class="s2">from </span><span class="s1">pandas.util._decorators </span><span class="s2">import </span><span class="s1">cache_readonly</span>
+<span class="s2">from </span><span class="s1">pandas.util._exceptions </span><span class="s2">import </span><span class="s1">find_stack_level</span>
+
+<span class="s2">from </span><span class="s1">pandas.core.dtypes.cast </span><span class="s2">import </span><span class="s1">sanitize_to_nanoseconds</span>
+<span class="s2">from </span><span class="s1">pandas.core.dtypes.common </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">is_categorical_dtype</span><span class="s2">,</span>
+    <span class="s1">is_list_like</span><span class="s2">,</span>
+    <span class="s1">is_scalar</span><span class="s2">,</span>
+<span class="s1">)</span>
+
+<span class="s2">import </span><span class="s1">pandas.core.algorithms </span><span class="s2">as </span><span class="s1">algorithms</span>
+<span class="s2">from </span><span class="s1">pandas.core.arrays </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">Categorical</span><span class="s2">,</span>
+    <span class="s1">ExtensionArray</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">import </span><span class="s1">pandas.core.common </span><span class="s2">as </span><span class="s1">com</span>
+<span class="s2">from </span><span class="s1">pandas.core.frame </span><span class="s2">import </span><span class="s1">DataFrame</span>
+<span class="s2">from </span><span class="s1">pandas.core.groupby </span><span class="s2">import </span><span class="s1">ops</span>
+<span class="s2">from </span><span class="s1">pandas.core.groupby.categorical </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">recode_for_groupby</span><span class="s2">,</span>
+    <span class="s1">recode_from_groupby</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas.core.indexes.api </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">CategoricalIndex</span><span class="s2">,</span>
+    <span class="s1">Index</span><span class="s2">,</span>
+    <span class="s1">MultiIndex</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas.core.series </span><span class="s2">import </span><span class="s1">Series</span>
+
+<span class="s2">from </span><span class="s1">pandas.io.formats.printing </span><span class="s2">import </span><span class="s1">pprint_thing</span>
+
+<span class="s2">if </span><span class="s1">TYPE_CHECKING:</span>
+    <span class="s2">from </span><span class="s1">pandas.core.generic </span><span class="s2">import </span><span class="s1">NDFrame</span>
+
+
+<span class="s2">class </span><span class="s1">Grouper:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    A Grouper allows the user to specify a groupby instruction for an object. 
+ 
+    This specification will select a column via the key parameter, or if the 
+    level and/or axis parameters are given, a level of the index of the target 
+    object. 
+ 
+    If `axis` and/or `level` are passed as keywords to both `Grouper` and 
+    `groupby`, the values passed to `Grouper` take precedence. 
+ 
+    Parameters 
+    ---------- 
+    key : str, defaults to None 
+        Groupby key, which selects the grouping column of the target. 
+    level : name/number, defaults to None 
+        The level for the target index. 
+    freq : str / frequency object, defaults to None 
+        This will groupby the specified frequency if the target selection 
+        (via key or level) is a datetime-like object. For full specification 
+        of available frequencies, please see `here 
+        &lt;https://pandas.pydata.org/pandas-docs/stable/user_guide/timeseries.html#offset-aliases&gt;`_. 
+    axis : str, int, defaults to 0 
+        Number/name of the axis. 
+    sort : bool, default to False 
+        Whether to sort the resulting labels. 
+    closed : {'left' or 'right'} 
+        Closed end of interval. Only when `freq` parameter is passed. 
+    label : {'left' or 'right'} 
+        Interval boundary to use for labeling. 
+        Only when `freq` parameter is passed. 
+    convention : {'start', 'end', 'e', 's'} 
+        If grouper is PeriodIndex and `freq` parameter is passed. 
+    base : int, default 0 
+        Only when `freq` parameter is passed. 
+        For frequencies that evenly subdivide 1 day, the &quot;origin&quot; of the 
+        aggregated intervals. For example, for '5min' frequency, base could 
+        range from 0 through 4. Defaults to 0. 
+ 
+        .. deprecated:: 1.1.0 
+            The new arguments that you should use are 'offset' or 'origin'. 
+ 
+    loffset : str, DateOffset, timedelta object 
+        Only when `freq` parameter is passed. 
+ 
+        .. deprecated:: 1.1.0 
+            loffset is only working for ``.resample(...)`` and not for 
+            Grouper (:issue:`28302`). 
+            However, loffset is also deprecated for ``.resample(...)`` 
+            See: :class:`DataFrame.resample` 
+ 
+    origin : Timestamp or str, default 'start_day' 
+        The timestamp on which to adjust the grouping. The timezone of origin must 
+        match the timezone of the index. 
+        If string, must be one of the following: 
+ 
+        - 'epoch': `origin` is 1970-01-01 
+        - 'start': `origin` is the first value of the timeseries 
+        - 'start_day': `origin` is the first day at midnight of the timeseries 
+ 
+        .. versionadded:: 1.1.0 
+ 
+        - 'end': `origin` is the last value of the timeseries 
+        - 'end_day': `origin` is the ceiling midnight of the last day 
+ 
+        .. versionadded:: 1.3.0 
+ 
+    offset : Timedelta or str, default is None 
+        An offset timedelta added to the origin. 
+ 
+        .. versionadded:: 1.1.0 
+ 
+    dropna : bool, default True 
+        If True, and if group keys contain NA values, NA values together with 
+        row/column will be dropped. If False, NA values will also be treated as 
+        the key in groups. 
+ 
+        .. versionadded:: 1.2.0 
+ 
+    Returns 
+    ------- 
+    A specification for a groupby instruction 
+ 
+    Examples 
+    -------- 
+    Syntactic sugar for ``df.groupby('A')`` 
+ 
+    &gt;&gt;&gt; df = pd.DataFrame( 
+    ...     { 
+    ...         &quot;Animal&quot;: [&quot;Falcon&quot;, &quot;Parrot&quot;, &quot;Falcon&quot;, &quot;Falcon&quot;, &quot;Parrot&quot;], 
+    ...         &quot;Speed&quot;: [100, 5, 200, 300, 15], 
+    ...     } 
+    ... ) 
+    &gt;&gt;&gt; df 
+       Animal  Speed 
+    0  Falcon    100 
+    1  Parrot      5 
+    2  Falcon    200 
+    3  Falcon    300 
+    4  Parrot     15 
+    &gt;&gt;&gt; df.groupby(pd.Grouper(key=&quot;Animal&quot;)).mean() 
+            Speed 
+    Animal 
+    Falcon  200.0 
+    Parrot   10.0 
+ 
+    Specify a resample operation on the column 'Publish date' 
+ 
+    &gt;&gt;&gt; df = pd.DataFrame( 
+    ...    { 
+    ...        &quot;Publish date&quot;: [ 
+    ...             pd.Timestamp(&quot;2000-01-02&quot;), 
+    ...             pd.Timestamp(&quot;2000-01-02&quot;), 
+    ...             pd.Timestamp(&quot;2000-01-09&quot;), 
+    ...             pd.Timestamp(&quot;2000-01-16&quot;) 
+    ...         ], 
+    ...         &quot;ID&quot;: [0, 1, 2, 3], 
+    ...         &quot;Price&quot;: [10, 20, 30, 40] 
+    ...     } 
+    ... ) 
+    &gt;&gt;&gt; df 
+      Publish date  ID  Price 
+    0   2000-01-02   0     10 
+    1   2000-01-02   1     20 
+    2   2000-01-09   2     30 
+    3   2000-01-16   3     40 
+    &gt;&gt;&gt; df.groupby(pd.Grouper(key=&quot;Publish date&quot;, freq=&quot;1W&quot;)).mean() 
+                   ID  Price 
+    Publish date 
+    2000-01-02    0.5   15.0 
+    2000-01-09    2.0   30.0 
+    2000-01-16    3.0   40.0 
+ 
+    If you want to adjust the start of the bins based on a fixed timestamp: 
+ 
+    &gt;&gt;&gt; start, end = '2000-10-01 23:30:00', '2000-10-02 00:30:00' 
+    &gt;&gt;&gt; rng = pd.date_range(start, end, freq='7min') 
+    &gt;&gt;&gt; ts = pd.Series(np.arange(len(rng)) * 3, index=rng) 
+    &gt;&gt;&gt; ts 
+    2000-10-01 23:30:00     0 
+    2000-10-01 23:37:00     3 
+    2000-10-01 23:44:00     6 
+    2000-10-01 23:51:00     9 
+    2000-10-01 23:58:00    12 
+    2000-10-02 00:05:00    15 
+    2000-10-02 00:12:00    18 
+    2000-10-02 00:19:00    21 
+    2000-10-02 00:26:00    24 
+    Freq: 7T, dtype: int64 
+ 
+    &gt;&gt;&gt; ts.groupby(pd.Grouper(freq='17min')).sum() 
+    2000-10-01 23:14:00     0 
+    2000-10-01 23:31:00     9 
+    2000-10-01 23:48:00    21 
+    2000-10-02 00:05:00    54 
+    2000-10-02 00:22:00    24 
+    Freq: 17T, dtype: int64 
+ 
+    &gt;&gt;&gt; ts.groupby(pd.Grouper(freq='17min', origin='epoch')).sum() 
+    2000-10-01 23:18:00     0 
+    2000-10-01 23:35:00    18 
+    2000-10-01 23:52:00    27 
+    2000-10-02 00:09:00    39 
+    2000-10-02 00:26:00    24 
+    Freq: 17T, dtype: int64 
+ 
+    &gt;&gt;&gt; ts.groupby(pd.Grouper(freq='17min', origin='2000-01-01')).sum() 
+    2000-10-01 23:24:00     3 
+    2000-10-01 23:41:00    15 
+    2000-10-01 23:58:00    45 
+    2000-10-02 00:15:00    45 
+    Freq: 17T, dtype: int64 
+ 
+    If you want to adjust the start of the bins with an `offset` Timedelta, the two 
+    following lines are equivalent: 
+ 
+    &gt;&gt;&gt; ts.groupby(pd.Grouper(freq='17min', origin='start')).sum() 
+    2000-10-01 23:30:00     9 
+    2000-10-01 23:47:00    21 
+    2000-10-02 00:04:00    54 
+    2000-10-02 00:21:00    24 
+    Freq: 17T, dtype: int64 
+ 
+    &gt;&gt;&gt; ts.groupby(pd.Grouper(freq='17min', offset='23h30min')).sum() 
+    2000-10-01 23:30:00     9 
+    2000-10-01 23:47:00    21 
+    2000-10-02 00:04:00    54 
+    2000-10-02 00:21:00    24 
+    Freq: 17T, dtype: int64 
+ 
+    To replace the use of the deprecated `base` argument, you can now use `offset`, 
+    in this example it is equivalent to have `base=2`: 
+ 
+    &gt;&gt;&gt; ts.groupby(pd.Grouper(freq='17min', offset='2min')).sum() 
+    2000-10-01 23:16:00     0 
+    2000-10-01 23:33:00     9 
+    2000-10-01 23:50:00    36 
+    2000-10-02 00:07:00    39 
+    2000-10-02 00:24:00    24 
+    Freq: 17T, dtype: int64 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">axis: int</span>
+    <span class="s1">sort: bool</span>
+    <span class="s1">dropna: bool</span>
+    <span class="s1">_gpr_index: Index | </span><span class="s2">None</span>
+    <span class="s1">_grouper: Index | </span><span class="s2">None</span>
+
+    <span class="s1">_attributes: tuple[str</span><span class="s2">, </span><span class="s1">...] = (</span><span class="s3">&quot;key&quot;</span><span class="s2">, </span><span class="s3">&quot;level&quot;</span><span class="s2">, </span><span class="s3">&quot;freq&quot;</span><span class="s2">, </span><span class="s3">&quot;axis&quot;</span><span class="s2">, </span><span class="s3">&quot;sort&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">__new__(cls</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+        <span class="s2">if </span><span class="s1">kwargs.get(</span><span class="s3">&quot;freq&quot;</span><span class="s1">) </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">from </span><span class="s1">pandas.core.resample </span><span class="s2">import </span><span class="s1">TimeGrouper</span>
+
+            <span class="s1">_check_deprecated_resample_kwargs(kwargs</span><span class="s2">, </span><span class="s1">origin=cls)</span>
+            <span class="s1">cls = TimeGrouper</span>
+        <span class="s2">return </span><span class="s1">super().__new__(cls)</span>
+
+    <span class="s2">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">key=</span><span class="s2">None,</span>
+        <span class="s1">level=</span><span class="s2">None,</span>
+        <span class="s1">freq=</span><span class="s2">None,</span>
+        <span class="s1">axis: int = </span><span class="s4">0</span><span class="s2">,</span>
+        <span class="s1">sort: bool = </span><span class="s2">False,</span>
+        <span class="s1">dropna: bool = </span><span class="s2">True,</span>
+    <span class="s1">):</span>
+        <span class="s1">self.key = key</span>
+        <span class="s1">self.level = level</span>
+        <span class="s1">self.freq = freq</span>
+        <span class="s1">self.axis = axis</span>
+        <span class="s1">self.sort = sort</span>
+
+        <span class="s1">self.grouper = </span><span class="s2">None</span>
+        <span class="s1">self._gpr_index = </span><span class="s2">None</span>
+        <span class="s1">self.obj = </span><span class="s2">None</span>
+        <span class="s1">self.indexer = </span><span class="s2">None</span>
+        <span class="s1">self.binner = </span><span class="s2">None</span>
+        <span class="s1">self._grouper = </span><span class="s2">None</span>
+        <span class="s1">self._indexer = </span><span class="s2">None</span>
+        <span class="s1">self.dropna = dropna</span>
+
+    <span class="s1">@final</span>
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">ax(self) -&gt; Index:</span>
+        <span class="s1">index = self._gpr_index</span>
+        <span class="s2">if </span><span class="s1">index </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;_set_grouper must be called before ax is accessed&quot;</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">index</span>
+
+    <span class="s2">def </span><span class="s1">_get_grouper(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">obj: NDFrameT</span><span class="s2">, </span><span class="s1">validate: bool = </span><span class="s2">True</span>
+    <span class="s1">) -&gt; tuple[Any</span><span class="s2">, </span><span class="s1">ops.BaseGrouper</span><span class="s2">, </span><span class="s1">NDFrameT]:</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Parameters 
+        ---------- 
+        obj : Series or DataFrame 
+        validate : bool, default True 
+            if True, validate the grouper 
+ 
+        Returns 
+        ------- 
+        a tuple of binner, grouper, obj (possibly sorted) 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self._set_grouper(obj)</span>
+        <span class="s5"># error: Value of type variable &quot;NDFrameT&quot; of &quot;get_grouper&quot; cannot be</span>
+        <span class="s5"># &quot;Optional[Any]&quot;</span>
+        <span class="s5"># error: Incompatible types in assignment (expression has type &quot;BaseGrouper&quot;,</span>
+        <span class="s5"># variable has type &quot;None&quot;)</span>
+        <span class="s1">self.grouper</span><span class="s2">, </span><span class="s1">_</span><span class="s2">, </span><span class="s1">self.obj = get_grouper(  </span><span class="s5"># type: ignore[type-var,assignment]</span>
+            <span class="s1">self.obj</span><span class="s2">,</span>
+            <span class="s1">[self.key]</span><span class="s2">,</span>
+            <span class="s1">axis=self.axis</span><span class="s2">,</span>
+            <span class="s1">level=self.level</span><span class="s2">,</span>
+            <span class="s1">sort=self.sort</span><span class="s2">,</span>
+            <span class="s1">validate=validate</span><span class="s2">,</span>
+            <span class="s1">dropna=self.dropna</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+        <span class="s5"># error: Incompatible return value type (got &quot;Tuple[None, None, None]&quot;,</span>
+        <span class="s5"># expected &quot;Tuple[Any, BaseGrouper, NDFrameT]&quot;)</span>
+        <span class="s2">return </span><span class="s1">self.binner</span><span class="s2">, </span><span class="s1">self.grouper</span><span class="s2">, </span><span class="s1">self.obj  </span><span class="s5"># type: ignore[return-value]</span>
+
+    <span class="s1">@final</span>
+    <span class="s2">def </span><span class="s1">_set_grouper(self</span><span class="s2">, </span><span class="s1">obj: NDFrame</span><span class="s2">, </span><span class="s1">sort: bool = </span><span class="s2">False</span><span class="s1">):</span>
+        <span class="s0">&quot;&quot;&quot; 
+        given an object and the specifications, setup the internal grouper 
+        for this particular specification 
+ 
+        Parameters 
+        ---------- 
+        obj : Series or DataFrame 
+        sort : bool, default False 
+            whether the resulting grouper should be sorted 
+        &quot;&quot;&quot;</span>
+        <span class="s2">assert </span><span class="s1">obj </span><span class="s2">is not None</span>
+
+        <span class="s2">if </span><span class="s1">self.key </span><span class="s2">is not None and </span><span class="s1">self.level </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;The Grouper cannot specify both a key and a level!&quot;</span><span class="s1">)</span>
+
+        <span class="s5"># Keep self.grouper value before overriding</span>
+        <span class="s2">if </span><span class="s1">self._grouper </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s5"># TODO: What are we assuming about subsequent calls?</span>
+            <span class="s1">self._grouper = self._gpr_index</span>
+            <span class="s1">self._indexer = self.indexer</span>
+
+        <span class="s5"># the key must be a valid info item</span>
+        <span class="s2">if </span><span class="s1">self.key </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">key = self.key</span>
+            <span class="s5"># The 'on' is already defined</span>
+            <span class="s2">if </span><span class="s1">getattr(self._gpr_index</span><span class="s2">, </span><span class="s3">&quot;name&quot;</span><span class="s2">, None</span><span class="s1">) == key </span><span class="s2">and </span><span class="s1">isinstance(</span>
+                <span class="s1">obj</span><span class="s2">, </span><span class="s1">Series</span>
+            <span class="s1">):</span>
+                <span class="s5"># Sometimes self._grouper will have been resorted while</span>
+                <span class="s5"># obj has not. In this case there is a mismatch when we</span>
+                <span class="s5"># call self._grouper.take(obj.index) so we need to undo the sorting</span>
+                <span class="s5"># before we call _grouper.take.</span>
+                <span class="s2">assert </span><span class="s1">self._grouper </span><span class="s2">is not None</span>
+                <span class="s2">if </span><span class="s1">self._indexer </span><span class="s2">is not None</span><span class="s1">:</span>
+                    <span class="s1">reverse_indexer = self._indexer.argsort()</span>
+                    <span class="s1">unsorted_ax = self._grouper.take(reverse_indexer)</span>
+                    <span class="s1">ax = unsorted_ax.take(obj.index)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">ax = self._grouper.take(obj.index)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">if </span><span class="s1">key </span><span class="s2">not in </span><span class="s1">obj._info_axis:</span>
+                    <span class="s2">raise </span><span class="s1">KeyError(</span><span class="s3">f&quot;The grouper name </span><span class="s2">{</span><span class="s1">key</span><span class="s2">} </span><span class="s3">is not found&quot;</span><span class="s1">)</span>
+                <span class="s1">ax = Index(obj[key]</span><span class="s2">, </span><span class="s1">name=key)</span>
+
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">ax = obj._get_axis(self.axis)</span>
+            <span class="s2">if </span><span class="s1">self.level </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s1">level = self.level</span>
+
+                <span class="s5"># if a level is given it must be a mi level or</span>
+                <span class="s5"># equivalent to the axis name</span>
+                <span class="s2">if </span><span class="s1">isinstance(ax</span><span class="s2">, </span><span class="s1">MultiIndex):</span>
+                    <span class="s1">level = ax._get_level_number(level)</span>
+                    <span class="s1">ax = Index(ax._get_level_values(level)</span><span class="s2">, </span><span class="s1">name=ax.names[level])</span>
+
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s2">if </span><span class="s1">level </span><span class="s2">not in </span><span class="s1">(</span><span class="s4">0</span><span class="s2">, </span><span class="s1">ax.name):</span>
+                        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">f&quot;The level </span><span class="s2">{</span><span class="s1">level</span><span class="s2">} </span><span class="s3">is not valid&quot;</span><span class="s1">)</span>
+
+        <span class="s5"># possibly sort</span>
+        <span class="s2">if </span><span class="s1">(self.sort </span><span class="s2">or </span><span class="s1">sort) </span><span class="s2">and not </span><span class="s1">ax.is_monotonic:</span>
+            <span class="s5"># use stable sort to support first, last, nth</span>
+            <span class="s5"># TODO: why does putting na_position=&quot;first&quot; fix datetimelike cases?</span>
+            <span class="s1">indexer = self.indexer = ax.array.argsort(</span>
+                <span class="s1">kind=</span><span class="s3">&quot;mergesort&quot;</span><span class="s2">, </span><span class="s1">na_position=</span><span class="s3">&quot;first&quot;</span>
+            <span class="s1">)</span>
+            <span class="s1">ax = ax.take(indexer)</span>
+            <span class="s1">obj = obj.take(indexer</span><span class="s2">, </span><span class="s1">axis=self.axis)</span>
+
+        <span class="s5"># error: Incompatible types in assignment (expression has type</span>
+        <span class="s5"># &quot;NDFrameT&quot;, variable has type &quot;None&quot;)</span>
+        <span class="s1">self.obj = obj  </span><span class="s5"># type: ignore[assignment]</span>
+        <span class="s1">self._gpr_index = ax</span>
+        <span class="s2">return </span><span class="s1">self._gpr_index</span>
+
+    <span class="s1">@final</span>
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">groups(self):</span>
+        <span class="s5"># error: &quot;None&quot; has no attribute &quot;groups&quot;</span>
+        <span class="s2">return </span><span class="s1">self.grouper.groups  </span><span class="s5"># type: ignore[attr-defined]</span>
+
+    <span class="s1">@final</span>
+    <span class="s2">def </span><span class="s1">__repr__(self) -&gt; str:</span>
+        <span class="s1">attrs_list = (</span>
+            <span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">attr_name</span><span class="s2">}</span><span class="s3">=</span><span class="s2">{</span><span class="s1">repr(getattr(self</span><span class="s2">, </span><span class="s1">attr_name))</span><span class="s2">}</span><span class="s3">&quot;</span>
+            <span class="s2">for </span><span class="s1">attr_name </span><span class="s2">in </span><span class="s1">self._attributes</span>
+            <span class="s2">if </span><span class="s1">getattr(self</span><span class="s2">, </span><span class="s1">attr_name) </span><span class="s2">is not None</span>
+        <span class="s1">)</span>
+        <span class="s1">attrs = </span><span class="s3">&quot;, &quot;</span><span class="s1">.join(attrs_list)</span>
+        <span class="s1">cls_name = type(self).__name__</span>
+        <span class="s2">return </span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">cls_name</span><span class="s2">}</span><span class="s3">(</span><span class="s2">{</span><span class="s1">attrs</span><span class="s2">}</span><span class="s3">)&quot;</span>
+
+
+<span class="s1">@final</span>
+<span class="s2">class </span><span class="s1">Grouping:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Holds the grouping information for a single key 
+ 
+    Parameters 
+    ---------- 
+    index : Index 
+    grouper : 
+    obj : DataFrame or Series 
+    name : Label 
+    level : 
+    observed : bool, default False 
+        If we are a Categorical, use the observed values 
+    in_axis : if the Grouping is a column in self.obj and hence among 
+        Groupby.exclusions list 
+ 
+    Returns 
+    ------- 
+    **Attributes**: 
+      * indices : dict of {group -&gt; index_list} 
+      * codes : ndarray, group codes 
+      * group_index : unique groups 
+      * groups : dict of {group -&gt; label_list} 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">_codes: np.ndarray | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None</span>
+    <span class="s1">_group_index: Index | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None</span>
+    <span class="s1">_passed_categorical: bool</span>
+    <span class="s1">_all_grouper: Categorical | </span><span class="s2">None</span>
+    <span class="s1">_index: Index</span>
+
+    <span class="s2">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">index: Index</span><span class="s2">,</span>
+        <span class="s1">grouper=</span><span class="s2">None,</span>
+        <span class="s1">obj: NDFrame | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+        <span class="s1">level=</span><span class="s2">None,</span>
+        <span class="s1">sort: bool = </span><span class="s2">True,</span>
+        <span class="s1">observed: bool = </span><span class="s2">False,</span>
+        <span class="s1">in_axis: bool = </span><span class="s2">False,</span>
+        <span class="s1">dropna: bool = </span><span class="s2">True,</span>
+    <span class="s1">):</span>
+        <span class="s1">self.level = level</span>
+        <span class="s1">self._orig_grouper = grouper</span>
+        <span class="s1">self.grouping_vector = _convert_grouper(index</span><span class="s2">, </span><span class="s1">grouper)</span>
+        <span class="s1">self._all_grouper = </span><span class="s2">None</span>
+        <span class="s1">self._index = index</span>
+        <span class="s1">self._sort = sort</span>
+        <span class="s1">self.obj = obj</span>
+        <span class="s1">self._observed = observed</span>
+        <span class="s1">self.in_axis = in_axis</span>
+        <span class="s1">self._dropna = dropna</span>
+
+        <span class="s1">self._passed_categorical = </span><span class="s2">False</span>
+
+        <span class="s5"># we have a single grouper which may be a myriad of things,</span>
+        <span class="s5"># some of which are dependent on the passing in level</span>
+
+        <span class="s1">ilevel = self._ilevel</span>
+        <span class="s2">if </span><span class="s1">ilevel </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">mapper = self.grouping_vector</span>
+            <span class="s5"># In extant tests, the new self.grouping_vector matches</span>
+            <span class="s5">#  `index.get_level_values(ilevel)` whenever</span>
+            <span class="s5">#  mapper is None and isinstance(index, MultiIndex)</span>
+            <span class="s1">(</span>
+                <span class="s1">self.grouping_vector</span><span class="s2">,  </span><span class="s5"># Index</span>
+                <span class="s1">self._codes</span><span class="s2">,</span>
+                <span class="s1">self._group_index</span><span class="s2">,</span>
+            <span class="s1">) = index._get_grouper_for_level(mapper</span><span class="s2">, </span><span class="s1">level=ilevel)</span>
+
+        <span class="s5"># a passed Grouper like, directly get the grouper in the same way</span>
+        <span class="s5"># as single grouper groupby, use the group_info to get codes</span>
+        <span class="s2">elif </span><span class="s1">isinstance(self.grouping_vector</span><span class="s2">, </span><span class="s1">Grouper):</span>
+            <span class="s5"># get the new grouper; we already have disambiguated</span>
+            <span class="s5"># what key/level refer to exactly, don't need to</span>
+            <span class="s5"># check again as we have by this point converted these</span>
+            <span class="s5"># to an actual value (rather than a pd.Grouper)</span>
+            <span class="s2">assert </span><span class="s1">self.obj </span><span class="s2">is not None  </span><span class="s5"># for mypy</span>
+            <span class="s1">_</span><span class="s2">, </span><span class="s1">newgrouper</span><span class="s2">, </span><span class="s1">newobj = self.grouping_vector._get_grouper(</span>
+                <span class="s1">self.obj</span><span class="s2">, </span><span class="s1">validate=</span><span class="s2">False</span>
+            <span class="s1">)</span>
+            <span class="s1">self.obj = newobj</span>
+
+            <span class="s1">ng = newgrouper._get_grouper()</span>
+            <span class="s2">if </span><span class="s1">isinstance(newgrouper</span><span class="s2">, </span><span class="s1">ops.BinGrouper):</span>
+                <span class="s5"># in this case we have `ng is newgrouper`</span>
+                <span class="s1">self.grouping_vector = ng</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s5"># ops.BaseGrouper</span>
+                <span class="s5"># use Index instead of ndarray so we can recover the name</span>
+                <span class="s1">self.grouping_vector = Index(ng</span><span class="s2">, </span><span class="s1">name=newgrouper.result_index.name)</span>
+
+        <span class="s2">elif </span><span class="s1">is_categorical_dtype(self.grouping_vector):</span>
+            <span class="s5"># a passed Categorical</span>
+            <span class="s1">self._passed_categorical = </span><span class="s2">True</span>
+
+            <span class="s1">self.grouping_vector</span><span class="s2">, </span><span class="s1">self._all_grouper = recode_for_groupby(</span>
+                <span class="s1">self.grouping_vector</span><span class="s2">, </span><span class="s1">sort</span><span class="s2">, </span><span class="s1">observed</span>
+            <span class="s1">)</span>
+
+        <span class="s2">elif not </span><span class="s1">isinstance(</span>
+            <span class="s1">self.grouping_vector</span><span class="s2">, </span><span class="s1">(Series</span><span class="s2">, </span><span class="s1">Index</span><span class="s2">, </span><span class="s1">ExtensionArray</span><span class="s2">, </span><span class="s1">np.ndarray)</span>
+        <span class="s1">):</span>
+            <span class="s5"># no level passed</span>
+            <span class="s2">if </span><span class="s1">getattr(self.grouping_vector</span><span class="s2">, </span><span class="s3">&quot;ndim&quot;</span><span class="s2">, </span><span class="s4">1</span><span class="s1">) != </span><span class="s4">1</span><span class="s1">:</span>
+                <span class="s1">t = self.name </span><span class="s2">or </span><span class="s1">str(type(self.grouping_vector))</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">f&quot;Grouper for '</span><span class="s2">{</span><span class="s1">t</span><span class="s2">}</span><span class="s3">' not 1-dimensional&quot;</span><span class="s1">)</span>
+
+            <span class="s1">self.grouping_vector = index.map(self.grouping_vector)</span>
+
+            <span class="s2">if not </span><span class="s1">(</span>
+                <span class="s1">hasattr(self.grouping_vector</span><span class="s2">, </span><span class="s3">&quot;__len__&quot;</span><span class="s1">)</span>
+                <span class="s2">and </span><span class="s1">len(self.grouping_vector) == len(index)</span>
+            <span class="s1">):</span>
+                <span class="s1">grper = pprint_thing(self.grouping_vector)</span>
+                <span class="s1">errmsg = (</span>
+                    <span class="s3">&quot;Grouper result violates len(labels) == &quot;</span>
+                    <span class="s3">f&quot;len(data)</span><span class="s2">\n</span><span class="s3">result: </span><span class="s2">{</span><span class="s1">grper</span><span class="s2">}</span><span class="s3">&quot;</span>
+                <span class="s1">)</span>
+                <span class="s1">self.grouping_vector = </span><span class="s2">None  </span><span class="s5"># Try for sanity</span>
+                <span class="s2">raise </span><span class="s1">AssertionError(errmsg)</span>
+
+        <span class="s2">if </span><span class="s1">isinstance(self.grouping_vector</span><span class="s2">, </span><span class="s1">np.ndarray):</span>
+            <span class="s5"># if we have a date/time-like grouper, make sure that we have</span>
+            <span class="s5"># Timestamps like</span>
+            <span class="s1">self.grouping_vector = sanitize_to_nanoseconds(self.grouping_vector)</span>
+
+    <span class="s2">def </span><span class="s1">__repr__(self) -&gt; str:</span>
+        <span class="s2">return </span><span class="s3">f&quot;Grouping(</span><span class="s2">{</span><span class="s1">self.name</span><span class="s2">}</span><span class="s3">)&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__iter__(self):</span>
+        <span class="s2">return </span><span class="s1">iter(self.indices)</span>
+
+    <span class="s1">@cache_readonly</span>
+    <span class="s2">def </span><span class="s1">name(self) -&gt; Hashable:</span>
+        <span class="s1">ilevel = self._ilevel</span>
+        <span class="s2">if </span><span class="s1">ilevel </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">self._index.names[ilevel]</span>
+
+        <span class="s2">if </span><span class="s1">isinstance(self._orig_grouper</span><span class="s2">, </span><span class="s1">(Index</span><span class="s2">, </span><span class="s1">Series)):</span>
+            <span class="s2">return </span><span class="s1">self._orig_grouper.name</span>
+
+        <span class="s2">elif </span><span class="s1">isinstance(self.grouping_vector</span><span class="s2">, </span><span class="s1">ops.BaseGrouper):</span>
+            <span class="s2">return </span><span class="s1">self.grouping_vector.result_index.name</span>
+
+        <span class="s2">elif </span><span class="s1">isinstance(self.grouping_vector</span><span class="s2">, </span><span class="s1">Index):</span>
+            <span class="s2">return </span><span class="s1">self.grouping_vector.name</span>
+
+        <span class="s5"># otherwise we have ndarray or ExtensionArray -&gt; no name</span>
+        <span class="s2">return None</span>
+
+    <span class="s1">@cache_readonly</span>
+    <span class="s2">def </span><span class="s1">_ilevel(self) -&gt; int | </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot; 
+        If necessary, converted index level name to index level position. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">level = self.level</span>
+        <span class="s2">if </span><span class="s1">level </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return None</span>
+        <span class="s2">if not </span><span class="s1">isinstance(level</span><span class="s2">, </span><span class="s1">int):</span>
+            <span class="s1">index = self._index</span>
+            <span class="s2">if </span><span class="s1">level </span><span class="s2">not in </span><span class="s1">index.names:</span>
+                <span class="s2">raise </span><span class="s1">AssertionError(</span><span class="s3">f&quot;Level </span><span class="s2">{</span><span class="s1">level</span><span class="s2">} </span><span class="s3">not in index&quot;</span><span class="s1">)</span>
+            <span class="s2">return </span><span class="s1">index.names.index(level)</span>
+        <span class="s2">return </span><span class="s1">level</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">ngroups(self) -&gt; int:</span>
+        <span class="s2">return </span><span class="s1">len(self.group_index)</span>
+
+    <span class="s1">@cache_readonly</span>
+    <span class="s2">def </span><span class="s1">indices(self) -&gt; dict[Hashable</span><span class="s2">, </span><span class="s1">npt.NDArray[np.intp]]:</span>
+        <span class="s5"># we have a list of groupers</span>
+        <span class="s2">if </span><span class="s1">isinstance(self.grouping_vector</span><span class="s2">, </span><span class="s1">ops.BaseGrouper):</span>
+            <span class="s2">return </span><span class="s1">self.grouping_vector.indices</span>
+
+        <span class="s1">values = Categorical(self.grouping_vector)</span>
+        <span class="s2">return </span><span class="s1">values._reverse_indexer()</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">codes(self) -&gt; np.ndarray:</span>
+        <span class="s2">if </span><span class="s1">self._codes </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s5"># _codes is set in __init__ for MultiIndex cases</span>
+            <span class="s2">return </span><span class="s1">self._codes</span>
+
+        <span class="s2">return </span><span class="s1">self._codes_and_uniques[</span><span class="s4">0</span><span class="s1">]</span>
+
+    <span class="s1">@cache_readonly</span>
+    <span class="s2">def </span><span class="s1">group_arraylike(self) -&gt; ArrayLike:</span>
+        <span class="s0">&quot;&quot;&quot; 
+        Analogous to result_index, but holding an ArrayLike to ensure 
+        we can retain ExtensionDtypes. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self._group_index </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s5"># _group_index is set in __init__ for MultiIndex cases</span>
+            <span class="s2">return </span><span class="s1">self._group_index._values</span>
+
+        <span class="s2">elif </span><span class="s1">self._all_grouper </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s5"># retain dtype for categories, including unobserved ones</span>
+            <span class="s2">return </span><span class="s1">self.result_index._values</span>
+
+        <span class="s2">return </span><span class="s1">self._codes_and_uniques[</span><span class="s4">1</span><span class="s1">]</span>
+
+    <span class="s1">@cache_readonly</span>
+    <span class="s2">def </span><span class="s1">result_index(self) -&gt; Index:</span>
+        <span class="s5"># result_index retains dtype for categories, including unobserved ones,</span>
+        <span class="s5">#  which group_index does not</span>
+        <span class="s2">if </span><span class="s1">self._all_grouper </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">group_idx = self.group_index</span>
+            <span class="s2">assert </span><span class="s1">isinstance(group_idx</span><span class="s2">, </span><span class="s1">CategoricalIndex)</span>
+            <span class="s2">return </span><span class="s1">recode_from_groupby(self._all_grouper</span><span class="s2">, </span><span class="s1">self._sort</span><span class="s2">, </span><span class="s1">group_idx)</span>
+        <span class="s2">return </span><span class="s1">self.group_index</span>
+
+    <span class="s1">@cache_readonly</span>
+    <span class="s2">def </span><span class="s1">group_index(self) -&gt; Index:</span>
+        <span class="s2">if </span><span class="s1">self._group_index </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s5"># _group_index is set in __init__ for MultiIndex cases</span>
+            <span class="s2">return </span><span class="s1">self._group_index</span>
+
+        <span class="s1">uniques = self._codes_and_uniques[</span><span class="s4">1</span><span class="s1">]</span>
+        <span class="s2">return </span><span class="s1">Index._with_infer(uniques</span><span class="s2">, </span><span class="s1">name=self.name)</span>
+
+    <span class="s1">@cache_readonly</span>
+    <span class="s2">def </span><span class="s1">_codes_and_uniques(self) -&gt; tuple[np.ndarray</span><span class="s2">, </span><span class="s1">ArrayLike]:</span>
+        <span class="s2">if </span><span class="s1">self._passed_categorical:</span>
+            <span class="s5"># we make a CategoricalIndex out of the cat grouper</span>
+            <span class="s5"># preserving the categories / ordered attributes</span>
+            <span class="s1">cat = self.grouping_vector</span>
+            <span class="s1">categories = cat.categories</span>
+
+            <span class="s2">if </span><span class="s1">self._observed:</span>
+                <span class="s1">ucodes = algorithms.unique1d(cat.codes)</span>
+                <span class="s1">ucodes = ucodes[ucodes != -</span><span class="s4">1</span><span class="s1">]</span>
+                <span class="s2">if </span><span class="s1">self._sort </span><span class="s2">or </span><span class="s1">cat.ordered:</span>
+                    <span class="s1">ucodes = np.sort(ucodes)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">ucodes = np.arange(len(categories))</span>
+
+            <span class="s1">uniques = Categorical.from_codes(</span>
+                <span class="s1">codes=ucodes</span><span class="s2">, </span><span class="s1">categories=categories</span><span class="s2">, </span><span class="s1">ordered=cat.ordered</span>
+            <span class="s1">)</span>
+            <span class="s2">return </span><span class="s1">cat.codes</span><span class="s2">, </span><span class="s1">uniques</span>
+
+        <span class="s2">elif </span><span class="s1">isinstance(self.grouping_vector</span><span class="s2">, </span><span class="s1">ops.BaseGrouper):</span>
+            <span class="s5"># we have a list of groupers</span>
+            <span class="s1">codes = self.grouping_vector.codes_info</span>
+            <span class="s1">uniques = self.grouping_vector.result_arraylike</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s5"># GH35667, replace dropna=False with na_sentinel=None</span>
+            <span class="s2">if not </span><span class="s1">self._dropna:</span>
+                <span class="s1">na_sentinel = </span><span class="s2">None</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">na_sentinel = -</span><span class="s4">1</span>
+            <span class="s1">codes</span><span class="s2">, </span><span class="s1">uniques = algorithms.factorize(</span>
+                <span class="s1">self.grouping_vector</span><span class="s2">, </span><span class="s1">sort=self._sort</span><span class="s2">, </span><span class="s1">na_sentinel=na_sentinel</span>
+            <span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">codes</span><span class="s2">, </span><span class="s1">uniques</span>
+
+    <span class="s1">@cache_readonly</span>
+    <span class="s2">def </span><span class="s1">groups(self) -&gt; dict[Hashable</span><span class="s2">, </span><span class="s1">np.ndarray]:</span>
+        <span class="s2">return </span><span class="s1">self._index.groupby(Categorical.from_codes(self.codes</span><span class="s2">, </span><span class="s1">self.group_index))</span>
+
+
+<span class="s2">def </span><span class="s1">get_grouper(</span>
+    <span class="s1">obj: NDFrameT</span><span class="s2">,</span>
+    <span class="s1">key=</span><span class="s2">None,</span>
+    <span class="s1">axis: int = </span><span class="s4">0</span><span class="s2">,</span>
+    <span class="s1">level=</span><span class="s2">None,</span>
+    <span class="s1">sort: bool = </span><span class="s2">True,</span>
+    <span class="s1">observed: bool = </span><span class="s2">False,</span>
+    <span class="s1">mutated: bool = </span><span class="s2">False,</span>
+    <span class="s1">validate: bool = </span><span class="s2">True,</span>
+    <span class="s1">dropna: bool = </span><span class="s2">True,</span>
+<span class="s1">) -&gt; tuple[ops.BaseGrouper</span><span class="s2">, </span><span class="s1">frozenset[Hashable]</span><span class="s2">, </span><span class="s1">NDFrameT]:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Create and return a BaseGrouper, which is an internal 
+    mapping of how to create the grouper indexers. 
+    This may be composed of multiple Grouping objects, indicating 
+    multiple groupers 
+ 
+    Groupers are ultimately index mappings. They can originate as: 
+    index mappings, keys to columns, functions, or Groupers 
+ 
+    Groupers enable local references to axis,level,sort, while 
+    the passed in axis, level, and sort are 'global'. 
+ 
+    This routine tries to figure out what the passing in references 
+    are and then creates a Grouping for each one, combined into 
+    a BaseGrouper. 
+ 
+    If observed &amp; we have a categorical grouper, only show the observed 
+    values. 
+ 
+    If validate, then check for key/level overlaps. 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s1">group_axis = obj._get_axis(axis)</span>
+
+    <span class="s5"># validate that the passed single level is compatible with the passed</span>
+    <span class="s5"># axis of the object</span>
+    <span class="s2">if </span><span class="s1">level </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s5"># TODO: These if-block and else-block are almost same.</span>
+        <span class="s5"># MultiIndex instance check is removable, but it seems that there are</span>
+        <span class="s5"># some processes only for non-MultiIndex in else-block,</span>
+        <span class="s5"># eg. `obj.index.name != level`. We have to consider carefully whether</span>
+        <span class="s5"># these are applicable for MultiIndex. Even if these are applicable,</span>
+        <span class="s5"># we need to check if it makes no side effect to subsequent processes</span>
+        <span class="s5"># on the outside of this condition.</span>
+        <span class="s5"># (GH 17621)</span>
+        <span class="s2">if </span><span class="s1">isinstance(group_axis</span><span class="s2">, </span><span class="s1">MultiIndex):</span>
+            <span class="s2">if </span><span class="s1">is_list_like(level) </span><span class="s2">and </span><span class="s1">len(level) == </span><span class="s4">1</span><span class="s1">:</span>
+                <span class="s1">level = level[</span><span class="s4">0</span><span class="s1">]</span>
+
+            <span class="s2">if </span><span class="s1">key </span><span class="s2">is None and </span><span class="s1">is_scalar(level):</span>
+                <span class="s5"># Get the level values from group_axis</span>
+                <span class="s1">key = group_axis.get_level_values(level)</span>
+                <span class="s1">level = </span><span class="s2">None</span>
+
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s5"># allow level to be a length-one list-like object</span>
+            <span class="s5"># (e.g., level=[0])</span>
+            <span class="s5"># GH 13901</span>
+            <span class="s2">if </span><span class="s1">is_list_like(level):</span>
+                <span class="s1">nlevels = len(level)</span>
+                <span class="s2">if </span><span class="s1">nlevels == </span><span class="s4">1</span><span class="s1">:</span>
+                    <span class="s1">level = level[</span><span class="s4">0</span><span class="s1">]</span>
+                <span class="s2">elif </span><span class="s1">nlevels == </span><span class="s4">0</span><span class="s1">:</span>
+                    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;No group keys passed!&quot;</span><span class="s1">)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;multiple levels only valid with MultiIndex&quot;</span><span class="s1">)</span>
+
+            <span class="s2">if </span><span class="s1">isinstance(level</span><span class="s2">, </span><span class="s1">str):</span>
+                <span class="s2">if </span><span class="s1">obj._get_axis(axis).name != level:</span>
+                    <span class="s2">raise </span><span class="s1">ValueError(</span>
+                        <span class="s3">f&quot;level name </span><span class="s2">{</span><span class="s1">level</span><span class="s2">} </span><span class="s3">is not the name &quot;</span>
+                        <span class="s3">f&quot;of the </span><span class="s2">{</span><span class="s1">obj._get_axis_name(axis)</span><span class="s2">}</span><span class="s3">&quot;</span>
+                    <span class="s1">)</span>
+            <span class="s2">elif </span><span class="s1">level &gt; </span><span class="s4">0 </span><span class="s2">or </span><span class="s1">level &lt; -</span><span class="s4">1</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;level &gt; 0 or level &lt; -1 only valid with MultiIndex&quot;</span><span class="s1">)</span>
+
+            <span class="s5"># NOTE: `group_axis` and `group_axis.get_level_values(level)`</span>
+            <span class="s5"># are same in this section.</span>
+            <span class="s1">level = </span><span class="s2">None</span>
+            <span class="s1">key = group_axis</span>
+
+    <span class="s5"># a passed-in Grouper, directly convert</span>
+    <span class="s2">if </span><span class="s1">isinstance(key</span><span class="s2">, </span><span class="s1">Grouper):</span>
+        <span class="s1">binner</span><span class="s2">, </span><span class="s1">grouper</span><span class="s2">, </span><span class="s1">obj = key._get_grouper(obj</span><span class="s2">, </span><span class="s1">validate=</span><span class="s2">False</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">key.key </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">grouper</span><span class="s2">, </span><span class="s1">frozenset()</span><span class="s2">, </span><span class="s1">obj</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">grouper</span><span class="s2">, </span><span class="s1">frozenset({key.key})</span><span class="s2">, </span><span class="s1">obj</span>
+
+    <span class="s5"># already have a BaseGrouper, just return it</span>
+    <span class="s2">elif </span><span class="s1">isinstance(key</span><span class="s2">, </span><span class="s1">ops.BaseGrouper):</span>
+        <span class="s2">return </span><span class="s1">key</span><span class="s2">, </span><span class="s1">frozenset()</span><span class="s2">, </span><span class="s1">obj</span>
+
+    <span class="s2">if not </span><span class="s1">isinstance(key</span><span class="s2">, </span><span class="s1">list):</span>
+        <span class="s1">keys = [key]</span>
+        <span class="s1">match_axis_length = </span><span class="s2">False</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">keys = key</span>
+        <span class="s1">match_axis_length = len(keys) == len(group_axis)</span>
+
+    <span class="s5"># what are we after, exactly?</span>
+    <span class="s1">any_callable = any(callable(g) </span><span class="s2">or </span><span class="s1">isinstance(g</span><span class="s2">, </span><span class="s1">dict) </span><span class="s2">for </span><span class="s1">g </span><span class="s2">in </span><span class="s1">keys)</span>
+    <span class="s1">any_groupers = any(isinstance(g</span><span class="s2">, </span><span class="s1">(Grouper</span><span class="s2">, </span><span class="s1">Grouping)) </span><span class="s2">for </span><span class="s1">g </span><span class="s2">in </span><span class="s1">keys)</span>
+    <span class="s1">any_arraylike = any(</span>
+        <span class="s1">isinstance(g</span><span class="s2">, </span><span class="s1">(list</span><span class="s2">, </span><span class="s1">tuple</span><span class="s2">, </span><span class="s1">Series</span><span class="s2">, </span><span class="s1">Index</span><span class="s2">, </span><span class="s1">np.ndarray)) </span><span class="s2">for </span><span class="s1">g </span><span class="s2">in </span><span class="s1">keys</span>
+    <span class="s1">)</span>
+
+    <span class="s5"># is this an index replacement?</span>
+    <span class="s2">if </span><span class="s1">(</span>
+        <span class="s2">not </span><span class="s1">any_callable</span>
+        <span class="s2">and not </span><span class="s1">any_arraylike</span>
+        <span class="s2">and not </span><span class="s1">any_groupers</span>
+        <span class="s2">and </span><span class="s1">match_axis_length</span>
+        <span class="s2">and </span><span class="s1">level </span><span class="s2">is None</span>
+    <span class="s1">):</span>
+        <span class="s2">if </span><span class="s1">isinstance(obj</span><span class="s2">, </span><span class="s1">DataFrame):</span>
+            <span class="s1">all_in_columns_index = all(</span>
+                <span class="s1">g </span><span class="s2">in </span><span class="s1">obj.columns </span><span class="s2">or </span><span class="s1">g </span><span class="s2">in </span><span class="s1">obj.index.names </span><span class="s2">for </span><span class="s1">g </span><span class="s2">in </span><span class="s1">keys</span>
+            <span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">assert </span><span class="s1">isinstance(obj</span><span class="s2">, </span><span class="s1">Series)</span>
+            <span class="s1">all_in_columns_index = all(g </span><span class="s2">in </span><span class="s1">obj.index.names </span><span class="s2">for </span><span class="s1">g </span><span class="s2">in </span><span class="s1">keys)</span>
+
+        <span class="s2">if not </span><span class="s1">all_in_columns_index:</span>
+            <span class="s1">keys = [com.asarray_tuplesafe(keys)]</span>
+
+    <span class="s2">if </span><span class="s1">isinstance(level</span><span class="s2">, </span><span class="s1">(tuple</span><span class="s2">, </span><span class="s1">list)):</span>
+        <span class="s2">if </span><span class="s1">key </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">keys = [</span><span class="s2">None</span><span class="s1">] * len(level)</span>
+        <span class="s1">levels = level</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">levels = [level] * len(keys)</span>
+
+    <span class="s1">groupings: list[Grouping] = []</span>
+    <span class="s1">exclusions: set[Hashable] = set()</span>
+
+    <span class="s5"># if the actual grouper should be obj[key]</span>
+    <span class="s2">def </span><span class="s1">is_in_axis(key) -&gt; bool:</span>
+        <span class="s2">if not </span><span class="s1">_is_label_like(key):</span>
+            <span class="s5"># items -&gt; .columns for DataFrame, .index for Series</span>
+            <span class="s1">items = obj.axes[-</span><span class="s4">1</span><span class="s1">]</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">items.get_loc(key)</span>
+            <span class="s2">except </span><span class="s1">(KeyError</span><span class="s2">, </span><span class="s1">TypeError</span><span class="s2">, </span><span class="s1">InvalidIndexError):</span>
+                <span class="s5"># TypeError shows up here if we pass e.g. Int64Index</span>
+                <span class="s2">return False</span>
+
+        <span class="s2">return True</span>
+
+    <span class="s5"># if the grouper is obj[name]</span>
+    <span class="s2">def </span><span class="s1">is_in_obj(gpr) -&gt; bool:</span>
+        <span class="s2">if not </span><span class="s1">hasattr(gpr</span><span class="s2">, </span><span class="s3">&quot;name&quot;</span><span class="s1">):</span>
+            <span class="s2">return False</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">gpr </span><span class="s2">is </span><span class="s1">obj[gpr.name]</span>
+        <span class="s2">except </span><span class="s1">(KeyError</span><span class="s2">, </span><span class="s1">IndexError</span><span class="s2">, </span><span class="s1">InvalidIndexError):</span>
+            <span class="s5"># IndexError reached in e.g. test_skip_group_keys when we pass</span>
+            <span class="s5">#  lambda here</span>
+            <span class="s5"># InvalidIndexError raised on key-types inappropriate for index,</span>
+            <span class="s5">#  e.g. DatetimeIndex.get_loc(tuple())</span>
+            <span class="s2">return False</span>
+
+    <span class="s2">for </span><span class="s1">gpr</span><span class="s2">, </span><span class="s1">level </span><span class="s2">in </span><span class="s1">zip(keys</span><span class="s2">, </span><span class="s1">levels):</span>
+
+        <span class="s2">if </span><span class="s1">is_in_obj(gpr):  </span><span class="s5"># df.groupby(df['name'])</span>
+            <span class="s1">in_axis = </span><span class="s2">True</span>
+            <span class="s1">exclusions.add(gpr.name)</span>
+
+        <span class="s2">elif </span><span class="s1">is_in_axis(gpr):  </span><span class="s5"># df.groupby('name')</span>
+            <span class="s2">if </span><span class="s1">gpr </span><span class="s2">in </span><span class="s1">obj:</span>
+                <span class="s2">if </span><span class="s1">validate:</span>
+                    <span class="s1">obj._check_label_or_level_ambiguity(gpr</span><span class="s2">, </span><span class="s1">axis=axis)</span>
+                <span class="s1">in_axis</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">gpr = </span><span class="s2">True, </span><span class="s1">gpr</span><span class="s2">, </span><span class="s1">obj[gpr]</span>
+                <span class="s2">if </span><span class="s1">gpr.ndim != </span><span class="s4">1</span><span class="s1">:</span>
+                    <span class="s5"># non-unique columns; raise here to get the name in the</span>
+                    <span class="s5"># exception message</span>
+                    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">f&quot;Grouper for '</span><span class="s2">{</span><span class="s1">name</span><span class="s2">}</span><span class="s3">' not 1-dimensional&quot;</span><span class="s1">)</span>
+                <span class="s1">exclusions.add(name)</span>
+            <span class="s2">elif </span><span class="s1">obj._is_level_reference(gpr</span><span class="s2">, </span><span class="s1">axis=axis):</span>
+                <span class="s1">in_axis</span><span class="s2">, </span><span class="s1">level</span><span class="s2">, </span><span class="s1">gpr = </span><span class="s2">False, </span><span class="s1">gpr</span><span class="s2">, None</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">KeyError(gpr)</span>
+        <span class="s2">elif </span><span class="s1">isinstance(gpr</span><span class="s2">, </span><span class="s1">Grouper) </span><span class="s2">and </span><span class="s1">gpr.key </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s5"># Add key to exclusions</span>
+            <span class="s1">exclusions.add(gpr.key)</span>
+            <span class="s1">in_axis = </span><span class="s2">False</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">in_axis = </span><span class="s2">False</span>
+
+        <span class="s5"># create the Grouping</span>
+        <span class="s5"># allow us to passing the actual Grouping as the gpr</span>
+        <span class="s1">ping = (</span>
+            <span class="s1">Grouping(</span>
+                <span class="s1">group_axis</span><span class="s2">,</span>
+                <span class="s1">gpr</span><span class="s2">,</span>
+                <span class="s1">obj=obj</span><span class="s2">,</span>
+                <span class="s1">level=level</span><span class="s2">,</span>
+                <span class="s1">sort=sort</span><span class="s2">,</span>
+                <span class="s1">observed=observed</span><span class="s2">,</span>
+                <span class="s1">in_axis=in_axis</span><span class="s2">,</span>
+                <span class="s1">dropna=dropna</span><span class="s2">,</span>
+            <span class="s1">)</span>
+            <span class="s2">if not </span><span class="s1">isinstance(gpr</span><span class="s2">, </span><span class="s1">Grouping)</span>
+            <span class="s2">else </span><span class="s1">gpr</span>
+        <span class="s1">)</span>
+
+        <span class="s1">groupings.append(ping)</span>
+
+    <span class="s2">if </span><span class="s1">len(groupings) == </span><span class="s4">0 </span><span class="s2">and </span><span class="s1">len(obj):</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;No group keys passed!&quot;</span><span class="s1">)</span>
+    <span class="s2">elif </span><span class="s1">len(groupings) == </span><span class="s4">0</span><span class="s1">:</span>
+        <span class="s1">groupings.append(Grouping(Index([]</span><span class="s2">, </span><span class="s1">dtype=</span><span class="s3">&quot;int&quot;</span><span class="s1">)</span><span class="s2">, </span><span class="s1">np.array([]</span><span class="s2">, </span><span class="s1">dtype=np.intp)))</span>
+
+    <span class="s5"># create the internals grouper</span>
+    <span class="s1">grouper = ops.BaseGrouper(</span>
+        <span class="s1">group_axis</span><span class="s2">, </span><span class="s1">groupings</span><span class="s2">, </span><span class="s1">sort=sort</span><span class="s2">, </span><span class="s1">mutated=mutated</span><span class="s2">, </span><span class="s1">dropna=dropna</span>
+    <span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">grouper</span><span class="s2">, </span><span class="s1">frozenset(exclusions)</span><span class="s2">, </span><span class="s1">obj</span>
+
+
+<span class="s2">def </span><span class="s1">_is_label_like(val) -&gt; bool:</span>
+    <span class="s2">return </span><span class="s1">isinstance(val</span><span class="s2">, </span><span class="s1">(str</span><span class="s2">, </span><span class="s1">tuple)) </span><span class="s2">or </span><span class="s1">(val </span><span class="s2">is not None and </span><span class="s1">is_scalar(val))</span>
+
+
+<span class="s2">def </span><span class="s1">_convert_grouper(axis: Index</span><span class="s2">, </span><span class="s1">grouper):</span>
+    <span class="s2">if </span><span class="s1">isinstance(grouper</span><span class="s2">, </span><span class="s1">dict):</span>
+        <span class="s2">return </span><span class="s1">grouper.get</span>
+    <span class="s2">elif </span><span class="s1">isinstance(grouper</span><span class="s2">, </span><span class="s1">Series):</span>
+        <span class="s2">if </span><span class="s1">grouper.index.equals(axis):</span>
+            <span class="s2">return </span><span class="s1">grouper._values</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">grouper.reindex(axis)._values</span>
+    <span class="s2">elif </span><span class="s1">isinstance(grouper</span><span class="s2">, </span><span class="s1">MultiIndex):</span>
+        <span class="s2">return </span><span class="s1">grouper._values</span>
+    <span class="s2">elif </span><span class="s1">isinstance(grouper</span><span class="s2">, </span><span class="s1">(list</span><span class="s2">, </span><span class="s1">tuple</span><span class="s2">, </span><span class="s1">Index</span><span class="s2">, </span><span class="s1">Categorical</span><span class="s2">, </span><span class="s1">np.ndarray)):</span>
+        <span class="s2">if </span><span class="s1">len(grouper) != len(axis):</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;Grouper and axis must be same length&quot;</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">isinstance(grouper</span><span class="s2">, </span><span class="s1">(list</span><span class="s2">, </span><span class="s1">tuple)):</span>
+            <span class="s1">grouper = com.asarray_tuplesafe(grouper)</span>
+        <span class="s2">return </span><span class="s1">grouper</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">grouper</span>
+
+
+<span class="s2">def </span><span class="s1">_check_deprecated_resample_kwargs(kwargs</span><span class="s2">, </span><span class="s1">origin):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Check for use of deprecated parameters in ``resample`` and related functions. 
+ 
+    Raises the appropriate warnings if these parameters are detected. 
+    Only sets an approximate ``stacklevel`` for the warnings (see #37603, #36629). 
+ 
+    Parameters 
+    ---------- 
+    kwargs : dict 
+        Dictionary of keyword arguments to check for deprecated parameters. 
+    origin : object 
+        From where this function is being called; either Grouper or TimeGrouper. Used 
+        to determine an approximate stacklevel. 
+    &quot;&quot;&quot;</span>
+    <span class="s5"># Deprecation warning of `base` and `loffset` since v1.1.0:</span>
+    <span class="s5"># we are raising the warning here to be able to set the `stacklevel`</span>
+    <span class="s5"># properly since we need to raise the `base` and `loffset` deprecation</span>
+    <span class="s5"># warning from three different cases:</span>
+    <span class="s5">#   core/generic.py::NDFrame.resample</span>
+    <span class="s5">#   core/groupby/groupby.py::GroupBy.resample</span>
+    <span class="s5">#   core/groupby/grouper.py::Grouper</span>
+    <span class="s5"># raising these warnings from TimeGrouper directly would fail the test:</span>
+    <span class="s5">#   tests/resample/test_deprecated.py::test_deprecating_on_loffset_and_base</span>
+
+    <span class="s2">if </span><span class="s1">kwargs.get(</span><span class="s3">&quot;base&quot;</span><span class="s2">, None</span><span class="s1">) </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s1">warnings.warn(</span>
+            <span class="s3">&quot;'base' in .resample() and in Grouper() is deprecated.</span><span class="s2">\n</span><span class="s3">&quot;</span>
+            <span class="s3">&quot;The new arguments that you should use are 'offset' or 'origin'.</span><span class="s2">\n</span><span class="s3">&quot;</span>
+            <span class="s3">'</span><span class="s2">\n</span><span class="s3">&gt;&gt;&gt; df.resample(freq=&quot;3s&quot;, base=2)</span><span class="s2">\n</span><span class="s3">'</span>
+            <span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">becomes:</span><span class="s2">\n</span><span class="s3">&quot;</span>
+            <span class="s3">'</span><span class="s2">\n</span><span class="s3">&gt;&gt;&gt; df.resample(freq=&quot;3s&quot;, offset=&quot;2s&quot;)</span><span class="s2">\n</span><span class="s3">'</span><span class="s2">,</span>
+            <span class="s1">FutureWarning</span><span class="s2">,</span>
+            <span class="s1">stacklevel=find_stack_level()</span><span class="s2">,</span>
+        <span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">kwargs.get(</span><span class="s3">&quot;loffset&quot;</span><span class="s2">, None</span><span class="s1">) </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s1">warnings.warn(</span>
+            <span class="s3">&quot;'loffset' in .resample() and in Grouper() is deprecated.</span><span class="s2">\n</span><span class="s3">&quot;</span>
+            <span class="s3">'</span><span class="s2">\n</span><span class="s3">&gt;&gt;&gt; df.resample(freq=&quot;3s&quot;, loffset=&quot;8H&quot;)</span><span class="s2">\n</span><span class="s3">'</span>
+            <span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">becomes:</span><span class="s2">\n</span><span class="s3">&quot;</span>
+            <span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">&gt;&gt;&gt; from pandas.tseries.frequencies import to_offset&quot;</span>
+            <span class="s3">'</span><span class="s2">\n</span><span class="s3">&gt;&gt;&gt; df = df.resample(freq=&quot;3s&quot;).mean()'</span>
+            <span class="s3">'</span><span class="s2">\n</span><span class="s3">&gt;&gt;&gt; df.index = df.index.to_timestamp() + to_offset(&quot;8H&quot;)</span><span class="s2">\n</span><span class="s3">'</span><span class="s2">,</span>
+            <span class="s1">FutureWarning</span><span class="s2">,</span>
+            <span class="s1">stacklevel=find_stack_level()</span><span class="s2">,</span>
+        <span class="s1">)</span>
+</pre>
+</body>
+</html>

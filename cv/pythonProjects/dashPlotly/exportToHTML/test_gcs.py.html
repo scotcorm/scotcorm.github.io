@@ -1,0 +1,216 @@
+<html>
+<head>
+<title>test_gcs.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #808080;}
+.s4 { color: #6897bb;}
+.s5 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+test_gcs.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">io </span><span class="s0">import </span><span class="s1">BytesIO</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">zipfile</span>
+
+<span class="s0">import </span><span class="s1">numpy </span><span class="s0">as </span><span class="s1">np</span>
+<span class="s0">import </span><span class="s1">pytest</span>
+
+<span class="s0">from </span><span class="s1">pandas </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">DataFrame</span><span class="s0">,</span>
+    <span class="s1">date_range</span><span class="s0">,</span>
+    <span class="s1">read_csv</span><span class="s0">,</span>
+    <span class="s1">read_excel</span><span class="s0">,</span>
+    <span class="s1">read_json</span><span class="s0">,</span>
+    <span class="s1">read_parquet</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">import </span><span class="s1">pandas._testing </span><span class="s0">as </span><span class="s1">tm</span>
+<span class="s0">from </span><span class="s1">pandas.util </span><span class="s0">import </span><span class="s1">_test_decorators </span><span class="s0">as </span><span class="s1">td</span>
+
+<span class="s0">import </span><span class="s1">pandas.io.common </span><span class="s0">as </span><span class="s1">icom</span>
+
+
+<span class="s1">@pytest.fixture</span>
+<span class="s0">def </span><span class="s1">gcs_buffer(monkeypatch):</span>
+    <span class="s2">&quot;&quot;&quot;Emulate GCS using a binary buffer.&quot;&quot;&quot;</span>
+    <span class="s0">from </span><span class="s1">fsspec </span><span class="s0">import </span><span class="s1">(</span>
+        <span class="s1">AbstractFileSystem</span><span class="s0">,</span>
+        <span class="s1">registry</span><span class="s0">,</span>
+    <span class="s1">)</span>
+
+    <span class="s1">registry.target.clear()  </span><span class="s3"># remove state</span>
+
+    <span class="s1">gcs_buffer = BytesIO()</span>
+    <span class="s1">gcs_buffer.close = </span><span class="s0">lambda</span><span class="s1">: </span><span class="s0">True</span>
+
+    <span class="s0">class </span><span class="s1">MockGCSFileSystem(AbstractFileSystem):</span>
+        <span class="s0">def </span><span class="s1">open(*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+            <span class="s1">gcs_buffer.seek(</span><span class="s4">0</span><span class="s1">)</span>
+            <span class="s0">return </span><span class="s1">gcs_buffer</span>
+
+        <span class="s0">def </span><span class="s1">ls(self</span><span class="s0">, </span><span class="s1">path</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+            <span class="s3"># needed for pyarrow</span>
+            <span class="s0">return </span><span class="s1">[{</span><span class="s5">&quot;name&quot;</span><span class="s1">: path</span><span class="s0">, </span><span class="s5">&quot;type&quot;</span><span class="s1">: </span><span class="s5">&quot;file&quot;</span><span class="s1">}]</span>
+
+    <span class="s1">monkeypatch.setattr(</span><span class="s5">&quot;gcsfs.GCSFileSystem&quot;</span><span class="s0">, </span><span class="s1">MockGCSFileSystem)</span>
+
+    <span class="s0">return </span><span class="s1">gcs_buffer</span>
+
+
+<span class="s1">@td.skip_if_no(</span><span class="s5">&quot;gcsfs&quot;</span><span class="s1">)</span>
+<span class="s1">@pytest.mark.parametrize(</span><span class="s5">&quot;format&quot;</span><span class="s0">, </span><span class="s1">[</span><span class="s5">&quot;csv&quot;</span><span class="s0">, </span><span class="s5">&quot;json&quot;</span><span class="s0">, </span><span class="s5">&quot;parquet&quot;</span><span class="s0">, </span><span class="s5">&quot;excel&quot;</span><span class="s0">, </span><span class="s5">&quot;markdown&quot;</span><span class="s1">])</span>
+<span class="s0">def </span><span class="s1">test_to_read_gcs(gcs_buffer</span><span class="s0">, </span><span class="s1">format):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Test that many to/read functions support GCS. 
+ 
+    GH 33987 
+    &quot;&quot;&quot;</span>
+    <span class="s0">from </span><span class="s1">fsspec </span><span class="s0">import </span><span class="s1">registry</span>
+
+    <span class="s1">registry.target.clear()  </span><span class="s3"># remove state</span>
+
+    <span class="s1">df1 = DataFrame(</span>
+        <span class="s1">{</span>
+            <span class="s5">&quot;int&quot;</span><span class="s1">: [</span><span class="s4">1</span><span class="s0">, </span><span class="s4">3</span><span class="s1">]</span><span class="s0">,</span>
+            <span class="s5">&quot;float&quot;</span><span class="s1">: [</span><span class="s4">2.0</span><span class="s0">, </span><span class="s1">np.nan]</span><span class="s0">,</span>
+            <span class="s5">&quot;str&quot;</span><span class="s1">: [</span><span class="s5">&quot;t&quot;</span><span class="s0">, </span><span class="s5">&quot;s&quot;</span><span class="s1">]</span><span class="s0">,</span>
+            <span class="s5">&quot;dt&quot;</span><span class="s1">: date_range(</span><span class="s5">&quot;2018-06-18&quot;</span><span class="s0">, </span><span class="s1">periods=</span><span class="s4">2</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">}</span>
+    <span class="s1">)</span>
+
+    <span class="s1">path = </span><span class="s5">f&quot;gs://test/test.</span><span class="s0">{</span><span class="s1">format</span><span class="s0">}</span><span class="s5">&quot;</span>
+
+    <span class="s0">if </span><span class="s1">format == </span><span class="s5">&quot;csv&quot;</span><span class="s1">:</span>
+        <span class="s1">df1.to_csv(path</span><span class="s0">, </span><span class="s1">index=</span><span class="s0">True</span><span class="s1">)</span>
+        <span class="s1">df2 = read_csv(path</span><span class="s0">, </span><span class="s1">parse_dates=[</span><span class="s5">&quot;dt&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s4">0</span><span class="s1">)</span>
+    <span class="s0">elif </span><span class="s1">format == </span><span class="s5">&quot;excel&quot;</span><span class="s1">:</span>
+        <span class="s1">path = </span><span class="s5">&quot;gs://test/test.xls&quot;</span>
+        <span class="s1">df1.to_excel(path)</span>
+        <span class="s1">df2 = read_excel(path</span><span class="s0">, </span><span class="s1">parse_dates=[</span><span class="s5">&quot;dt&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s4">0</span><span class="s1">)</span>
+    <span class="s0">elif </span><span class="s1">format == </span><span class="s5">&quot;json&quot;</span><span class="s1">:</span>
+        <span class="s1">df1.to_json(path)</span>
+        <span class="s1">df2 = read_json(path</span><span class="s0">, </span><span class="s1">convert_dates=[</span><span class="s5">&quot;dt&quot;</span><span class="s1">])</span>
+    <span class="s0">elif </span><span class="s1">format == </span><span class="s5">&quot;parquet&quot;</span><span class="s1">:</span>
+        <span class="s1">pytest.importorskip(</span><span class="s5">&quot;pyarrow&quot;</span><span class="s1">)</span>
+        <span class="s1">df1.to_parquet(path)</span>
+        <span class="s1">df2 = read_parquet(path)</span>
+    <span class="s0">elif </span><span class="s1">format == </span><span class="s5">&quot;markdown&quot;</span><span class="s1">:</span>
+        <span class="s1">pytest.importorskip(</span><span class="s5">&quot;tabulate&quot;</span><span class="s1">)</span>
+        <span class="s1">df1.to_markdown(path)</span>
+        <span class="s1">df2 = df1</span>
+
+    <span class="s1">tm.assert_frame_equal(df1</span><span class="s0">, </span><span class="s1">df2)</span>
+
+
+<span class="s0">def </span><span class="s1">assert_equal_zip_safe(result: bytes</span><span class="s0">, </span><span class="s1">expected: bytes</span><span class="s0">, </span><span class="s1">compression: str):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    For zip compression, only compare the CRC-32 checksum of the file contents 
+    to avoid checking the time-dependent last-modified timestamp which 
+    in some CI builds is off-by-one 
+ 
+    See https://en.wikipedia.org/wiki/ZIP_(file_format)#File_headers 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">compression == </span><span class="s5">&quot;zip&quot;</span><span class="s1">:</span>
+        <span class="s3"># Only compare the CRC checksum of the file contents</span>
+        <span class="s0">with </span><span class="s1">zipfile.ZipFile(BytesIO(result)) </span><span class="s0">as </span><span class="s1">exp</span><span class="s0">, </span><span class="s1">zipfile.ZipFile(</span>
+            <span class="s1">BytesIO(expected)</span>
+        <span class="s1">) </span><span class="s0">as </span><span class="s1">res:</span>
+            <span class="s0">for </span><span class="s1">res_info</span><span class="s0">, </span><span class="s1">exp_info </span><span class="s0">in </span><span class="s1">zip(res.infolist()</span><span class="s0">, </span><span class="s1">exp.infolist()):</span>
+                <span class="s0">assert </span><span class="s1">res_info.CRC == exp_info.CRC</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s0">assert </span><span class="s1">result == expected</span>
+
+
+<span class="s1">@td.skip_if_no(</span><span class="s5">&quot;gcsfs&quot;</span><span class="s1">)</span>
+<span class="s1">@pytest.mark.parametrize(</span><span class="s5">&quot;encoding&quot;</span><span class="s0">, </span><span class="s1">[</span><span class="s5">&quot;utf-8&quot;</span><span class="s0">, </span><span class="s5">&quot;cp1251&quot;</span><span class="s1">])</span>
+<span class="s0">def </span><span class="s1">test_to_csv_compression_encoding_gcs(gcs_buffer</span><span class="s0">, </span><span class="s1">compression_only</span><span class="s0">, </span><span class="s1">encoding):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Compression and encoding should with GCS. 
+ 
+    GH 35677 (to_csv, compression), GH 26124 (to_csv, encoding), and 
+    GH 32392 (read_csv, encoding) 
+    &quot;&quot;&quot;</span>
+    <span class="s0">from </span><span class="s1">fsspec </span><span class="s0">import </span><span class="s1">registry</span>
+
+    <span class="s1">registry.target.clear()  </span><span class="s3"># remove state</span>
+    <span class="s1">df = tm.makeDataFrame()</span>
+
+    <span class="s3"># reference of compressed and encoded file</span>
+    <span class="s1">compression = {</span><span class="s5">&quot;method&quot;</span><span class="s1">: compression_only}</span>
+    <span class="s0">if </span><span class="s1">compression_only == </span><span class="s5">&quot;gzip&quot;</span><span class="s1">:</span>
+        <span class="s1">compression[</span><span class="s5">&quot;mtime&quot;</span><span class="s1">] = </span><span class="s4">1  </span><span class="s3"># be reproducible</span>
+    <span class="s1">buffer = BytesIO()</span>
+    <span class="s1">df.to_csv(buffer</span><span class="s0">, </span><span class="s1">compression=compression</span><span class="s0">, </span><span class="s1">encoding=encoding</span><span class="s0">, </span><span class="s1">mode=</span><span class="s5">&quot;wb&quot;</span><span class="s1">)</span>
+
+    <span class="s3"># write compressed file with explicit compression</span>
+    <span class="s1">path_gcs = </span><span class="s5">&quot;gs://test/test.csv&quot;</span>
+    <span class="s1">df.to_csv(path_gcs</span><span class="s0">, </span><span class="s1">compression=compression</span><span class="s0">, </span><span class="s1">encoding=encoding)</span>
+    <span class="s1">res = gcs_buffer.getvalue()</span>
+    <span class="s1">expected = buffer.getvalue()</span>
+    <span class="s1">assert_equal_zip_safe(res</span><span class="s0">, </span><span class="s1">expected</span><span class="s0">, </span><span class="s1">compression_only)</span>
+
+    <span class="s1">read_df = read_csv(</span>
+        <span class="s1">path_gcs</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s4">0</span><span class="s0">, </span><span class="s1">compression=compression_only</span><span class="s0">, </span><span class="s1">encoding=encoding</span>
+    <span class="s1">)</span>
+    <span class="s1">tm.assert_frame_equal(df</span><span class="s0">, </span><span class="s1">read_df)</span>
+
+    <span class="s3"># write compressed file with implicit compression</span>
+    <span class="s1">file_ext = icom._compression_to_extension[compression_only]</span>
+    <span class="s1">compression[</span><span class="s5">&quot;method&quot;</span><span class="s1">] = </span><span class="s5">&quot;infer&quot;</span>
+    <span class="s1">path_gcs += </span><span class="s5">f&quot;.</span><span class="s0">{</span><span class="s1">file_ext</span><span class="s0">}</span><span class="s5">&quot;</span>
+    <span class="s1">df.to_csv(path_gcs</span><span class="s0">, </span><span class="s1">compression=compression</span><span class="s0">, </span><span class="s1">encoding=encoding)</span>
+
+    <span class="s1">res = gcs_buffer.getvalue()</span>
+    <span class="s1">expected = buffer.getvalue()</span>
+    <span class="s1">assert_equal_zip_safe(res</span><span class="s0">, </span><span class="s1">expected</span><span class="s0">, </span><span class="s1">compression_only)</span>
+
+    <span class="s1">read_df = read_csv(path_gcs</span><span class="s0">, </span><span class="s1">index_col=</span><span class="s4">0</span><span class="s0">, </span><span class="s1">compression=</span><span class="s5">&quot;infer&quot;</span><span class="s0">, </span><span class="s1">encoding=encoding)</span>
+    <span class="s1">tm.assert_frame_equal(df</span><span class="s0">, </span><span class="s1">read_df)</span>
+
+
+<span class="s1">@td.skip_if_no(</span><span class="s5">&quot;fastparquet&quot;</span><span class="s1">)</span>
+<span class="s1">@td.skip_if_no(</span><span class="s5">&quot;gcsfs&quot;</span><span class="s1">)</span>
+<span class="s0">def </span><span class="s1">test_to_parquet_gcs_new_file(monkeypatch</span><span class="s0">, </span><span class="s1">tmpdir):</span>
+    <span class="s2">&quot;&quot;&quot;Regression test for writing to a not-yet-existent GCS Parquet file.&quot;&quot;&quot;</span>
+    <span class="s0">from </span><span class="s1">fsspec </span><span class="s0">import </span><span class="s1">(</span>
+        <span class="s1">AbstractFileSystem</span><span class="s0">,</span>
+        <span class="s1">registry</span><span class="s0">,</span>
+    <span class="s1">)</span>
+
+    <span class="s1">registry.target.clear()  </span><span class="s3"># remove state</span>
+    <span class="s1">df1 = DataFrame(</span>
+        <span class="s1">{</span>
+            <span class="s5">&quot;int&quot;</span><span class="s1">: [</span><span class="s4">1</span><span class="s0">, </span><span class="s4">3</span><span class="s1">]</span><span class="s0">,</span>
+            <span class="s5">&quot;float&quot;</span><span class="s1">: [</span><span class="s4">2.0</span><span class="s0">, </span><span class="s1">np.nan]</span><span class="s0">,</span>
+            <span class="s5">&quot;str&quot;</span><span class="s1">: [</span><span class="s5">&quot;t&quot;</span><span class="s0">, </span><span class="s5">&quot;s&quot;</span><span class="s1">]</span><span class="s0">,</span>
+            <span class="s5">&quot;dt&quot;</span><span class="s1">: date_range(</span><span class="s5">&quot;2018-06-18&quot;</span><span class="s0">, </span><span class="s1">periods=</span><span class="s4">2</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">}</span>
+    <span class="s1">)</span>
+
+    <span class="s0">class </span><span class="s1">MockGCSFileSystem(AbstractFileSystem):</span>
+        <span class="s0">def </span><span class="s1">open(self</span><span class="s0">, </span><span class="s1">path</span><span class="s0">, </span><span class="s1">mode=</span><span class="s5">&quot;r&quot;</span><span class="s0">, </span><span class="s1">*args):</span>
+            <span class="s0">if </span><span class="s5">&quot;w&quot; </span><span class="s0">not in </span><span class="s1">mode:</span>
+                <span class="s0">raise </span><span class="s1">FileNotFoundError</span>
+            <span class="s0">return </span><span class="s1">open(os.path.join(tmpdir</span><span class="s0">, </span><span class="s5">&quot;test.parquet&quot;</span><span class="s1">)</span><span class="s0">, </span><span class="s1">mode)</span>
+
+    <span class="s1">monkeypatch.setattr(</span><span class="s5">&quot;gcsfs.GCSFileSystem&quot;</span><span class="s0">, </span><span class="s1">MockGCSFileSystem)</span>
+    <span class="s1">df1.to_parquet(</span>
+        <span class="s5">&quot;gs://test/test.csv&quot;</span><span class="s0">, </span><span class="s1">index=</span><span class="s0">True, </span><span class="s1">engine=</span><span class="s5">&quot;fastparquet&quot;</span><span class="s0">, </span><span class="s1">compression=</span><span class="s0">None</span>
+    <span class="s1">)</span>
+
+
+<span class="s1">@td.skip_if_installed(</span><span class="s5">&quot;gcsfs&quot;</span><span class="s1">)</span>
+<span class="s0">def </span><span class="s1">test_gcs_not_present_exception():</span>
+    <span class="s0">with </span><span class="s1">tm.external_error_raised(ImportError):</span>
+        <span class="s1">read_csv(</span><span class="s5">&quot;gs://test/test.csv&quot;</span><span class="s1">)</span>
+</pre>
+</body>
+</html>

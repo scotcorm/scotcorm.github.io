@@ -1,0 +1,544 @@
+<html>
+<head>
+<title>array_ops.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #808080;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+array_ops.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+Functions for arithmetic and comparison operations on NumPy arrays and 
+ExtensionArrays. 
+&quot;&quot;&quot;</span>
+<span class="s2">import </span><span class="s1">datetime</span>
+<span class="s2">from </span><span class="s1">functools </span><span class="s2">import </span><span class="s1">partial</span>
+<span class="s2">import </span><span class="s1">operator</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">Any</span>
+
+<span class="s2">import </span><span class="s1">numpy </span><span class="s2">as </span><span class="s1">np</span>
+
+<span class="s2">from </span><span class="s1">pandas._libs </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">NaT</span><span class="s2">,</span>
+    <span class="s1">Timedelta</span><span class="s2">,</span>
+    <span class="s1">Timestamp</span><span class="s2">,</span>
+    <span class="s1">lib</span><span class="s2">,</span>
+    <span class="s1">ops </span><span class="s2">as </span><span class="s1">libops</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas._libs.tslibs </span><span class="s2">import </span><span class="s1">BaseOffset</span>
+<span class="s2">from </span><span class="s1">pandas._typing </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">ArrayLike</span><span class="s2">,</span>
+    <span class="s1">Shape</span><span class="s2">,</span>
+<span class="s1">)</span>
+
+<span class="s2">from </span><span class="s1">pandas.core.dtypes.cast </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">construct_1d_object_array_from_listlike</span><span class="s2">,</span>
+    <span class="s1">find_common_type</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas.core.dtypes.common </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">ensure_object</span><span class="s2">,</span>
+    <span class="s1">is_bool_dtype</span><span class="s2">,</span>
+    <span class="s1">is_integer_dtype</span><span class="s2">,</span>
+    <span class="s1">is_list_like</span><span class="s2">,</span>
+    <span class="s1">is_numeric_v_string_like</span><span class="s2">,</span>
+    <span class="s1">is_object_dtype</span><span class="s2">,</span>
+    <span class="s1">is_scalar</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas.core.dtypes.generic </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">ABCExtensionArray</span><span class="s2">,</span>
+    <span class="s1">ABCIndex</span><span class="s2">,</span>
+    <span class="s1">ABCSeries</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas.core.dtypes.missing </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">isna</span><span class="s2">,</span>
+    <span class="s1">notna</span><span class="s2">,</span>
+<span class="s1">)</span>
+
+<span class="s2">import </span><span class="s1">pandas.core.computation.expressions </span><span class="s2">as </span><span class="s1">expressions</span>
+<span class="s2">from </span><span class="s1">pandas.core.construction </span><span class="s2">import </span><span class="s1">ensure_wrapped_if_datetimelike</span>
+<span class="s2">from </span><span class="s1">pandas.core.ops </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">missing</span><span class="s2">,</span>
+    <span class="s1">roperator</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas.core.ops.dispatch </span><span class="s2">import </span><span class="s1">should_extension_dispatch</span>
+<span class="s2">from </span><span class="s1">pandas.core.ops.invalid </span><span class="s2">import </span><span class="s1">invalid_comparison</span>
+
+
+<span class="s2">def </span><span class="s1">comp_method_OBJECT_ARRAY(op</span><span class="s2">, </span><span class="s1">x</span><span class="s2">, </span><span class="s1">y):</span>
+    <span class="s2">if </span><span class="s1">isinstance(y</span><span class="s2">, </span><span class="s1">list):</span>
+        <span class="s1">y = construct_1d_object_array_from_listlike(y)</span>
+
+    <span class="s2">if </span><span class="s1">isinstance(y</span><span class="s2">, </span><span class="s1">(np.ndarray</span><span class="s2">, </span><span class="s1">ABCSeries</span><span class="s2">, </span><span class="s1">ABCIndex)):</span>
+        <span class="s2">if not </span><span class="s1">is_object_dtype(y.dtype):</span>
+            <span class="s1">y = y.astype(np.object_)</span>
+
+        <span class="s2">if </span><span class="s1">isinstance(y</span><span class="s2">, </span><span class="s1">(ABCSeries</span><span class="s2">, </span><span class="s1">ABCIndex)):</span>
+            <span class="s1">y = y._values</span>
+
+        <span class="s2">if </span><span class="s1">x.shape != y.shape:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;Shapes must match&quot;</span><span class="s2">, </span><span class="s1">x.shape</span><span class="s2">, </span><span class="s1">y.shape)</span>
+        <span class="s1">result = libops.vec_compare(x.ravel()</span><span class="s2">, </span><span class="s1">y.ravel()</span><span class="s2">, </span><span class="s1">op)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">result = libops.scalar_compare(x.ravel()</span><span class="s2">, </span><span class="s1">y</span><span class="s2">, </span><span class="s1">op)</span>
+    <span class="s2">return </span><span class="s1">result.reshape(x.shape)</span>
+
+
+<span class="s2">def </span><span class="s1">_masked_arith_op(x: np.ndarray</span><span class="s2">, </span><span class="s1">y</span><span class="s2">, </span><span class="s1">op):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    If the given arithmetic operation fails, attempt it again on 
+    only the non-null elements of the input array(s). 
+ 
+    Parameters 
+    ---------- 
+    x : np.ndarray 
+    y : np.ndarray, Series, Index 
+    op : binary operator 
+    &quot;&quot;&quot;</span>
+    <span class="s4"># For Series `x` is 1D so ravel() is a no-op; calling it anyway makes</span>
+    <span class="s4"># the logic valid for both Series and DataFrame ops.</span>
+    <span class="s1">xrav = x.ravel()</span>
+    <span class="s2">assert </span><span class="s1">isinstance(x</span><span class="s2">, </span><span class="s1">np.ndarray)</span><span class="s2">, </span><span class="s1">type(x)</span>
+    <span class="s2">if </span><span class="s1">isinstance(y</span><span class="s2">, </span><span class="s1">np.ndarray):</span>
+        <span class="s1">dtype = find_common_type([x.dtype</span><span class="s2">, </span><span class="s1">y.dtype])</span>
+        <span class="s1">result = np.empty(x.size</span><span class="s2">, </span><span class="s1">dtype=dtype)</span>
+
+        <span class="s2">if </span><span class="s1">len(x) != len(y):</span>
+            <span class="s2">raise </span><span class="s1">ValueError(x.shape</span><span class="s2">, </span><span class="s1">y.shape)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">ymask = notna(y)</span>
+
+        <span class="s4"># NB: ravel() is only safe since y is ndarray; for e.g. PeriodIndex</span>
+        <span class="s4">#  we would get int64 dtype, see GH#19956</span>
+        <span class="s1">yrav = y.ravel()</span>
+        <span class="s1">mask = notna(xrav) &amp; ymask.ravel()</span>
+
+        <span class="s4"># See GH#5284, GH#5035, GH#19448 for historical reference</span>
+        <span class="s2">if </span><span class="s1">mask.any():</span>
+            <span class="s1">result[mask] = op(xrav[mask]</span><span class="s2">, </span><span class="s1">yrav[mask])</span>
+
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">if not </span><span class="s1">is_scalar(y):</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span>
+                <span class="s3">f&quot;Cannot broadcast np.ndarray with operand of type </span><span class="s2">{ </span><span class="s1">type(y) </span><span class="s2">}</span><span class="s3">&quot;</span>
+            <span class="s1">)</span>
+
+        <span class="s4"># mask is only meaningful for x</span>
+        <span class="s1">result = np.empty(x.size</span><span class="s2">, </span><span class="s1">dtype=x.dtype)</span>
+        <span class="s1">mask = notna(xrav)</span>
+
+        <span class="s4"># 1 ** np.nan is 1. So we have to unmask those.</span>
+        <span class="s2">if </span><span class="s1">op </span><span class="s2">is </span><span class="s1">pow:</span>
+            <span class="s1">mask = np.where(x == </span><span class="s5">1</span><span class="s2">, False, </span><span class="s1">mask)</span>
+        <span class="s2">elif </span><span class="s1">op </span><span class="s2">is </span><span class="s1">roperator.rpow:</span>
+            <span class="s1">mask = np.where(y == </span><span class="s5">1</span><span class="s2">, False, </span><span class="s1">mask)</span>
+
+        <span class="s2">if </span><span class="s1">mask.any():</span>
+            <span class="s1">result[mask] = op(xrav[mask]</span><span class="s2">, </span><span class="s1">y)</span>
+
+    <span class="s1">np.putmask(result</span><span class="s2">, </span><span class="s1">~mask</span><span class="s2">, </span><span class="s1">np.nan)</span>
+    <span class="s1">result = result.reshape(x.shape)  </span><span class="s4"># 2D compat</span>
+    <span class="s2">return </span><span class="s1">result</span>
+
+
+<span class="s2">def </span><span class="s1">_na_arithmetic_op(left: np.ndarray</span><span class="s2">, </span><span class="s1">right</span><span class="s2">, </span><span class="s1">op</span><span class="s2">, </span><span class="s1">is_cmp: bool = </span><span class="s2">False</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Return the result of evaluating op on the passed in values. 
+ 
+    If native types are not compatible, try coercion to object dtype. 
+ 
+    Parameters 
+    ---------- 
+    left : np.ndarray 
+    right : np.ndarray or scalar 
+        Excludes DataFrame, Series, Index, ExtensionArray. 
+    is_cmp : bool, default False 
+        If this a comparison operation. 
+ 
+    Returns 
+    ------- 
+    array-like 
+ 
+    Raises 
+    ------ 
+    TypeError : invalid operation 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">isinstance(right</span><span class="s2">, </span><span class="s1">str):</span>
+        <span class="s4"># can never use numexpr</span>
+        <span class="s1">func = op</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">func = partial(expressions.evaluate</span><span class="s2">, </span><span class="s1">op)</span>
+
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">result = func(left</span><span class="s2">, </span><span class="s1">right)</span>
+    <span class="s2">except </span><span class="s1">TypeError:</span>
+        <span class="s2">if not </span><span class="s1">is_cmp </span><span class="s2">and </span><span class="s1">(is_object_dtype(left.dtype) </span><span class="s2">or </span><span class="s1">is_object_dtype(right)):</span>
+            <span class="s4"># For object dtype, fallback to a masked operation (only operating</span>
+            <span class="s4">#  on the non-missing values)</span>
+            <span class="s4"># Don't do this for comparisons, as that will handle complex numbers</span>
+            <span class="s4">#  incorrectly, see GH#32047</span>
+            <span class="s1">result = _masked_arith_op(left</span><span class="s2">, </span><span class="s1">right</span><span class="s2">, </span><span class="s1">op)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">raise</span>
+
+    <span class="s2">if </span><span class="s1">is_cmp </span><span class="s2">and </span><span class="s1">(is_scalar(result) </span><span class="s2">or </span><span class="s1">result </span><span class="s2">is </span><span class="s1">NotImplemented):</span>
+        <span class="s4"># numpy returned a scalar instead of operating element-wise</span>
+        <span class="s4"># e.g. numeric array vs str</span>
+        <span class="s4"># TODO: can remove this after dropping some future numpy version?</span>
+        <span class="s2">return </span><span class="s1">invalid_comparison(left</span><span class="s2">, </span><span class="s1">right</span><span class="s2">, </span><span class="s1">op)</span>
+
+    <span class="s2">return </span><span class="s1">missing.dispatch_fill_zeros(op</span><span class="s2">, </span><span class="s1">left</span><span class="s2">, </span><span class="s1">right</span><span class="s2">, </span><span class="s1">result)</span>
+
+
+<span class="s2">def </span><span class="s1">arithmetic_op(left: ArrayLike</span><span class="s2">, </span><span class="s1">right: Any</span><span class="s2">, </span><span class="s1">op):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Evaluate an arithmetic operation `+`, `-`, `*`, `/`, `//`, `%`, `**`, ... 
+ 
+    Note: the caller is responsible for ensuring that numpy warnings are 
+    suppressed (with np.errstate(all=&quot;ignore&quot;)) if needed. 
+ 
+    Parameters 
+    ---------- 
+    left : np.ndarray or ExtensionArray 
+    right : object 
+        Cannot be a DataFrame or Index.  Series is *not* excluded. 
+    op : {operator.add, operator.sub, ...} 
+        Or one of the reversed variants from roperator. 
+ 
+    Returns 
+    ------- 
+    ndarray or ExtensionArray 
+        Or a 2-tuple of these in the case of divmod or rdivmod. 
+    &quot;&quot;&quot;</span>
+    <span class="s4"># NB: We assume that extract_array and ensure_wrapped_if_datetimelike</span>
+    <span class="s4">#  have already been called on `left` and `right`,</span>
+    <span class="s4">#  and `maybe_prepare_scalar_for_op` has already been called on `right`</span>
+    <span class="s4"># We need to special-case datetime64/timedelta64 dtypes (e.g. because numpy</span>
+    <span class="s4"># casts integer dtypes to timedelta64 when operating with timedelta64 - GH#22390)</span>
+
+    <span class="s2">if </span><span class="s1">(</span>
+        <span class="s1">should_extension_dispatch(left</span><span class="s2">, </span><span class="s1">right)</span>
+        <span class="s2">or </span><span class="s1">isinstance(right</span><span class="s2">, </span><span class="s1">(Timedelta</span><span class="s2">, </span><span class="s1">BaseOffset</span><span class="s2">, </span><span class="s1">Timestamp))</span>
+        <span class="s2">or </span><span class="s1">right </span><span class="s2">is </span><span class="s1">NaT</span>
+    <span class="s1">):</span>
+        <span class="s4"># Timedelta/Timestamp and other custom scalars are included in the check</span>
+        <span class="s4"># because numexpr will fail on it, see GH#31457</span>
+        <span class="s1">res_values = op(left</span><span class="s2">, </span><span class="s1">right)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s4"># TODO we should handle EAs consistently and move this check before the if/else</span>
+        <span class="s4"># (https://github.com/pandas-dev/pandas/issues/41165)</span>
+        <span class="s1">_bool_arith_check(op</span><span class="s2">, </span><span class="s1">left</span><span class="s2">, </span><span class="s1">right)</span>
+
+        <span class="s1">res_values = _na_arithmetic_op(left</span><span class="s2">, </span><span class="s1">right</span><span class="s2">, </span><span class="s1">op)</span>
+
+    <span class="s2">return </span><span class="s1">res_values</span>
+
+
+<span class="s2">def </span><span class="s1">comparison_op(left: ArrayLike</span><span class="s2">, </span><span class="s1">right: Any</span><span class="s2">, </span><span class="s1">op) -&gt; ArrayLike:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Evaluate a comparison operation `=`, `!=`, `&gt;=`, `&gt;`, `&lt;=`, or `&lt;`. 
+ 
+    Note: the caller is responsible for ensuring that numpy warnings are 
+    suppressed (with np.errstate(all=&quot;ignore&quot;)) if needed. 
+ 
+    Parameters 
+    ---------- 
+    left : np.ndarray or ExtensionArray 
+    right : object 
+        Cannot be a DataFrame, Series, or Index. 
+    op : {operator.eq, operator.ne, operator.gt, operator.ge, operator.lt, operator.le} 
+ 
+    Returns 
+    ------- 
+    ndarray or ExtensionArray 
+    &quot;&quot;&quot;</span>
+    <span class="s4"># NB: We assume extract_array has already been called on left and right</span>
+    <span class="s1">lvalues = ensure_wrapped_if_datetimelike(left)</span>
+    <span class="s1">rvalues = ensure_wrapped_if_datetimelike(right)</span>
+
+    <span class="s1">rvalues = lib.item_from_zerodim(rvalues)</span>
+    <span class="s2">if </span><span class="s1">isinstance(rvalues</span><span class="s2">, </span><span class="s1">list):</span>
+        <span class="s4"># We don't catch tuple here bc we may be comparing e.g. MultiIndex</span>
+        <span class="s4">#  to a tuple that represents a single entry, see test_compare_tuple_strs</span>
+        <span class="s1">rvalues = np.asarray(rvalues)</span>
+
+    <span class="s2">if </span><span class="s1">isinstance(rvalues</span><span class="s2">, </span><span class="s1">(np.ndarray</span><span class="s2">, </span><span class="s1">ABCExtensionArray)):</span>
+        <span class="s4"># TODO: make this treatment consistent across ops and classes.</span>
+        <span class="s4">#  We are not catching all listlikes here (e.g. frozenset, tuple)</span>
+        <span class="s4">#  The ambiguous case is object-dtype.  See GH#27803</span>
+        <span class="s2">if </span><span class="s1">len(lvalues) != len(rvalues):</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span>
+                <span class="s3">&quot;Lengths must match to compare&quot;</span><span class="s2">, </span><span class="s1">lvalues.shape</span><span class="s2">, </span><span class="s1">rvalues.shape</span>
+            <span class="s1">)</span>
+
+    <span class="s2">if </span><span class="s1">should_extension_dispatch(lvalues</span><span class="s2">, </span><span class="s1">rvalues) </span><span class="s2">or </span><span class="s1">(</span>
+        <span class="s1">(isinstance(rvalues</span><span class="s2">, </span><span class="s1">(Timedelta</span><span class="s2">, </span><span class="s1">BaseOffset</span><span class="s2">, </span><span class="s1">Timestamp)) </span><span class="s2">or </span><span class="s1">right </span><span class="s2">is </span><span class="s1">NaT)</span>
+        <span class="s2">and not </span><span class="s1">is_object_dtype(lvalues.dtype)</span>
+    <span class="s1">):</span>
+        <span class="s4"># Call the method on lvalues</span>
+        <span class="s1">res_values = op(lvalues</span><span class="s2">, </span><span class="s1">rvalues)</span>
+
+    <span class="s2">elif </span><span class="s1">is_scalar(rvalues) </span><span class="s2">and </span><span class="s1">isna(rvalues):  </span><span class="s4"># TODO: but not pd.NA?</span>
+        <span class="s4"># numpy does not like comparisons vs None</span>
+        <span class="s2">if </span><span class="s1">op </span><span class="s2">is </span><span class="s1">operator.ne:</span>
+            <span class="s1">res_values = np.ones(lvalues.shape</span><span class="s2">, </span><span class="s1">dtype=bool)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">res_values = np.zeros(lvalues.shape</span><span class="s2">, </span><span class="s1">dtype=bool)</span>
+
+    <span class="s2">elif </span><span class="s1">is_numeric_v_string_like(lvalues</span><span class="s2">, </span><span class="s1">rvalues):</span>
+        <span class="s4"># GH#36377 going through the numexpr path would incorrectly raise</span>
+        <span class="s2">return </span><span class="s1">invalid_comparison(lvalues</span><span class="s2">, </span><span class="s1">rvalues</span><span class="s2">, </span><span class="s1">op)</span>
+
+    <span class="s2">elif </span><span class="s1">is_object_dtype(lvalues.dtype) </span><span class="s2">or </span><span class="s1">isinstance(rvalues</span><span class="s2">, </span><span class="s1">str):</span>
+        <span class="s1">res_values = comp_method_OBJECT_ARRAY(op</span><span class="s2">, </span><span class="s1">lvalues</span><span class="s2">, </span><span class="s1">rvalues)</span>
+
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">res_values = _na_arithmetic_op(lvalues</span><span class="s2">, </span><span class="s1">rvalues</span><span class="s2">, </span><span class="s1">op</span><span class="s2">, </span><span class="s1">is_cmp=</span><span class="s2">True</span><span class="s1">)</span>
+
+    <span class="s2">return </span><span class="s1">res_values</span>
+
+
+<span class="s2">def </span><span class="s1">na_logical_op(x: np.ndarray</span><span class="s2">, </span><span class="s1">y</span><span class="s2">, </span><span class="s1">op):</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s4"># For exposition, write:</span>
+        <span class="s4">#  yarr = isinstance(y, np.ndarray)</span>
+        <span class="s4">#  yint = is_integer(y) or (yarr and y.dtype.kind == &quot;i&quot;)</span>
+        <span class="s4">#  ybool = is_bool(y) or (yarr and y.dtype.kind == &quot;b&quot;)</span>
+        <span class="s4">#  xint = x.dtype.kind == &quot;i&quot;</span>
+        <span class="s4">#  xbool = x.dtype.kind == &quot;b&quot;</span>
+        <span class="s4"># Then Cases where this goes through without raising include:</span>
+        <span class="s4">#  (xint or xbool) and (yint or bool)</span>
+        <span class="s1">result = op(x</span><span class="s2">, </span><span class="s1">y)</span>
+    <span class="s2">except </span><span class="s1">TypeError:</span>
+        <span class="s2">if </span><span class="s1">isinstance(y</span><span class="s2">, </span><span class="s1">np.ndarray):</span>
+            <span class="s4"># bool-bool dtype operations should be OK, should not get here</span>
+            <span class="s2">assert not </span><span class="s1">(is_bool_dtype(x.dtype) </span><span class="s2">and </span><span class="s1">is_bool_dtype(y.dtype))</span>
+            <span class="s1">x = ensure_object(x)</span>
+            <span class="s1">y = ensure_object(y)</span>
+            <span class="s1">result = libops.vec_binop(x.ravel()</span><span class="s2">, </span><span class="s1">y.ravel()</span><span class="s2">, </span><span class="s1">op)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s4"># let null fall thru</span>
+            <span class="s2">assert </span><span class="s1">lib.is_scalar(y)</span>
+            <span class="s2">if not </span><span class="s1">isna(y):</span>
+                <span class="s1">y = bool(y)</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">result = libops.scalar_binop(x</span><span class="s2">, </span><span class="s1">y</span><span class="s2">, </span><span class="s1">op)</span>
+            <span class="s2">except </span><span class="s1">(</span>
+                <span class="s1">TypeError</span><span class="s2">,</span>
+                <span class="s1">ValueError</span><span class="s2">,</span>
+                <span class="s1">AttributeError</span><span class="s2">,</span>
+                <span class="s1">OverflowError</span><span class="s2">,</span>
+                <span class="s1">NotImplementedError</span><span class="s2">,</span>
+            <span class="s1">) </span><span class="s2">as </span><span class="s1">err:</span>
+                <span class="s1">typ = type(y).__name__</span>
+                <span class="s2">raise </span><span class="s1">TypeError(</span>
+                    <span class="s3">f&quot;Cannot perform '</span><span class="s2">{</span><span class="s1">op.__name__</span><span class="s2">}</span><span class="s3">' with a dtyped [</span><span class="s2">{</span><span class="s1">x.dtype</span><span class="s2">}</span><span class="s3">] array &quot;</span>
+                    <span class="s3">f&quot;and scalar of type [</span><span class="s2">{</span><span class="s1">typ</span><span class="s2">}</span><span class="s3">]&quot;</span>
+                <span class="s1">) </span><span class="s2">from </span><span class="s1">err</span>
+
+    <span class="s2">return </span><span class="s1">result.reshape(x.shape)</span>
+
+
+<span class="s2">def </span><span class="s1">logical_op(left: ArrayLike</span><span class="s2">, </span><span class="s1">right: Any</span><span class="s2">, </span><span class="s1">op) -&gt; ArrayLike:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Evaluate a logical operation `|`, `&amp;`, or `^`. 
+ 
+    Parameters 
+    ---------- 
+    left : np.ndarray or ExtensionArray 
+    right : object 
+        Cannot be a DataFrame, Series, or Index. 
+    op : {operator.and_, operator.or_, operator.xor} 
+        Or one of the reversed variants from roperator. 
+ 
+    Returns 
+    ------- 
+    ndarray or ExtensionArray 
+    &quot;&quot;&quot;</span>
+    <span class="s1">fill_int = </span><span class="s2">lambda </span><span class="s1">x: x</span>
+
+    <span class="s2">def </span><span class="s1">fill_bool(x</span><span class="s2">, </span><span class="s1">left=</span><span class="s2">None</span><span class="s1">):</span>
+        <span class="s4"># if `left` is specifically not-boolean, we do not cast to bool</span>
+        <span class="s2">if </span><span class="s1">x.dtype.kind </span><span class="s2">in </span><span class="s1">[</span><span class="s3">&quot;c&quot;</span><span class="s2">, </span><span class="s3">&quot;f&quot;</span><span class="s2">, </span><span class="s3">&quot;O&quot;</span><span class="s1">]:</span>
+            <span class="s4"># dtypes that can hold NA</span>
+            <span class="s1">mask = isna(x)</span>
+            <span class="s2">if </span><span class="s1">mask.any():</span>
+                <span class="s1">x = x.astype(object)</span>
+                <span class="s1">x[mask] = </span><span class="s2">False</span>
+
+        <span class="s2">if </span><span class="s1">left </span><span class="s2">is None or </span><span class="s1">is_bool_dtype(left.dtype):</span>
+            <span class="s1">x = x.astype(bool)</span>
+        <span class="s2">return </span><span class="s1">x</span>
+
+    <span class="s1">is_self_int_dtype = is_integer_dtype(left.dtype)</span>
+
+    <span class="s1">right = lib.item_from_zerodim(right)</span>
+    <span class="s2">if </span><span class="s1">is_list_like(right) </span><span class="s2">and not </span><span class="s1">hasattr(right</span><span class="s2">, </span><span class="s3">&quot;dtype&quot;</span><span class="s1">):</span>
+        <span class="s4"># e.g. list, tuple</span>
+        <span class="s1">right = construct_1d_object_array_from_listlike(right)</span>
+
+    <span class="s4"># NB: We assume extract_array has already been called on left and right</span>
+    <span class="s1">lvalues = ensure_wrapped_if_datetimelike(left)</span>
+    <span class="s1">rvalues = right</span>
+
+    <span class="s2">if </span><span class="s1">should_extension_dispatch(lvalues</span><span class="s2">, </span><span class="s1">rvalues):</span>
+        <span class="s4"># Call the method on lvalues</span>
+        <span class="s1">res_values = op(lvalues</span><span class="s2">, </span><span class="s1">rvalues)</span>
+
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">isinstance(rvalues</span><span class="s2">, </span><span class="s1">np.ndarray):</span>
+            <span class="s1">is_other_int_dtype = is_integer_dtype(rvalues.dtype)</span>
+            <span class="s1">rvalues = rvalues </span><span class="s2">if </span><span class="s1">is_other_int_dtype </span><span class="s2">else </span><span class="s1">fill_bool(rvalues</span><span class="s2">, </span><span class="s1">lvalues)</span>
+
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s4"># i.e. scalar</span>
+            <span class="s1">is_other_int_dtype = lib.is_integer(rvalues)</span>
+
+        <span class="s4"># For int vs int `^`, `|`, `&amp;` are bitwise operators and return</span>
+        <span class="s4">#   integer dtypes.  Otherwise these are boolean ops</span>
+        <span class="s1">filler = fill_int </span><span class="s2">if </span><span class="s1">is_self_int_dtype </span><span class="s2">and </span><span class="s1">is_other_int_dtype </span><span class="s2">else </span><span class="s1">fill_bool</span>
+
+        <span class="s1">res_values = na_logical_op(lvalues</span><span class="s2">, </span><span class="s1">rvalues</span><span class="s2">, </span><span class="s1">op)</span>
+        <span class="s4"># error: Cannot call function of unknown type</span>
+        <span class="s1">res_values = filler(res_values)  </span><span class="s4"># type: ignore[operator]</span>
+
+    <span class="s2">return </span><span class="s1">res_values</span>
+
+
+<span class="s2">def </span><span class="s1">get_array_op(op):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Return a binary array operation corresponding to the given operator op. 
+ 
+    Parameters 
+    ---------- 
+    op : function 
+        Binary operator from operator or roperator module. 
+ 
+    Returns 
+    ------- 
+    functools.partial 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">isinstance(op</span><span class="s2">, </span><span class="s1">partial):</span>
+        <span class="s4"># We get here via dispatch_to_series in DataFrame case</span>
+        <span class="s4"># e.g. test_rolling_consistency_var_debiasing_factors</span>
+        <span class="s2">return </span><span class="s1">op</span>
+
+    <span class="s1">op_name = op.__name__.strip(</span><span class="s3">&quot;_&quot;</span><span class="s1">).lstrip(</span><span class="s3">&quot;r&quot;</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">op_name == </span><span class="s3">&quot;arith_op&quot;</span><span class="s1">:</span>
+        <span class="s4"># Reached via DataFrame._combine_frame i.e. flex methods</span>
+        <span class="s4"># e.g. test_df_add_flex_filled_mixed_dtypes</span>
+        <span class="s2">return </span><span class="s1">op</span>
+
+    <span class="s2">if </span><span class="s1">op_name </span><span class="s2">in </span><span class="s1">{</span><span class="s3">&quot;eq&quot;</span><span class="s2">, </span><span class="s3">&quot;ne&quot;</span><span class="s2">, </span><span class="s3">&quot;lt&quot;</span><span class="s2">, </span><span class="s3">&quot;le&quot;</span><span class="s2">, </span><span class="s3">&quot;gt&quot;</span><span class="s2">, </span><span class="s3">&quot;ge&quot;</span><span class="s1">}:</span>
+        <span class="s2">return </span><span class="s1">partial(comparison_op</span><span class="s2">, </span><span class="s1">op=op)</span>
+    <span class="s2">elif </span><span class="s1">op_name </span><span class="s2">in </span><span class="s1">{</span><span class="s3">&quot;and&quot;</span><span class="s2">, </span><span class="s3">&quot;or&quot;</span><span class="s2">, </span><span class="s3">&quot;xor&quot;</span><span class="s2">, </span><span class="s3">&quot;rand&quot;</span><span class="s2">, </span><span class="s3">&quot;ror&quot;</span><span class="s2">, </span><span class="s3">&quot;rxor&quot;</span><span class="s1">}:</span>
+        <span class="s2">return </span><span class="s1">partial(logical_op</span><span class="s2">, </span><span class="s1">op=op)</span>
+    <span class="s2">elif </span><span class="s1">op_name </span><span class="s2">in </span><span class="s1">{</span>
+        <span class="s3">&quot;add&quot;</span><span class="s2">,</span>
+        <span class="s3">&quot;sub&quot;</span><span class="s2">,</span>
+        <span class="s3">&quot;mul&quot;</span><span class="s2">,</span>
+        <span class="s3">&quot;truediv&quot;</span><span class="s2">,</span>
+        <span class="s3">&quot;floordiv&quot;</span><span class="s2">,</span>
+        <span class="s3">&quot;mod&quot;</span><span class="s2">,</span>
+        <span class="s3">&quot;divmod&quot;</span><span class="s2">,</span>
+        <span class="s3">&quot;pow&quot;</span><span class="s2">,</span>
+    <span class="s1">}:</span>
+        <span class="s2">return </span><span class="s1">partial(arithmetic_op</span><span class="s2">, </span><span class="s1">op=op)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">NotImplementedError(op_name)</span>
+
+
+<span class="s2">def </span><span class="s1">maybe_prepare_scalar_for_op(obj</span><span class="s2">, </span><span class="s1">shape: Shape):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Cast non-pandas objects to pandas types to unify behavior of arithmetic 
+    and comparison operations. 
+ 
+    Parameters 
+    ---------- 
+    obj: object 
+    shape : tuple[int] 
+ 
+    Returns 
+    ------- 
+    out : object 
+ 
+    Notes 
+    ----- 
+    Be careful to call this *after* determining the `name` attribute to be 
+    attached to the result of the arithmetic operation. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">type(obj) </span><span class="s2">is </span><span class="s1">datetime.timedelta:</span>
+        <span class="s4"># GH#22390  cast up to Timedelta to rely on Timedelta</span>
+        <span class="s4"># implementation; otherwise operation against numeric-dtype</span>
+        <span class="s4"># raises TypeError</span>
+        <span class="s2">return </span><span class="s1">Timedelta(obj)</span>
+    <span class="s2">elif </span><span class="s1">type(obj) </span><span class="s2">is </span><span class="s1">datetime.datetime:</span>
+        <span class="s4"># cast up to Timestamp to rely on Timestamp implementation, see Timedelta above</span>
+        <span class="s2">return </span><span class="s1">Timestamp(obj)</span>
+    <span class="s2">elif </span><span class="s1">isinstance(obj</span><span class="s2">, </span><span class="s1">np.datetime64):</span>
+        <span class="s4"># GH#28080 numpy casts integer-dtype to datetime64 when doing</span>
+        <span class="s4">#  array[int] + datetime64, which we do not allow</span>
+        <span class="s2">if </span><span class="s1">isna(obj):</span>
+            <span class="s2">from </span><span class="s1">pandas.core.arrays </span><span class="s2">import </span><span class="s1">DatetimeArray</span>
+
+            <span class="s4"># Avoid possible ambiguities with pd.NaT</span>
+            <span class="s1">obj = obj.astype(</span><span class="s3">&quot;datetime64[ns]&quot;</span><span class="s1">)</span>
+            <span class="s1">right = np.broadcast_to(obj</span><span class="s2">, </span><span class="s1">shape)</span>
+            <span class="s2">return </span><span class="s1">DatetimeArray(right)</span>
+
+        <span class="s2">return </span><span class="s1">Timestamp(obj)</span>
+
+    <span class="s2">elif </span><span class="s1">isinstance(obj</span><span class="s2">, </span><span class="s1">np.timedelta64):</span>
+        <span class="s2">if </span><span class="s1">isna(obj):</span>
+            <span class="s2">from </span><span class="s1">pandas.core.arrays </span><span class="s2">import </span><span class="s1">TimedeltaArray</span>
+
+            <span class="s4"># wrapping timedelta64(&quot;NaT&quot;) in Timedelta returns NaT,</span>
+            <span class="s4">#  which would incorrectly be treated as a datetime-NaT, so</span>
+            <span class="s4">#  we broadcast and wrap in a TimedeltaArray</span>
+            <span class="s1">obj = obj.astype(</span><span class="s3">&quot;timedelta64[ns]&quot;</span><span class="s1">)</span>
+            <span class="s1">right = np.broadcast_to(obj</span><span class="s2">, </span><span class="s1">shape)</span>
+            <span class="s2">return </span><span class="s1">TimedeltaArray(right)</span>
+
+        <span class="s4"># In particular non-nanosecond timedelta64 needs to be cast to</span>
+        <span class="s4">#  nanoseconds, or else we get undesired behavior like</span>
+        <span class="s4">#  np.timedelta64(3, 'D') / 2 == np.timedelta64(1, 'D')</span>
+        <span class="s2">return </span><span class="s1">Timedelta(obj)</span>
+
+    <span class="s2">return </span><span class="s1">obj</span>
+
+
+<span class="s1">_BOOL_OP_NOT_ALLOWED = {</span>
+    <span class="s1">operator.truediv</span><span class="s2">,</span>
+    <span class="s1">roperator.rtruediv</span><span class="s2">,</span>
+    <span class="s1">operator.floordiv</span><span class="s2">,</span>
+    <span class="s1">roperator.rfloordiv</span><span class="s2">,</span>
+    <span class="s1">operator.pow</span><span class="s2">,</span>
+    <span class="s1">roperator.rpow</span><span class="s2">,</span>
+<span class="s1">}</span>
+
+
+<span class="s2">def </span><span class="s1">_bool_arith_check(op</span><span class="s2">, </span><span class="s1">a</span><span class="s2">, </span><span class="s1">b):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    In contrast to numpy, pandas raises an error for certain operations 
+    with booleans. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">op </span><span class="s2">in </span><span class="s1">_BOOL_OP_NOT_ALLOWED:</span>
+        <span class="s2">if </span><span class="s1">is_bool_dtype(a.dtype) </span><span class="s2">and </span><span class="s1">(</span>
+            <span class="s1">is_bool_dtype(b) </span><span class="s2">or </span><span class="s1">isinstance(b</span><span class="s2">, </span><span class="s1">(bool</span><span class="s2">, </span><span class="s1">np.bool_))</span>
+        <span class="s1">):</span>
+            <span class="s1">op_name = op.__name__.strip(</span><span class="s3">&quot;_&quot;</span><span class="s1">).lstrip(</span><span class="s3">&quot;r&quot;</span><span class="s1">)</span>
+            <span class="s2">raise </span><span class="s1">NotImplementedError(</span>
+                <span class="s3">f&quot;operator '</span><span class="s2">{</span><span class="s1">op_name</span><span class="s2">}</span><span class="s3">' not implemented for bool dtypes&quot;</span>
+            <span class="s1">)</span>
+</pre>
+</body>
+</html>

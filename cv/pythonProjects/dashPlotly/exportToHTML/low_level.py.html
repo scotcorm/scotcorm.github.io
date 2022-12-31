@@ -1,0 +1,420 @@
+<html>
+<head>
+<title>low_level.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #808080;}
+.s4 { color: #a5c261;}
+.s5 { color: #6897bb;}
+.s6 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+low_level.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+Low-level helpers for the SecureTransport bindings. 
+ 
+These are Python functions that are not directly related to the high-level APIs 
+but are necessary to get them to work. They include a whole bunch of low-level 
+CoreFoundation messing about and memory management. The concerns in this module 
+are almost entirely about trying to avoid memory leaks and providing 
+appropriate and useful assistance to the higher-level code. 
+&quot;&quot;&quot;</span>
+<span class="s2">import </span><span class="s1">base64</span>
+<span class="s2">import </span><span class="s1">ctypes</span>
+<span class="s2">import </span><span class="s1">itertools</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">ssl</span>
+<span class="s2">import </span><span class="s1">struct</span>
+<span class="s2">import </span><span class="s1">tempfile</span>
+
+<span class="s2">from </span><span class="s1">.bindings </span><span class="s2">import </span><span class="s1">CFConst</span><span class="s2">, </span><span class="s1">CoreFoundation</span><span class="s2">, </span><span class="s1">Security</span>
+
+<span class="s3"># This regular expression is used to grab PEM data out of a PEM bundle.</span>
+<span class="s1">_PEM_CERTS_RE = re.compile(</span>
+    <span class="s4">b&quot;-----BEGIN CERTIFICATE-----</span><span class="s2">\n</span><span class="s4">(.*?)</span><span class="s2">\n</span><span class="s4">-----END CERTIFICATE-----&quot;</span><span class="s2">, </span><span class="s1">re.DOTALL</span>
+<span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">_cf_data_from_bytes(bytestring):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Given a bytestring, create a CFData object from it. This CFData object must 
+    be CFReleased by the caller. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">return </span><span class="s1">CoreFoundation.CFDataCreate(</span>
+        <span class="s1">CoreFoundation.kCFAllocatorDefault</span><span class="s2">, </span><span class="s1">bytestring</span><span class="s2">, </span><span class="s1">len(bytestring)</span>
+    <span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">_cf_dictionary_from_tuples(tuples):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Given a list of Python tuples, create an associated CFDictionary. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">dictionary_size = len(tuples)</span>
+
+    <span class="s3"># We need to get the dictionary keys and values out in the same order.</span>
+    <span class="s1">keys = (t[</span><span class="s5">0</span><span class="s1">] </span><span class="s2">for </span><span class="s1">t </span><span class="s2">in </span><span class="s1">tuples)</span>
+    <span class="s1">values = (t[</span><span class="s5">1</span><span class="s1">] </span><span class="s2">for </span><span class="s1">t </span><span class="s2">in </span><span class="s1">tuples)</span>
+    <span class="s1">cf_keys = (CoreFoundation.CFTypeRef * dictionary_size)(*keys)</span>
+    <span class="s1">cf_values = (CoreFoundation.CFTypeRef * dictionary_size)(*values)</span>
+
+    <span class="s2">return </span><span class="s1">CoreFoundation.CFDictionaryCreate(</span>
+        <span class="s1">CoreFoundation.kCFAllocatorDefault</span><span class="s2">,</span>
+        <span class="s1">cf_keys</span><span class="s2">,</span>
+        <span class="s1">cf_values</span><span class="s2">,</span>
+        <span class="s1">dictionary_size</span><span class="s2">,</span>
+        <span class="s1">CoreFoundation.kCFTypeDictionaryKeyCallBacks</span><span class="s2">,</span>
+        <span class="s1">CoreFoundation.kCFTypeDictionaryValueCallBacks</span><span class="s2">,</span>
+    <span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">_cfstr(py_bstr):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Given a Python binary data, create a CFString. 
+    The string must be CFReleased by the caller. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">c_str = ctypes.c_char_p(py_bstr)</span>
+    <span class="s1">cf_str = CoreFoundation.CFStringCreateWithCString(</span>
+        <span class="s1">CoreFoundation.kCFAllocatorDefault</span><span class="s2">,</span>
+        <span class="s1">c_str</span><span class="s2">,</span>
+        <span class="s1">CFConst.kCFStringEncodingUTF8</span><span class="s2">,</span>
+    <span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">cf_str</span>
+
+
+<span class="s2">def </span><span class="s1">_create_cfstring_array(lst):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Given a list of Python binary data, create an associated CFMutableArray. 
+    The array must be CFReleased by the caller. 
+ 
+    Raises an ssl.SSLError on failure. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">cf_arr = </span><span class="s2">None</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">cf_arr = CoreFoundation.CFArrayCreateMutable(</span>
+            <span class="s1">CoreFoundation.kCFAllocatorDefault</span><span class="s2">,</span>
+            <span class="s5">0</span><span class="s2">,</span>
+            <span class="s1">ctypes.byref(CoreFoundation.kCFTypeArrayCallBacks)</span><span class="s2">,</span>
+        <span class="s1">)</span>
+        <span class="s2">if not </span><span class="s1">cf_arr:</span>
+            <span class="s2">raise </span><span class="s1">MemoryError(</span><span class="s6">&quot;Unable to allocate memory!&quot;</span><span class="s1">)</span>
+        <span class="s2">for </span><span class="s1">item </span><span class="s2">in </span><span class="s1">lst:</span>
+            <span class="s1">cf_str = _cfstr(item)</span>
+            <span class="s2">if not </span><span class="s1">cf_str:</span>
+                <span class="s2">raise </span><span class="s1">MemoryError(</span><span class="s6">&quot;Unable to allocate memory!&quot;</span><span class="s1">)</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">CoreFoundation.CFArrayAppendValue(cf_arr</span><span class="s2">, </span><span class="s1">cf_str)</span>
+            <span class="s2">finally</span><span class="s1">:</span>
+                <span class="s1">CoreFoundation.CFRelease(cf_str)</span>
+    <span class="s2">except </span><span class="s1">BaseException </span><span class="s2">as </span><span class="s1">e:</span>
+        <span class="s2">if </span><span class="s1">cf_arr:</span>
+            <span class="s1">CoreFoundation.CFRelease(cf_arr)</span>
+        <span class="s2">raise </span><span class="s1">ssl.SSLError(</span><span class="s6">&quot;Unable to allocate array: %s&quot; </span><span class="s1">% (e</span><span class="s2">,</span><span class="s1">))</span>
+    <span class="s2">return </span><span class="s1">cf_arr</span>
+
+
+<span class="s2">def </span><span class="s1">_cf_string_to_unicode(value):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Creates a Unicode string from a CFString object. Used entirely for error 
+    reporting. 
+ 
+    Yes, it annoys me quite a lot that this function is this complex. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">value_as_void_p = ctypes.cast(value</span><span class="s2">, </span><span class="s1">ctypes.POINTER(ctypes.c_void_p))</span>
+
+    <span class="s1">string = CoreFoundation.CFStringGetCStringPtr(</span>
+        <span class="s1">value_as_void_p</span><span class="s2">, </span><span class="s1">CFConst.kCFStringEncodingUTF8</span>
+    <span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">string </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">buffer = ctypes.create_string_buffer(</span><span class="s5">1024</span><span class="s1">)</span>
+        <span class="s1">result = CoreFoundation.CFStringGetCString(</span>
+            <span class="s1">value_as_void_p</span><span class="s2">, </span><span class="s1">buffer</span><span class="s2">, </span><span class="s5">1024</span><span class="s2">, </span><span class="s1">CFConst.kCFStringEncodingUTF8</span>
+        <span class="s1">)</span>
+        <span class="s2">if not </span><span class="s1">result:</span>
+            <span class="s2">raise </span><span class="s1">OSError(</span><span class="s6">&quot;Error copying C string from CFStringRef&quot;</span><span class="s1">)</span>
+        <span class="s1">string = buffer.value</span>
+    <span class="s2">if </span><span class="s1">string </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s1">string = string.decode(</span><span class="s6">&quot;utf-8&quot;</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">string</span>
+
+
+<span class="s2">def </span><span class="s1">_assert_no_error(error</span><span class="s2">, </span><span class="s1">exception_class=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Checks the return code and throws an exception if there is an error to 
+    report 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">error == </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s2">return</span>
+
+    <span class="s1">cf_error_string = Security.SecCopyErrorMessageString(error</span><span class="s2">, None</span><span class="s1">)</span>
+    <span class="s1">output = _cf_string_to_unicode(cf_error_string)</span>
+    <span class="s1">CoreFoundation.CFRelease(cf_error_string)</span>
+
+    <span class="s2">if </span><span class="s1">output </span><span class="s2">is None or </span><span class="s1">output == </span><span class="s6">u&quot;&quot;</span><span class="s1">:</span>
+        <span class="s1">output = </span><span class="s6">u&quot;OSStatus %s&quot; </span><span class="s1">% error</span>
+
+    <span class="s2">if </span><span class="s1">exception_class </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">exception_class = ssl.SSLError</span>
+
+    <span class="s2">raise </span><span class="s1">exception_class(output)</span>
+
+
+<span class="s2">def </span><span class="s1">_cert_array_from_pem(pem_bundle):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Given a bundle of certs in PEM format, turns them into a CFArray of certs 
+    that can be used to validate a cert chain. 
+    &quot;&quot;&quot;</span>
+    <span class="s3"># Normalize the PEM bundle's line endings.</span>
+    <span class="s1">pem_bundle = pem_bundle.replace(</span><span class="s4">b&quot;</span><span class="s2">\r\n</span><span class="s4">&quot;</span><span class="s2">, </span><span class="s4">b&quot;</span><span class="s2">\n</span><span class="s4">&quot;</span><span class="s1">)</span>
+
+    <span class="s1">der_certs = [</span>
+        <span class="s1">base64.b64decode(match.group(</span><span class="s5">1</span><span class="s1">)) </span><span class="s2">for </span><span class="s1">match </span><span class="s2">in </span><span class="s1">_PEM_CERTS_RE.finditer(pem_bundle)</span>
+    <span class="s1">]</span>
+    <span class="s2">if not </span><span class="s1">der_certs:</span>
+        <span class="s2">raise </span><span class="s1">ssl.SSLError(</span><span class="s6">&quot;No root certificates specified&quot;</span><span class="s1">)</span>
+
+    <span class="s1">cert_array = CoreFoundation.CFArrayCreateMutable(</span>
+        <span class="s1">CoreFoundation.kCFAllocatorDefault</span><span class="s2">,</span>
+        <span class="s5">0</span><span class="s2">,</span>
+        <span class="s1">ctypes.byref(CoreFoundation.kCFTypeArrayCallBacks)</span><span class="s2">,</span>
+    <span class="s1">)</span>
+    <span class="s2">if not </span><span class="s1">cert_array:</span>
+        <span class="s2">raise </span><span class="s1">ssl.SSLError(</span><span class="s6">&quot;Unable to allocate memory!&quot;</span><span class="s1">)</span>
+
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s2">for </span><span class="s1">der_bytes </span><span class="s2">in </span><span class="s1">der_certs:</span>
+            <span class="s1">certdata = _cf_data_from_bytes(der_bytes)</span>
+            <span class="s2">if not </span><span class="s1">certdata:</span>
+                <span class="s2">raise </span><span class="s1">ssl.SSLError(</span><span class="s6">&quot;Unable to allocate memory!&quot;</span><span class="s1">)</span>
+            <span class="s1">cert = Security.SecCertificateCreateWithData(</span>
+                <span class="s1">CoreFoundation.kCFAllocatorDefault</span><span class="s2">, </span><span class="s1">certdata</span>
+            <span class="s1">)</span>
+            <span class="s1">CoreFoundation.CFRelease(certdata)</span>
+            <span class="s2">if not </span><span class="s1">cert:</span>
+                <span class="s2">raise </span><span class="s1">ssl.SSLError(</span><span class="s6">&quot;Unable to build cert object!&quot;</span><span class="s1">)</span>
+
+            <span class="s1">CoreFoundation.CFArrayAppendValue(cert_array</span><span class="s2">, </span><span class="s1">cert)</span>
+            <span class="s1">CoreFoundation.CFRelease(cert)</span>
+    <span class="s2">except </span><span class="s1">Exception:</span>
+        <span class="s3"># We need to free the array before the exception bubbles further.</span>
+        <span class="s3"># We only want to do that if an error occurs: otherwise, the caller</span>
+        <span class="s3"># should free.</span>
+        <span class="s1">CoreFoundation.CFRelease(cert_array)</span>
+        <span class="s2">raise</span>
+
+    <span class="s2">return </span><span class="s1">cert_array</span>
+
+
+<span class="s2">def </span><span class="s1">_is_cert(item):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Returns True if a given CFTypeRef is a certificate. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">expected = Security.SecCertificateGetTypeID()</span>
+    <span class="s2">return </span><span class="s1">CoreFoundation.CFGetTypeID(item) == expected</span>
+
+
+<span class="s2">def </span><span class="s1">_is_identity(item):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Returns True if a given CFTypeRef is an identity. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">expected = Security.SecIdentityGetTypeID()</span>
+    <span class="s2">return </span><span class="s1">CoreFoundation.CFGetTypeID(item) == expected</span>
+
+
+<span class="s2">def </span><span class="s1">_temporary_keychain():</span>
+    <span class="s0">&quot;&quot;&quot; 
+    This function creates a temporary Mac keychain that we can use to work with 
+    credentials. This keychain uses a one-time password and a temporary file to 
+    store the data. We expect to have one keychain per socket. The returned 
+    SecKeychainRef must be freed by the caller, including calling 
+    SecKeychainDelete. 
+ 
+    Returns a tuple of the SecKeychainRef and the path to the temporary 
+    directory that contains it. 
+    &quot;&quot;&quot;</span>
+    <span class="s3"># Unfortunately, SecKeychainCreate requires a path to a keychain. This</span>
+    <span class="s3"># means we cannot use mkstemp to use a generic temporary file. Instead,</span>
+    <span class="s3"># we're going to create a temporary directory and a filename to use there.</span>
+    <span class="s3"># This filename will be 8 random bytes expanded into base64. We also need</span>
+    <span class="s3"># some random bytes to password-protect the keychain we're creating, so we</span>
+    <span class="s3"># ask for 40 random bytes.</span>
+    <span class="s1">random_bytes = os.urandom(</span><span class="s5">40</span><span class="s1">)</span>
+    <span class="s1">filename = base64.b16encode(random_bytes[:</span><span class="s5">8</span><span class="s1">]).decode(</span><span class="s6">&quot;utf-8&quot;</span><span class="s1">)</span>
+    <span class="s1">password = base64.b16encode(random_bytes[</span><span class="s5">8</span><span class="s1">:])  </span><span class="s3"># Must be valid UTF-8</span>
+    <span class="s1">tempdirectory = tempfile.mkdtemp()</span>
+
+    <span class="s1">keychain_path = os.path.join(tempdirectory</span><span class="s2">, </span><span class="s1">filename).encode(</span><span class="s6">&quot;utf-8&quot;</span><span class="s1">)</span>
+
+    <span class="s3"># We now want to create the keychain itself.</span>
+    <span class="s1">keychain = Security.SecKeychainRef()</span>
+    <span class="s1">status = Security.SecKeychainCreate(</span>
+        <span class="s1">keychain_path</span><span class="s2">, </span><span class="s1">len(password)</span><span class="s2">, </span><span class="s1">password</span><span class="s2">, False, None, </span><span class="s1">ctypes.byref(keychain)</span>
+    <span class="s1">)</span>
+    <span class="s1">_assert_no_error(status)</span>
+
+    <span class="s3"># Having created the keychain, we want to pass it off to the caller.</span>
+    <span class="s2">return </span><span class="s1">keychain</span><span class="s2">, </span><span class="s1">tempdirectory</span>
+
+
+<span class="s2">def </span><span class="s1">_load_items_from_file(keychain</span><span class="s2">, </span><span class="s1">path):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Given a single file, loads all the trust objects from it into arrays and 
+    the keychain. 
+    Returns a tuple of lists: the first list is a list of identities, the 
+    second a list of certs. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">certificates = []</span>
+    <span class="s1">identities = []</span>
+    <span class="s1">result_array = </span><span class="s2">None</span>
+
+    <span class="s2">with </span><span class="s1">open(path</span><span class="s2">, </span><span class="s6">&quot;rb&quot;</span><span class="s1">) </span><span class="s2">as </span><span class="s1">f:</span>
+        <span class="s1">raw_filedata = f.read()</span>
+
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">filedata = CoreFoundation.CFDataCreate(</span>
+            <span class="s1">CoreFoundation.kCFAllocatorDefault</span><span class="s2">, </span><span class="s1">raw_filedata</span><span class="s2">, </span><span class="s1">len(raw_filedata)</span>
+        <span class="s1">)</span>
+        <span class="s1">result_array = CoreFoundation.CFArrayRef()</span>
+        <span class="s1">result = Security.SecItemImport(</span>
+            <span class="s1">filedata</span><span class="s2">,  </span><span class="s3"># cert data</span>
+            <span class="s2">None,  </span><span class="s3"># Filename, leaving it out for now</span>
+            <span class="s2">None,  </span><span class="s3"># What the type of the file is, we don't care</span>
+            <span class="s2">None,  </span><span class="s3"># what's in the file, we don't care</span>
+            <span class="s5">0</span><span class="s2">,  </span><span class="s3"># import flags</span>
+            <span class="s2">None,  </span><span class="s3"># key params, can include passphrase in the future</span>
+            <span class="s1">keychain</span><span class="s2">,  </span><span class="s3"># The keychain to insert into</span>
+            <span class="s1">ctypes.byref(result_array)</span><span class="s2">,  </span><span class="s3"># Results</span>
+        <span class="s1">)</span>
+        <span class="s1">_assert_no_error(result)</span>
+
+        <span class="s3"># A CFArray is not very useful to us as an intermediary</span>
+        <span class="s3"># representation, so we are going to extract the objects we want</span>
+        <span class="s3"># and then free the array. We don't need to keep hold of keys: the</span>
+        <span class="s3"># keychain already has them!</span>
+        <span class="s1">result_count = CoreFoundation.CFArrayGetCount(result_array)</span>
+        <span class="s2">for </span><span class="s1">index </span><span class="s2">in </span><span class="s1">range(result_count):</span>
+            <span class="s1">item = CoreFoundation.CFArrayGetValueAtIndex(result_array</span><span class="s2">, </span><span class="s1">index)</span>
+            <span class="s1">item = ctypes.cast(item</span><span class="s2">, </span><span class="s1">CoreFoundation.CFTypeRef)</span>
+
+            <span class="s2">if </span><span class="s1">_is_cert(item):</span>
+                <span class="s1">CoreFoundation.CFRetain(item)</span>
+                <span class="s1">certificates.append(item)</span>
+            <span class="s2">elif </span><span class="s1">_is_identity(item):</span>
+                <span class="s1">CoreFoundation.CFRetain(item)</span>
+                <span class="s1">identities.append(item)</span>
+    <span class="s2">finally</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">result_array:</span>
+            <span class="s1">CoreFoundation.CFRelease(result_array)</span>
+
+        <span class="s1">CoreFoundation.CFRelease(filedata)</span>
+
+    <span class="s2">return </span><span class="s1">(identities</span><span class="s2">, </span><span class="s1">certificates)</span>
+
+
+<span class="s2">def </span><span class="s1">_load_client_cert_chain(keychain</span><span class="s2">, </span><span class="s1">*paths):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Load certificates and maybe keys from a number of files. Has the end goal 
+    of returning a CFArray containing one SecIdentityRef, and then zero or more 
+    SecCertificateRef objects, suitable for use as a client certificate trust 
+    chain. 
+    &quot;&quot;&quot;</span>
+    <span class="s3"># Ok, the strategy.</span>
+    <span class="s3">#</span>
+    <span class="s3"># This relies on knowing that macOS will not give you a SecIdentityRef</span>
+    <span class="s3"># unless you have imported a key into a keychain. This is a somewhat</span>
+    <span class="s3"># artificial limitation of macOS (for example, it doesn't necessarily</span>
+    <span class="s3"># affect iOS), but there is nothing inside Security.framework that lets you</span>
+    <span class="s3"># get a SecIdentityRef without having a key in a keychain.</span>
+    <span class="s3">#</span>
+    <span class="s3"># So the policy here is we take all the files and iterate them in order.</span>
+    <span class="s3"># Each one will use SecItemImport to have one or more objects loaded from</span>
+    <span class="s3"># it. We will also point at a keychain that macOS can use to work with the</span>
+    <span class="s3"># private key.</span>
+    <span class="s3">#</span>
+    <span class="s3"># Once we have all the objects, we'll check what we actually have. If we</span>
+    <span class="s3"># already have a SecIdentityRef in hand, fab: we'll use that. Otherwise,</span>
+    <span class="s3"># we'll take the first certificate (which we assume to be our leaf) and</span>
+    <span class="s3"># ask the keychain to give us a SecIdentityRef with that cert's associated</span>
+    <span class="s3"># key.</span>
+    <span class="s3">#</span>
+    <span class="s3"># We'll then return a CFArray containing the trust chain: one</span>
+    <span class="s3"># SecIdentityRef and then zero-or-more SecCertificateRef objects. The</span>
+    <span class="s3"># responsibility for freeing this CFArray will be with the caller. This</span>
+    <span class="s3"># CFArray must remain alive for the entire connection, so in practice it</span>
+    <span class="s3"># will be stored with a single SSLSocket, along with the reference to the</span>
+    <span class="s3"># keychain.</span>
+    <span class="s1">certificates = []</span>
+    <span class="s1">identities = []</span>
+
+    <span class="s3"># Filter out bad paths.</span>
+    <span class="s1">paths = (path </span><span class="s2">for </span><span class="s1">path </span><span class="s2">in </span><span class="s1">paths </span><span class="s2">if </span><span class="s1">path)</span>
+
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s2">for </span><span class="s1">file_path </span><span class="s2">in </span><span class="s1">paths:</span>
+            <span class="s1">new_identities</span><span class="s2">, </span><span class="s1">new_certs = _load_items_from_file(keychain</span><span class="s2">, </span><span class="s1">file_path)</span>
+            <span class="s1">identities.extend(new_identities)</span>
+            <span class="s1">certificates.extend(new_certs)</span>
+
+        <span class="s3"># Ok, we have everything. The question is: do we have an identity? If</span>
+        <span class="s3"># not, we want to grab one from the first cert we have.</span>
+        <span class="s2">if not </span><span class="s1">identities:</span>
+            <span class="s1">new_identity = Security.SecIdentityRef()</span>
+            <span class="s1">status = Security.SecIdentityCreateWithCertificate(</span>
+                <span class="s1">keychain</span><span class="s2">, </span><span class="s1">certificates[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">ctypes.byref(new_identity)</span>
+            <span class="s1">)</span>
+            <span class="s1">_assert_no_error(status)</span>
+            <span class="s1">identities.append(new_identity)</span>
+
+            <span class="s3"># We now want to release the original certificate, as we no longer</span>
+            <span class="s3"># need it.</span>
+            <span class="s1">CoreFoundation.CFRelease(certificates.pop(</span><span class="s5">0</span><span class="s1">))</span>
+
+        <span class="s3"># We now need to build a new CFArray that holds the trust chain.</span>
+        <span class="s1">trust_chain = CoreFoundation.CFArrayCreateMutable(</span>
+            <span class="s1">CoreFoundation.kCFAllocatorDefault</span><span class="s2">,</span>
+            <span class="s5">0</span><span class="s2">,</span>
+            <span class="s1">ctypes.byref(CoreFoundation.kCFTypeArrayCallBacks)</span><span class="s2">,</span>
+        <span class="s1">)</span>
+        <span class="s2">for </span><span class="s1">item </span><span class="s2">in </span><span class="s1">itertools.chain(identities</span><span class="s2">, </span><span class="s1">certificates):</span>
+            <span class="s3"># ArrayAppendValue does a CFRetain on the item. That's fine,</span>
+            <span class="s3"># because the finally block will release our other refs to them.</span>
+            <span class="s1">CoreFoundation.CFArrayAppendValue(trust_chain</span><span class="s2">, </span><span class="s1">item)</span>
+
+        <span class="s2">return </span><span class="s1">trust_chain</span>
+    <span class="s2">finally</span><span class="s1">:</span>
+        <span class="s2">for </span><span class="s1">obj </span><span class="s2">in </span><span class="s1">itertools.chain(identities</span><span class="s2">, </span><span class="s1">certificates):</span>
+            <span class="s1">CoreFoundation.CFRelease(obj)</span>
+
+
+<span class="s1">TLS_PROTOCOL_VERSIONS = {</span>
+    <span class="s6">&quot;SSLv2&quot;</span><span class="s1">: (</span><span class="s5">0</span><span class="s2">, </span><span class="s5">2</span><span class="s1">)</span><span class="s2">,</span>
+    <span class="s6">&quot;SSLv3&quot;</span><span class="s1">: (</span><span class="s5">3</span><span class="s2">, </span><span class="s5">0</span><span class="s1">)</span><span class="s2">,</span>
+    <span class="s6">&quot;TLSv1&quot;</span><span class="s1">: (</span><span class="s5">3</span><span class="s2">, </span><span class="s5">1</span><span class="s1">)</span><span class="s2">,</span>
+    <span class="s6">&quot;TLSv1.1&quot;</span><span class="s1">: (</span><span class="s5">3</span><span class="s2">, </span><span class="s5">2</span><span class="s1">)</span><span class="s2">,</span>
+    <span class="s6">&quot;TLSv1.2&quot;</span><span class="s1">: (</span><span class="s5">3</span><span class="s2">, </span><span class="s5">3</span><span class="s1">)</span><span class="s2">,</span>
+<span class="s1">}</span>
+
+
+<span class="s2">def </span><span class="s1">_build_tls_unknown_ca_alert(version):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Builds a TLS alert record for an unknown CA. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">ver_maj</span><span class="s2">, </span><span class="s1">ver_min = TLS_PROTOCOL_VERSIONS[version]</span>
+    <span class="s1">severity_fatal = </span><span class="s5">0x02</span>
+    <span class="s1">description_unknown_ca = </span><span class="s5">0x30</span>
+    <span class="s1">msg = struct.pack(</span><span class="s6">&quot;&gt;BB&quot;</span><span class="s2">, </span><span class="s1">severity_fatal</span><span class="s2">, </span><span class="s1">description_unknown_ca)</span>
+    <span class="s1">msg_len = len(msg)</span>
+    <span class="s1">record_type_alert = </span><span class="s5">0x15</span>
+    <span class="s1">record = struct.pack(</span><span class="s6">&quot;&gt;BBBH&quot;</span><span class="s2">, </span><span class="s1">record_type_alert</span><span class="s2">, </span><span class="s1">ver_maj</span><span class="s2">, </span><span class="s1">ver_min</span><span class="s2">, </span><span class="s1">msg_len) + msg</span>
+    <span class="s2">return </span><span class="s1">record</span>
+</pre>
+</body>
+</html>

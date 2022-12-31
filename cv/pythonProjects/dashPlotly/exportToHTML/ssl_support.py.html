@@ -1,0 +1,288 @@
+<html>
+<head>
+<title>ssl_support.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6a8759;}
+.s3 { color: #808080;}
+.s4 { color: #6897bb;}
+.s5 { color: #629755; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+ssl_support.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">socket</span>
+<span class="s0">import </span><span class="s1">atexit</span>
+<span class="s0">import </span><span class="s1">re</span>
+<span class="s0">import </span><span class="s1">functools</span>
+<span class="s0">import </span><span class="s1">urllib.request</span>
+<span class="s0">import </span><span class="s1">http.client</span>
+
+
+<span class="s0">from </span><span class="s1">pkg_resources </span><span class="s0">import </span><span class="s1">ResolutionError</span><span class="s0">, </span><span class="s1">ExtractionError</span>
+
+<span class="s0">try</span><span class="s1">:</span>
+    <span class="s0">import </span><span class="s1">ssl</span>
+<span class="s0">except </span><span class="s1">ImportError:</span>
+    <span class="s1">ssl = </span><span class="s0">None</span>
+
+<span class="s1">__all__ = [</span>
+    <span class="s2">'VerifyingHTTPSHandler'</span><span class="s0">, </span><span class="s2">'find_ca_bundle'</span><span class="s0">, </span><span class="s2">'is_available'</span><span class="s0">, </span><span class="s2">'cert_paths'</span><span class="s0">,</span>
+    <span class="s2">'opener_for'</span>
+<span class="s1">]</span>
+
+<span class="s1">cert_paths = </span><span class="s2">&quot;&quot;&quot; 
+/etc/pki/tls/certs/ca-bundle.crt 
+/etc/ssl/certs/ca-certificates.crt 
+/usr/share/ssl/certs/ca-bundle.crt 
+/usr/local/share/certs/ca-root.crt 
+/etc/ssl/cert.pem 
+/System/Library/OpenSSL/certs/cert.pem 
+/usr/local/share/certs/ca-root-nss.crt 
+/etc/ssl/ca-bundle.pem 
+&quot;&quot;&quot;</span><span class="s1">.strip().split()</span>
+
+<span class="s0">try</span><span class="s1">:</span>
+    <span class="s1">HTTPSHandler = urllib.request.HTTPSHandler</span>
+    <span class="s1">HTTPSConnection = http.client.HTTPSConnection</span>
+<span class="s0">except </span><span class="s1">AttributeError:</span>
+    <span class="s1">HTTPSHandler = HTTPSConnection = object</span>
+
+<span class="s1">is_available = ssl </span><span class="s0">is not None and </span><span class="s1">object </span><span class="s0">not in </span><span class="s1">(</span>
+    <span class="s1">HTTPSHandler</span><span class="s0">, </span><span class="s1">HTTPSConnection)</span>
+
+
+<span class="s0">try</span><span class="s1">:</span>
+    <span class="s0">from </span><span class="s1">ssl </span><span class="s0">import </span><span class="s1">CertificateError</span><span class="s0">, </span><span class="s1">match_hostname</span>
+<span class="s0">except </span><span class="s1">ImportError:</span>
+    <span class="s0">try</span><span class="s1">:</span>
+        <span class="s0">from </span><span class="s1">backports.ssl_match_hostname </span><span class="s0">import </span><span class="s1">CertificateError</span>
+        <span class="s0">from </span><span class="s1">backports.ssl_match_hostname </span><span class="s0">import </span><span class="s1">match_hostname</span>
+    <span class="s0">except </span><span class="s1">ImportError:</span>
+        <span class="s1">CertificateError = </span><span class="s0">None</span>
+        <span class="s1">match_hostname = </span><span class="s0">None</span>
+
+<span class="s0">if not </span><span class="s1">CertificateError:</span>
+
+    <span class="s0">class </span><span class="s1">CertificateError(ValueError):</span>
+        <span class="s0">pass</span>
+
+
+<span class="s0">if not </span><span class="s1">match_hostname:  </span><span class="s3"># noqa: C901  # 'If 59' is too complex (21)  # FIXME</span>
+
+    <span class="s0">def </span><span class="s1">_dnsname_match(dn</span><span class="s0">, </span><span class="s1">hostname</span><span class="s0">, </span><span class="s1">max_wildcards=</span><span class="s4">1</span><span class="s1">):</span>
+        <span class="s5">&quot;&quot;&quot;Matching according to RFC 6125, section 6.4.3 
+ 
+        https://tools.ietf.org/html/rfc6125#section-6.4.3 
+        &quot;&quot;&quot;</span>
+        <span class="s1">pats = []</span>
+        <span class="s0">if not </span><span class="s1">dn:</span>
+            <span class="s0">return False</span>
+
+        <span class="s3"># Ported from python3-syntax:</span>
+        <span class="s3"># leftmost, *remainder = dn.split(r'.')</span>
+        <span class="s1">parts = dn.split(</span><span class="s2">r'.'</span><span class="s1">)</span>
+        <span class="s1">leftmost = parts[</span><span class="s4">0</span><span class="s1">]</span>
+        <span class="s1">remainder = parts[</span><span class="s4">1</span><span class="s1">:]</span>
+
+        <span class="s1">wildcards = leftmost.count(</span><span class="s2">'*'</span><span class="s1">)</span>
+        <span class="s0">if </span><span class="s1">wildcards &gt; max_wildcards:</span>
+            <span class="s3"># Issue #17980: avoid denials of service by refusing more</span>
+            <span class="s3"># than one wildcard per fragment.  A survey of established</span>
+            <span class="s3"># policy among SSL implementations showed it to be a</span>
+            <span class="s3"># reasonable choice.</span>
+            <span class="s0">raise </span><span class="s1">CertificateError(</span>
+                <span class="s2">&quot;too many wildcards in certificate DNS name: &quot; </span><span class="s1">+ repr(dn))</span>
+
+        <span class="s3"># speed up common case w/o wildcards</span>
+        <span class="s0">if not </span><span class="s1">wildcards:</span>
+            <span class="s0">return </span><span class="s1">dn.lower() == hostname.lower()</span>
+
+        <span class="s3"># RFC 6125, section 6.4.3, subitem 1.</span>
+        <span class="s3"># The client SHOULD NOT attempt to match a</span>
+        <span class="s3"># presented identifier in which the wildcard</span>
+        <span class="s3"># character comprises a label other than the</span>
+        <span class="s3"># left-most label.</span>
+        <span class="s0">if </span><span class="s1">leftmost == </span><span class="s2">'*'</span><span class="s1">:</span>
+            <span class="s3"># When '*' is a fragment by itself, it matches a non-empty dotless</span>
+            <span class="s3"># fragment.</span>
+            <span class="s1">pats.append(</span><span class="s2">'[^.]+'</span><span class="s1">)</span>
+        <span class="s0">elif </span><span class="s1">leftmost.startswith(</span><span class="s2">'xn--'</span><span class="s1">) </span><span class="s0">or </span><span class="s1">hostname.startswith(</span><span class="s2">'xn--'</span><span class="s1">):</span>
+            <span class="s3"># RFC 6125, section 6.4.3, subitem 3.</span>
+            <span class="s3"># The client SHOULD NOT attempt to match a presented identifier</span>
+            <span class="s3"># where the wildcard character is embedded within an A-label or</span>
+            <span class="s3"># U-label of an internationalized domain name.</span>
+            <span class="s1">pats.append(re.escape(leftmost))</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s3"># Otherwise, '*' matches any dotless string, e.g. www*</span>
+            <span class="s1">pats.append(re.escape(leftmost).replace(</span><span class="s2">r'\*'</span><span class="s0">, </span><span class="s2">'[^.]*'</span><span class="s1">))</span>
+
+        <span class="s3"># add the remaining fragments, ignore any wildcards</span>
+        <span class="s0">for </span><span class="s1">frag </span><span class="s0">in </span><span class="s1">remainder:</span>
+            <span class="s1">pats.append(re.escape(frag))</span>
+
+        <span class="s1">pat = re.compile(</span><span class="s2">r'\A' </span><span class="s1">+ </span><span class="s2">r'\.'</span><span class="s1">.join(pats) + </span><span class="s2">r'\Z'</span><span class="s0">, </span><span class="s1">re.IGNORECASE)</span>
+        <span class="s0">return </span><span class="s1">pat.match(hostname)</span>
+
+    <span class="s0">def </span><span class="s1">match_hostname(cert</span><span class="s0">, </span><span class="s1">hostname):</span>
+        <span class="s5">&quot;&quot;&quot;Verify that *cert* (in decoded format as returned by 
+        SSLSocket.getpeercert()) matches the *hostname*.  RFC 2818 and RFC 6125 
+        rules are followed, but IP addresses are not accepted for *hostname*. 
+ 
+        CertificateError is raised on failure. On success, the function 
+        returns nothing. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if not </span><span class="s1">cert:</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s2">&quot;empty or no certificate&quot;</span><span class="s1">)</span>
+        <span class="s1">dnsnames = []</span>
+        <span class="s1">san = cert.get(</span><span class="s2">'subjectAltName'</span><span class="s0">, </span><span class="s1">())</span>
+        <span class="s0">for </span><span class="s1">key</span><span class="s0">, </span><span class="s1">value </span><span class="s0">in </span><span class="s1">san:</span>
+            <span class="s0">if </span><span class="s1">key == </span><span class="s2">'DNS'</span><span class="s1">:</span>
+                <span class="s0">if </span><span class="s1">_dnsname_match(value</span><span class="s0">, </span><span class="s1">hostname):</span>
+                    <span class="s0">return</span>
+                <span class="s1">dnsnames.append(value)</span>
+        <span class="s0">if not </span><span class="s1">dnsnames:</span>
+            <span class="s3"># The subject is only checked when there is no dNSName entry</span>
+            <span class="s3"># in subjectAltName</span>
+            <span class="s0">for </span><span class="s1">sub </span><span class="s0">in </span><span class="s1">cert.get(</span><span class="s2">'subject'</span><span class="s0">, </span><span class="s1">()):</span>
+                <span class="s0">for </span><span class="s1">key</span><span class="s0">, </span><span class="s1">value </span><span class="s0">in </span><span class="s1">sub:</span>
+                    <span class="s3"># XXX according to RFC 2818, the most specific Common Name</span>
+                    <span class="s3"># must be used.</span>
+                    <span class="s0">if </span><span class="s1">key == </span><span class="s2">'commonName'</span><span class="s1">:</span>
+                        <span class="s0">if </span><span class="s1">_dnsname_match(value</span><span class="s0">, </span><span class="s1">hostname):</span>
+                            <span class="s0">return</span>
+                        <span class="s1">dnsnames.append(value)</span>
+        <span class="s0">if </span><span class="s1">len(dnsnames) &gt; </span><span class="s4">1</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">CertificateError(</span>
+                <span class="s2">&quot;hostname %r doesn't match either of %s&quot;</span>
+                <span class="s1">% (hostname</span><span class="s0">, </span><span class="s2">', '</span><span class="s1">.join(map(repr</span><span class="s0">, </span><span class="s1">dnsnames))))</span>
+        <span class="s0">elif </span><span class="s1">len(dnsnames) == </span><span class="s4">1</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">CertificateError(</span>
+                <span class="s2">&quot;hostname %r doesn't match %r&quot;</span>
+                <span class="s1">% (hostname</span><span class="s0">, </span><span class="s1">dnsnames[</span><span class="s4">0</span><span class="s1">]))</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">CertificateError(</span>
+                <span class="s2">&quot;no appropriate commonName or &quot;</span>
+                <span class="s2">&quot;subjectAltName fields were found&quot;</span><span class="s1">)</span>
+
+
+<span class="s0">class </span><span class="s1">VerifyingHTTPSHandler(HTTPSHandler):</span>
+    <span class="s5">&quot;&quot;&quot;Simple verifying handler: no auth, subclasses, timeouts, etc.&quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">ca_bundle):</span>
+        <span class="s1">self.ca_bundle = ca_bundle</span>
+        <span class="s1">HTTPSHandler.__init__(self)</span>
+
+    <span class="s0">def </span><span class="s1">https_open(self</span><span class="s0">, </span><span class="s1">req):</span>
+        <span class="s0">return </span><span class="s1">self.do_open(</span>
+            <span class="s0">lambda </span><span class="s1">host</span><span class="s0">, </span><span class="s1">**kw: VerifyingHTTPSConn(host</span><span class="s0">, </span><span class="s1">self.ca_bundle</span><span class="s0">, </span><span class="s1">**kw)</span><span class="s0">,</span>
+            <span class="s1">req</span>
+        <span class="s1">)</span>
+
+
+<span class="s0">class </span><span class="s1">VerifyingHTTPSConn(HTTPSConnection):</span>
+    <span class="s5">&quot;&quot;&quot;Simple verifying connection: no auth, subclasses, timeouts, etc.&quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">host</span><span class="s0">, </span><span class="s1">ca_bundle</span><span class="s0">, </span><span class="s1">**kw):</span>
+        <span class="s1">HTTPSConnection.__init__(self</span><span class="s0">, </span><span class="s1">host</span><span class="s0">, </span><span class="s1">**kw)</span>
+        <span class="s1">self.ca_bundle = ca_bundle</span>
+
+    <span class="s0">def </span><span class="s1">connect(self):</span>
+        <span class="s1">sock = socket.create_connection(</span>
+            <span class="s1">(self.host</span><span class="s0">, </span><span class="s1">self.port)</span><span class="s0">, </span><span class="s1">getattr(self</span><span class="s0">, </span><span class="s2">'source_address'</span><span class="s0">, None</span><span class="s1">)</span>
+        <span class="s1">)</span>
+
+        <span class="s3"># Handle the socket if a (proxy) tunnel is present</span>
+        <span class="s0">if </span><span class="s1">hasattr(self</span><span class="s0">, </span><span class="s2">'_tunnel'</span><span class="s1">) </span><span class="s0">and </span><span class="s1">getattr(self</span><span class="s0">, </span><span class="s2">'_tunnel_host'</span><span class="s0">, None</span><span class="s1">):</span>
+            <span class="s1">self.sock = sock</span>
+            <span class="s1">self._tunnel()</span>
+            <span class="s3"># http://bugs.python.org/issue7776: Python&gt;=3.4.1 and &gt;=2.7.7</span>
+            <span class="s3"># change self.host to mean the proxy server host when tunneling is</span>
+            <span class="s3"># being used. Adapt, since we are interested in the destination</span>
+            <span class="s3"># host for the match_hostname() comparison.</span>
+            <span class="s1">actual_host = self._tunnel_host</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">actual_host = self.host</span>
+
+        <span class="s0">if </span><span class="s1">hasattr(ssl</span><span class="s0">, </span><span class="s2">'create_default_context'</span><span class="s1">):</span>
+            <span class="s1">ctx = ssl.create_default_context(cafile=self.ca_bundle)</span>
+            <span class="s1">self.sock = ctx.wrap_socket(sock</span><span class="s0">, </span><span class="s1">server_hostname=actual_host)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s3"># This is for python &lt; 2.7.9 and &lt; 3.4?</span>
+            <span class="s1">self.sock = ssl.wrap_socket(</span>
+                <span class="s1">sock</span><span class="s0">, </span><span class="s1">cert_reqs=ssl.CERT_REQUIRED</span><span class="s0">, </span><span class="s1">ca_certs=self.ca_bundle</span>
+            <span class="s1">)</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">match_hostname(self.sock.getpeercert()</span><span class="s0">, </span><span class="s1">actual_host)</span>
+        <span class="s0">except </span><span class="s1">CertificateError:</span>
+            <span class="s1">self.sock.shutdown(socket.SHUT_RDWR)</span>
+            <span class="s1">self.sock.close()</span>
+            <span class="s0">raise</span>
+
+
+<span class="s0">def </span><span class="s1">opener_for(ca_bundle=</span><span class="s0">None</span><span class="s1">):</span>
+    <span class="s5">&quot;&quot;&quot;Get a urlopen() replacement that uses ca_bundle for verification&quot;&quot;&quot;</span>
+    <span class="s0">return </span><span class="s1">urllib.request.build_opener(</span>
+        <span class="s1">VerifyingHTTPSHandler(ca_bundle </span><span class="s0">or </span><span class="s1">find_ca_bundle())</span>
+    <span class="s1">).open</span>
+
+
+<span class="s3"># from jaraco.functools</span>
+<span class="s0">def </span><span class="s1">once(func):</span>
+    <span class="s1">@functools.wraps(func)</span>
+    <span class="s0">def </span><span class="s1">wrapper(*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+        <span class="s0">if not </span><span class="s1">hasattr(func</span><span class="s0">, </span><span class="s2">'always_returns'</span><span class="s1">):</span>
+            <span class="s1">func.always_returns = func(*args</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+        <span class="s0">return </span><span class="s1">func.always_returns</span>
+    <span class="s0">return </span><span class="s1">wrapper</span>
+
+
+<span class="s1">@once</span>
+<span class="s0">def </span><span class="s1">get_win_certfile():</span>
+    <span class="s0">try</span><span class="s1">:</span>
+        <span class="s0">import </span><span class="s1">wincertstore</span>
+    <span class="s0">except </span><span class="s1">ImportError:</span>
+        <span class="s0">return None</span>
+
+    <span class="s0">class </span><span class="s1">CertFile(wincertstore.CertFile):</span>
+        <span class="s0">def </span><span class="s1">__init__(self):</span>
+            <span class="s1">super(CertFile</span><span class="s0">, </span><span class="s1">self).__init__()</span>
+            <span class="s1">atexit.register(self.close)</span>
+
+        <span class="s0">def </span><span class="s1">close(self):</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">super(CertFile</span><span class="s0">, </span><span class="s1">self).close()</span>
+            <span class="s0">except </span><span class="s1">OSError:</span>
+                <span class="s0">pass</span>
+
+    <span class="s1">_wincerts = CertFile()</span>
+    <span class="s1">_wincerts.addstore(</span><span class="s2">'CA'</span><span class="s1">)</span>
+    <span class="s1">_wincerts.addstore(</span><span class="s2">'ROOT'</span><span class="s1">)</span>
+    <span class="s0">return </span><span class="s1">_wincerts.name</span>
+
+
+<span class="s0">def </span><span class="s1">find_ca_bundle():</span>
+    <span class="s5">&quot;&quot;&quot;Return an existing CA bundle path, or None&quot;&quot;&quot;</span>
+    <span class="s1">extant_cert_paths = filter(os.path.isfile</span><span class="s0">, </span><span class="s1">cert_paths)</span>
+    <span class="s0">return </span><span class="s1">(</span>
+        <span class="s1">get_win_certfile()</span>
+        <span class="s0">or </span><span class="s1">next(extant_cert_paths</span><span class="s0">, None</span><span class="s1">)</span>
+        <span class="s0">or </span><span class="s1">_certifi_where()</span>
+    <span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">_certifi_where():</span>
+    <span class="s0">try</span><span class="s1">:</span>
+        <span class="s0">return </span><span class="s1">__import__(</span><span class="s2">'certifi'</span><span class="s1">).where()</span>
+    <span class="s0">except </span><span class="s1">(ImportError</span><span class="s0">, </span><span class="s1">ResolutionError</span><span class="s0">, </span><span class="s1">ExtractionError):</span>
+        <span class="s0">pass</span>
+</pre>
+</body>
+</html>

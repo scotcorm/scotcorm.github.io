@@ -1,0 +1,430 @@
+<html>
+<head>
+<title>eval.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #808080;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+eval.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+Top level ``eval`` module. 
+&quot;&quot;&quot;</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">tokenize</span>
+<span class="s2">import </span><span class="s1">warnings</span>
+
+<span class="s2">from </span><span class="s1">pandas._libs.lib </span><span class="s2">import </span><span class="s1">no_default</span>
+<span class="s2">from </span><span class="s1">pandas.util._exceptions </span><span class="s2">import </span><span class="s1">find_stack_level</span>
+<span class="s2">from </span><span class="s1">pandas.util._validators </span><span class="s2">import </span><span class="s1">validate_bool_kwarg</span>
+
+<span class="s2">from </span><span class="s1">pandas.core.computation.engines </span><span class="s2">import </span><span class="s1">ENGINES</span>
+<span class="s2">from </span><span class="s1">pandas.core.computation.expr </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">PARSERS</span><span class="s2">,</span>
+    <span class="s1">Expr</span><span class="s2">,</span>
+<span class="s1">)</span>
+<span class="s2">from </span><span class="s1">pandas.core.computation.ops </span><span class="s2">import </span><span class="s1">BinOp</span>
+<span class="s2">from </span><span class="s1">pandas.core.computation.parsing </span><span class="s2">import </span><span class="s1">tokenize_string</span>
+<span class="s2">from </span><span class="s1">pandas.core.computation.scope </span><span class="s2">import </span><span class="s1">ensure_scope</span>
+
+<span class="s2">from </span><span class="s1">pandas.io.formats.printing </span><span class="s2">import </span><span class="s1">pprint_thing</span>
+
+
+<span class="s2">def </span><span class="s1">_check_engine(engine: str | </span><span class="s2">None</span><span class="s1">) -&gt; str:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Make sure a valid engine is passed. 
+ 
+    Parameters 
+    ---------- 
+    engine : str 
+        String to validate. 
+ 
+    Raises 
+    ------ 
+    KeyError 
+      * If an invalid engine is passed. 
+    ImportError 
+      * If numexpr was requested but doesn't exist. 
+ 
+    Returns 
+    ------- 
+    str 
+        Engine name. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">from </span><span class="s1">pandas.core.computation.check </span><span class="s2">import </span><span class="s1">NUMEXPR_INSTALLED</span>
+    <span class="s2">from </span><span class="s1">pandas.core.computation.expressions </span><span class="s2">import </span><span class="s1">USE_NUMEXPR</span>
+
+    <span class="s2">if </span><span class="s1">engine </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">engine = </span><span class="s3">&quot;numexpr&quot; </span><span class="s2">if </span><span class="s1">USE_NUMEXPR </span><span class="s2">else </span><span class="s3">&quot;python&quot;</span>
+
+    <span class="s2">if </span><span class="s1">engine </span><span class="s2">not in </span><span class="s1">ENGINES:</span>
+        <span class="s1">valid_engines = list(ENGINES.keys())</span>
+        <span class="s2">raise </span><span class="s1">KeyError(</span>
+            <span class="s3">f&quot;Invalid engine '</span><span class="s2">{</span><span class="s1">engine</span><span class="s2">}</span><span class="s3">' passed, valid engines are </span><span class="s2">{</span><span class="s1">valid_engines</span><span class="s2">}</span><span class="s3">&quot;</span>
+        <span class="s1">)</span>
+
+    <span class="s4"># TODO: validate this in a more general way (thinking of future engines</span>
+    <span class="s4"># that won't necessarily be import-able)</span>
+    <span class="s4"># Could potentially be done on engine instantiation</span>
+    <span class="s2">if </span><span class="s1">engine == </span><span class="s3">&quot;numexpr&quot; </span><span class="s2">and not </span><span class="s1">NUMEXPR_INSTALLED:</span>
+        <span class="s2">raise </span><span class="s1">ImportError(</span>
+            <span class="s3">&quot;'numexpr' is not installed or an unsupported version. Cannot use &quot;</span>
+            <span class="s3">&quot;engine='numexpr' for query/eval if 'numexpr' is not installed&quot;</span>
+        <span class="s1">)</span>
+
+    <span class="s2">return </span><span class="s1">engine</span>
+
+
+<span class="s2">def </span><span class="s1">_check_parser(parser: str):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Make sure a valid parser is passed. 
+ 
+    Parameters 
+    ---------- 
+    parser : str 
+ 
+    Raises 
+    ------ 
+    KeyError 
+      * If an invalid parser is passed 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">parser </span><span class="s2">not in </span><span class="s1">PARSERS:</span>
+        <span class="s2">raise </span><span class="s1">KeyError(</span>
+            <span class="s3">f&quot;Invalid parser '</span><span class="s2">{</span><span class="s1">parser</span><span class="s2">}</span><span class="s3">' passed, valid parsers are </span><span class="s2">{</span><span class="s1">PARSERS.keys()</span><span class="s2">}</span><span class="s3">&quot;</span>
+        <span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">_check_resolvers(resolvers):</span>
+    <span class="s2">if </span><span class="s1">resolvers </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s2">for </span><span class="s1">resolver </span><span class="s2">in </span><span class="s1">resolvers:</span>
+            <span class="s2">if not </span><span class="s1">hasattr(resolver</span><span class="s2">, </span><span class="s3">&quot;__getitem__&quot;</span><span class="s1">):</span>
+                <span class="s1">name = type(resolver).__name__</span>
+                <span class="s2">raise </span><span class="s1">TypeError(</span>
+                    <span class="s3">f&quot;Resolver of type '</span><span class="s2">{</span><span class="s1">name</span><span class="s2">}</span><span class="s3">' does not &quot;</span>
+                    <span class="s3">&quot;implement the __getitem__ method&quot;</span>
+                <span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">_check_expression(expr):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Make sure an expression is not an empty string 
+ 
+    Parameters 
+    ---------- 
+    expr : object 
+        An object that can be converted to a string 
+ 
+    Raises 
+    ------ 
+    ValueError 
+      * If expr is an empty string 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if not </span><span class="s1">expr:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;expr cannot be an empty string&quot;</span><span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">_convert_expression(expr) -&gt; str:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Convert an object to an expression. 
+ 
+    This function converts an object to an expression (a unicode string) and 
+    checks to make sure it isn't empty after conversion. This is used to 
+    convert operators to their string representation for recursive calls to 
+    :func:`~pandas.eval`. 
+ 
+    Parameters 
+    ---------- 
+    expr : object 
+        The object to be converted to a string. 
+ 
+    Returns 
+    ------- 
+    str 
+        The string representation of an object. 
+ 
+    Raises 
+    ------ 
+    ValueError 
+      * If the expression is empty. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">s = pprint_thing(expr)</span>
+    <span class="s1">_check_expression(s)</span>
+    <span class="s2">return </span><span class="s1">s</span>
+
+
+<span class="s2">def </span><span class="s1">_check_for_locals(expr: str</span><span class="s2">, </span><span class="s1">stack_level: int</span><span class="s2">, </span><span class="s1">parser: str):</span>
+
+    <span class="s1">at_top_of_stack = stack_level == </span><span class="s5">0</span>
+    <span class="s1">not_pandas_parser = parser != </span><span class="s3">&quot;pandas&quot;</span>
+
+    <span class="s2">if </span><span class="s1">not_pandas_parser:</span>
+        <span class="s1">msg = </span><span class="s3">&quot;The '@' prefix is only supported by the pandas parser&quot;</span>
+    <span class="s2">elif </span><span class="s1">at_top_of_stack:</span>
+        <span class="s1">msg = (</span>
+            <span class="s3">&quot;The '@' prefix is not allowed in top-level eval calls.</span><span class="s2">\n</span><span class="s3">&quot;</span>
+            <span class="s3">&quot;please refer to your variables by name without the '@' prefix.&quot;</span>
+        <span class="s1">)</span>
+
+    <span class="s2">if </span><span class="s1">at_top_of_stack </span><span class="s2">or </span><span class="s1">not_pandas_parser:</span>
+        <span class="s2">for </span><span class="s1">toknum</span><span class="s2">, </span><span class="s1">tokval </span><span class="s2">in </span><span class="s1">tokenize_string(expr):</span>
+            <span class="s2">if </span><span class="s1">toknum == tokenize.OP </span><span class="s2">and </span><span class="s1">tokval == </span><span class="s3">&quot;@&quot;</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">SyntaxError(msg)</span>
+
+
+<span class="s2">def </span><span class="s1">eval(</span>
+    <span class="s1">expr: str | BinOp</span><span class="s2">,  </span><span class="s4"># we leave BinOp out of the docstr bc it isn't for users</span>
+    <span class="s1">parser: str = </span><span class="s3">&quot;pandas&quot;</span><span class="s2">,</span>
+    <span class="s1">engine: str | </span><span class="s2">None </span><span class="s1">= </span><span class="s2">None,</span>
+    <span class="s1">truediv=no_default</span><span class="s2">,</span>
+    <span class="s1">local_dict=</span><span class="s2">None,</span>
+    <span class="s1">global_dict=</span><span class="s2">None,</span>
+    <span class="s1">resolvers=()</span><span class="s2">,</span>
+    <span class="s1">level=</span><span class="s5">0</span><span class="s2">,</span>
+    <span class="s1">target=</span><span class="s2">None,</span>
+    <span class="s1">inplace=</span><span class="s2">False,</span>
+<span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Evaluate a Python expression as a string using various backends. 
+ 
+    The following arithmetic operations are supported: ``+``, ``-``, ``*``, 
+    ``/``, ``**``, ``%``, ``//`` (python engine only) along with the following 
+    boolean operations: ``|`` (or), ``&amp;`` (and), and ``~`` (not). 
+    Additionally, the ``'pandas'`` parser allows the use of :keyword:`and`, 
+    :keyword:`or`, and :keyword:`not` with the same semantics as the 
+    corresponding bitwise operators.  :class:`~pandas.Series` and 
+    :class:`~pandas.DataFrame` objects are supported and behave as they would 
+    with plain ol' Python evaluation. 
+ 
+    Parameters 
+    ---------- 
+    expr : str 
+        The expression to evaluate. This string cannot contain any Python 
+        `statements 
+        &lt;https://docs.python.org/3/reference/simple_stmts.html#simple-statements&gt;`__, 
+        only Python `expressions 
+        &lt;https://docs.python.org/3/reference/simple_stmts.html#expression-statements&gt;`__. 
+    parser : {'pandas', 'python'}, default 'pandas' 
+        The parser to use to construct the syntax tree from the expression. The 
+        default of ``'pandas'`` parses code slightly different than standard 
+        Python. Alternatively, you can parse an expression using the 
+        ``'python'`` parser to retain strict Python semantics.  See the 
+        :ref:`enhancing performance &lt;enhancingperf.eval&gt;` documentation for 
+        more details. 
+    engine : {'python', 'numexpr'}, default 'numexpr' 
+ 
+        The engine used to evaluate the expression. Supported engines are 
+ 
+        - None         : tries to use ``numexpr``, falls back to ``python`` 
+        - ``'numexpr'``: This default engine evaluates pandas objects using 
+                         numexpr for large speed ups in complex expressions 
+                         with large frames. 
+        - ``'python'``: Performs operations as if you had ``eval``'d in top 
+                        level python. This engine is generally not that useful. 
+ 
+        More backends may be available in the future. 
+ 
+    truediv : bool, optional 
+        Whether to use true division, like in Python &gt;= 3. 
+ 
+        .. deprecated:: 1.0.0 
+ 
+    local_dict : dict or None, optional 
+        A dictionary of local variables, taken from locals() by default. 
+    global_dict : dict or None, optional 
+        A dictionary of global variables, taken from globals() by default. 
+    resolvers : list of dict-like or None, optional 
+        A list of objects implementing the ``__getitem__`` special method that 
+        you can use to inject an additional collection of namespaces to use for 
+        variable lookup. For example, this is used in the 
+        :meth:`~DataFrame.query` method to inject the 
+        ``DataFrame.index`` and ``DataFrame.columns`` 
+        variables that refer to their respective :class:`~pandas.DataFrame` 
+        instance attributes. 
+    level : int, optional 
+        The number of prior stack frames to traverse and add to the current 
+        scope. Most users will **not** need to change this parameter. 
+    target : object, optional, default None 
+        This is the target object for assignment. It is used when there is 
+        variable assignment in the expression. If so, then `target` must 
+        support item assignment with string keys, and if a copy is being 
+        returned, it must also support `.copy()`. 
+    inplace : bool, default False 
+        If `target` is provided, and the expression mutates `target`, whether 
+        to modify `target` inplace. Otherwise, return a copy of `target` with 
+        the mutation. 
+ 
+    Returns 
+    ------- 
+    ndarray, numeric scalar, DataFrame, Series, or None 
+        The completion value of evaluating the given code or None if ``inplace=True``. 
+ 
+    Raises 
+    ------ 
+    ValueError 
+        There are many instances where such an error can be raised: 
+ 
+        - `target=None`, but the expression is multiline. 
+        - The expression is multiline, but not all them have item assignment. 
+          An example of such an arrangement is this: 
+ 
+          a = b + 1 
+          a + 2 
+ 
+          Here, there are expressions on different lines, making it multiline, 
+          but the last line has no variable assigned to the output of `a + 2`. 
+        - `inplace=True`, but the expression is missing item assignment. 
+        - Item assignment is provided, but the `target` does not support 
+          string item assignment. 
+        - Item assignment is provided and `inplace=False`, but the `target` 
+          does not support the `.copy()` method 
+ 
+    See Also 
+    -------- 
+    DataFrame.query : Evaluates a boolean expression to query the columns 
+            of a frame. 
+    DataFrame.eval : Evaluate a string describing operations on 
+            DataFrame columns. 
+ 
+    Notes 
+    ----- 
+    The ``dtype`` of any objects involved in an arithmetic ``%`` operation are 
+    recursively cast to ``float64``. 
+ 
+    See the :ref:`enhancing performance &lt;enhancingperf.eval&gt;` documentation for 
+    more details. 
+ 
+    Examples 
+    -------- 
+    &gt;&gt;&gt; df = pd.DataFrame({&quot;animal&quot;: [&quot;dog&quot;, &quot;pig&quot;], &quot;age&quot;: [10, 20]}) 
+    &gt;&gt;&gt; df 
+      animal  age 
+    0    dog   10 
+    1    pig   20 
+ 
+    We can add a new column using ``pd.eval``: 
+ 
+    &gt;&gt;&gt; pd.eval(&quot;double_age = df.age * 2&quot;, target=df) 
+      animal  age  double_age 
+    0    dog   10          20 
+    1    pig   20          40 
+    &quot;&quot;&quot;</span>
+    <span class="s1">inplace = validate_bool_kwarg(inplace</span><span class="s2">, </span><span class="s3">&quot;inplace&quot;</span><span class="s1">)</span>
+
+    <span class="s2">if </span><span class="s1">truediv </span><span class="s2">is not </span><span class="s1">no_default:</span>
+        <span class="s1">warnings.warn(</span>
+            <span class="s1">(</span>
+                <span class="s3">&quot;The `truediv` parameter in pd.eval is deprecated and &quot;</span>
+                <span class="s3">&quot;will be removed in a future version.&quot;</span>
+            <span class="s1">)</span><span class="s2">,</span>
+            <span class="s1">FutureWarning</span><span class="s2">,</span>
+            <span class="s1">stacklevel=find_stack_level()</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+    <span class="s1">exprs: list[str | BinOp]</span>
+    <span class="s2">if </span><span class="s1">isinstance(expr</span><span class="s2">, </span><span class="s1">str):</span>
+        <span class="s1">_check_expression(expr)</span>
+        <span class="s1">exprs = [e.strip() </span><span class="s2">for </span><span class="s1">e </span><span class="s2">in </span><span class="s1">expr.splitlines() </span><span class="s2">if </span><span class="s1">e.strip() != </span><span class="s3">&quot;&quot;</span><span class="s1">]</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s4"># ops.BinOp; for internal compat, not intended to be passed by users</span>
+        <span class="s1">exprs = [expr]</span>
+    <span class="s1">multi_line = len(exprs) &gt; </span><span class="s5">1</span>
+
+    <span class="s2">if </span><span class="s1">multi_line </span><span class="s2">and </span><span class="s1">target </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span>
+            <span class="s3">&quot;multi-line expressions are only valid in the &quot;</span>
+            <span class="s3">&quot;context of data, use DataFrame.eval&quot;</span>
+        <span class="s1">)</span>
+    <span class="s1">engine = _check_engine(engine)</span>
+    <span class="s1">_check_parser(parser)</span>
+    <span class="s1">_check_resolvers(resolvers)</span>
+
+    <span class="s1">ret = </span><span class="s2">None</span>
+    <span class="s1">first_expr = </span><span class="s2">True</span>
+    <span class="s1">target_modified = </span><span class="s2">False</span>
+
+    <span class="s2">for </span><span class="s1">expr </span><span class="s2">in </span><span class="s1">exprs:</span>
+        <span class="s1">expr = _convert_expression(expr)</span>
+        <span class="s1">_check_for_locals(expr</span><span class="s2">, </span><span class="s1">level</span><span class="s2">, </span><span class="s1">parser)</span>
+
+        <span class="s4"># get our (possibly passed-in) scope</span>
+        <span class="s1">env = ensure_scope(</span>
+            <span class="s1">level + </span><span class="s5">1</span><span class="s2">,</span>
+            <span class="s1">global_dict=global_dict</span><span class="s2">,</span>
+            <span class="s1">local_dict=local_dict</span><span class="s2">,</span>
+            <span class="s1">resolvers=resolvers</span><span class="s2">,</span>
+            <span class="s1">target=target</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+        <span class="s1">parsed_expr = Expr(expr</span><span class="s2">, </span><span class="s1">engine=engine</span><span class="s2">, </span><span class="s1">parser=parser</span><span class="s2">, </span><span class="s1">env=env)</span>
+
+        <span class="s4"># construct the engine and evaluate the parsed expression</span>
+        <span class="s1">eng = ENGINES[engine]</span>
+        <span class="s1">eng_inst = eng(parsed_expr)</span>
+        <span class="s1">ret = eng_inst.evaluate()</span>
+
+        <span class="s2">if </span><span class="s1">parsed_expr.assigner </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">multi_line:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span>
+                    <span class="s3">&quot;Multi-line expressions are only valid &quot;</span>
+                    <span class="s3">&quot;if all expressions contain an assignment&quot;</span>
+                <span class="s1">)</span>
+            <span class="s2">elif </span><span class="s1">inplace:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;Cannot operate inplace if there is no assignment&quot;</span><span class="s1">)</span>
+
+        <span class="s4"># assign if needed</span>
+        <span class="s1">assigner = parsed_expr.assigner</span>
+        <span class="s2">if </span><span class="s1">env.target </span><span class="s2">is not None and </span><span class="s1">assigner </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">target_modified = </span><span class="s2">True</span>
+
+            <span class="s4"># if returning a copy, copy only on the first assignment</span>
+            <span class="s2">if not </span><span class="s1">inplace </span><span class="s2">and </span><span class="s1">first_expr:</span>
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s1">target = env.target.copy()</span>
+                <span class="s2">except </span><span class="s1">AttributeError </span><span class="s2">as </span><span class="s1">err:</span>
+                    <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;Cannot return a copy of the target&quot;</span><span class="s1">) </span><span class="s2">from </span><span class="s1">err</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">target = env.target</span>
+
+            <span class="s4"># TypeError is most commonly raised (e.g. int, list), but you</span>
+            <span class="s4"># get IndexError if you try to do this assignment on np.ndarray.</span>
+            <span class="s4"># we will ignore numpy warnings here; e.g. if trying</span>
+            <span class="s4"># to use a non-numeric indexer</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s2">with </span><span class="s1">warnings.catch_warnings(record=</span><span class="s2">True</span><span class="s1">):</span>
+                    <span class="s4"># TODO: Filter the warnings we actually care about here.</span>
+                    <span class="s1">target[assigner] = ret</span>
+            <span class="s2">except </span><span class="s1">(TypeError</span><span class="s2">, </span><span class="s1">IndexError) </span><span class="s2">as </span><span class="s1">err:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;Cannot assign expression output to target&quot;</span><span class="s1">) </span><span class="s2">from </span><span class="s1">err</span>
+
+            <span class="s2">if not </span><span class="s1">resolvers:</span>
+                <span class="s1">resolvers = ({assigner: ret}</span><span class="s2">,</span><span class="s1">)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s4"># existing resolver needs updated to handle</span>
+                <span class="s4"># case of mutating existing column in copy</span>
+                <span class="s2">for </span><span class="s1">resolver </span><span class="s2">in </span><span class="s1">resolvers:</span>
+                    <span class="s2">if </span><span class="s1">assigner </span><span class="s2">in </span><span class="s1">resolver:</span>
+                        <span class="s1">resolver[assigner] = ret</span>
+                        <span class="s2">break</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">resolvers += ({assigner: ret}</span><span class="s2">,</span><span class="s1">)</span>
+
+            <span class="s1">ret = </span><span class="s2">None</span>
+            <span class="s1">first_expr = </span><span class="s2">False</span>
+
+    <span class="s4"># We want to exclude `inplace=None` as being False.</span>
+    <span class="s2">if </span><span class="s1">inplace </span><span class="s2">is False</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">target </span><span class="s2">if </span><span class="s1">target_modified </span><span class="s2">else </span><span class="s1">ret</span>
+</pre>
+</body>
+</html>

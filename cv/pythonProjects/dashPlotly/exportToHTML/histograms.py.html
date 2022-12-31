@@ -1,0 +1,1151 @@
+<html>
+<head>
+<title>histograms.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #808080;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+histograms.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+Histogram-related functions 
+&quot;&quot;&quot;</span>
+<span class="s2">import </span><span class="s1">contextlib</span>
+<span class="s2">import </span><span class="s1">functools</span>
+<span class="s2">import </span><span class="s1">operator</span>
+<span class="s2">import </span><span class="s1">warnings</span>
+
+<span class="s2">import </span><span class="s1">numpy </span><span class="s2">as </span><span class="s1">np</span>
+<span class="s2">from </span><span class="s1">numpy.core </span><span class="s2">import </span><span class="s1">overrides</span>
+
+<span class="s1">__all__ = [</span><span class="s3">'histogram'</span><span class="s2">, </span><span class="s3">'histogramdd'</span><span class="s2">, </span><span class="s3">'histogram_bin_edges'</span><span class="s1">]</span>
+
+<span class="s1">array_function_dispatch = functools.partial(</span>
+    <span class="s1">overrides.array_function_dispatch</span><span class="s2">, </span><span class="s1">module=</span><span class="s3">'numpy'</span><span class="s1">)</span>
+
+<span class="s4"># range is a keyword argument to many functions, so save the builtin so they can</span>
+<span class="s4"># use it.</span>
+<span class="s1">_range = range</span>
+
+
+<span class="s2">def </span><span class="s1">_ptp(x):</span>
+    <span class="s0">&quot;&quot;&quot;Peak-to-peak value of x. 
+ 
+    This implementation avoids the problem of signed integer arrays having a 
+    peak-to-peak value that cannot be represented with the array's data type. 
+    This function returns an unsigned value for signed integer arrays. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">return </span><span class="s1">_unsigned_subtract(x.max()</span><span class="s2">, </span><span class="s1">x.min())</span>
+
+
+<span class="s2">def </span><span class="s1">_hist_bin_sqrt(x</span><span class="s2">, </span><span class="s1">range):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Square root histogram bin estimator. 
+ 
+    Bin width is inversely proportional to the data size. Used by many 
+    programs for its simplicity. 
+ 
+    Parameters 
+    ---------- 
+    x : array_like 
+        Input data that is to be histogrammed, trimmed to range. May not 
+        be empty. 
+ 
+    Returns 
+    ------- 
+    h : An estimate of the optimal bin width for the given data. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">del </span><span class="s1">range  </span><span class="s4"># unused</span>
+    <span class="s2">return </span><span class="s1">_ptp(x) / np.sqrt(x.size)</span>
+
+
+<span class="s2">def </span><span class="s1">_hist_bin_sturges(x</span><span class="s2">, </span><span class="s1">range):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Sturges histogram bin estimator. 
+ 
+    A very simplistic estimator based on the assumption of normality of 
+    the data. This estimator has poor performance for non-normal data, 
+    which becomes especially obvious for large data sets. The estimate 
+    depends only on size of the data. 
+ 
+    Parameters 
+    ---------- 
+    x : array_like 
+        Input data that is to be histogrammed, trimmed to range. May not 
+        be empty. 
+ 
+    Returns 
+    ------- 
+    h : An estimate of the optimal bin width for the given data. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">del </span><span class="s1">range  </span><span class="s4"># unused</span>
+    <span class="s2">return </span><span class="s1">_ptp(x) / (np.log2(x.size) + </span><span class="s5">1.0</span><span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">_hist_bin_rice(x</span><span class="s2">, </span><span class="s1">range):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Rice histogram bin estimator. 
+ 
+    Another simple estimator with no normality assumption. It has better 
+    performance for large data than Sturges, but tends to overestimate 
+    the number of bins. The number of bins is proportional to the cube 
+    root of data size (asymptotically optimal). The estimate depends 
+    only on size of the data. 
+ 
+    Parameters 
+    ---------- 
+    x : array_like 
+        Input data that is to be histogrammed, trimmed to range. May not 
+        be empty. 
+ 
+    Returns 
+    ------- 
+    h : An estimate of the optimal bin width for the given data. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">del </span><span class="s1">range  </span><span class="s4"># unused</span>
+    <span class="s2">return </span><span class="s1">_ptp(x) / (</span><span class="s5">2.0 </span><span class="s1">* x.size ** (</span><span class="s5">1.0 </span><span class="s1">/ </span><span class="s5">3</span><span class="s1">))</span>
+
+
+<span class="s2">def </span><span class="s1">_hist_bin_scott(x</span><span class="s2">, </span><span class="s1">range):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Scott histogram bin estimator. 
+ 
+    The binwidth is proportional to the standard deviation of the data 
+    and inversely proportional to the cube root of data size 
+    (asymptotically optimal). 
+ 
+    Parameters 
+    ---------- 
+    x : array_like 
+        Input data that is to be histogrammed, trimmed to range. May not 
+        be empty. 
+ 
+    Returns 
+    ------- 
+    h : An estimate of the optimal bin width for the given data. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">del </span><span class="s1">range  </span><span class="s4"># unused</span>
+    <span class="s2">return </span><span class="s1">(</span><span class="s5">24.0 </span><span class="s1">* np.pi**</span><span class="s5">0.5 </span><span class="s1">/ x.size)**(</span><span class="s5">1.0 </span><span class="s1">/ </span><span class="s5">3.0</span><span class="s1">) * np.std(x)</span>
+
+
+<span class="s2">def </span><span class="s1">_hist_bin_stone(x</span><span class="s2">, </span><span class="s1">range):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Histogram bin estimator based on minimizing the estimated integrated squared error (ISE). 
+ 
+    The number of bins is chosen by minimizing the estimated ISE against the unknown true distribution. 
+    The ISE is estimated using cross-validation and can be regarded as a generalization of Scott's rule. 
+    https://en.wikipedia.org/wiki/Histogram#Scott.27s_normal_reference_rule 
+ 
+    This paper by Stone appears to be the origination of this rule. 
+    http://digitalassets.lib.berkeley.edu/sdtr/ucb/text/34.pdf 
+ 
+    Parameters 
+    ---------- 
+    x : array_like 
+        Input data that is to be histogrammed, trimmed to range. May not 
+        be empty. 
+    range : (float, float) 
+        The lower and upper range of the bins. 
+ 
+    Returns 
+    ------- 
+    h : An estimate of the optimal bin width for the given data. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">n = x.size</span>
+    <span class="s1">ptp_x = _ptp(x)</span>
+    <span class="s2">if </span><span class="s1">n &lt;= </span><span class="s5">1 </span><span class="s2">or </span><span class="s1">ptp_x == </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s5">0</span>
+
+    <span class="s2">def </span><span class="s1">jhat(nbins):</span>
+        <span class="s1">hh = ptp_x / nbins</span>
+        <span class="s1">p_k = np.histogram(x</span><span class="s2">, </span><span class="s1">bins=nbins</span><span class="s2">, </span><span class="s1">range=range)[</span><span class="s5">0</span><span class="s1">] / n</span>
+        <span class="s2">return </span><span class="s1">(</span><span class="s5">2 </span><span class="s1">- (n + </span><span class="s5">1</span><span class="s1">) * p_k.dot(p_k)) / hh</span>
+
+    <span class="s1">nbins_upper_bound = max(</span><span class="s5">100</span><span class="s2">, </span><span class="s1">int(np.sqrt(n)))</span>
+    <span class="s1">nbins = min(_range(</span><span class="s5">1</span><span class="s2">, </span><span class="s1">nbins_upper_bound + </span><span class="s5">1</span><span class="s1">)</span><span class="s2">, </span><span class="s1">key=jhat)</span>
+    <span class="s2">if </span><span class="s1">nbins == nbins_upper_bound:</span>
+        <span class="s1">warnings.warn(</span><span class="s3">&quot;The number of bins estimated may be suboptimal.&quot;</span><span class="s2">,</span>
+                      <span class="s1">RuntimeWarning</span><span class="s2">, </span><span class="s1">stacklevel=</span><span class="s5">3</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">ptp_x / nbins</span>
+
+
+<span class="s2">def </span><span class="s1">_hist_bin_doane(x</span><span class="s2">, </span><span class="s1">range):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Doane's histogram bin estimator. 
+ 
+    Improved version of Sturges' formula which works better for 
+    non-normal data. See 
+    stats.stackexchange.com/questions/55134/doanes-formula-for-histogram-binning 
+ 
+    Parameters 
+    ---------- 
+    x : array_like 
+        Input data that is to be histogrammed, trimmed to range. May not 
+        be empty. 
+ 
+    Returns 
+    ------- 
+    h : An estimate of the optimal bin width for the given data. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">del </span><span class="s1">range  </span><span class="s4"># unused</span>
+    <span class="s2">if </span><span class="s1">x.size &gt; </span><span class="s5">2</span><span class="s1">:</span>
+        <span class="s1">sg1 = np.sqrt(</span><span class="s5">6.0 </span><span class="s1">* (x.size - </span><span class="s5">2</span><span class="s1">) / ((x.size + </span><span class="s5">1.0</span><span class="s1">) * (x.size + </span><span class="s5">3</span><span class="s1">)))</span>
+        <span class="s1">sigma = np.std(x)</span>
+        <span class="s2">if </span><span class="s1">sigma &gt; </span><span class="s5">0.0</span><span class="s1">:</span>
+            <span class="s4"># These three operations add up to</span>
+            <span class="s4"># g1 = np.mean(((x - np.mean(x)) / sigma)**3)</span>
+            <span class="s4"># but use only one temp array instead of three</span>
+            <span class="s1">temp = x - np.mean(x)</span>
+            <span class="s1">np.true_divide(temp</span><span class="s2">, </span><span class="s1">sigma</span><span class="s2">, </span><span class="s1">temp)</span>
+            <span class="s1">np.power(temp</span><span class="s2">, </span><span class="s5">3</span><span class="s2">, </span><span class="s1">temp)</span>
+            <span class="s1">g1 = np.mean(temp)</span>
+            <span class="s2">return </span><span class="s1">_ptp(x) / (</span><span class="s5">1.0 </span><span class="s1">+ np.log2(x.size) +</span>
+                                    <span class="s1">np.log2(</span><span class="s5">1.0 </span><span class="s1">+ np.absolute(g1) / sg1))</span>
+    <span class="s2">return </span><span class="s5">0.0</span>
+
+
+<span class="s2">def </span><span class="s1">_hist_bin_fd(x</span><span class="s2">, </span><span class="s1">range):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    The Freedman-Diaconis histogram bin estimator. 
+ 
+    The Freedman-Diaconis rule uses interquartile range (IQR) to 
+    estimate binwidth. It is considered a variation of the Scott rule 
+    with more robustness as the IQR is less affected by outliers than 
+    the standard deviation. However, the IQR depends on fewer points 
+    than the standard deviation, so it is less accurate, especially for 
+    long tailed distributions. 
+ 
+    If the IQR is 0, this function returns 0 for the bin width. 
+    Binwidth is inversely proportional to the cube root of data size 
+    (asymptotically optimal). 
+ 
+    Parameters 
+    ---------- 
+    x : array_like 
+        Input data that is to be histogrammed, trimmed to range. May not 
+        be empty. 
+ 
+    Returns 
+    ------- 
+    h : An estimate of the optimal bin width for the given data. 
+    &quot;&quot;&quot;</span>
+    <span class="s2">del </span><span class="s1">range  </span><span class="s4"># unused</span>
+    <span class="s1">iqr = np.subtract(*np.percentile(x</span><span class="s2">, </span><span class="s1">[</span><span class="s5">75</span><span class="s2">, </span><span class="s5">25</span><span class="s1">]))</span>
+    <span class="s2">return </span><span class="s5">2.0 </span><span class="s1">* iqr * x.size ** (-</span><span class="s5">1.0 </span><span class="s1">/ </span><span class="s5">3.0</span><span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">_hist_bin_auto(x</span><span class="s2">, </span><span class="s1">range):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Histogram bin estimator that uses the minimum width of the 
+    Freedman-Diaconis and Sturges estimators if the FD bin width is non-zero. 
+    If the bin width from the FD estimator is 0, the Sturges estimator is used. 
+ 
+    The FD estimator is usually the most robust method, but its width 
+    estimate tends to be too large for small `x` and bad for data with limited 
+    variance. The Sturges estimator is quite good for small (&lt;1000) datasets 
+    and is the default in the R language. This method gives good off-the-shelf 
+    behaviour. 
+ 
+    .. versionchanged:: 1.15.0 
+    If there is limited variance the IQR can be 0, which results in the 
+    FD bin width being 0 too. This is not a valid bin width, so 
+    ``np.histogram_bin_edges`` chooses 1 bin instead, which may not be optimal. 
+    If the IQR is 0, it's unlikely any variance-based estimators will be of 
+    use, so we revert to the Sturges estimator, which only uses the size of the 
+    dataset in its calculation. 
+ 
+    Parameters 
+    ---------- 
+    x : array_like 
+        Input data that is to be histogrammed, trimmed to range. May not 
+        be empty. 
+ 
+    Returns 
+    ------- 
+    h : An estimate of the optimal bin width for the given data. 
+ 
+    See Also 
+    -------- 
+    _hist_bin_fd, _hist_bin_sturges 
+    &quot;&quot;&quot;</span>
+    <span class="s1">fd_bw = _hist_bin_fd(x</span><span class="s2">, </span><span class="s1">range)</span>
+    <span class="s1">sturges_bw = _hist_bin_sturges(x</span><span class="s2">, </span><span class="s1">range)</span>
+    <span class="s2">del </span><span class="s1">range  </span><span class="s4"># unused</span>
+    <span class="s2">if </span><span class="s1">fd_bw:</span>
+        <span class="s2">return </span><span class="s1">min(fd_bw</span><span class="s2">, </span><span class="s1">sturges_bw)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s4"># limited variance, so we return a len dependent bw estimator</span>
+        <span class="s2">return </span><span class="s1">sturges_bw</span>
+
+<span class="s4"># Private dict initialized at module load time</span>
+<span class="s1">_hist_bin_selectors = {</span><span class="s3">'stone'</span><span class="s1">: _hist_bin_stone</span><span class="s2">,</span>
+                       <span class="s3">'auto'</span><span class="s1">: _hist_bin_auto</span><span class="s2">,</span>
+                       <span class="s3">'doane'</span><span class="s1">: _hist_bin_doane</span><span class="s2">,</span>
+                       <span class="s3">'fd'</span><span class="s1">: _hist_bin_fd</span><span class="s2">,</span>
+                       <span class="s3">'rice'</span><span class="s1">: _hist_bin_rice</span><span class="s2">,</span>
+                       <span class="s3">'scott'</span><span class="s1">: _hist_bin_scott</span><span class="s2">,</span>
+                       <span class="s3">'sqrt'</span><span class="s1">: _hist_bin_sqrt</span><span class="s2">,</span>
+                       <span class="s3">'sturges'</span><span class="s1">: _hist_bin_sturges}</span>
+
+
+<span class="s2">def </span><span class="s1">_ravel_and_check_weights(a</span><span class="s2">, </span><span class="s1">weights):</span>
+    <span class="s0">&quot;&quot;&quot; Check a and weights have matching shapes, and ravel both &quot;&quot;&quot;</span>
+    <span class="s1">a = np.asarray(a)</span>
+
+    <span class="s4"># Ensure that the array is a &quot;subtractable&quot; dtype</span>
+    <span class="s2">if </span><span class="s1">a.dtype == np.bool_:</span>
+        <span class="s1">warnings.warn(</span><span class="s3">&quot;Converting input from {} to {} for compatibility.&quot;</span>
+                      <span class="s1">.format(a.dtype</span><span class="s2">, </span><span class="s1">np.uint8)</span><span class="s2">,</span>
+                      <span class="s1">RuntimeWarning</span><span class="s2">, </span><span class="s1">stacklevel=</span><span class="s5">3</span><span class="s1">)</span>
+        <span class="s1">a = a.astype(np.uint8)</span>
+
+    <span class="s2">if </span><span class="s1">weights </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s1">weights = np.asarray(weights)</span>
+        <span class="s2">if </span><span class="s1">weights.shape != a.shape:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span>
+                <span class="s3">'weights should have the same shape as a.'</span><span class="s1">)</span>
+        <span class="s1">weights = weights.ravel()</span>
+    <span class="s1">a = a.ravel()</span>
+    <span class="s2">return </span><span class="s1">a</span><span class="s2">, </span><span class="s1">weights</span>
+
+
+<span class="s2">def </span><span class="s1">_get_outer_edges(a</span><span class="s2">, </span><span class="s1">range):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Determine the outer bin edges to use, from either the data or the range 
+    argument 
+    &quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">range </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s1">first_edge</span><span class="s2">, </span><span class="s1">last_edge = range</span>
+        <span class="s2">if </span><span class="s1">first_edge &gt; last_edge:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span>
+                <span class="s3">'max must be larger than min in range parameter.'</span><span class="s1">)</span>
+        <span class="s2">if not </span><span class="s1">(np.isfinite(first_edge) </span><span class="s2">and </span><span class="s1">np.isfinite(last_edge)):</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span>
+                <span class="s3">&quot;supplied range of [{}, {}] is not finite&quot;</span><span class="s1">.format(first_edge</span><span class="s2">, </span><span class="s1">last_edge))</span>
+    <span class="s2">elif </span><span class="s1">a.size == </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s4"># handle empty arrays. Can't determine range, so use 0-1.</span>
+        <span class="s1">first_edge</span><span class="s2">, </span><span class="s1">last_edge = </span><span class="s5">0</span><span class="s2">, </span><span class="s5">1</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">first_edge</span><span class="s2">, </span><span class="s1">last_edge = a.min()</span><span class="s2">, </span><span class="s1">a.max()</span>
+        <span class="s2">if not </span><span class="s1">(np.isfinite(first_edge) </span><span class="s2">and </span><span class="s1">np.isfinite(last_edge)):</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span>
+                <span class="s3">&quot;autodetected range of [{}, {}] is not finite&quot;</span><span class="s1">.format(first_edge</span><span class="s2">, </span><span class="s1">last_edge))</span>
+
+    <span class="s4"># expand empty range to avoid divide by zero</span>
+    <span class="s2">if </span><span class="s1">first_edge == last_edge:</span>
+        <span class="s1">first_edge = first_edge - </span><span class="s5">0.5</span>
+        <span class="s1">last_edge = last_edge + </span><span class="s5">0.5</span>
+
+    <span class="s2">return </span><span class="s1">first_edge</span><span class="s2">, </span><span class="s1">last_edge</span>
+
+
+<span class="s2">def </span><span class="s1">_unsigned_subtract(a</span><span class="s2">, </span><span class="s1">b):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Subtract two values where a &gt;= b, and produce an unsigned result 
+ 
+    This is needed when finding the difference between the upper and lower 
+    bound of an int16 histogram 
+    &quot;&quot;&quot;</span>
+    <span class="s4"># coerce to a single type</span>
+    <span class="s1">signed_to_unsigned = {</span>
+        <span class="s1">np.byte: np.ubyte</span><span class="s2">,</span>
+        <span class="s1">np.short: np.ushort</span><span class="s2">,</span>
+        <span class="s1">np.intc: np.uintc</span><span class="s2">,</span>
+        <span class="s1">np.int_: np.uint</span><span class="s2">,</span>
+        <span class="s1">np.longlong: np.ulonglong</span>
+    <span class="s1">}</span>
+    <span class="s1">dt = np.result_type(a</span><span class="s2">, </span><span class="s1">b)</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">dt = signed_to_unsigned[dt.type]</span>
+    <span class="s2">except </span><span class="s1">KeyError:</span>
+        <span class="s2">return </span><span class="s1">np.subtract(a</span><span class="s2">, </span><span class="s1">b</span><span class="s2">, </span><span class="s1">dtype=dt)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s4"># we know the inputs are integers, and we are deliberately casting</span>
+        <span class="s4"># signed to unsigned</span>
+        <span class="s2">return </span><span class="s1">np.subtract(a</span><span class="s2">, </span><span class="s1">b</span><span class="s2">, </span><span class="s1">casting=</span><span class="s3">'unsafe'</span><span class="s2">, </span><span class="s1">dtype=dt)</span>
+
+
+<span class="s2">def </span><span class="s1">_get_bin_edges(a</span><span class="s2">, </span><span class="s1">bins</span><span class="s2">, </span><span class="s1">range</span><span class="s2">, </span><span class="s1">weights):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Computes the bins used internally by `histogram`. 
+ 
+    Parameters 
+    ========== 
+    a : ndarray 
+        Ravelled data array 
+    bins, range 
+        Forwarded arguments from `histogram`. 
+    weights : ndarray, optional 
+        Ravelled weights array, or None 
+ 
+    Returns 
+    ======= 
+    bin_edges : ndarray 
+        Array of bin edges 
+    uniform_bins : (Number, Number, int): 
+        The upper bound, lowerbound, and number of bins, used in the optimized 
+        implementation of `histogram` that works on uniform bins. 
+    &quot;&quot;&quot;</span>
+    <span class="s4"># parse the overloaded bins argument</span>
+    <span class="s1">n_equal_bins = </span><span class="s2">None</span>
+    <span class="s1">bin_edges = </span><span class="s2">None</span>
+
+    <span class="s2">if </span><span class="s1">isinstance(bins</span><span class="s2">, </span><span class="s1">str):</span>
+        <span class="s1">bin_name = bins</span>
+        <span class="s4"># if `bins` is a string for an automatic method,</span>
+        <span class="s4"># this will replace it with the number of bins calculated</span>
+        <span class="s2">if </span><span class="s1">bin_name </span><span class="s2">not in </span><span class="s1">_hist_bin_selectors:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span>
+                <span class="s3">&quot;{!r} is not a valid estimator for `bins`&quot;</span><span class="s1">.format(bin_name))</span>
+        <span class="s2">if </span><span class="s1">weights </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;Automated estimation of the number of &quot;</span>
+                            <span class="s3">&quot;bins is not supported for weighted data&quot;</span><span class="s1">)</span>
+
+        <span class="s1">first_edge</span><span class="s2">, </span><span class="s1">last_edge = _get_outer_edges(a</span><span class="s2">, </span><span class="s1">range)</span>
+
+        <span class="s4"># truncate the range if needed</span>
+        <span class="s2">if </span><span class="s1">range </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">keep = (a &gt;= first_edge)</span>
+            <span class="s1">keep &amp;= (a &lt;= last_edge)</span>
+            <span class="s2">if not </span><span class="s1">np.logical_and.reduce(keep):</span>
+                <span class="s1">a = a[keep]</span>
+
+        <span class="s2">if </span><span class="s1">a.size == </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s1">n_equal_bins = </span><span class="s5">1</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s4"># Do not call selectors on empty arrays</span>
+            <span class="s1">width = _hist_bin_selectors[bin_name](a</span><span class="s2">, </span><span class="s1">(first_edge</span><span class="s2">, </span><span class="s1">last_edge))</span>
+            <span class="s2">if </span><span class="s1">width:</span>
+                <span class="s1">n_equal_bins = int(np.ceil(_unsigned_subtract(last_edge</span><span class="s2">, </span><span class="s1">first_edge) / width))</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s4"># Width can be zero for some estimators, e.g. FD when</span>
+                <span class="s4"># the IQR of the data is zero.</span>
+                <span class="s1">n_equal_bins = </span><span class="s5">1</span>
+
+    <span class="s2">elif </span><span class="s1">np.ndim(bins) == </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">n_equal_bins = operator.index(bins)</span>
+        <span class="s2">except </span><span class="s1">TypeError </span><span class="s2">as </span><span class="s1">e:</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span>
+                <span class="s3">'`bins` must be an integer, a string, or an array'</span><span class="s1">) </span><span class="s2">from </span><span class="s1">e</span>
+        <span class="s2">if </span><span class="s1">n_equal_bins &lt; </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">'`bins` must be positive, when an integer'</span><span class="s1">)</span>
+
+        <span class="s1">first_edge</span><span class="s2">, </span><span class="s1">last_edge = _get_outer_edges(a</span><span class="s2">, </span><span class="s1">range)</span>
+
+    <span class="s2">elif </span><span class="s1">np.ndim(bins) == </span><span class="s5">1</span><span class="s1">:</span>
+        <span class="s1">bin_edges = np.asarray(bins)</span>
+        <span class="s2">if </span><span class="s1">np.any(bin_edges[:-</span><span class="s5">1</span><span class="s1">] &gt; bin_edges[</span><span class="s5">1</span><span class="s1">:]):</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span>
+                <span class="s3">'`bins` must increase monotonically, when an array'</span><span class="s1">)</span>
+
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">'`bins` must be 1d, when an array'</span><span class="s1">)</span>
+
+    <span class="s2">if </span><span class="s1">n_equal_bins </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s4"># gh-10322 means that type resolution rules are dependent on array</span>
+        <span class="s4"># shapes. To avoid this causing problems, we pick a type now and stick</span>
+        <span class="s4"># with it throughout.</span>
+        <span class="s1">bin_type = np.result_type(first_edge</span><span class="s2">, </span><span class="s1">last_edge</span><span class="s2">, </span><span class="s1">a)</span>
+        <span class="s2">if </span><span class="s1">np.issubdtype(bin_type</span><span class="s2">, </span><span class="s1">np.integer):</span>
+            <span class="s1">bin_type = np.result_type(bin_type</span><span class="s2">, </span><span class="s1">float)</span>
+
+        <span class="s4"># bin edges must be computed</span>
+        <span class="s1">bin_edges = np.linspace(</span>
+            <span class="s1">first_edge</span><span class="s2">, </span><span class="s1">last_edge</span><span class="s2">, </span><span class="s1">n_equal_bins + </span><span class="s5">1</span><span class="s2">,</span>
+            <span class="s1">endpoint=</span><span class="s2">True, </span><span class="s1">dtype=bin_type)</span>
+        <span class="s2">return </span><span class="s1">bin_edges</span><span class="s2">, </span><span class="s1">(first_edge</span><span class="s2">, </span><span class="s1">last_edge</span><span class="s2">, </span><span class="s1">n_equal_bins)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">bin_edges</span><span class="s2">, None</span>
+
+
+<span class="s2">def </span><span class="s1">_search_sorted_inclusive(a</span><span class="s2">, </span><span class="s1">v):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Like `searchsorted`, but where the last item in `v` is placed on the right. 
+ 
+    In the context of a histogram, this makes the last bin edge inclusive 
+    &quot;&quot;&quot;</span>
+    <span class="s2">return </span><span class="s1">np.concatenate((</span>
+        <span class="s1">a.searchsorted(v[:-</span><span class="s5">1</span><span class="s1">]</span><span class="s2">, </span><span class="s3">'left'</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">a.searchsorted(v[-</span><span class="s5">1</span><span class="s1">:]</span><span class="s2">, </span><span class="s3">'right'</span><span class="s1">)</span>
+    <span class="s1">))</span>
+
+
+<span class="s2">def </span><span class="s1">_histogram_bin_edges_dispatcher(a</span><span class="s2">, </span><span class="s1">bins=</span><span class="s2">None, </span><span class="s1">range=</span><span class="s2">None, </span><span class="s1">weights=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s2">return </span><span class="s1">(a</span><span class="s2">, </span><span class="s1">bins</span><span class="s2">, </span><span class="s1">weights)</span>
+
+
+<span class="s1">@array_function_dispatch(_histogram_bin_edges_dispatcher)</span>
+<span class="s2">def </span><span class="s1">histogram_bin_edges(a</span><span class="s2">, </span><span class="s1">bins=</span><span class="s5">10</span><span class="s2">, </span><span class="s1">range=</span><span class="s2">None, </span><span class="s1">weights=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s0">r&quot;&quot;&quot; 
+    Function to calculate only the edges of the bins used by the `histogram` 
+    function. 
+ 
+    Parameters 
+    ---------- 
+    a : array_like 
+        Input data. The histogram is computed over the flattened array. 
+    bins : int or sequence of scalars or str, optional 
+        If `bins` is an int, it defines the number of equal-width 
+        bins in the given range (10, by default). If `bins` is a 
+        sequence, it defines the bin edges, including the rightmost 
+        edge, allowing for non-uniform bin widths. 
+ 
+        If `bins` is a string from the list below, `histogram_bin_edges` will use 
+        the method chosen to calculate the optimal bin width and 
+        consequently the number of bins (see `Notes` for more detail on 
+        the estimators) from the data that falls within the requested 
+        range. While the bin width will be optimal for the actual data 
+        in the range, the number of bins will be computed to fill the 
+        entire range, including the empty portions. For visualisation, 
+        using the 'auto' option is suggested. Weighted data is not 
+        supported for automated bin size selection. 
+ 
+        'auto' 
+            Maximum of the 'sturges' and 'fd' estimators. Provides good 
+            all around performance. 
+ 
+        'fd' (Freedman Diaconis Estimator) 
+            Robust (resilient to outliers) estimator that takes into 
+            account data variability and data size. 
+ 
+        'doane' 
+            An improved version of Sturges' estimator that works better 
+            with non-normal datasets. 
+ 
+        'scott' 
+            Less robust estimator that that takes into account data 
+            variability and data size. 
+ 
+        'stone' 
+            Estimator based on leave-one-out cross-validation estimate of 
+            the integrated squared error. Can be regarded as a generalization 
+            of Scott's rule. 
+ 
+        'rice' 
+            Estimator does not take variability into account, only data 
+            size. Commonly overestimates number of bins required. 
+ 
+        'sturges' 
+            R's default method, only accounts for data size. Only 
+            optimal for gaussian data and underestimates number of bins 
+            for large non-gaussian datasets. 
+ 
+        'sqrt' 
+            Square root (of data size) estimator, used by Excel and 
+            other programs for its speed and simplicity. 
+ 
+    range : (float, float), optional 
+        The lower and upper range of the bins.  If not provided, range 
+        is simply ``(a.min(), a.max())``.  Values outside the range are 
+        ignored. The first element of the range must be less than or 
+        equal to the second. `range` affects the automatic bin 
+        computation as well. While bin width is computed to be optimal 
+        based on the actual data within `range`, the bin count will fill 
+        the entire range including portions containing no data. 
+ 
+    weights : array_like, optional 
+        An array of weights, of the same shape as `a`.  Each value in 
+        `a` only contributes its associated weight towards the bin count 
+        (instead of 1). This is currently not used by any of the bin estimators, 
+        but may be in the future. 
+ 
+    Returns 
+    ------- 
+    bin_edges : array of dtype float 
+        The edges to pass into `histogram` 
+ 
+    See Also 
+    -------- 
+    histogram 
+ 
+    Notes 
+    ----- 
+    The methods to estimate the optimal number of bins are well founded 
+    in literature, and are inspired by the choices R provides for 
+    histogram visualisation. Note that having the number of bins 
+    proportional to :math:`n^{1/3}` is asymptotically optimal, which is 
+    why it appears in most estimators. These are simply plug-in methods 
+    that give good starting points for number of bins. In the equations 
+    below, :math:`h` is the binwidth and :math:`n_h` is the number of 
+    bins. All estimators that compute bin counts are recast to bin width 
+    using the `ptp` of the data. The final bin count is obtained from 
+    ``np.round(np.ceil(range / h))``. The final bin width is often less  
+    than what is returned by the estimators below. 
+ 
+    'auto' (maximum of the 'sturges' and 'fd' estimators) 
+        A compromise to get a good value. For small datasets the Sturges 
+        value will usually be chosen, while larger datasets will usually 
+        default to FD.  Avoids the overly conservative behaviour of FD 
+        and Sturges for small and large datasets respectively. 
+        Switchover point is usually :math:`a.size \approx 1000`. 
+ 
+    'fd' (Freedman Diaconis Estimator) 
+        .. math:: h = 2 \frac{IQR}{n^{1/3}} 
+ 
+        The binwidth is proportional to the interquartile range (IQR) 
+        and inversely proportional to cube root of a.size. Can be too 
+        conservative for small datasets, but is quite good for large 
+        datasets. The IQR is very robust to outliers. 
+ 
+    'scott' 
+        .. math:: h = \sigma \sqrt[3]{\frac{24 * \sqrt{\pi}}{n}} 
+ 
+        The binwidth is proportional to the standard deviation of the 
+        data and inversely proportional to cube root of ``x.size``. Can 
+        be too conservative for small datasets, but is quite good for 
+        large datasets. The standard deviation is not very robust to 
+        outliers. Values are very similar to the Freedman-Diaconis 
+        estimator in the absence of outliers. 
+ 
+    'rice' 
+        .. math:: n_h = 2n^{1/3} 
+ 
+        The number of bins is only proportional to cube root of 
+        ``a.size``. It tends to overestimate the number of bins and it 
+        does not take into account data variability. 
+ 
+    'sturges' 
+        .. math:: n_h = \log _{2}n+1 
+ 
+        The number of bins is the base 2 log of ``a.size``.  This 
+        estimator assumes normality of data and is too conservative for 
+        larger, non-normal datasets. This is the default method in R's 
+        ``hist`` method. 
+ 
+    'doane' 
+        .. math:: n_h = 1 + \log_{2}(n) + 
+                        \log_{2}(1 + \frac{|g_1|}{\sigma_{g_1}}) 
+ 
+            g_1 = mean[(\frac{x - \mu}{\sigma})^3] 
+ 
+            \sigma_{g_1} = \sqrt{\frac{6(n - 2)}{(n + 1)(n + 3)}} 
+ 
+        An improved version of Sturges' formula that produces better 
+        estimates for non-normal datasets. This estimator attempts to 
+        account for the skew of the data. 
+ 
+    'sqrt' 
+        .. math:: n_h = \sqrt n 
+ 
+        The simplest and fastest estimator. Only takes into account the 
+        data size. 
+ 
+    Examples 
+    -------- 
+    &gt;&gt;&gt; arr = np.array([0, 0, 0, 1, 2, 3, 3, 4, 5]) 
+    &gt;&gt;&gt; np.histogram_bin_edges(arr, bins='auto', range=(0, 1)) 
+    array([0.  , 0.25, 0.5 , 0.75, 1.  ]) 
+    &gt;&gt;&gt; np.histogram_bin_edges(arr, bins=2) 
+    array([0. , 2.5, 5. ]) 
+ 
+    For consistency with histogram, an array of pre-computed bins is 
+    passed through unmodified: 
+ 
+    &gt;&gt;&gt; np.histogram_bin_edges(arr, [1, 2]) 
+    array([1, 2]) 
+ 
+    This function allows one set of bins to be computed, and reused across 
+    multiple histograms: 
+ 
+    &gt;&gt;&gt; shared_bins = np.histogram_bin_edges(arr, bins='auto') 
+    &gt;&gt;&gt; shared_bins 
+    array([0., 1., 2., 3., 4., 5.]) 
+ 
+    &gt;&gt;&gt; group_id = np.array([0, 1, 1, 0, 1, 1, 0, 1, 1]) 
+    &gt;&gt;&gt; hist_0, _ = np.histogram(arr[group_id == 0], bins=shared_bins) 
+    &gt;&gt;&gt; hist_1, _ = np.histogram(arr[group_id == 1], bins=shared_bins) 
+ 
+    &gt;&gt;&gt; hist_0; hist_1 
+    array([1, 1, 0, 1, 0]) 
+    array([2, 0, 1, 1, 2]) 
+ 
+    Which gives more easily comparable results than using separate bins for 
+    each histogram: 
+ 
+    &gt;&gt;&gt; hist_0, bins_0 = np.histogram(arr[group_id == 0], bins='auto') 
+    &gt;&gt;&gt; hist_1, bins_1 = np.histogram(arr[group_id == 1], bins='auto') 
+    &gt;&gt;&gt; hist_0; hist_1 
+    array([1, 1, 1]) 
+    array([2, 1, 1, 2]) 
+    &gt;&gt;&gt; bins_0; bins_1 
+    array([0., 1., 2., 3.]) 
+    array([0.  , 1.25, 2.5 , 3.75, 5.  ]) 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s1">a</span><span class="s2">, </span><span class="s1">weights = _ravel_and_check_weights(a</span><span class="s2">, </span><span class="s1">weights)</span>
+    <span class="s1">bin_edges</span><span class="s2">, </span><span class="s1">_ = _get_bin_edges(a</span><span class="s2">, </span><span class="s1">bins</span><span class="s2">, </span><span class="s1">range</span><span class="s2">, </span><span class="s1">weights)</span>
+    <span class="s2">return </span><span class="s1">bin_edges</span>
+
+
+<span class="s2">def </span><span class="s1">_histogram_dispatcher(</span>
+        <span class="s1">a</span><span class="s2">, </span><span class="s1">bins=</span><span class="s2">None, </span><span class="s1">range=</span><span class="s2">None, </span><span class="s1">normed=</span><span class="s2">None, </span><span class="s1">weights=</span><span class="s2">None, </span><span class="s1">density=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s2">return </span><span class="s1">(a</span><span class="s2">, </span><span class="s1">bins</span><span class="s2">, </span><span class="s1">weights)</span>
+
+
+<span class="s1">@array_function_dispatch(_histogram_dispatcher)</span>
+<span class="s2">def </span><span class="s1">histogram(a</span><span class="s2">, </span><span class="s1">bins=</span><span class="s5">10</span><span class="s2">, </span><span class="s1">range=</span><span class="s2">None, </span><span class="s1">normed=</span><span class="s2">None, </span><span class="s1">weights=</span><span class="s2">None,</span>
+              <span class="s1">density=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s0">r&quot;&quot;&quot; 
+    Compute the histogram of a dataset. 
+ 
+    Parameters 
+    ---------- 
+    a : array_like 
+        Input data. The histogram is computed over the flattened array. 
+    bins : int or sequence of scalars or str, optional 
+        If `bins` is an int, it defines the number of equal-width 
+        bins in the given range (10, by default). If `bins` is a 
+        sequence, it defines a monotonically increasing array of bin edges, 
+        including the rightmost edge, allowing for non-uniform bin widths. 
+ 
+        .. versionadded:: 1.11.0 
+ 
+        If `bins` is a string, it defines the method used to calculate the 
+        optimal bin width, as defined by `histogram_bin_edges`. 
+ 
+    range : (float, float), optional 
+        The lower and upper range of the bins.  If not provided, range 
+        is simply ``(a.min(), a.max())``.  Values outside the range are 
+        ignored. The first element of the range must be less than or 
+        equal to the second. `range` affects the automatic bin 
+        computation as well. While bin width is computed to be optimal 
+        based on the actual data within `range`, the bin count will fill 
+        the entire range including portions containing no data. 
+    normed : bool, optional 
+ 
+        .. deprecated:: 1.6.0 
+ 
+        This is equivalent to the `density` argument, but produces incorrect 
+        results for unequal bin widths. It should not be used. 
+ 
+        .. versionchanged:: 1.15.0 
+            DeprecationWarnings are actually emitted. 
+ 
+    weights : array_like, optional 
+        An array of weights, of the same shape as `a`.  Each value in 
+        `a` only contributes its associated weight towards the bin count 
+        (instead of 1). If `density` is True, the weights are 
+        normalized, so that the integral of the density over the range 
+        remains 1. 
+    density : bool, optional 
+        If ``False``, the result will contain the number of samples in 
+        each bin. If ``True``, the result is the value of the 
+        probability *density* function at the bin, normalized such that 
+        the *integral* over the range is 1. Note that the sum of the 
+        histogram values will not be equal to 1 unless bins of unity 
+        width are chosen; it is not a probability *mass* function. 
+ 
+        Overrides the ``normed`` keyword if given. 
+ 
+    Returns 
+    ------- 
+    hist : array 
+        The values of the histogram. See `density` and `weights` for a 
+        description of the possible semantics. 
+    bin_edges : array of dtype float 
+        Return the bin edges ``(length(hist)+1)``. 
+ 
+ 
+    See Also 
+    -------- 
+    histogramdd, bincount, searchsorted, digitize, histogram_bin_edges 
+ 
+    Notes 
+    ----- 
+    All but the last (righthand-most) bin is half-open.  In other words, 
+    if `bins` is:: 
+ 
+      [1, 2, 3, 4] 
+ 
+    then the first bin is ``[1, 2)`` (including 1, but excluding 2) and 
+    the second ``[2, 3)``.  The last bin, however, is ``[3, 4]``, which 
+    *includes* 4. 
+ 
+ 
+    Examples 
+    -------- 
+    &gt;&gt;&gt; np.histogram([1, 2, 1], bins=[0, 1, 2, 3]) 
+    (array([0, 2, 1]), array([0, 1, 2, 3])) 
+    &gt;&gt;&gt; np.histogram(np.arange(4), bins=np.arange(5), density=True) 
+    (array([0.25, 0.25, 0.25, 0.25]), array([0, 1, 2, 3, 4])) 
+    &gt;&gt;&gt; np.histogram([[1, 2, 1], [1, 0, 1]], bins=[0,1,2,3]) 
+    (array([1, 4, 1]), array([0, 1, 2, 3])) 
+ 
+    &gt;&gt;&gt; a = np.arange(5) 
+    &gt;&gt;&gt; hist, bin_edges = np.histogram(a, density=True) 
+    &gt;&gt;&gt; hist 
+    array([0.5, 0. , 0.5, 0. , 0. , 0.5, 0. , 0.5, 0. , 0.5]) 
+    &gt;&gt;&gt; hist.sum() 
+    2.4999999999999996 
+    &gt;&gt;&gt; np.sum(hist * np.diff(bin_edges)) 
+    1.0 
+ 
+    .. versionadded:: 1.11.0 
+ 
+    Automated Bin Selection Methods example, using 2 peak random data 
+    with 2000 points: 
+ 
+    &gt;&gt;&gt; import matplotlib.pyplot as plt 
+    &gt;&gt;&gt; rng = np.random.RandomState(10)  # deterministic random data 
+    &gt;&gt;&gt; a = np.hstack((rng.normal(size=1000), 
+    ...                rng.normal(loc=5, scale=2, size=1000))) 
+    &gt;&gt;&gt; _ = plt.hist(a, bins='auto')  # arguments are passed to np.histogram 
+    &gt;&gt;&gt; plt.title(&quot;Histogram with 'auto' bins&quot;) 
+    Text(0.5, 1.0, &quot;Histogram with 'auto' bins&quot;) 
+    &gt;&gt;&gt; plt.show() 
+ 
+    &quot;&quot;&quot;</span>
+    <span class="s1">a</span><span class="s2">, </span><span class="s1">weights = _ravel_and_check_weights(a</span><span class="s2">, </span><span class="s1">weights)</span>
+
+    <span class="s1">bin_edges</span><span class="s2">, </span><span class="s1">uniform_bins = _get_bin_edges(a</span><span class="s2">, </span><span class="s1">bins</span><span class="s2">, </span><span class="s1">range</span><span class="s2">, </span><span class="s1">weights)</span>
+
+    <span class="s4"># Histogram is an integer or a float array depending on the weights.</span>
+    <span class="s2">if </span><span class="s1">weights </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">ntype = np.dtype(np.intp)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">ntype = weights.dtype</span>
+
+    <span class="s4"># We set a block size, as this allows us to iterate over chunks when</span>
+    <span class="s4"># computing histograms, to minimize memory usage.</span>
+    <span class="s1">BLOCK = </span><span class="s5">65536</span>
+
+    <span class="s4"># The fast path uses bincount, but that only works for certain types</span>
+    <span class="s4"># of weight</span>
+    <span class="s1">simple_weights = (</span>
+        <span class="s1">weights </span><span class="s2">is None or</span>
+        <span class="s1">np.can_cast(weights.dtype</span><span class="s2">, </span><span class="s1">np.double) </span><span class="s2">or</span>
+        <span class="s1">np.can_cast(weights.dtype</span><span class="s2">, </span><span class="s1">complex)</span>
+    <span class="s1">)</span>
+
+    <span class="s2">if </span><span class="s1">uniform_bins </span><span class="s2">is not None and </span><span class="s1">simple_weights:</span>
+        <span class="s4"># Fast algorithm for equal bins</span>
+        <span class="s4"># We now convert values of a to bin indices, under the assumption of</span>
+        <span class="s4"># equal bin widths (which is valid here).</span>
+        <span class="s1">first_edge</span><span class="s2">, </span><span class="s1">last_edge</span><span class="s2">, </span><span class="s1">n_equal_bins = uniform_bins</span>
+
+        <span class="s4"># Initialize empty histogram</span>
+        <span class="s1">n = np.zeros(n_equal_bins</span><span class="s2">, </span><span class="s1">ntype)</span>
+
+        <span class="s4"># Pre-compute histogram scaling factor</span>
+        <span class="s1">norm = n_equal_bins / _unsigned_subtract(last_edge</span><span class="s2">, </span><span class="s1">first_edge)</span>
+
+        <span class="s4"># We iterate over blocks here for two reasons: the first is that for</span>
+        <span class="s4"># large arrays, it is actually faster (for example for a 10^8 array it</span>
+        <span class="s4"># is 2x as fast) and it results in a memory footprint 3x lower in the</span>
+        <span class="s4"># limit of large arrays.</span>
+        <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">_range(</span><span class="s5">0</span><span class="s2">, </span><span class="s1">len(a)</span><span class="s2">, </span><span class="s1">BLOCK):</span>
+            <span class="s1">tmp_a = a[i:i+BLOCK]</span>
+            <span class="s2">if </span><span class="s1">weights </span><span class="s2">is None</span><span class="s1">:</span>
+                <span class="s1">tmp_w = </span><span class="s2">None</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">tmp_w = weights[i:i + BLOCK]</span>
+
+            <span class="s4"># Only include values in the right range</span>
+            <span class="s1">keep = (tmp_a &gt;= first_edge)</span>
+            <span class="s1">keep &amp;= (tmp_a &lt;= last_edge)</span>
+            <span class="s2">if not </span><span class="s1">np.logical_and.reduce(keep):</span>
+                <span class="s1">tmp_a = tmp_a[keep]</span>
+                <span class="s2">if </span><span class="s1">tmp_w </span><span class="s2">is not None</span><span class="s1">:</span>
+                    <span class="s1">tmp_w = tmp_w[keep]</span>
+
+            <span class="s4"># This cast ensures no type promotions occur below, which gh-10322</span>
+            <span class="s4"># make unpredictable. Getting it wrong leads to precision errors</span>
+            <span class="s4"># like gh-8123.</span>
+            <span class="s1">tmp_a = tmp_a.astype(bin_edges.dtype</span><span class="s2">, </span><span class="s1">copy=</span><span class="s2">False</span><span class="s1">)</span>
+
+            <span class="s4"># Compute the bin indices, and for values that lie exactly on</span>
+            <span class="s4"># last_edge we need to subtract one</span>
+            <span class="s1">f_indices = _unsigned_subtract(tmp_a</span><span class="s2">, </span><span class="s1">first_edge) * norm</span>
+            <span class="s1">indices = f_indices.astype(np.intp)</span>
+            <span class="s1">indices[indices == n_equal_bins] -= </span><span class="s5">1</span>
+
+            <span class="s4"># The index computation is not guaranteed to give exactly</span>
+            <span class="s4"># consistent results within ~1 ULP of the bin edges.</span>
+            <span class="s1">decrement = tmp_a &lt; bin_edges[indices]</span>
+            <span class="s1">indices[decrement] -= </span><span class="s5">1</span>
+            <span class="s4"># The last bin includes the right edge. The other bins do not.</span>
+            <span class="s1">increment = ((tmp_a &gt;= bin_edges[indices + </span><span class="s5">1</span><span class="s1">])</span>
+                         <span class="s1">&amp; (indices != n_equal_bins - </span><span class="s5">1</span><span class="s1">))</span>
+            <span class="s1">indices[increment] += </span><span class="s5">1</span>
+
+            <span class="s4"># We now compute the histogram using bincount</span>
+            <span class="s2">if </span><span class="s1">ntype.kind == </span><span class="s3">'c'</span><span class="s1">:</span>
+                <span class="s1">n.real += np.bincount(indices</span><span class="s2">, </span><span class="s1">weights=tmp_w.real</span><span class="s2">,</span>
+                                      <span class="s1">minlength=n_equal_bins)</span>
+                <span class="s1">n.imag += np.bincount(indices</span><span class="s2">, </span><span class="s1">weights=tmp_w.imag</span><span class="s2">,</span>
+                                      <span class="s1">minlength=n_equal_bins)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">n += np.bincount(indices</span><span class="s2">, </span><span class="s1">weights=tmp_w</span><span class="s2">,</span>
+                                 <span class="s1">minlength=n_equal_bins).astype(ntype)</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s4"># Compute via cumulative histogram</span>
+        <span class="s1">cum_n = np.zeros(bin_edges.shape</span><span class="s2">, </span><span class="s1">ntype)</span>
+        <span class="s2">if </span><span class="s1">weights </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">_range(</span><span class="s5">0</span><span class="s2">, </span><span class="s1">len(a)</span><span class="s2">, </span><span class="s1">BLOCK):</span>
+                <span class="s1">sa = np.sort(a[i:i+BLOCK])</span>
+                <span class="s1">cum_n += _search_sorted_inclusive(sa</span><span class="s2">, </span><span class="s1">bin_edges)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">zero = np.zeros(</span><span class="s5">1</span><span class="s2">, </span><span class="s1">dtype=ntype)</span>
+            <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">_range(</span><span class="s5">0</span><span class="s2">, </span><span class="s1">len(a)</span><span class="s2">, </span><span class="s1">BLOCK):</span>
+                <span class="s1">tmp_a = a[i:i+BLOCK]</span>
+                <span class="s1">tmp_w = weights[i:i+BLOCK]</span>
+                <span class="s1">sorting_index = np.argsort(tmp_a)</span>
+                <span class="s1">sa = tmp_a[sorting_index]</span>
+                <span class="s1">sw = tmp_w[sorting_index]</span>
+                <span class="s1">cw = np.concatenate((zero</span><span class="s2">, </span><span class="s1">sw.cumsum()))</span>
+                <span class="s1">bin_index = _search_sorted_inclusive(sa</span><span class="s2">, </span><span class="s1">bin_edges)</span>
+                <span class="s1">cum_n += cw[bin_index]</span>
+
+        <span class="s1">n = np.diff(cum_n)</span>
+
+    <span class="s4"># density overrides the normed keyword</span>
+    <span class="s2">if </span><span class="s1">density </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">normed </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s4"># 2018-06-13, numpy 1.15.0 (this was not noisily deprecated in 1.6)</span>
+            <span class="s1">warnings.warn(</span>
+                    <span class="s3">&quot;The normed argument is ignored when density is provided. &quot;</span>
+                    <span class="s3">&quot;In future passing both will result in an error.&quot;</span><span class="s2">,</span>
+                    <span class="s1">DeprecationWarning</span><span class="s2">, </span><span class="s1">stacklevel=</span><span class="s5">3</span><span class="s1">)</span>
+        <span class="s1">normed = </span><span class="s2">None</span>
+
+    <span class="s2">if </span><span class="s1">density:</span>
+        <span class="s1">db = np.array(np.diff(bin_edges)</span><span class="s2">, </span><span class="s1">float)</span>
+        <span class="s2">return </span><span class="s1">n/db/n.sum()</span><span class="s2">, </span><span class="s1">bin_edges</span>
+    <span class="s2">elif </span><span class="s1">normed:</span>
+        <span class="s4"># 2018-06-13, numpy 1.15.0 (this was not noisily deprecated in 1.6)</span>
+        <span class="s1">warnings.warn(</span>
+                <span class="s3">&quot;Passing `normed=True` on non-uniform bins has always been &quot;</span>
+                <span class="s3">&quot;broken, and computes neither the probability density &quot;</span>
+                <span class="s3">&quot;function nor the probability mass function. &quot;</span>
+                <span class="s3">&quot;The result is only correct if the bins are uniform, when &quot;</span>
+                <span class="s3">&quot;density=True will produce the same result anyway. &quot;</span>
+                <span class="s3">&quot;The argument will be removed in a future version of &quot;</span>
+                <span class="s3">&quot;numpy.&quot;</span><span class="s2">,</span>
+                <span class="s1">np.VisibleDeprecationWarning</span><span class="s2">, </span><span class="s1">stacklevel=</span><span class="s5">3</span><span class="s1">)</span>
+
+        <span class="s4"># this normalization is incorrect, but</span>
+        <span class="s1">db = np.array(np.diff(bin_edges)</span><span class="s2">, </span><span class="s1">float)</span>
+        <span class="s2">return </span><span class="s1">n/(n*db).sum()</span><span class="s2">, </span><span class="s1">bin_edges</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">normed </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s4"># 2018-06-13, numpy 1.15.0 (this was not noisily deprecated in 1.6)</span>
+            <span class="s1">warnings.warn(</span>
+                    <span class="s3">&quot;Passing normed=False is deprecated, and has no effect. &quot;</span>
+                    <span class="s3">&quot;Consider passing the density argument instead.&quot;</span><span class="s2">,</span>
+                    <span class="s1">DeprecationWarning</span><span class="s2">, </span><span class="s1">stacklevel=</span><span class="s5">3</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">n</span><span class="s2">, </span><span class="s1">bin_edges</span>
+
+
+<span class="s2">def </span><span class="s1">_histogramdd_dispatcher(sample</span><span class="s2">, </span><span class="s1">bins=</span><span class="s2">None, </span><span class="s1">range=</span><span class="s2">None, </span><span class="s1">normed=</span><span class="s2">None,</span>
+                            <span class="s1">weights=</span><span class="s2">None, </span><span class="s1">density=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s2">if </span><span class="s1">hasattr(sample</span><span class="s2">, </span><span class="s3">'shape'</span><span class="s1">):  </span><span class="s4"># same condition as used in histogramdd</span>
+        <span class="s2">yield </span><span class="s1">sample</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">yield from </span><span class="s1">sample</span>
+    <span class="s2">with </span><span class="s1">contextlib.suppress(TypeError):</span>
+        <span class="s2">yield from </span><span class="s1">bins</span>
+    <span class="s2">yield </span><span class="s1">weights</span>
+
+
+<span class="s1">@array_function_dispatch(_histogramdd_dispatcher)</span>
+<span class="s2">def </span><span class="s1">histogramdd(sample</span><span class="s2">, </span><span class="s1">bins=</span><span class="s5">10</span><span class="s2">, </span><span class="s1">range=</span><span class="s2">None, </span><span class="s1">normed=</span><span class="s2">None, </span><span class="s1">weights=</span><span class="s2">None,</span>
+                <span class="s1">density=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Compute the multidimensional histogram of some data. 
+ 
+    Parameters 
+    ---------- 
+    sample : (N, D) array, or (D, N) array_like 
+        The data to be histogrammed. 
+ 
+        Note the unusual interpretation of sample when an array_like: 
+ 
+        * When an array, each row is a coordinate in a D-dimensional space - 
+          such as ``histogramdd(np.array([p1, p2, p3]))``. 
+        * When an array_like, each element is the list of values for single 
+          coordinate - such as ``histogramdd((X, Y, Z))``. 
+ 
+        The first form should be preferred. 
+ 
+    bins : sequence or int, optional 
+        The bin specification: 
+ 
+        * A sequence of arrays describing the monotonically increasing bin 
+          edges along each dimension. 
+        * The number of bins for each dimension (nx, ny, ... =bins) 
+        * The number of bins for all dimensions (nx=ny=...=bins). 
+ 
+    range : sequence, optional 
+        A sequence of length D, each an optional (lower, upper) tuple giving 
+        the outer bin edges to be used if the edges are not given explicitly in 
+        `bins`. 
+        An entry of None in the sequence results in the minimum and maximum 
+        values being used for the corresponding dimension. 
+        The default, None, is equivalent to passing a tuple of D None values. 
+    density : bool, optional 
+        If False, the default, returns the number of samples in each bin. 
+        If True, returns the probability *density* function at the bin, 
+        ``bin_count / sample_count / bin_volume``. 
+    normed : bool, optional 
+        An alias for the density argument that behaves identically. To avoid 
+        confusion with the broken normed argument to `histogram`, `density` 
+        should be preferred. 
+    weights : (N,) array_like, optional 
+        An array of values `w_i` weighing each sample `(x_i, y_i, z_i, ...)`. 
+        Weights are normalized to 1 if normed is True. If normed is False, 
+        the values of the returned histogram are equal to the sum of the 
+        weights belonging to the samples falling into each bin. 
+ 
+    Returns 
+    ------- 
+    H : ndarray 
+        The multidimensional histogram of sample x. See normed and weights 
+        for the different possible semantics. 
+    edges : list 
+        A list of D arrays describing the bin edges for each dimension. 
+ 
+    See Also 
+    -------- 
+    histogram: 1-D histogram 
+    histogram2d: 2-D histogram 
+ 
+    Examples 
+    -------- 
+    &gt;&gt;&gt; r = np.random.randn(100,3) 
+    &gt;&gt;&gt; H, edges = np.histogramdd(r, bins = (5, 8, 4)) 
+    &gt;&gt;&gt; H.shape, edges[0].size, edges[1].size, edges[2].size 
+    ((5, 8, 4), 6, 9, 5) 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s4"># Sample is an ND-array.</span>
+        <span class="s1">N</span><span class="s2">, </span><span class="s1">D = sample.shape</span>
+    <span class="s2">except </span><span class="s1">(AttributeError</span><span class="s2">, </span><span class="s1">ValueError):</span>
+        <span class="s4"># Sample is a sequence of 1D arrays.</span>
+        <span class="s1">sample = np.atleast_2d(sample).T</span>
+        <span class="s1">N</span><span class="s2">, </span><span class="s1">D = sample.shape</span>
+
+    <span class="s1">nbin = np.empty(D</span><span class="s2">, </span><span class="s1">int)</span>
+    <span class="s1">edges = D*[</span><span class="s2">None</span><span class="s1">]</span>
+    <span class="s1">dedges = D*[</span><span class="s2">None</span><span class="s1">]</span>
+    <span class="s2">if </span><span class="s1">weights </span><span class="s2">is not None</span><span class="s1">:</span>
+        <span class="s1">weights = np.asarray(weights)</span>
+
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">M = len(bins)</span>
+        <span class="s2">if </span><span class="s1">M != D:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span>
+                <span class="s3">'The dimension of bins must be equal to the dimension of the '</span>
+                <span class="s3">' sample x.'</span><span class="s1">)</span>
+    <span class="s2">except </span><span class="s1">TypeError:</span>
+        <span class="s4"># bins is an integer</span>
+        <span class="s1">bins = D*[bins]</span>
+
+    <span class="s4"># normalize the range argument</span>
+    <span class="s2">if </span><span class="s1">range </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s1">range = (</span><span class="s2">None,</span><span class="s1">) * D</span>
+    <span class="s2">elif </span><span class="s1">len(range) != D:</span>
+        <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s3">'range argument must have one entry per dimension'</span><span class="s1">)</span>
+
+    <span class="s4"># Create edge arrays</span>
+    <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">_range(D):</span>
+        <span class="s2">if </span><span class="s1">np.ndim(bins[i]) == </span><span class="s5">0</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">bins[i] &lt; </span><span class="s5">1</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span>
+                    <span class="s3">'`bins[{}]` must be positive, when an integer'</span><span class="s1">.format(i))</span>
+            <span class="s1">smin</span><span class="s2">, </span><span class="s1">smax = _get_outer_edges(sample[:</span><span class="s2">,</span><span class="s1">i]</span><span class="s2">, </span><span class="s1">range[i])</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">n = operator.index(bins[i])</span>
+            
+            <span class="s2">except </span><span class="s1">TypeError </span><span class="s2">as </span><span class="s1">e:</span>
+                <span class="s2">raise </span><span class="s1">TypeError(</span>
+                	<span class="s3">&quot;`bins[{}]` must be an integer, when a scalar&quot;</span><span class="s1">.format(i)</span>
+                <span class="s1">) </span><span class="s2">from </span><span class="s1">e</span>
+                
+            <span class="s1">edges[i] = np.linspace(smin</span><span class="s2">, </span><span class="s1">smax</span><span class="s2">, </span><span class="s1">n + </span><span class="s5">1</span><span class="s1">)    </span>
+        <span class="s2">elif </span><span class="s1">np.ndim(bins[i]) == </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s1">edges[i] = np.asarray(bins[i])</span>
+            <span class="s2">if </span><span class="s1">np.any(edges[i][:-</span><span class="s5">1</span><span class="s1">] &gt; edges[i][</span><span class="s5">1</span><span class="s1">:]):</span>
+                <span class="s2">raise </span><span class="s1">ValueError(</span>
+                    <span class="s3">'`bins[{}]` must be monotonically increasing, when an array'</span>
+                    <span class="s1">.format(i))</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span>
+                <span class="s3">'`bins[{}]` must be a scalar or 1d array'</span><span class="s1">.format(i))</span>
+
+        <span class="s1">nbin[i] = len(edges[i]) + </span><span class="s5">1  </span><span class="s4"># includes an outlier on each end</span>
+        <span class="s1">dedges[i] = np.diff(edges[i])</span>
+
+    <span class="s4"># Compute the bin number each sample falls into.</span>
+    <span class="s1">Ncount = tuple(</span>
+        <span class="s4"># avoid np.digitize to work around gh-11022</span>
+        <span class="s1">np.searchsorted(edges[i]</span><span class="s2">, </span><span class="s1">sample[:</span><span class="s2">, </span><span class="s1">i]</span><span class="s2">, </span><span class="s1">side=</span><span class="s3">'right'</span><span class="s1">)</span>
+        <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">_range(D)</span>
+    <span class="s1">)</span>
+
+    <span class="s4"># Using digitize, values that fall on an edge are put in the right bin.</span>
+    <span class="s4"># For the rightmost bin, we want values equal to the right edge to be</span>
+    <span class="s4"># counted in the last bin, and not as an outlier.</span>
+    <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">_range(D):</span>
+        <span class="s4"># Find which points are on the rightmost edge.</span>
+        <span class="s1">on_edge = (sample[:</span><span class="s2">, </span><span class="s1">i] == edges[i][-</span><span class="s5">1</span><span class="s1">])</span>
+        <span class="s4"># Shift these points one bin to the left.</span>
+        <span class="s1">Ncount[i][on_edge] -= </span><span class="s5">1</span>
+
+    <span class="s4"># Compute the sample indices in the flattened histogram matrix.</span>
+    <span class="s4"># This raises an error if the array is too large.</span>
+    <span class="s1">xy = np.ravel_multi_index(Ncount</span><span class="s2">, </span><span class="s1">nbin)</span>
+
+    <span class="s4"># Compute the number of repetitions in xy and assign it to the</span>
+    <span class="s4"># flattened histmat.</span>
+    <span class="s1">hist = np.bincount(xy</span><span class="s2">, </span><span class="s1">weights</span><span class="s2">, </span><span class="s1">minlength=nbin.prod())</span>
+
+    <span class="s4"># Shape into a proper matrix</span>
+    <span class="s1">hist = hist.reshape(nbin)</span>
+
+    <span class="s4"># This preserves the (bad) behavior observed in gh-7845, for now.</span>
+    <span class="s1">hist = hist.astype(float</span><span class="s2">, </span><span class="s1">casting=</span><span class="s3">'safe'</span><span class="s1">)</span>
+
+    <span class="s4"># Remove outliers (indices 0 and -1 for each dimension).</span>
+    <span class="s1">core = D*(slice(</span><span class="s5">1</span><span class="s2">, </span><span class="s1">-</span><span class="s5">1</span><span class="s1">)</span><span class="s2">,</span><span class="s1">)</span>
+    <span class="s1">hist = hist[core]</span>
+
+    <span class="s4"># handle the aliasing normed argument</span>
+    <span class="s2">if </span><span class="s1">normed </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">density </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">density = </span><span class="s2">False</span>
+    <span class="s2">elif </span><span class="s1">density </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s4"># an explicit normed argument was passed, alias it to the new name</span>
+        <span class="s1">density = normed</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;Cannot specify both 'normed' and 'density'&quot;</span><span class="s1">)</span>
+
+    <span class="s2">if </span><span class="s1">density:</span>
+        <span class="s4"># calculate the probability density function</span>
+        <span class="s1">s = hist.sum()</span>
+        <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">_range(D):</span>
+            <span class="s1">shape = np.ones(D</span><span class="s2">, </span><span class="s1">int)</span>
+            <span class="s1">shape[i] = nbin[i] - </span><span class="s5">2</span>
+            <span class="s1">hist = hist / dedges[i].reshape(shape)</span>
+        <span class="s1">hist /= s</span>
+
+    <span class="s2">if </span><span class="s1">(hist.shape != nbin - </span><span class="s5">2</span><span class="s1">).any():</span>
+        <span class="s2">raise </span><span class="s1">RuntimeError(</span>
+            <span class="s3">&quot;Internal Shape Error&quot;</span><span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">hist</span><span class="s2">, </span><span class="s1">edges</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,273 @@
+<html>
+<head>
+<title>extbuild.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #808080;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+extbuild.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot; 
+Build a c-extension module on-the-fly in tests. 
+See build_and_import_extensions for usage hints 
+ 
+&quot;&quot;&quot;</span>
+
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">pathlib</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">sysconfig</span>
+<span class="s2">from </span><span class="s1">numpy.distutils.ccompiler </span><span class="s2">import </span><span class="s1">new_compiler</span>
+<span class="s2">from </span><span class="s1">distutils.errors </span><span class="s2">import </span><span class="s1">CompileError</span>
+
+<span class="s1">__all__ = [</span><span class="s3">'build_and_import_extension'</span><span class="s2">, </span><span class="s3">'compile_extension_module'</span><span class="s1">]</span>
+
+
+<span class="s2">def </span><span class="s1">build_and_import_extension(</span>
+        <span class="s1">modname</span><span class="s2">, </span><span class="s1">functions</span><span class="s2">, </span><span class="s1">*</span><span class="s2">, </span><span class="s1">prologue=</span><span class="s3">&quot;&quot;</span><span class="s2">, </span><span class="s1">build_dir=</span><span class="s2">None,</span>
+        <span class="s1">include_dirs=[]</span><span class="s2">, </span><span class="s1">more_init=</span><span class="s3">&quot;&quot;</span><span class="s1">):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Build and imports a c-extension module `modname` from a list of function 
+    fragments `functions`. 
+ 
+ 
+    Parameters 
+    ---------- 
+    functions : list of fragments 
+        Each fragment is a sequence of func_name, calling convention, snippet. 
+    prologue : string 
+        Code to preceed the rest, usually extra ``#include`` or ``#define`` 
+        macros. 
+    build_dir : pathlib.Path 
+        Where to build the module, usually a temporary directory 
+    include_dirs : list 
+        Extra directories to find include files when compiling 
+    more_init : string 
+        Code to appear in the module PyMODINIT_FUNC 
+ 
+    Returns 
+    ------- 
+    out: module 
+        The module will have been loaded and is ready for use 
+ 
+    Examples 
+    -------- 
+    &gt;&gt;&gt; functions = [(&quot;test_bytes&quot;, &quot;METH_O&quot;, \&quot;\&quot;\&quot; 
+        if ( !PyBytesCheck(args)) { 
+            Py_RETURN_FALSE; 
+        } 
+        Py_RETURN_TRUE; 
+    \&quot;\&quot;\&quot;)] 
+    &gt;&gt;&gt; mod = build_and_import_extension(&quot;testme&quot;, functions) 
+    &gt;&gt;&gt; assert not mod.test_bytes(u'abc') 
+    &gt;&gt;&gt; assert mod.test_bytes(b'abc') 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">body = prologue + _make_methods(functions</span><span class="s2">, </span><span class="s1">modname)</span>
+    <span class="s1">init = </span><span class="s3">&quot;&quot;&quot;PyObject *mod = PyModule_Create(&amp;moduledef); 
+           &quot;&quot;&quot;</span>
+    <span class="s2">if not </span><span class="s1">build_dir:</span>
+        <span class="s1">build_dir = pathlib.Path(</span><span class="s3">'.'</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">more_init:</span>
+        <span class="s1">init += </span><span class="s3">&quot;&quot;&quot;#define INITERROR return NULL 
+                &quot;&quot;&quot;</span>
+        <span class="s1">init += more_init</span>
+    <span class="s1">init += </span><span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">return mod;&quot;</span>
+    <span class="s1">source_string = _make_source(modname</span><span class="s2">, </span><span class="s1">init</span><span class="s2">, </span><span class="s1">body)</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">mod_so = compile_extension_module(</span>
+            <span class="s1">modname</span><span class="s2">, </span><span class="s1">build_dir</span><span class="s2">, </span><span class="s1">include_dirs</span><span class="s2">, </span><span class="s1">source_string)</span>
+    <span class="s2">except </span><span class="s1">CompileError </span><span class="s2">as </span><span class="s1">e:</span>
+        <span class="s4"># shorten the exception chain</span>
+        <span class="s2">raise </span><span class="s1">RuntimeError(</span><span class="s3">f&quot;could not compile in </span><span class="s2">{</span><span class="s1">build_dir</span><span class="s2">}</span><span class="s3">:&quot;</span><span class="s1">) </span><span class="s2">from </span><span class="s1">e</span>
+    <span class="s2">import </span><span class="s1">importlib.util</span>
+    <span class="s1">spec = importlib.util.spec_from_file_location(modname</span><span class="s2">, </span><span class="s1">mod_so)</span>
+    <span class="s1">foo = importlib.util.module_from_spec(spec)</span>
+    <span class="s1">spec.loader.exec_module(foo)</span>
+    <span class="s2">return </span><span class="s1">foo</span>
+
+
+<span class="s2">def </span><span class="s1">compile_extension_module(</span>
+        <span class="s1">name</span><span class="s2">, </span><span class="s1">builddir</span><span class="s2">, </span><span class="s1">include_dirs</span><span class="s2">,</span>
+        <span class="s1">source_string</span><span class="s2">, </span><span class="s1">libraries=[]</span><span class="s2">, </span><span class="s1">library_dirs=[]):</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Build an extension module and return the filename of the resulting 
+    native code file. 
+ 
+    Parameters 
+    ---------- 
+    name : string 
+        name of the module, possibly including dots if it is a module inside a 
+        package. 
+    builddir : pathlib.Path 
+        Where to build the module, usually a temporary directory 
+    include_dirs : list 
+        Extra directories to find include files when compiling 
+    libraries : list 
+        Libraries to link into the extension module 
+    library_dirs: list 
+        Where to find the libraries, ``-L`` passed to the linker 
+    &quot;&quot;&quot;</span>
+    <span class="s1">modname = name.split(</span><span class="s3">'.'</span><span class="s1">)[-</span><span class="s5">1</span><span class="s1">]</span>
+    <span class="s1">dirname = builddir / name</span>
+    <span class="s1">dirname.mkdir(exist_ok=</span><span class="s2">True</span><span class="s1">)</span>
+    <span class="s1">cfile = _convert_str_to_file(source_string</span><span class="s2">, </span><span class="s1">dirname)</span>
+    <span class="s1">include_dirs = [sysconfig.get_config_var(</span><span class="s3">'INCLUDEPY'</span><span class="s1">)] + include_dirs</span>
+
+    <span class="s2">return </span><span class="s1">_c_compile(</span>
+        <span class="s1">cfile</span><span class="s2">, </span><span class="s1">outputfilename=dirname / modname</span><span class="s2">,</span>
+        <span class="s1">include_dirs=include_dirs</span><span class="s2">, </span><span class="s1">libraries=[]</span><span class="s2">, </span><span class="s1">library_dirs=[]</span><span class="s2">,</span>
+        <span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">_convert_str_to_file(source</span><span class="s2">, </span><span class="s1">dirname):</span>
+    <span class="s0">&quot;&quot;&quot;Helper function to create a file ``source.c`` in `dirname` that contains 
+    the string in `source`. Returns the file name 
+    &quot;&quot;&quot;</span>
+    <span class="s1">filename = dirname / </span><span class="s3">'source.c'</span>
+    <span class="s2">with </span><span class="s1">filename.open(</span><span class="s3">'w'</span><span class="s1">) </span><span class="s2">as </span><span class="s1">f:</span>
+        <span class="s1">f.write(str(source))</span>
+    <span class="s2">return </span><span class="s1">filename</span>
+
+
+<span class="s2">def </span><span class="s1">_make_methods(functions</span><span class="s2">, </span><span class="s1">modname):</span>
+    <span class="s0">&quot;&quot;&quot; Turns the name, signature, code in functions into complete functions 
+    and lists them in a methods_table. Then turns the methods_table into a 
+    ``PyMethodDef`` structure and returns the resulting code fragment ready 
+    for compilation 
+    &quot;&quot;&quot;</span>
+    <span class="s1">methods_table = []</span>
+    <span class="s1">codes = []</span>
+    <span class="s2">for </span><span class="s1">funcname</span><span class="s2">, </span><span class="s1">flags</span><span class="s2">, </span><span class="s1">code </span><span class="s2">in </span><span class="s1">functions:</span>
+        <span class="s1">cfuncname = </span><span class="s3">&quot;%s_%s&quot; </span><span class="s1">% (modname</span><span class="s2">, </span><span class="s1">funcname)</span>
+        <span class="s2">if </span><span class="s3">'METH_KEYWORDS' </span><span class="s2">in </span><span class="s1">flags:</span>
+            <span class="s1">signature = </span><span class="s3">'(PyObject *self, PyObject *args, PyObject *kwargs)'</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">signature = </span><span class="s3">'(PyObject *self, PyObject *args)'</span>
+        <span class="s1">methods_table.append(</span>
+            <span class="s3">&quot;{</span><span class="s2">\&quot;</span><span class="s3">%s</span><span class="s2">\&quot;</span><span class="s3">, (PyCFunction)%s, %s},&quot; </span><span class="s1">% (funcname</span><span class="s2">, </span><span class="s1">cfuncname</span><span class="s2">, </span><span class="s1">flags))</span>
+        <span class="s1">func_code = </span><span class="s3">&quot;&quot;&quot; 
+        static PyObject* {cfuncname}{signature} 
+        {{ 
+        {code} 
+        }} 
+        &quot;&quot;&quot;</span><span class="s1">.format(cfuncname=cfuncname</span><span class="s2">, </span><span class="s1">signature=signature</span><span class="s2">, </span><span class="s1">code=code)</span>
+        <span class="s1">codes.append(func_code)</span>
+
+    <span class="s1">body = </span><span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">&quot;</span><span class="s1">.join(codes) + </span><span class="s3">&quot;&quot;&quot; 
+    static PyMethodDef methods[] = { 
+    %(methods)s 
+    { NULL } 
+    }; 
+    static struct PyModuleDef moduledef = { 
+        PyModuleDef_HEAD_INIT, 
+        &quot;%(modname)s&quot;,  /* m_name */ 
+        NULL,           /* m_doc */ 
+        -1,             /* m_size */ 
+        methods,        /* m_methods */ 
+    }; 
+    &quot;&quot;&quot; </span><span class="s1">% dict(methods=</span><span class="s3">'</span><span class="s2">\n</span><span class="s3">'</span><span class="s1">.join(methods_table)</span><span class="s2">, </span><span class="s1">modname=modname)</span>
+    <span class="s2">return </span><span class="s1">body</span>
+
+
+<span class="s2">def </span><span class="s1">_make_source(name</span><span class="s2">, </span><span class="s1">init</span><span class="s2">, </span><span class="s1">body):</span>
+    <span class="s0">&quot;&quot;&quot; Combines the code fragments into source code ready to be compiled 
+    &quot;&quot;&quot;</span>
+    <span class="s1">code = </span><span class="s3">&quot;&quot;&quot; 
+    #include &lt;Python.h&gt; 
+ 
+    %(body)s 
+ 
+    PyMODINIT_FUNC 
+    PyInit_%(name)s(void) { 
+    %(init)s 
+    } 
+    &quot;&quot;&quot; </span><span class="s1">% dict(</span>
+        <span class="s1">name=name</span><span class="s2">, </span><span class="s1">init=init</span><span class="s2">, </span><span class="s1">body=body</span><span class="s2">,</span>
+    <span class="s1">)</span>
+    <span class="s2">return </span><span class="s1">code</span>
+
+
+<span class="s2">def </span><span class="s1">_c_compile(cfile</span><span class="s2">, </span><span class="s1">outputfilename</span><span class="s2">, </span><span class="s1">include_dirs=[]</span><span class="s2">, </span><span class="s1">libraries=[]</span><span class="s2">,</span>
+               <span class="s1">library_dirs=[]):</span>
+    <span class="s2">if </span><span class="s1">sys.platform == </span><span class="s3">'win32'</span><span class="s1">:</span>
+        <span class="s1">compile_extra = [</span><span class="s3">&quot;/we4013&quot;</span><span class="s1">]</span>
+        <span class="s1">link_extra = [</span><span class="s3">&quot;/LIBPATH:&quot; </span><span class="s1">+ os.path.join(sys.base_prefix</span><span class="s2">, </span><span class="s3">'libs'</span><span class="s1">)]</span>
+    <span class="s2">elif </span><span class="s1">sys.platform.startswith(</span><span class="s3">'linux'</span><span class="s1">):</span>
+        <span class="s1">compile_extra = [</span>
+            <span class="s3">&quot;-O0&quot;</span><span class="s2">, </span><span class="s3">&quot;-g&quot;</span><span class="s2">, </span><span class="s3">&quot;-Werror=implicit-function-declaration&quot;</span><span class="s2">, </span><span class="s3">&quot;-fPIC&quot;</span><span class="s1">]</span>
+        <span class="s1">link_extra = </span><span class="s2">None</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">compile_extra = link_extra = </span><span class="s2">None</span>
+        <span class="s2">pass</span>
+    <span class="s2">if </span><span class="s1">sys.platform == </span><span class="s3">'win32'</span><span class="s1">:</span>
+        <span class="s1">link_extra = link_extra + [</span><span class="s3">'/DEBUG'</span><span class="s1">]  </span><span class="s4"># generate .pdb file</span>
+    <span class="s2">if </span><span class="s1">sys.platform == </span><span class="s3">'darwin'</span><span class="s1">:</span>
+        <span class="s4"># support Fink &amp; Darwinports</span>
+        <span class="s2">for </span><span class="s1">s </span><span class="s2">in </span><span class="s1">(</span><span class="s3">'/sw/'</span><span class="s2">, </span><span class="s3">'/opt/local/'</span><span class="s1">):</span>
+            <span class="s2">if </span><span class="s1">(s + </span><span class="s3">'include' </span><span class="s2">not in </span><span class="s1">include_dirs</span>
+                    <span class="s2">and </span><span class="s1">os.path.exists(s + </span><span class="s3">'include'</span><span class="s1">)):</span>
+                <span class="s1">include_dirs.append(s + </span><span class="s3">'include'</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">s + </span><span class="s3">'lib' </span><span class="s2">not in </span><span class="s1">library_dirs </span><span class="s2">and </span><span class="s1">os.path.exists(s + </span><span class="s3">'lib'</span><span class="s1">):</span>
+                <span class="s1">library_dirs.append(s + </span><span class="s3">'lib'</span><span class="s1">)</span>
+
+    <span class="s1">outputfilename = outputfilename.with_suffix(get_so_suffix())</span>
+    <span class="s1">saved_environ = os.environ.copy()</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">build(</span>
+            <span class="s1">cfile</span><span class="s2">, </span><span class="s1">outputfilename</span><span class="s2">,</span>
+            <span class="s1">compile_extra</span><span class="s2">, </span><span class="s1">link_extra</span><span class="s2">,</span>
+            <span class="s1">include_dirs</span><span class="s2">, </span><span class="s1">libraries</span><span class="s2">, </span><span class="s1">library_dirs)</span>
+    <span class="s2">finally</span><span class="s1">:</span>
+        <span class="s4"># workaround for a distutils bugs where some env vars can</span>
+        <span class="s4"># become longer and longer every time it is used</span>
+        <span class="s2">for </span><span class="s1">key</span><span class="s2">, </span><span class="s1">value </span><span class="s2">in </span><span class="s1">saved_environ.items():</span>
+            <span class="s2">if </span><span class="s1">os.environ.get(key) != value:</span>
+                <span class="s1">os.environ[key] = value</span>
+    <span class="s2">return </span><span class="s1">outputfilename</span>
+
+
+<span class="s2">def </span><span class="s1">build(cfile</span><span class="s2">, </span><span class="s1">outputfilename</span><span class="s2">, </span><span class="s1">compile_extra</span><span class="s2">, </span><span class="s1">link_extra</span><span class="s2">,</span>
+          <span class="s1">include_dirs</span><span class="s2">, </span><span class="s1">libraries</span><span class="s2">, </span><span class="s1">library_dirs):</span>
+    <span class="s0">&quot;cd into the directory where the cfile is, use distutils to build&quot;</span>
+
+    <span class="s1">compiler = new_compiler(force=</span><span class="s5">1</span><span class="s2">, </span><span class="s1">verbose=</span><span class="s5">2</span><span class="s1">)</span>
+    <span class="s1">compiler.customize(</span><span class="s3">''</span><span class="s1">)</span>
+    <span class="s1">objects = []</span>
+
+    <span class="s1">old = os.getcwd()</span>
+    <span class="s1">os.chdir(cfile.parent)</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s1">res = compiler.compile(</span>
+            <span class="s1">[str(cfile.name)]</span><span class="s2">,</span>
+            <span class="s1">include_dirs=include_dirs</span><span class="s2">,</span>
+            <span class="s1">extra_preargs=compile_extra</span>
+            <span class="s1">)</span>
+        <span class="s1">objects += [str(cfile.parent / r) </span><span class="s2">for </span><span class="s1">r </span><span class="s2">in </span><span class="s1">res]</span>
+    <span class="s2">finally</span><span class="s1">:</span>
+        <span class="s1">os.chdir(old)</span>
+
+    <span class="s1">compiler.link_shared_object(</span>
+        <span class="s1">objects</span><span class="s2">, </span><span class="s1">str(outputfilename)</span><span class="s2">,</span>
+        <span class="s1">libraries=libraries</span><span class="s2">,</span>
+        <span class="s1">extra_preargs=link_extra</span><span class="s2">,</span>
+        <span class="s1">library_dirs=library_dirs)</span>
+
+
+<span class="s2">def </span><span class="s1">get_so_suffix():</span>
+    <span class="s1">ret = sysconfig.get_config_var(</span><span class="s3">'EXT_SUFFIX'</span><span class="s1">)</span>
+    <span class="s2">assert </span><span class="s1">ret</span>
+    <span class="s2">return </span><span class="s1">ret</span>
+</pre>
+</body>
+</html>

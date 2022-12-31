@@ -1,0 +1,465 @@
+<html>
+<head>
+<title>layout.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+layout.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">abc </span><span class="s0">import </span><span class="s1">ABC</span><span class="s0">, </span><span class="s1">abstractmethod</span>
+<span class="s0">from </span><span class="s1">itertools </span><span class="s0">import </span><span class="s1">islice</span>
+<span class="s0">from </span><span class="s1">operator </span><span class="s0">import </span><span class="s1">itemgetter</span>
+<span class="s0">from </span><span class="s1">threading </span><span class="s0">import </span><span class="s1">RLock</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">TYPE_CHECKING</span><span class="s0">,</span>
+    <span class="s1">Dict</span><span class="s0">,</span>
+    <span class="s1">Iterable</span><span class="s0">,</span>
+    <span class="s1">List</span><span class="s0">,</span>
+    <span class="s1">NamedTuple</span><span class="s0">,</span>
+    <span class="s1">Optional</span><span class="s0">,</span>
+    <span class="s1">Sequence</span><span class="s0">,</span>
+    <span class="s1">Tuple</span><span class="s0">,</span>
+    <span class="s1">Union</span><span class="s0">,</span>
+<span class="s1">)</span>
+
+<span class="s0">from </span><span class="s1">._ratio </span><span class="s0">import </span><span class="s1">ratio_resolve</span>
+<span class="s0">from </span><span class="s1">.align </span><span class="s0">import </span><span class="s1">Align</span>
+<span class="s0">from </span><span class="s1">.console </span><span class="s0">import </span><span class="s1">Console</span><span class="s0">, </span><span class="s1">ConsoleOptions</span><span class="s0">, </span><span class="s1">RenderableType</span><span class="s0">, </span><span class="s1">RenderResult</span>
+<span class="s0">from </span><span class="s1">.highlighter </span><span class="s0">import </span><span class="s1">ReprHighlighter</span>
+<span class="s0">from </span><span class="s1">.panel </span><span class="s0">import </span><span class="s1">Panel</span>
+<span class="s0">from </span><span class="s1">.pretty </span><span class="s0">import </span><span class="s1">Pretty</span>
+<span class="s0">from </span><span class="s1">.repr </span><span class="s0">import </span><span class="s1">rich_repr</span><span class="s0">, </span><span class="s1">Result</span>
+<span class="s0">from </span><span class="s1">.region </span><span class="s0">import </span><span class="s1">Region</span>
+<span class="s0">from </span><span class="s1">.segment </span><span class="s0">import </span><span class="s1">Segment</span>
+<span class="s0">from </span><span class="s1">.style </span><span class="s0">import </span><span class="s1">StyleType</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING:</span>
+    <span class="s0">from </span><span class="s1">pip._vendor.rich.tree </span><span class="s0">import </span><span class="s1">Tree</span>
+
+
+<span class="s0">class </span><span class="s1">LayoutRender(NamedTuple):</span>
+    <span class="s2">&quot;&quot;&quot;An individual layout render.&quot;&quot;&quot;</span>
+
+    <span class="s1">region: Region</span>
+    <span class="s1">render: List[List[Segment]]</span>
+
+
+<span class="s1">RegionMap = Dict[</span><span class="s3">&quot;Layout&quot;</span><span class="s0">, </span><span class="s1">Region]</span>
+<span class="s1">RenderMap = Dict[</span><span class="s3">&quot;Layout&quot;</span><span class="s0">, </span><span class="s1">LayoutRender]</span>
+
+
+<span class="s0">class </span><span class="s1">LayoutError(Exception):</span>
+    <span class="s2">&quot;&quot;&quot;Layout related error.&quot;&quot;&quot;</span>
+
+
+<span class="s0">class </span><span class="s1">NoSplitter(LayoutError):</span>
+    <span class="s2">&quot;&quot;&quot;Requested splitter does not exist.&quot;&quot;&quot;</span>
+
+
+<span class="s0">class </span><span class="s1">_Placeholder:</span>
+    <span class="s2">&quot;&quot;&quot;An internal renderable used as a Layout placeholder.&quot;&quot;&quot;</span>
+
+    <span class="s1">highlighter = ReprHighlighter()</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">layout: </span><span class="s3">&quot;Layout&quot;</span><span class="s0">, </span><span class="s1">style: StyleType = </span><span class="s3">&quot;&quot;</span><span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self.layout = layout</span>
+        <span class="s1">self.style = style</span>
+
+    <span class="s0">def </span><span class="s1">__rich_console__(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">console: Console</span><span class="s0">, </span><span class="s1">options: ConsoleOptions</span>
+    <span class="s1">) -&gt; RenderResult:</span>
+        <span class="s1">width = options.max_width</span>
+        <span class="s1">height = options.height </span><span class="s0">or </span><span class="s1">options.size.height</span>
+        <span class="s1">layout = self.layout</span>
+        <span class="s1">title = (</span>
+            <span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">layout.name</span><span class="s0">!r} </span><span class="s3">(</span><span class="s0">{</span><span class="s1">width</span><span class="s0">} </span><span class="s3">x </span><span class="s0">{</span><span class="s1">height</span><span class="s0">}</span><span class="s3">)&quot;</span>
+            <span class="s0">if </span><span class="s1">layout.name</span>
+            <span class="s0">else </span><span class="s3">f&quot;(</span><span class="s0">{</span><span class="s1">width</span><span class="s0">} </span><span class="s3">x </span><span class="s0">{</span><span class="s1">height</span><span class="s0">}</span><span class="s3">)&quot;</span>
+        <span class="s1">)</span>
+        <span class="s0">yield </span><span class="s1">Panel(</span>
+            <span class="s1">Align.center(Pretty(layout)</span><span class="s0">, </span><span class="s1">vertical=</span><span class="s3">&quot;middle&quot;</span><span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">style=self.style</span><span class="s0">,</span>
+            <span class="s1">title=self.highlighter(title)</span><span class="s0">,</span>
+            <span class="s1">border_style=</span><span class="s3">&quot;blue&quot;</span><span class="s0">,</span>
+        <span class="s1">)</span>
+
+
+<span class="s0">class </span><span class="s1">Splitter(ABC):</span>
+    <span class="s2">&quot;&quot;&quot;Base class for a splitter.&quot;&quot;&quot;</span>
+
+    <span class="s1">name: str = </span><span class="s3">&quot;&quot;</span>
+
+    <span class="s1">@abstractmethod</span>
+    <span class="s0">def </span><span class="s1">get_tree_icon(self) -&gt; str:</span>
+        <span class="s2">&quot;&quot;&quot;Get the icon (emoji) used in layout.tree&quot;&quot;&quot;</span>
+
+    <span class="s1">@abstractmethod</span>
+    <span class="s0">def </span><span class="s1">divide(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">children: Sequence[</span><span class="s3">&quot;Layout&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">region: Region</span>
+    <span class="s1">) -&gt; Iterable[Tuple[</span><span class="s3">&quot;Layout&quot;</span><span class="s0">, </span><span class="s1">Region]]:</span>
+        <span class="s2">&quot;&quot;&quot;Divide a region amongst several child layouts. 
+ 
+        Args: 
+            children (Sequence(Layout)): A number of child layouts. 
+            region (Region): A rectangular region to divide. 
+        &quot;&quot;&quot;</span>
+
+
+<span class="s0">class </span><span class="s1">RowSplitter(Splitter):</span>
+    <span class="s2">&quot;&quot;&quot;Split a layout region in to rows.&quot;&quot;&quot;</span>
+
+    <span class="s1">name = </span><span class="s3">&quot;row&quot;</span>
+
+    <span class="s0">def </span><span class="s1">get_tree_icon(self) -&gt; str:</span>
+        <span class="s0">return </span><span class="s3">&quot;[layout.tree.row]⬌&quot;</span>
+
+    <span class="s0">def </span><span class="s1">divide(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">children: Sequence[</span><span class="s3">&quot;Layout&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">region: Region</span>
+    <span class="s1">) -&gt; Iterable[Tuple[</span><span class="s3">&quot;Layout&quot;</span><span class="s0">, </span><span class="s1">Region]]:</span>
+        <span class="s1">x</span><span class="s0">, </span><span class="s1">y</span><span class="s0">, </span><span class="s1">width</span><span class="s0">, </span><span class="s1">height = region</span>
+        <span class="s1">render_widths = ratio_resolve(width</span><span class="s0">, </span><span class="s1">children)</span>
+        <span class="s1">offset = </span><span class="s4">0</span>
+        <span class="s1">_Region = Region</span>
+        <span class="s0">for </span><span class="s1">child</span><span class="s0">, </span><span class="s1">child_width </span><span class="s0">in </span><span class="s1">zip(children</span><span class="s0">, </span><span class="s1">render_widths):</span>
+            <span class="s0">yield </span><span class="s1">child</span><span class="s0">, </span><span class="s1">_Region(x + offset</span><span class="s0">, </span><span class="s1">y</span><span class="s0">, </span><span class="s1">child_width</span><span class="s0">, </span><span class="s1">height)</span>
+            <span class="s1">offset += child_width</span>
+
+
+<span class="s0">class </span><span class="s1">ColumnSplitter(Splitter):</span>
+    <span class="s2">&quot;&quot;&quot;Split a layout region in to columns.&quot;&quot;&quot;</span>
+
+    <span class="s1">name = </span><span class="s3">&quot;column&quot;</span>
+
+    <span class="s0">def </span><span class="s1">get_tree_icon(self) -&gt; str:</span>
+        <span class="s0">return </span><span class="s3">&quot;[layout.tree.column]⬍&quot;</span>
+
+    <span class="s0">def </span><span class="s1">divide(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">children: Sequence[</span><span class="s3">&quot;Layout&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">region: Region</span>
+    <span class="s1">) -&gt; Iterable[Tuple[</span><span class="s3">&quot;Layout&quot;</span><span class="s0">, </span><span class="s1">Region]]:</span>
+        <span class="s1">x</span><span class="s0">, </span><span class="s1">y</span><span class="s0">, </span><span class="s1">width</span><span class="s0">, </span><span class="s1">height = region</span>
+        <span class="s1">render_heights = ratio_resolve(height</span><span class="s0">, </span><span class="s1">children)</span>
+        <span class="s1">offset = </span><span class="s4">0</span>
+        <span class="s1">_Region = Region</span>
+        <span class="s0">for </span><span class="s1">child</span><span class="s0">, </span><span class="s1">child_height </span><span class="s0">in </span><span class="s1">zip(children</span><span class="s0">, </span><span class="s1">render_heights):</span>
+            <span class="s0">yield </span><span class="s1">child</span><span class="s0">, </span><span class="s1">_Region(x</span><span class="s0">, </span><span class="s1">y + offset</span><span class="s0">, </span><span class="s1">width</span><span class="s0">, </span><span class="s1">child_height)</span>
+            <span class="s1">offset += child_height</span>
+
+
+<span class="s1">@rich_repr</span>
+<span class="s0">class </span><span class="s1">Layout:</span>
+    <span class="s2">&quot;&quot;&quot;A renderable to divide a fixed height in to rows or columns. 
+ 
+    Args: 
+        renderable (RenderableType, optional): Renderable content, or None for placeholder. Defaults to None. 
+        name (str, optional): Optional identifier for Layout. Defaults to None. 
+        size (int, optional): Optional fixed size of layout. Defaults to None. 
+        minimum_size (int, optional): Minimum size of layout. Defaults to 1. 
+        ratio (int, optional): Optional ratio for flexible layout. Defaults to 1. 
+        visible (bool, optional): Visibility of layout. Defaults to True. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">splitters = {</span><span class="s3">&quot;row&quot;</span><span class="s1">: RowSplitter</span><span class="s0">, </span><span class="s3">&quot;column&quot;</span><span class="s1">: ColumnSplitter}</span>
+
+    <span class="s0">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">renderable: Optional[RenderableType] = </span><span class="s0">None,</span>
+        <span class="s1">*</span><span class="s0">,</span>
+        <span class="s1">name: Optional[str] = </span><span class="s0">None,</span>
+        <span class="s1">size: Optional[int] = </span><span class="s0">None,</span>
+        <span class="s1">minimum_size: int = </span><span class="s4">1</span><span class="s0">,</span>
+        <span class="s1">ratio: int = </span><span class="s4">1</span><span class="s0">,</span>
+        <span class="s1">visible: bool = </span><span class="s0">True,</span>
+        <span class="s1">height: Optional[int] = </span><span class="s0">None,</span>
+    <span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self._renderable = renderable </span><span class="s0">or </span><span class="s1">_Placeholder(self)</span>
+        <span class="s1">self.size = size</span>
+        <span class="s1">self.minimum_size = minimum_size</span>
+        <span class="s1">self.ratio = ratio</span>
+        <span class="s1">self.name = name</span>
+        <span class="s1">self.visible = visible</span>
+        <span class="s1">self.height = height</span>
+        <span class="s1">self.splitter: Splitter = self.splitters[</span><span class="s3">&quot;column&quot;</span><span class="s1">]()</span>
+        <span class="s1">self._children: List[Layout] = []</span>
+        <span class="s1">self._render_map: RenderMap = {}</span>
+        <span class="s1">self._lock = RLock()</span>
+
+    <span class="s0">def </span><span class="s1">__rich_repr__(self) -&gt; Result:</span>
+        <span class="s0">yield </span><span class="s3">&quot;name&quot;</span><span class="s0">, </span><span class="s1">self.name</span><span class="s0">, None</span>
+        <span class="s0">yield </span><span class="s3">&quot;size&quot;</span><span class="s0">, </span><span class="s1">self.size</span><span class="s0">, None</span>
+        <span class="s0">yield </span><span class="s3">&quot;minimum_size&quot;</span><span class="s0">, </span><span class="s1">self.minimum_size</span><span class="s0">, </span><span class="s4">1</span>
+        <span class="s0">yield </span><span class="s3">&quot;ratio&quot;</span><span class="s0">, </span><span class="s1">self.ratio</span><span class="s0">, </span><span class="s4">1</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">renderable(self) -&gt; RenderableType:</span>
+        <span class="s2">&quot;&quot;&quot;Layout renderable.&quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self </span><span class="s0">if </span><span class="s1">self._children </span><span class="s0">else </span><span class="s1">self._renderable</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">children(self) -&gt; List[</span><span class="s3">&quot;Layout&quot;</span><span class="s1">]:</span>
+        <span class="s2">&quot;&quot;&quot;Gets (visible) layout children.&quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">[child </span><span class="s0">for </span><span class="s1">child </span><span class="s0">in </span><span class="s1">self._children </span><span class="s0">if </span><span class="s1">child.visible]</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">map(self) -&gt; RenderMap:</span>
+        <span class="s2">&quot;&quot;&quot;Get a map of the last render.&quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self._render_map</span>
+
+    <span class="s0">def </span><span class="s1">get(self</span><span class="s0">, </span><span class="s1">name: str) -&gt; Optional[</span><span class="s3">&quot;Layout&quot;</span><span class="s1">]:</span>
+        <span class="s2">&quot;&quot;&quot;Get a named layout, or None if it doesn't exist. 
+ 
+        Args: 
+            name (str): Name of layout. 
+ 
+        Returns: 
+            Optional[Layout]: Layout instance or None if no layout was found. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">self.name == name:</span>
+            <span class="s0">return </span><span class="s1">self</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">for </span><span class="s1">child </span><span class="s0">in </span><span class="s1">self._children:</span>
+                <span class="s1">named_layout = child.get(name)</span>
+                <span class="s0">if </span><span class="s1">named_layout </span><span class="s0">is not None</span><span class="s1">:</span>
+                    <span class="s0">return </span><span class="s1">named_layout</span>
+        <span class="s0">return None</span>
+
+    <span class="s0">def </span><span class="s1">__getitem__(self</span><span class="s0">, </span><span class="s1">name: str) -&gt; </span><span class="s3">&quot;Layout&quot;</span><span class="s1">:</span>
+        <span class="s1">layout = self.get(name)</span>
+        <span class="s0">if </span><span class="s1">layout </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s0">raise </span><span class="s1">KeyError(</span><span class="s3">f&quot;No layout with name </span><span class="s0">{</span><span class="s1">name</span><span class="s0">!r}</span><span class="s3">&quot;</span><span class="s1">)</span>
+        <span class="s0">return </span><span class="s1">layout</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">tree(self) -&gt; </span><span class="s3">&quot;Tree&quot;</span><span class="s1">:</span>
+        <span class="s2">&quot;&quot;&quot;Get a tree renderable to show layout structure.&quot;&quot;&quot;</span>
+        <span class="s0">from </span><span class="s1">pip._vendor.rich.styled </span><span class="s0">import </span><span class="s1">Styled</span>
+        <span class="s0">from </span><span class="s1">pip._vendor.rich.table </span><span class="s0">import </span><span class="s1">Table</span>
+        <span class="s0">from </span><span class="s1">pip._vendor.rich.tree </span><span class="s0">import </span><span class="s1">Tree</span>
+
+        <span class="s0">def </span><span class="s1">summary(layout: </span><span class="s3">&quot;Layout&quot;</span><span class="s1">) -&gt; Table:</span>
+
+            <span class="s1">icon = layout.splitter.get_tree_icon()</span>
+
+            <span class="s1">table = Table.grid(padding=(</span><span class="s4">0</span><span class="s0">, </span><span class="s4">1</span><span class="s0">, </span><span class="s4">0</span><span class="s0">, </span><span class="s4">0</span><span class="s1">))</span>
+
+            <span class="s1">text: RenderableType = (</span>
+                <span class="s1">Pretty(layout) </span><span class="s0">if </span><span class="s1">layout.visible </span><span class="s0">else </span><span class="s1">Styled(Pretty(layout)</span><span class="s0">, </span><span class="s3">&quot;dim&quot;</span><span class="s1">)</span>
+            <span class="s1">)</span>
+            <span class="s1">table.add_row(icon</span><span class="s0">, </span><span class="s1">text)</span>
+            <span class="s1">_summary = table</span>
+            <span class="s0">return </span><span class="s1">_summary</span>
+
+        <span class="s1">layout = self</span>
+        <span class="s1">tree = Tree(</span>
+            <span class="s1">summary(layout)</span><span class="s0">,</span>
+            <span class="s1">guide_style=</span><span class="s3">f&quot;layout.tree.</span><span class="s0">{</span><span class="s1">layout.splitter.name</span><span class="s0">}</span><span class="s3">&quot;</span><span class="s0">,</span>
+            <span class="s1">highlight=</span><span class="s0">True,</span>
+        <span class="s1">)</span>
+
+        <span class="s0">def </span><span class="s1">recurse(tree: </span><span class="s3">&quot;Tree&quot;</span><span class="s0">, </span><span class="s1">layout: </span><span class="s3">&quot;Layout&quot;</span><span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+            <span class="s0">for </span><span class="s1">child </span><span class="s0">in </span><span class="s1">layout._children:</span>
+                <span class="s1">recurse(</span>
+                    <span class="s1">tree.add(</span>
+                        <span class="s1">summary(child)</span><span class="s0">,</span>
+                        <span class="s1">guide_style=</span><span class="s3">f&quot;layout.tree.</span><span class="s0">{</span><span class="s1">child.splitter.name</span><span class="s0">}</span><span class="s3">&quot;</span><span class="s0">,</span>
+                    <span class="s1">)</span><span class="s0">,</span>
+                    <span class="s1">child</span><span class="s0">,</span>
+                <span class="s1">)</span>
+
+        <span class="s1">recurse(tree</span><span class="s0">, </span><span class="s1">self)</span>
+        <span class="s0">return </span><span class="s1">tree</span>
+
+    <span class="s0">def </span><span class="s1">split(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">*layouts: Union[</span><span class="s3">&quot;Layout&quot;</span><span class="s0">, </span><span class="s1">RenderableType]</span><span class="s0">,</span>
+        <span class="s1">splitter: Union[Splitter</span><span class="s0">, </span><span class="s1">str] = </span><span class="s3">&quot;column&quot;</span><span class="s0">,</span>
+    <span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s2">&quot;&quot;&quot;Split the layout in to multiple sub-layouts. 
+ 
+        Args: 
+            *layouts (Layout): Positional arguments should be (sub) Layout instances. 
+            splitter (Union[Splitter, str]): Splitter instance or name of splitter. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">_layouts = [</span>
+            <span class="s1">layout </span><span class="s0">if </span><span class="s1">isinstance(layout</span><span class="s0">, </span><span class="s1">Layout) </span><span class="s0">else </span><span class="s1">Layout(layout)</span>
+            <span class="s0">for </span><span class="s1">layout </span><span class="s0">in </span><span class="s1">layouts</span>
+        <span class="s1">]</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">self.splitter = (</span>
+                <span class="s1">splitter</span>
+                <span class="s0">if </span><span class="s1">isinstance(splitter</span><span class="s0">, </span><span class="s1">Splitter)</span>
+                <span class="s0">else </span><span class="s1">self.splitters[splitter]()</span>
+            <span class="s1">)</span>
+        <span class="s0">except </span><span class="s1">KeyError:</span>
+            <span class="s0">raise </span><span class="s1">NoSplitter(</span><span class="s3">f&quot;No splitter called </span><span class="s0">{</span><span class="s1">splitter</span><span class="s0">!r}</span><span class="s3">&quot;</span><span class="s1">)</span>
+        <span class="s1">self._children[:] = _layouts</span>
+
+    <span class="s0">def </span><span class="s1">add_split(self</span><span class="s0">, </span><span class="s1">*layouts: Union[</span><span class="s3">&quot;Layout&quot;</span><span class="s0">, </span><span class="s1">RenderableType]) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s2">&quot;&quot;&quot;Add a new layout(s) to existing split. 
+ 
+        Args: 
+            *layouts (Union[Layout, RenderableType]): Positional arguments should be renderables or (sub) Layout instances. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s1">_layouts = (</span>
+            <span class="s1">layout </span><span class="s0">if </span><span class="s1">isinstance(layout</span><span class="s0">, </span><span class="s1">Layout) </span><span class="s0">else </span><span class="s1">Layout(layout)</span>
+            <span class="s0">for </span><span class="s1">layout </span><span class="s0">in </span><span class="s1">layouts</span>
+        <span class="s1">)</span>
+        <span class="s1">self._children.extend(_layouts)</span>
+
+    <span class="s0">def </span><span class="s1">split_row(self</span><span class="s0">, </span><span class="s1">*layouts: Union[</span><span class="s3">&quot;Layout&quot;</span><span class="s0">, </span><span class="s1">RenderableType]) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s2">&quot;&quot;&quot;Split the layout in tow a row (Layouts side by side). 
+ 
+        Args: 
+            *layouts (Layout): Positional arguments should be (sub) Layout instances. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.split(*layouts</span><span class="s0">, </span><span class="s1">splitter=</span><span class="s3">&quot;row&quot;</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">split_column(self</span><span class="s0">, </span><span class="s1">*layouts: Union[</span><span class="s3">&quot;Layout&quot;</span><span class="s0">, </span><span class="s1">RenderableType]) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s2">&quot;&quot;&quot;Split the layout in to a column (layouts stacked on top of each other). 
+ 
+        Args: 
+            *layouts (Layout): Positional arguments should be (sub) Layout instances. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.split(*layouts</span><span class="s0">, </span><span class="s1">splitter=</span><span class="s3">&quot;column&quot;</span><span class="s1">)</span>
+
+    <span class="s0">def </span><span class="s1">unsplit(self) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s2">&quot;&quot;&quot;Reset splits to initial state.&quot;&quot;&quot;</span>
+        <span class="s0">del </span><span class="s1">self._children[:]</span>
+
+    <span class="s0">def </span><span class="s1">update(self</span><span class="s0">, </span><span class="s1">renderable: RenderableType) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s2">&quot;&quot;&quot;Update renderable. 
+ 
+        Args: 
+            renderable (RenderableType): New renderable object. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">with </span><span class="s1">self._lock:</span>
+            <span class="s1">self._renderable = renderable</span>
+
+    <span class="s0">def </span><span class="s1">refresh_screen(self</span><span class="s0">, </span><span class="s1">console: </span><span class="s3">&quot;Console&quot;</span><span class="s0">, </span><span class="s1">layout_name: str) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s2">&quot;&quot;&quot;Refresh a sub-layout. 
+ 
+        Args: 
+            console (Console): Console instance where Layout is to be rendered. 
+            layout_name (str): Name of layout. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">with </span><span class="s1">self._lock:</span>
+            <span class="s1">layout = self[layout_name]</span>
+            <span class="s1">region</span><span class="s0">, </span><span class="s1">_lines = self._render_map[layout]</span>
+            <span class="s1">(x</span><span class="s0">, </span><span class="s1">y</span><span class="s0">, </span><span class="s1">width</span><span class="s0">, </span><span class="s1">height) = region</span>
+            <span class="s1">lines = console.render_lines(</span>
+                <span class="s1">layout</span><span class="s0">, </span><span class="s1">console.options.update_dimensions(width</span><span class="s0">, </span><span class="s1">height)</span>
+            <span class="s1">)</span>
+            <span class="s1">self._render_map[layout] = LayoutRender(region</span><span class="s0">, </span><span class="s1">lines)</span>
+            <span class="s1">console.update_screen_lines(lines</span><span class="s0">, </span><span class="s1">x</span><span class="s0">, </span><span class="s1">y)</span>
+
+    <span class="s0">def </span><span class="s1">_make_region_map(self</span><span class="s0">, </span><span class="s1">width: int</span><span class="s0">, </span><span class="s1">height: int) -&gt; RegionMap:</span>
+        <span class="s2">&quot;&quot;&quot;Create a dict that maps layout on to Region.&quot;&quot;&quot;</span>
+        <span class="s1">stack: List[Tuple[Layout</span><span class="s0">, </span><span class="s1">Region]] = [(self</span><span class="s0">, </span><span class="s1">Region(</span><span class="s4">0</span><span class="s0">, </span><span class="s4">0</span><span class="s0">, </span><span class="s1">width</span><span class="s0">, </span><span class="s1">height))]</span>
+        <span class="s1">push = stack.append</span>
+        <span class="s1">pop = stack.pop</span>
+        <span class="s1">layout_regions: List[Tuple[Layout</span><span class="s0">, </span><span class="s1">Region]] = []</span>
+        <span class="s1">append_layout_region = layout_regions.append</span>
+        <span class="s0">while </span><span class="s1">stack:</span>
+            <span class="s1">append_layout_region(pop())</span>
+            <span class="s1">layout</span><span class="s0">, </span><span class="s1">region = layout_regions[-</span><span class="s4">1</span><span class="s1">]</span>
+            <span class="s1">children = layout.children</span>
+            <span class="s0">if </span><span class="s1">children:</span>
+                <span class="s0">for </span><span class="s1">child_and_region </span><span class="s0">in </span><span class="s1">layout.splitter.divide(children</span><span class="s0">, </span><span class="s1">region):</span>
+                    <span class="s1">push(child_and_region)</span>
+
+        <span class="s1">region_map = {</span>
+            <span class="s1">layout: region</span>
+            <span class="s0">for </span><span class="s1">layout</span><span class="s0">, </span><span class="s1">region </span><span class="s0">in </span><span class="s1">sorted(layout_regions</span><span class="s0">, </span><span class="s1">key=itemgetter(</span><span class="s4">1</span><span class="s1">))</span>
+        <span class="s1">}</span>
+        <span class="s0">return </span><span class="s1">region_map</span>
+
+    <span class="s0">def </span><span class="s1">render(self</span><span class="s0">, </span><span class="s1">console: Console</span><span class="s0">, </span><span class="s1">options: ConsoleOptions) -&gt; RenderMap:</span>
+        <span class="s2">&quot;&quot;&quot;Render the sub_layouts. 
+ 
+        Args: 
+            console (Console): Console instance. 
+            options (ConsoleOptions): Console options. 
+ 
+        Returns: 
+            RenderMap: A dict that maps Layout on to a tuple of Region, lines 
+        &quot;&quot;&quot;</span>
+        <span class="s1">render_width = options.max_width</span>
+        <span class="s1">render_height = options.height </span><span class="s0">or </span><span class="s1">console.height</span>
+        <span class="s1">region_map = self._make_region_map(render_width</span><span class="s0">, </span><span class="s1">render_height)</span>
+        <span class="s1">layout_regions = [</span>
+            <span class="s1">(layout</span><span class="s0">, </span><span class="s1">region)</span>
+            <span class="s0">for </span><span class="s1">layout</span><span class="s0">, </span><span class="s1">region </span><span class="s0">in </span><span class="s1">region_map.items()</span>
+            <span class="s0">if not </span><span class="s1">layout.children</span>
+        <span class="s1">]</span>
+        <span class="s1">render_map: Dict[</span><span class="s3">&quot;Layout&quot;</span><span class="s0">, </span><span class="s3">&quot;LayoutRender&quot;</span><span class="s1">] = {}</span>
+        <span class="s1">render_lines = console.render_lines</span>
+        <span class="s1">update_dimensions = options.update_dimensions</span>
+
+        <span class="s0">for </span><span class="s1">layout</span><span class="s0">, </span><span class="s1">region </span><span class="s0">in </span><span class="s1">layout_regions:</span>
+            <span class="s1">lines = render_lines(</span>
+                <span class="s1">layout.renderable</span><span class="s0">, </span><span class="s1">update_dimensions(region.width</span><span class="s0">, </span><span class="s1">region.height)</span>
+            <span class="s1">)</span>
+            <span class="s1">render_map[layout] = LayoutRender(region</span><span class="s0">, </span><span class="s1">lines)</span>
+        <span class="s0">return </span><span class="s1">render_map</span>
+
+    <span class="s0">def </span><span class="s1">__rich_console__(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">console: Console</span><span class="s0">, </span><span class="s1">options: ConsoleOptions</span>
+    <span class="s1">) -&gt; RenderResult:</span>
+        <span class="s0">with </span><span class="s1">self._lock:</span>
+            <span class="s1">width = options.max_width </span><span class="s0">or </span><span class="s1">console.width</span>
+            <span class="s1">height = options.height </span><span class="s0">or </span><span class="s1">console.height</span>
+            <span class="s1">render_map = self.render(console</span><span class="s0">, </span><span class="s1">options.update_dimensions(width</span><span class="s0">, </span><span class="s1">height))</span>
+            <span class="s1">self._render_map = render_map</span>
+            <span class="s1">layout_lines: List[List[Segment]] = [[] </span><span class="s0">for </span><span class="s1">_ </span><span class="s0">in </span><span class="s1">range(height)]</span>
+            <span class="s1">_islice = islice</span>
+            <span class="s0">for </span><span class="s1">(region</span><span class="s0">, </span><span class="s1">lines) </span><span class="s0">in </span><span class="s1">render_map.values():</span>
+                <span class="s1">_x</span><span class="s0">, </span><span class="s1">y</span><span class="s0">, </span><span class="s1">_layout_width</span><span class="s0">, </span><span class="s1">layout_height = region</span>
+                <span class="s0">for </span><span class="s1">row</span><span class="s0">, </span><span class="s1">line </span><span class="s0">in </span><span class="s1">zip(</span>
+                    <span class="s1">_islice(layout_lines</span><span class="s0">, </span><span class="s1">y</span><span class="s0">, </span><span class="s1">y + layout_height)</span><span class="s0">, </span><span class="s1">lines</span>
+                <span class="s1">):</span>
+                    <span class="s1">row.extend(line)</span>
+
+            <span class="s1">new_line = Segment.line()</span>
+            <span class="s0">for </span><span class="s1">layout_row </span><span class="s0">in </span><span class="s1">layout_lines:</span>
+                <span class="s0">yield from </span><span class="s1">layout_row</span>
+                <span class="s0">yield </span><span class="s1">new_line</span>
+
+
+<span class="s0">if </span><span class="s1">__name__ == </span><span class="s3">&quot;__main__&quot;</span><span class="s1">:</span>
+    <span class="s0">from </span><span class="s1">pip._vendor.rich.console </span><span class="s0">import </span><span class="s1">Console</span>
+
+    <span class="s1">console = Console()</span>
+    <span class="s1">layout = Layout()</span>
+
+    <span class="s1">layout.split_column(</span>
+        <span class="s1">Layout(name=</span><span class="s3">&quot;header&quot;</span><span class="s0">, </span><span class="s1">size=</span><span class="s4">3</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">Layout(ratio=</span><span class="s4">1</span><span class="s0">, </span><span class="s1">name=</span><span class="s3">&quot;main&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">Layout(size=</span><span class="s4">10</span><span class="s0">, </span><span class="s1">name=</span><span class="s3">&quot;footer&quot;</span><span class="s1">)</span><span class="s0">,</span>
+    <span class="s1">)</span>
+
+    <span class="s1">layout[</span><span class="s3">&quot;main&quot;</span><span class="s1">].split_row(Layout(name=</span><span class="s3">&quot;side&quot;</span><span class="s1">)</span><span class="s0">, </span><span class="s1">Layout(name=</span><span class="s3">&quot;body&quot;</span><span class="s0">, </span><span class="s1">ratio=</span><span class="s4">2</span><span class="s1">))</span>
+
+    <span class="s1">layout[</span><span class="s3">&quot;body&quot;</span><span class="s1">].split_row(Layout(name=</span><span class="s3">&quot;content&quot;</span><span class="s0">, </span><span class="s1">ratio=</span><span class="s4">2</span><span class="s1">)</span><span class="s0">, </span><span class="s1">Layout(name=</span><span class="s3">&quot;s2&quot;</span><span class="s1">))</span>
+
+    <span class="s1">layout[</span><span class="s3">&quot;s2&quot;</span><span class="s1">].split_column(</span>
+        <span class="s1">Layout(name=</span><span class="s3">&quot;top&quot;</span><span class="s1">)</span><span class="s0">, </span><span class="s1">Layout(name=</span><span class="s3">&quot;middle&quot;</span><span class="s1">)</span><span class="s0">, </span><span class="s1">Layout(name=</span><span class="s3">&quot;bottom&quot;</span><span class="s1">)</span>
+    <span class="s1">)</span>
+
+    <span class="s1">layout[</span><span class="s3">&quot;side&quot;</span><span class="s1">].split_column(Layout(layout.tree</span><span class="s0">, </span><span class="s1">name=</span><span class="s3">&quot;left1&quot;</span><span class="s1">)</span><span class="s0">, </span><span class="s1">Layout(name=</span><span class="s3">&quot;left2&quot;</span><span class="s1">))</span>
+
+    <span class="s1">layout[</span><span class="s3">&quot;content&quot;</span><span class="s1">].update(</span><span class="s3">&quot;foo&quot;</span><span class="s1">)</span>
+
+    <span class="s1">console.print(layout)</span>
+</pre>
+</body>
+</html>

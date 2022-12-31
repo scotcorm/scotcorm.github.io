@@ -1,0 +1,238 @@
+<html>
+<head>
+<title>socks.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+socks.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># -*- coding: utf-8 -*-</span>
+<span class="s2">&quot;&quot;&quot; 
+This module contains provisional support for SOCKS proxies from within 
+urllib3. This module supports SOCKS4, SOCKS4A (an extension of SOCKS4), and 
+SOCKS5. To enable its functionality, either install PySocks or install this 
+module with the ``socks`` extra. 
+ 
+The SOCKS implementation supports the full range of urllib3 features. It also 
+supports the following SOCKS features: 
+ 
+- SOCKS4A (``proxy_url='socks4a://...``) 
+- SOCKS4 (``proxy_url='socks4://...``) 
+- SOCKS5 with remote DNS (``proxy_url='socks5h://...``) 
+- SOCKS5 with local DNS (``proxy_url='socks5://...``) 
+- Usernames and passwords for the SOCKS proxy 
+ 
+.. note:: 
+   It is recommended to use ``socks5h://`` or ``socks4a://`` schemes in 
+   your ``proxy_url`` to ensure that DNS resolution is done from the remote 
+   server instead of client-side when connecting to a domain name. 
+ 
+SOCKS4 supports IPv4 and domain names with the SOCKS4A extension. SOCKS5 
+supports IPv4, IPv6, and domain names. 
+ 
+When connecting to a SOCKS4 proxy the ``username`` portion of the ``proxy_url`` 
+will be sent as the ``userid`` section of the SOCKS request: 
+ 
+.. code-block:: python 
+ 
+    proxy_url=&quot;socks4a://&lt;userid&gt;@proxy-host&quot; 
+ 
+When connecting to a SOCKS5 proxy the ``username`` and ``password`` portion 
+of the ``proxy_url`` will be sent as the username/password to authenticate 
+with the proxy: 
+ 
+.. code-block:: python 
+ 
+    proxy_url=&quot;socks5h://&lt;username&gt;:&lt;password&gt;@proxy-host&quot; 
+ 
+&quot;&quot;&quot;</span>
+<span class="s3">from </span><span class="s1">__future__ </span><span class="s3">import </span><span class="s1">absolute_import</span>
+
+<span class="s3">try</span><span class="s1">:</span>
+    <span class="s3">import </span><span class="s1">socks</span>
+<span class="s3">except </span><span class="s1">ImportError:</span>
+    <span class="s3">import </span><span class="s1">warnings</span>
+
+    <span class="s3">from </span><span class="s1">..exceptions </span><span class="s3">import </span><span class="s1">DependencyWarning</span>
+
+    <span class="s1">warnings.warn(</span>
+        <span class="s1">(</span>
+            <span class="s4">&quot;SOCKS support in urllib3 requires the installation of optional &quot;</span>
+            <span class="s4">&quot;dependencies: specifically, PySocks.  For more information, see &quot;</span>
+            <span class="s4">&quot;https://urllib3.readthedocs.io/en/1.26.x/contrib.html#socks-proxies&quot;</span>
+        <span class="s1">)</span><span class="s3">,</span>
+        <span class="s1">DependencyWarning</span><span class="s3">,</span>
+    <span class="s1">)</span>
+    <span class="s3">raise</span>
+
+<span class="s3">from </span><span class="s1">socket </span><span class="s3">import </span><span class="s1">error </span><span class="s3">as </span><span class="s1">SocketError</span>
+<span class="s3">from </span><span class="s1">socket </span><span class="s3">import </span><span class="s1">timeout </span><span class="s3">as </span><span class="s1">SocketTimeout</span>
+
+<span class="s3">from </span><span class="s1">..connection </span><span class="s3">import </span><span class="s1">HTTPConnection</span><span class="s3">, </span><span class="s1">HTTPSConnection</span>
+<span class="s3">from </span><span class="s1">..connectionpool </span><span class="s3">import </span><span class="s1">HTTPConnectionPool</span><span class="s3">, </span><span class="s1">HTTPSConnectionPool</span>
+<span class="s3">from </span><span class="s1">..exceptions </span><span class="s3">import </span><span class="s1">ConnectTimeoutError</span><span class="s3">, </span><span class="s1">NewConnectionError</span>
+<span class="s3">from </span><span class="s1">..poolmanager </span><span class="s3">import </span><span class="s1">PoolManager</span>
+<span class="s3">from </span><span class="s1">..util.url </span><span class="s3">import </span><span class="s1">parse_url</span>
+
+<span class="s3">try</span><span class="s1">:</span>
+    <span class="s3">import </span><span class="s1">ssl</span>
+<span class="s3">except </span><span class="s1">ImportError:</span>
+    <span class="s1">ssl = </span><span class="s3">None</span>
+
+
+<span class="s3">class </span><span class="s1">SOCKSConnection(HTTPConnection):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    A plain-text HTTP connection that connects via a SOCKS proxy. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">*args</span><span class="s3">, </span><span class="s1">**kwargs):</span>
+        <span class="s1">self._socks_options = kwargs.pop(</span><span class="s4">&quot;_socks_options&quot;</span><span class="s1">)</span>
+        <span class="s1">super(SOCKSConnection</span><span class="s3">, </span><span class="s1">self).__init__(*args</span><span class="s3">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s3">def </span><span class="s1">_new_conn(self):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Establish a new connection via the SOCKS proxy. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">extra_kw = {}</span>
+        <span class="s3">if </span><span class="s1">self.source_address:</span>
+            <span class="s1">extra_kw[</span><span class="s4">&quot;source_address&quot;</span><span class="s1">] = self.source_address</span>
+
+        <span class="s3">if </span><span class="s1">self.socket_options:</span>
+            <span class="s1">extra_kw[</span><span class="s4">&quot;socket_options&quot;</span><span class="s1">] = self.socket_options</span>
+
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">conn = socks.create_connection(</span>
+                <span class="s1">(self.host</span><span class="s3">, </span><span class="s1">self.port)</span><span class="s3">,</span>
+                <span class="s1">proxy_type=self._socks_options[</span><span class="s4">&quot;socks_version&quot;</span><span class="s1">]</span><span class="s3">,</span>
+                <span class="s1">proxy_addr=self._socks_options[</span><span class="s4">&quot;proxy_host&quot;</span><span class="s1">]</span><span class="s3">,</span>
+                <span class="s1">proxy_port=self._socks_options[</span><span class="s4">&quot;proxy_port&quot;</span><span class="s1">]</span><span class="s3">,</span>
+                <span class="s1">proxy_username=self._socks_options[</span><span class="s4">&quot;username&quot;</span><span class="s1">]</span><span class="s3">,</span>
+                <span class="s1">proxy_password=self._socks_options[</span><span class="s4">&quot;password&quot;</span><span class="s1">]</span><span class="s3">,</span>
+                <span class="s1">proxy_rdns=self._socks_options[</span><span class="s4">&quot;rdns&quot;</span><span class="s1">]</span><span class="s3">,</span>
+                <span class="s1">timeout=self.timeout</span><span class="s3">,</span>
+                <span class="s1">**extra_kw</span>
+            <span class="s1">)</span>
+
+        <span class="s3">except </span><span class="s1">SocketTimeout:</span>
+            <span class="s3">raise </span><span class="s1">ConnectTimeoutError(</span>
+                <span class="s1">self</span><span class="s3">,</span>
+                <span class="s4">&quot;Connection to %s timed out. (connect timeout=%s)&quot;</span>
+                <span class="s1">% (self.host</span><span class="s3">, </span><span class="s1">self.timeout)</span><span class="s3">,</span>
+            <span class="s1">)</span>
+
+        <span class="s3">except </span><span class="s1">socks.ProxyError </span><span class="s3">as </span><span class="s1">e:</span>
+            <span class="s0"># This is fragile as hell, but it seems to be the only way to raise</span>
+            <span class="s0"># useful errors here.</span>
+            <span class="s3">if </span><span class="s1">e.socket_err:</span>
+                <span class="s1">error = e.socket_err</span>
+                <span class="s3">if </span><span class="s1">isinstance(error</span><span class="s3">, </span><span class="s1">SocketTimeout):</span>
+                    <span class="s3">raise </span><span class="s1">ConnectTimeoutError(</span>
+                        <span class="s1">self</span><span class="s3">,</span>
+                        <span class="s4">&quot;Connection to %s timed out. (connect timeout=%s)&quot;</span>
+                        <span class="s1">% (self.host</span><span class="s3">, </span><span class="s1">self.timeout)</span><span class="s3">,</span>
+                    <span class="s1">)</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s3">raise </span><span class="s1">NewConnectionError(</span>
+                        <span class="s1">self</span><span class="s3">, </span><span class="s4">&quot;Failed to establish a new connection: %s&quot; </span><span class="s1">% error</span>
+                    <span class="s1">)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s3">raise </span><span class="s1">NewConnectionError(</span>
+                    <span class="s1">self</span><span class="s3">, </span><span class="s4">&quot;Failed to establish a new connection: %s&quot; </span><span class="s1">% e</span>
+                <span class="s1">)</span>
+
+        <span class="s3">except </span><span class="s1">SocketError </span><span class="s3">as </span><span class="s1">e:  </span><span class="s0"># Defensive: PySocks should catch all these.</span>
+            <span class="s3">raise </span><span class="s1">NewConnectionError(</span>
+                <span class="s1">self</span><span class="s3">, </span><span class="s4">&quot;Failed to establish a new connection: %s&quot; </span><span class="s1">% e</span>
+            <span class="s1">)</span>
+
+        <span class="s3">return </span><span class="s1">conn</span>
+
+
+<span class="s0"># We don't need to duplicate the Verified/Unverified distinction from</span>
+<span class="s0"># urllib3/connection.py here because the HTTPSConnection will already have been</span>
+<span class="s0"># correctly set to either the Verified or Unverified form by that module. This</span>
+<span class="s0"># means the SOCKSHTTPSConnection will automatically be the correct type.</span>
+<span class="s3">class </span><span class="s1">SOCKSHTTPSConnection(SOCKSConnection</span><span class="s3">, </span><span class="s1">HTTPSConnection):</span>
+    <span class="s3">pass</span>
+
+
+<span class="s3">class </span><span class="s1">SOCKSHTTPConnectionPool(HTTPConnectionPool):</span>
+    <span class="s1">ConnectionCls = SOCKSConnection</span>
+
+
+<span class="s3">class </span><span class="s1">SOCKSHTTPSConnectionPool(HTTPSConnectionPool):</span>
+    <span class="s1">ConnectionCls = SOCKSHTTPSConnection</span>
+
+
+<span class="s3">class </span><span class="s1">SOCKSProxyManager(PoolManager):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    A version of the urllib3 ProxyManager that routes connections via the 
+    defined SOCKS proxy. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s1">pool_classes_by_scheme = {</span>
+        <span class="s4">&quot;http&quot;</span><span class="s1">: SOCKSHTTPConnectionPool</span><span class="s3">,</span>
+        <span class="s4">&quot;https&quot;</span><span class="s1">: SOCKSHTTPSConnectionPool</span><span class="s3">,</span>
+    <span class="s1">}</span>
+
+    <span class="s3">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s3">,</span>
+        <span class="s1">proxy_url</span><span class="s3">,</span>
+        <span class="s1">username=</span><span class="s3">None,</span>
+        <span class="s1">password=</span><span class="s3">None,</span>
+        <span class="s1">num_pools=</span><span class="s5">10</span><span class="s3">,</span>
+        <span class="s1">headers=</span><span class="s3">None,</span>
+        <span class="s1">**connection_pool_kw</span>
+    <span class="s1">):</span>
+        <span class="s1">parsed = parse_url(proxy_url)</span>
+
+        <span class="s3">if </span><span class="s1">username </span><span class="s3">is None and </span><span class="s1">password </span><span class="s3">is None and </span><span class="s1">parsed.auth </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">split = parsed.auth.split(</span><span class="s4">&quot;:&quot;</span><span class="s1">)</span>
+            <span class="s3">if </span><span class="s1">len(split) == </span><span class="s5">2</span><span class="s1">:</span>
+                <span class="s1">username</span><span class="s3">, </span><span class="s1">password = split</span>
+        <span class="s3">if </span><span class="s1">parsed.scheme == </span><span class="s4">&quot;socks5&quot;</span><span class="s1">:</span>
+            <span class="s1">socks_version = socks.PROXY_TYPE_SOCKS5</span>
+            <span class="s1">rdns = </span><span class="s3">False</span>
+        <span class="s3">elif </span><span class="s1">parsed.scheme == </span><span class="s4">&quot;socks5h&quot;</span><span class="s1">:</span>
+            <span class="s1">socks_version = socks.PROXY_TYPE_SOCKS5</span>
+            <span class="s1">rdns = </span><span class="s3">True</span>
+        <span class="s3">elif </span><span class="s1">parsed.scheme == </span><span class="s4">&quot;socks4&quot;</span><span class="s1">:</span>
+            <span class="s1">socks_version = socks.PROXY_TYPE_SOCKS4</span>
+            <span class="s1">rdns = </span><span class="s3">False</span>
+        <span class="s3">elif </span><span class="s1">parsed.scheme == </span><span class="s4">&quot;socks4a&quot;</span><span class="s1">:</span>
+            <span class="s1">socks_version = socks.PROXY_TYPE_SOCKS4</span>
+            <span class="s1">rdns = </span><span class="s3">True</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;Unable to determine SOCKS version from %s&quot; </span><span class="s1">% proxy_url)</span>
+
+        <span class="s1">self.proxy_url = proxy_url</span>
+
+        <span class="s1">socks_options = {</span>
+            <span class="s4">&quot;socks_version&quot;</span><span class="s1">: socks_version</span><span class="s3">,</span>
+            <span class="s4">&quot;proxy_host&quot;</span><span class="s1">: parsed.host</span><span class="s3">,</span>
+            <span class="s4">&quot;proxy_port&quot;</span><span class="s1">: parsed.port</span><span class="s3">,</span>
+            <span class="s4">&quot;username&quot;</span><span class="s1">: username</span><span class="s3">,</span>
+            <span class="s4">&quot;password&quot;</span><span class="s1">: password</span><span class="s3">,</span>
+            <span class="s4">&quot;rdns&quot;</span><span class="s1">: rdns</span><span class="s3">,</span>
+        <span class="s1">}</span>
+        <span class="s1">connection_pool_kw[</span><span class="s4">&quot;_socks_options&quot;</span><span class="s1">] = socks_options</span>
+
+        <span class="s1">super(SOCKSProxyManager</span><span class="s3">, </span><span class="s1">self).__init__(</span>
+            <span class="s1">num_pools</span><span class="s3">, </span><span class="s1">headers</span><span class="s3">, </span><span class="s1">**connection_pool_kw</span>
+        <span class="s1">)</span>
+
+        <span class="s1">self.pool_classes_by_scheme = SOCKSProxyManager.pool_classes_by_scheme</span>
+</pre>
+</body>
+</html>

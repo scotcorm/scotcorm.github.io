@@ -1,0 +1,204 @@
+<html>
+<head>
+<title>numba_.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+numba_.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;Common utilities for Numba operations with groupby ops&quot;&quot;&quot;</span>
+<span class="s2">from </span><span class="s1">__future__ </span><span class="s2">import </span><span class="s1">annotations</span>
+
+<span class="s2">import </span><span class="s1">inspect</span>
+<span class="s2">from </span><span class="s1">typing </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">TYPE_CHECKING</span><span class="s2">,</span>
+    <span class="s1">Any</span><span class="s2">,</span>
+    <span class="s1">Callable</span><span class="s2">,</span>
+<span class="s1">)</span>
+
+<span class="s2">import </span><span class="s1">numpy </span><span class="s2">as </span><span class="s1">np</span>
+
+<span class="s2">from </span><span class="s1">pandas._typing </span><span class="s2">import </span><span class="s1">Scalar</span>
+<span class="s2">from </span><span class="s1">pandas.compat._optional </span><span class="s2">import </span><span class="s1">import_optional_dependency</span>
+
+<span class="s2">from </span><span class="s1">pandas.core.util.numba_ </span><span class="s2">import </span><span class="s1">(</span>
+    <span class="s1">NUMBA_FUNC_CACHE</span><span class="s2">,</span>
+    <span class="s1">NumbaUtilError</span><span class="s2">,</span>
+    <span class="s1">get_jit_arguments</span><span class="s2">,</span>
+    <span class="s1">jit_user_function</span><span class="s2">,</span>
+<span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">validate_udf(func: Callable) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Validate user defined function for ops when using Numba with groupby ops. 
+ 
+    The first signature arguments should include: 
+ 
+    def f(values, index, ...): 
+        ... 
+ 
+    Parameters 
+    ---------- 
+    func : function, default False 
+        user defined function 
+ 
+    Returns 
+    ------- 
+    None 
+ 
+    Raises 
+    ------ 
+    NumbaUtilError 
+    &quot;&quot;&quot;</span>
+    <span class="s1">udf_signature = list(inspect.signature(func).parameters.keys())</span>
+    <span class="s1">expected_args = [</span><span class="s3">&quot;values&quot;</span><span class="s2">, </span><span class="s3">&quot;index&quot;</span><span class="s1">]</span>
+    <span class="s1">min_number_args = len(expected_args)</span>
+    <span class="s2">if </span><span class="s1">(</span>
+        <span class="s1">len(udf_signature) &lt; min_number_args</span>
+        <span class="s2">or </span><span class="s1">udf_signature[:min_number_args] != expected_args</span>
+    <span class="s1">):</span>
+        <span class="s2">raise </span><span class="s1">NumbaUtilError(</span>
+            <span class="s3">f&quot;The first </span><span class="s2">{</span><span class="s1">min_number_args</span><span class="s2">} </span><span class="s3">arguments to </span><span class="s2">{</span><span class="s1">func.__name__</span><span class="s2">} </span><span class="s3">must be &quot;</span>
+            <span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">expected_args</span><span class="s2">}</span><span class="s3">&quot;</span>
+        <span class="s1">)</span>
+
+
+<span class="s2">def </span><span class="s1">generate_numba_agg_func(</span>
+    <span class="s1">kwargs: dict[str</span><span class="s2">, </span><span class="s1">Any]</span><span class="s2">,</span>
+    <span class="s1">func: Callable[...</span><span class="s2">, </span><span class="s1">Scalar]</span><span class="s2">,</span>
+    <span class="s1">engine_kwargs: dict[str</span><span class="s2">, </span><span class="s1">bool] | </span><span class="s2">None,</span>
+<span class="s1">) -&gt; Callable[[np.ndarray</span><span class="s2">, </span><span class="s1">np.ndarray</span><span class="s2">, </span><span class="s1">np.ndarray</span><span class="s2">, </span><span class="s1">np.ndarray</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s1">Any]</span><span class="s2">, </span><span class="s1">np.ndarray]:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Generate a numba jitted agg function specified by values from engine_kwargs. 
+ 
+    1. jit the user's function 
+    2. Return a groupby agg function with the jitted function inline 
+ 
+    Configurations specified in engine_kwargs apply to both the user's 
+    function _AND_ the groupby evaluation loop. 
+ 
+    Parameters 
+    ---------- 
+    kwargs : dict 
+        **kwargs to be passed into the function 
+    func : function 
+        function to be applied to each window and will be JITed 
+    engine_kwargs : dict 
+        dictionary of arguments to be passed into numba.jit 
+ 
+    Returns 
+    ------- 
+    Numba function 
+    &quot;&quot;&quot;</span>
+    <span class="s1">nopython</span><span class="s2">, </span><span class="s1">nogil</span><span class="s2">, </span><span class="s1">parallel = get_jit_arguments(engine_kwargs</span><span class="s2">, </span><span class="s1">kwargs)</span>
+
+    <span class="s1">validate_udf(func)</span>
+    <span class="s1">cache_key = (func</span><span class="s2">, </span><span class="s3">&quot;groupby_agg&quot;</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">cache_key </span><span class="s2">in </span><span class="s1">NUMBA_FUNC_CACHE:</span>
+        <span class="s2">return </span><span class="s1">NUMBA_FUNC_CACHE[cache_key]</span>
+
+    <span class="s1">numba_func = jit_user_function(func</span><span class="s2">, </span><span class="s1">nopython</span><span class="s2">, </span><span class="s1">nogil</span><span class="s2">, </span><span class="s1">parallel)</span>
+    <span class="s2">if </span><span class="s1">TYPE_CHECKING:</span>
+        <span class="s2">import </span><span class="s1">numba</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">numba = import_optional_dependency(</span><span class="s3">&quot;numba&quot;</span><span class="s1">)</span>
+
+    <span class="s1">@numba.jit(nopython=nopython</span><span class="s2">, </span><span class="s1">nogil=nogil</span><span class="s2">, </span><span class="s1">parallel=parallel)</span>
+    <span class="s2">def </span><span class="s1">group_agg(</span>
+        <span class="s1">values: np.ndarray</span><span class="s2">,</span>
+        <span class="s1">index: np.ndarray</span><span class="s2">,</span>
+        <span class="s1">begin: np.ndarray</span><span class="s2">,</span>
+        <span class="s1">end: np.ndarray</span><span class="s2">,</span>
+        <span class="s1">num_columns: int</span><span class="s2">,</span>
+        <span class="s1">*args: Any</span><span class="s2">,</span>
+    <span class="s1">) -&gt; np.ndarray:</span>
+
+        <span class="s2">assert </span><span class="s1">len(begin) == len(end)</span>
+        <span class="s1">num_groups = len(begin)</span>
+
+        <span class="s1">result = np.empty((num_groups</span><span class="s2">, </span><span class="s1">num_columns))</span>
+        <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">numba.prange(num_groups):</span>
+            <span class="s1">group_index = index[begin[i] : end[i]]</span>
+            <span class="s2">for </span><span class="s1">j </span><span class="s2">in </span><span class="s1">numba.prange(num_columns):</span>
+                <span class="s1">group = values[begin[i] : end[i]</span><span class="s2">, </span><span class="s1">j]</span>
+                <span class="s1">result[i</span><span class="s2">, </span><span class="s1">j] = numba_func(group</span><span class="s2">, </span><span class="s1">group_index</span><span class="s2">, </span><span class="s1">*args)</span>
+        <span class="s2">return </span><span class="s1">result</span>
+
+    <span class="s2">return </span><span class="s1">group_agg</span>
+
+
+<span class="s2">def </span><span class="s1">generate_numba_transform_func(</span>
+    <span class="s1">kwargs: dict[str</span><span class="s2">, </span><span class="s1">Any]</span><span class="s2">,</span>
+    <span class="s1">func: Callable[...</span><span class="s2">, </span><span class="s1">np.ndarray]</span><span class="s2">,</span>
+    <span class="s1">engine_kwargs: dict[str</span><span class="s2">, </span><span class="s1">bool] | </span><span class="s2">None,</span>
+<span class="s1">) -&gt; Callable[[np.ndarray</span><span class="s2">, </span><span class="s1">np.ndarray</span><span class="s2">, </span><span class="s1">np.ndarray</span><span class="s2">, </span><span class="s1">np.ndarray</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s1">Any]</span><span class="s2">, </span><span class="s1">np.ndarray]:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Generate a numba jitted transform function specified by values from engine_kwargs. 
+ 
+    1. jit the user's function 
+    2. Return a groupby transform function with the jitted function inline 
+ 
+    Configurations specified in engine_kwargs apply to both the user's 
+    function _AND_ the groupby evaluation loop. 
+ 
+    Parameters 
+    ---------- 
+    kwargs : dict 
+        **kwargs to be passed into the function 
+    func : function 
+        function to be applied to each window and will be JITed 
+    engine_kwargs : dict 
+        dictionary of arguments to be passed into numba.jit 
+ 
+    Returns 
+    ------- 
+    Numba function 
+    &quot;&quot;&quot;</span>
+    <span class="s1">nopython</span><span class="s2">, </span><span class="s1">nogil</span><span class="s2">, </span><span class="s1">parallel = get_jit_arguments(engine_kwargs</span><span class="s2">, </span><span class="s1">kwargs)</span>
+
+    <span class="s1">validate_udf(func)</span>
+    <span class="s1">cache_key = (func</span><span class="s2">, </span><span class="s3">&quot;groupby_transform&quot;</span><span class="s1">)</span>
+    <span class="s2">if </span><span class="s1">cache_key </span><span class="s2">in </span><span class="s1">NUMBA_FUNC_CACHE:</span>
+        <span class="s2">return </span><span class="s1">NUMBA_FUNC_CACHE[cache_key]</span>
+
+    <span class="s1">numba_func = jit_user_function(func</span><span class="s2">, </span><span class="s1">nopython</span><span class="s2">, </span><span class="s1">nogil</span><span class="s2">, </span><span class="s1">parallel)</span>
+    <span class="s2">if </span><span class="s1">TYPE_CHECKING:</span>
+        <span class="s2">import </span><span class="s1">numba</span>
+    <span class="s2">else</span><span class="s1">:</span>
+        <span class="s1">numba = import_optional_dependency(</span><span class="s3">&quot;numba&quot;</span><span class="s1">)</span>
+
+    <span class="s1">@numba.jit(nopython=nopython</span><span class="s2">, </span><span class="s1">nogil=nogil</span><span class="s2">, </span><span class="s1">parallel=parallel)</span>
+    <span class="s2">def </span><span class="s1">group_transform(</span>
+        <span class="s1">values: np.ndarray</span><span class="s2">,</span>
+        <span class="s1">index: np.ndarray</span><span class="s2">,</span>
+        <span class="s1">begin: np.ndarray</span><span class="s2">,</span>
+        <span class="s1">end: np.ndarray</span><span class="s2">,</span>
+        <span class="s1">num_columns: int</span><span class="s2">,</span>
+        <span class="s1">*args: Any</span><span class="s2">,</span>
+    <span class="s1">) -&gt; np.ndarray:</span>
+
+        <span class="s2">assert </span><span class="s1">len(begin) == len(end)</span>
+        <span class="s1">num_groups = len(begin)</span>
+
+        <span class="s1">result = np.empty((len(values)</span><span class="s2">, </span><span class="s1">num_columns))</span>
+        <span class="s2">for </span><span class="s1">i </span><span class="s2">in </span><span class="s1">numba.prange(num_groups):</span>
+            <span class="s1">group_index = index[begin[i] : end[i]]</span>
+            <span class="s2">for </span><span class="s1">j </span><span class="s2">in </span><span class="s1">numba.prange(num_columns):</span>
+                <span class="s1">group = values[begin[i] : end[i]</span><span class="s2">, </span><span class="s1">j]</span>
+                <span class="s1">result[begin[i] : end[i]</span><span class="s2">, </span><span class="s1">j] = numba_func(group</span><span class="s2">, </span><span class="s1">group_index</span><span class="s2">, </span><span class="s1">*args)</span>
+        <span class="s2">return </span><span class="s1">result</span>
+
+    <span class="s2">return </span><span class="s1">group_transform</span>
+</pre>
+</body>
+</html>

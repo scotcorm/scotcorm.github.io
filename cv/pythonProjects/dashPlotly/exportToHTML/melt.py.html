@@ -1,0 +1,569 @@
+<html>
+<head>
+<title>melt.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6a8759;}
+.s3 { color: #808080;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+melt.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">import </span><span class="s1">re</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">TYPE_CHECKING</span>
+<span class="s0">import </span><span class="s1">warnings</span>
+
+<span class="s0">import </span><span class="s1">numpy </span><span class="s0">as </span><span class="s1">np</span>
+
+<span class="s0">from </span><span class="s1">pandas.util._decorators </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">Appender</span><span class="s0">,</span>
+    <span class="s1">deprecate_kwarg</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.util._exceptions </span><span class="s0">import </span><span class="s1">find_stack_level</span>
+
+<span class="s0">from </span><span class="s1">pandas.core.dtypes.common </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">is_extension_array_dtype</span><span class="s0">,</span>
+    <span class="s1">is_list_like</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.core.dtypes.concat </span><span class="s0">import </span><span class="s1">concat_compat</span>
+<span class="s0">from </span><span class="s1">pandas.core.dtypes.missing </span><span class="s0">import </span><span class="s1">notna</span>
+
+<span class="s0">import </span><span class="s1">pandas.core.algorithms </span><span class="s0">as </span><span class="s1">algos</span>
+<span class="s0">from </span><span class="s1">pandas.core.arrays </span><span class="s0">import </span><span class="s1">Categorical</span>
+<span class="s0">import </span><span class="s1">pandas.core.common </span><span class="s0">as </span><span class="s1">com</span>
+<span class="s0">from </span><span class="s1">pandas.core.indexes.api </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">Index</span><span class="s0">,</span>
+    <span class="s1">MultiIndex</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.core.reshape.concat </span><span class="s0">import </span><span class="s1">concat</span>
+<span class="s0">from </span><span class="s1">pandas.core.reshape.util </span><span class="s0">import </span><span class="s1">tile_compat</span>
+<span class="s0">from </span><span class="s1">pandas.core.shared_docs </span><span class="s0">import </span><span class="s1">_shared_docs</span>
+<span class="s0">from </span><span class="s1">pandas.core.tools.numeric </span><span class="s0">import </span><span class="s1">to_numeric</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING:</span>
+    <span class="s0">from </span><span class="s1">pandas </span><span class="s0">import </span><span class="s1">DataFrame</span>
+
+
+<span class="s1">@Appender(_shared_docs[</span><span class="s2">&quot;melt&quot;</span><span class="s1">] % {</span><span class="s2">&quot;caller&quot;</span><span class="s1">: </span><span class="s2">&quot;pd.melt(df, &quot;</span><span class="s0">, </span><span class="s2">&quot;other&quot;</span><span class="s1">: </span><span class="s2">&quot;DataFrame.melt&quot;</span><span class="s1">})</span>
+<span class="s0">def </span><span class="s1">melt(</span>
+    <span class="s1">frame: DataFrame</span><span class="s0">,</span>
+    <span class="s1">id_vars=</span><span class="s0">None,</span>
+    <span class="s1">value_vars=</span><span class="s0">None,</span>
+    <span class="s1">var_name=</span><span class="s0">None,</span>
+    <span class="s1">value_name=</span><span class="s2">&quot;value&quot;</span><span class="s0">,</span>
+    <span class="s1">col_level=</span><span class="s0">None,</span>
+    <span class="s1">ignore_index: bool = </span><span class="s0">True,</span>
+<span class="s1">) -&gt; DataFrame:</span>
+    <span class="s3"># If multiindex, gather names of columns on all level for checking presence</span>
+    <span class="s3"># of `id_vars` and `value_vars`</span>
+    <span class="s0">if </span><span class="s1">isinstance(frame.columns</span><span class="s0">, </span><span class="s1">MultiIndex):</span>
+        <span class="s1">cols = [x </span><span class="s0">for </span><span class="s1">c </span><span class="s0">in </span><span class="s1">frame.columns </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">c]</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">cols = list(frame.columns)</span>
+
+    <span class="s0">if </span><span class="s1">value_name </span><span class="s0">in </span><span class="s1">frame.columns:</span>
+        <span class="s1">warnings.warn(</span>
+            <span class="s2">&quot;This dataframe has a column name that matches the 'value_name' column &quot;</span>
+            <span class="s2">&quot;name of the resulting Dataframe. &quot;</span>
+            <span class="s2">&quot;In the future this will raise an error, please set the 'value_name' &quot;</span>
+            <span class="s2">&quot;parameter of DataFrame.melt to a unique name.&quot;</span><span class="s0">,</span>
+            <span class="s1">FutureWarning</span><span class="s0">,</span>
+            <span class="s1">stacklevel=find_stack_level()</span><span class="s0">,</span>
+        <span class="s1">)</span>
+
+    <span class="s0">if </span><span class="s1">id_vars </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s0">if not </span><span class="s1">is_list_like(id_vars):</span>
+            <span class="s1">id_vars = [id_vars]</span>
+        <span class="s0">elif </span><span class="s1">isinstance(frame.columns</span><span class="s0">, </span><span class="s1">MultiIndex) </span><span class="s0">and not </span><span class="s1">isinstance(id_vars</span><span class="s0">, </span><span class="s1">list):</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span>
+                <span class="s2">&quot;id_vars must be a list of tuples when columns are a MultiIndex&quot;</span>
+            <span class="s1">)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s3"># Check that `id_vars` are in frame</span>
+            <span class="s1">id_vars = list(id_vars)</span>
+            <span class="s1">missing = Index(com.flatten(id_vars)).difference(cols)</span>
+            <span class="s0">if not </span><span class="s1">missing.empty:</span>
+                <span class="s0">raise </span><span class="s1">KeyError(</span>
+                    <span class="s2">&quot;The following 'id_vars' are not present &quot;</span>
+                    <span class="s2">f&quot;in the DataFrame: </span><span class="s0">{</span><span class="s1">list(missing)</span><span class="s0">}</span><span class="s2">&quot;</span>
+                <span class="s1">)</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">id_vars = []</span>
+
+    <span class="s0">if </span><span class="s1">value_vars </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s0">if not </span><span class="s1">is_list_like(value_vars):</span>
+            <span class="s1">value_vars = [value_vars]</span>
+        <span class="s0">elif </span><span class="s1">isinstance(frame.columns</span><span class="s0">, </span><span class="s1">MultiIndex) </span><span class="s0">and not </span><span class="s1">isinstance(value_vars</span><span class="s0">, </span><span class="s1">list):</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span>
+                <span class="s2">&quot;value_vars must be a list of tuples when columns are a MultiIndex&quot;</span>
+            <span class="s1">)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">value_vars = list(value_vars)</span>
+            <span class="s3"># Check that `value_vars` are in frame</span>
+            <span class="s1">missing = Index(com.flatten(value_vars)).difference(cols)</span>
+            <span class="s0">if not </span><span class="s1">missing.empty:</span>
+                <span class="s0">raise </span><span class="s1">KeyError(</span>
+                    <span class="s2">&quot;The following 'value_vars' are not present in &quot;</span>
+                    <span class="s2">f&quot;the DataFrame: </span><span class="s0">{</span><span class="s1">list(missing)</span><span class="s0">}</span><span class="s2">&quot;</span>
+                <span class="s1">)</span>
+        <span class="s0">if </span><span class="s1">col_level </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">idx = frame.columns.get_level_values(col_level).get_indexer(</span>
+                <span class="s1">id_vars + value_vars</span>
+            <span class="s1">)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">idx = algos.unique(frame.columns.get_indexer_for(id_vars + value_vars))</span>
+        <span class="s1">frame = frame.iloc[:</span><span class="s0">, </span><span class="s1">idx]</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">frame = frame.copy()</span>
+
+    <span class="s0">if </span><span class="s1">col_level </span><span class="s0">is not None</span><span class="s1">:  </span><span class="s3"># allow list or other?</span>
+        <span class="s3"># frame is a copy</span>
+        <span class="s1">frame.columns = frame.columns.get_level_values(col_level)</span>
+
+    <span class="s0">if </span><span class="s1">var_name </span><span class="s0">is None</span><span class="s1">:</span>
+        <span class="s0">if </span><span class="s1">isinstance(frame.columns</span><span class="s0">, </span><span class="s1">MultiIndex):</span>
+            <span class="s0">if </span><span class="s1">len(frame.columns.names) == len(set(frame.columns.names)):</span>
+                <span class="s1">var_name = frame.columns.names</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">var_name = [</span><span class="s2">f&quot;variable_</span><span class="s0">{</span><span class="s1">i</span><span class="s0">}</span><span class="s2">&quot; </span><span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">range(len(frame.columns.names))]</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">var_name = [</span>
+                <span class="s1">frame.columns.name </span><span class="s0">if </span><span class="s1">frame.columns.name </span><span class="s0">is not None else </span><span class="s2">&quot;variable&quot;</span>
+            <span class="s1">]</span>
+    <span class="s0">if </span><span class="s1">isinstance(var_name</span><span class="s0">, </span><span class="s1">str):</span>
+        <span class="s1">var_name = [var_name]</span>
+
+    <span class="s1">N</span><span class="s0">, </span><span class="s1">K = frame.shape</span>
+    <span class="s1">K -= len(id_vars)</span>
+
+    <span class="s1">mdata = {}</span>
+    <span class="s0">for </span><span class="s1">col </span><span class="s0">in </span><span class="s1">id_vars:</span>
+        <span class="s1">id_data = frame.pop(col)</span>
+        <span class="s0">if </span><span class="s1">is_extension_array_dtype(id_data):</span>
+            <span class="s1">id_data = concat([id_data] * K</span><span class="s0">, </span><span class="s1">ignore_index=</span><span class="s0">True</span><span class="s1">)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s3"># Incompatible types in assignment (expression has type</span>
+            <span class="s3"># &quot;ndarray[Any, dtype[Any]]&quot;, variable has type &quot;Series&quot;)  [assignment]</span>
+            <span class="s1">id_data = np.tile(id_data._values</span><span class="s0">, </span><span class="s1">K)  </span><span class="s3"># type: ignore[assignment]</span>
+        <span class="s1">mdata[col] = id_data</span>
+
+    <span class="s1">mcolumns = id_vars + var_name + [value_name]</span>
+
+    <span class="s3"># error: Incompatible types in assignment (expression has type &quot;ndarray&quot;,</span>
+    <span class="s3"># target has type &quot;Series&quot;)</span>
+    <span class="s1">mdata[value_name] = frame._values.ravel(</span><span class="s2">&quot;F&quot;</span><span class="s1">)  </span><span class="s3"># type: ignore[assignment]</span>
+    <span class="s0">for </span><span class="s1">i</span><span class="s0">, </span><span class="s1">col </span><span class="s0">in </span><span class="s1">enumerate(var_name):</span>
+        <span class="s3"># asanyarray will keep the columns as an Index</span>
+
+        <span class="s3"># error: Incompatible types in assignment (expression has type &quot;ndarray&quot;, target</span>
+        <span class="s3"># has type &quot;Series&quot;)</span>
+        <span class="s1">mdata[col] = np.asanyarray(  </span><span class="s3"># type: ignore[assignment]</span>
+            <span class="s1">frame.columns._get_level_values(i)</span>
+        <span class="s1">).repeat(N)</span>
+
+    <span class="s1">result = frame._constructor(mdata</span><span class="s0">, </span><span class="s1">columns=mcolumns)</span>
+
+    <span class="s0">if not </span><span class="s1">ignore_index:</span>
+        <span class="s1">result.index = tile_compat(frame.index</span><span class="s0">, </span><span class="s1">K)</span>
+
+    <span class="s0">return </span><span class="s1">result</span>
+
+
+<span class="s1">@deprecate_kwarg(old_arg_name=</span><span class="s2">&quot;label&quot;</span><span class="s0">, </span><span class="s1">new_arg_name=</span><span class="s0">None</span><span class="s1">)</span>
+<span class="s0">def </span><span class="s1">lreshape(data: DataFrame</span><span class="s0">, </span><span class="s1">groups</span><span class="s0">, </span><span class="s1">dropna: bool = </span><span class="s0">True, </span><span class="s1">label=</span><span class="s0">None</span><span class="s1">) -&gt; DataFrame:</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Reshape wide-format data to long. Generalized inverse of DataFrame.pivot. 
+ 
+    Accepts a dictionary, ``groups``, in which each key is a new column name 
+    and each value is a list of old column names that will be &quot;melted&quot; under 
+    the new column name as part of the reshape. 
+ 
+    Parameters 
+    ---------- 
+    data : DataFrame 
+        The wide-format DataFrame. 
+    groups : dict 
+        {new_name : list_of_columns}. 
+    dropna : bool, default True 
+        Do not include columns whose entries are all NaN. 
+    label : None 
+        Not used. 
+ 
+        .. deprecated:: 1.0.0 
+ 
+    Returns 
+    ------- 
+    DataFrame 
+        Reshaped DataFrame. 
+ 
+    See Also 
+    -------- 
+    melt : Unpivot a DataFrame from wide to long format, optionally leaving 
+        identifiers set. 
+    pivot : Create a spreadsheet-style pivot table as a DataFrame. 
+    DataFrame.pivot : Pivot without aggregation that can handle 
+        non-numeric data. 
+    DataFrame.pivot_table : Generalization of pivot that can handle 
+        duplicate values for one index/column pair. 
+    DataFrame.unstack : Pivot based on the index values instead of a 
+        column. 
+    wide_to_long : Wide panel to long format. Less flexible but more 
+        user-friendly than melt. 
+ 
+    Examples 
+    -------- 
+    &gt;&gt;&gt; data = pd.DataFrame({'hr1': [514, 573], 'hr2': [545, 526], 
+    ...                      'team': ['Red Sox', 'Yankees'], 
+    ...                      'year1': [2007, 2007], 'year2': [2008, 2008]}) 
+    &gt;&gt;&gt; data 
+       hr1  hr2     team  year1  year2 
+    0  514  545  Red Sox   2007   2008 
+    1  573  526  Yankees   2007   2008 
+ 
+    &gt;&gt;&gt; pd.lreshape(data, {'year': ['year1', 'year2'], 'hr': ['hr1', 'hr2']}) 
+          team  year   hr 
+    0  Red Sox  2007  514 
+    1  Yankees  2007  573 
+    2  Red Sox  2008  545 
+    3  Yankees  2008  526 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">isinstance(groups</span><span class="s0">, </span><span class="s1">dict):</span>
+        <span class="s1">keys = list(groups.keys())</span>
+        <span class="s1">values = list(groups.values())</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">keys</span><span class="s0">, </span><span class="s1">values = zip(*groups)</span>
+
+    <span class="s1">all_cols = list(set.union(*(set(x) </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">values)))</span>
+    <span class="s1">id_cols = list(data.columns.difference(all_cols))</span>
+
+    <span class="s1">K = len(values[</span><span class="s5">0</span><span class="s1">])</span>
+
+    <span class="s0">for </span><span class="s1">seq </span><span class="s0">in </span><span class="s1">values:</span>
+        <span class="s0">if </span><span class="s1">len(seq) != K:</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s2">&quot;All column lists must be same length&quot;</span><span class="s1">)</span>
+
+    <span class="s1">mdata = {}</span>
+    <span class="s1">pivot_cols = []</span>
+
+    <span class="s0">for </span><span class="s1">target</span><span class="s0">, </span><span class="s1">names </span><span class="s0">in </span><span class="s1">zip(keys</span><span class="s0">, </span><span class="s1">values):</span>
+        <span class="s1">to_concat = [data[col]._values </span><span class="s0">for </span><span class="s1">col </span><span class="s0">in </span><span class="s1">names]</span>
+
+        <span class="s1">mdata[target] = concat_compat(to_concat)</span>
+        <span class="s1">pivot_cols.append(target)</span>
+
+    <span class="s0">for </span><span class="s1">col </span><span class="s0">in </span><span class="s1">id_cols:</span>
+        <span class="s1">mdata[col] = np.tile(data[col]._values</span><span class="s0">, </span><span class="s1">K)</span>
+
+    <span class="s0">if </span><span class="s1">dropna:</span>
+        <span class="s1">mask = np.ones(len(mdata[pivot_cols[</span><span class="s5">0</span><span class="s1">]])</span><span class="s0">, </span><span class="s1">dtype=bool)</span>
+        <span class="s0">for </span><span class="s1">c </span><span class="s0">in </span><span class="s1">pivot_cols:</span>
+            <span class="s1">mask &amp;= notna(mdata[c])</span>
+        <span class="s0">if not </span><span class="s1">mask.all():</span>
+            <span class="s1">mdata = {k: v[mask] </span><span class="s0">for </span><span class="s1">k</span><span class="s0">, </span><span class="s1">v </span><span class="s0">in </span><span class="s1">mdata.items()}</span>
+
+    <span class="s0">return </span><span class="s1">data._constructor(mdata</span><span class="s0">, </span><span class="s1">columns=id_cols + pivot_cols)</span>
+
+
+<span class="s0">def </span><span class="s1">wide_to_long(</span>
+    <span class="s1">df: DataFrame</span><span class="s0">, </span><span class="s1">stubnames</span><span class="s0">, </span><span class="s1">i</span><span class="s0">, </span><span class="s1">j</span><span class="s0">, </span><span class="s1">sep: str = </span><span class="s2">&quot;&quot;</span><span class="s0">, </span><span class="s1">suffix: str = </span><span class="s2">r&quot;\d+&quot;</span>
+<span class="s1">) -&gt; DataFrame:</span>
+    <span class="s4">r&quot;&quot;&quot; 
+    Unpivot a DataFrame from wide to long format. 
+ 
+    Less flexible but more user-friendly than melt. 
+ 
+    With stubnames ['A', 'B'], this function expects to find one or more 
+    group of columns with format 
+    A-suffix1, A-suffix2,..., B-suffix1, B-suffix2,... 
+    You specify what you want to call this suffix in the resulting long format 
+    with `j` (for example `j='year'`) 
+ 
+    Each row of these wide variables are assumed to be uniquely identified by 
+    `i` (can be a single column name or a list of column names) 
+ 
+    All remaining variables in the data frame are left intact. 
+ 
+    Parameters 
+    ---------- 
+    df : DataFrame 
+        The wide-format DataFrame. 
+    stubnames : str or list-like 
+        The stub name(s). The wide format variables are assumed to 
+        start with the stub names. 
+    i : str or list-like 
+        Column(s) to use as id variable(s). 
+    j : str 
+        The name of the sub-observation variable. What you wish to name your 
+        suffix in the long format. 
+    sep : str, default &quot;&quot; 
+        A character indicating the separation of the variable names 
+        in the wide format, to be stripped from the names in the long format. 
+        For example, if your column names are A-suffix1, A-suffix2, you 
+        can strip the hyphen by specifying `sep='-'`. 
+    suffix : str, default '\\d+' 
+        A regular expression capturing the wanted suffixes. '\\d+' captures 
+        numeric suffixes. Suffixes with no numbers could be specified with the 
+        negated character class '\\D+'. You can also further disambiguate 
+        suffixes, for example, if your wide variables are of the form A-one, 
+        B-two,.., and you have an unrelated column A-rating, you can ignore the 
+        last one by specifying `suffix='(!?one|two)'`. When all suffixes are 
+        numeric, they are cast to int64/float64. 
+ 
+    Returns 
+    ------- 
+    DataFrame 
+        A DataFrame that contains each stub name as a variable, with new index 
+        (i, j). 
+ 
+    See Also 
+    -------- 
+    melt : Unpivot a DataFrame from wide to long format, optionally leaving 
+        identifiers set. 
+    pivot : Create a spreadsheet-style pivot table as a DataFrame. 
+    DataFrame.pivot : Pivot without aggregation that can handle 
+        non-numeric data. 
+    DataFrame.pivot_table : Generalization of pivot that can handle 
+        duplicate values for one index/column pair. 
+    DataFrame.unstack : Pivot based on the index values instead of a 
+        column. 
+ 
+    Notes 
+    ----- 
+    All extra variables are left untouched. This simply uses 
+    `pandas.melt` under the hood, but is hard-coded to &quot;do the right thing&quot; 
+    in a typical case. 
+ 
+    Examples 
+    -------- 
+    &gt;&gt;&gt; np.random.seed(123) 
+    &gt;&gt;&gt; df = pd.DataFrame({&quot;A1970&quot; : {0 : &quot;a&quot;, 1 : &quot;b&quot;, 2 : &quot;c&quot;}, 
+    ...                    &quot;A1980&quot; : {0 : &quot;d&quot;, 1 : &quot;e&quot;, 2 : &quot;f&quot;}, 
+    ...                    &quot;B1970&quot; : {0 : 2.5, 1 : 1.2, 2 : .7}, 
+    ...                    &quot;B1980&quot; : {0 : 3.2, 1 : 1.3, 2 : .1}, 
+    ...                    &quot;X&quot;     : dict(zip(range(3), np.random.randn(3))) 
+    ...                   }) 
+    &gt;&gt;&gt; df[&quot;id&quot;] = df.index 
+    &gt;&gt;&gt; df 
+      A1970 A1980  B1970  B1980         X  id 
+    0     a     d    2.5    3.2 -1.085631   0 
+    1     b     e    1.2    1.3  0.997345   1 
+    2     c     f    0.7    0.1  0.282978   2 
+    &gt;&gt;&gt; pd.wide_to_long(df, [&quot;A&quot;, &quot;B&quot;], i=&quot;id&quot;, j=&quot;year&quot;) 
+    ... # doctest: +NORMALIZE_WHITESPACE 
+                    X  A    B 
+    id year 
+    0  1970 -1.085631  a  2.5 
+    1  1970  0.997345  b  1.2 
+    2  1970  0.282978  c  0.7 
+    0  1980 -1.085631  d  3.2 
+    1  1980  0.997345  e  1.3 
+    2  1980  0.282978  f  0.1 
+ 
+    With multiple id columns 
+ 
+    &gt;&gt;&gt; df = pd.DataFrame({ 
+    ...     'famid': [1, 1, 1, 2, 2, 2, 3, 3, 3], 
+    ...     'birth': [1, 2, 3, 1, 2, 3, 1, 2, 3], 
+    ...     'ht1': [2.8, 2.9, 2.2, 2, 1.8, 1.9, 2.2, 2.3, 2.1], 
+    ...     'ht2': [3.4, 3.8, 2.9, 3.2, 2.8, 2.4, 3.3, 3.4, 2.9] 
+    ... }) 
+    &gt;&gt;&gt; df 
+       famid  birth  ht1  ht2 
+    0      1      1  2.8  3.4 
+    1      1      2  2.9  3.8 
+    2      1      3  2.2  2.9 
+    3      2      1  2.0  3.2 
+    4      2      2  1.8  2.8 
+    5      2      3  1.9  2.4 
+    6      3      1  2.2  3.3 
+    7      3      2  2.3  3.4 
+    8      3      3  2.1  2.9 
+    &gt;&gt;&gt; l = pd.wide_to_long(df, stubnames='ht', i=['famid', 'birth'], j='age') 
+    &gt;&gt;&gt; l 
+    ... # doctest: +NORMALIZE_WHITESPACE 
+                      ht 
+    famid birth age 
+    1     1     1    2.8 
+                2    3.4 
+          2     1    2.9 
+                2    3.8 
+          3     1    2.2 
+                2    2.9 
+    2     1     1    2.0 
+                2    3.2 
+          2     1    1.8 
+                2    2.8 
+          3     1    1.9 
+                2    2.4 
+    3     1     1    2.2 
+                2    3.3 
+          2     1    2.3 
+                2    3.4 
+          3     1    2.1 
+                2    2.9 
+ 
+    Going from long back to wide just takes some creative use of `unstack` 
+ 
+    &gt;&gt;&gt; w = l.unstack() 
+    &gt;&gt;&gt; w.columns = w.columns.map('{0[0]}{0[1]}'.format) 
+    &gt;&gt;&gt; w.reset_index() 
+       famid  birth  ht1  ht2 
+    0      1      1  2.8  3.4 
+    1      1      2  2.9  3.8 
+    2      1      3  2.2  2.9 
+    3      2      1  2.0  3.2 
+    4      2      2  1.8  2.8 
+    5      2      3  1.9  2.4 
+    6      3      1  2.2  3.3 
+    7      3      2  2.3  3.4 
+    8      3      3  2.1  2.9 
+ 
+    Less wieldy column names are also handled 
+ 
+    &gt;&gt;&gt; np.random.seed(0) 
+    &gt;&gt;&gt; df = pd.DataFrame({'A(weekly)-2010': np.random.rand(3), 
+    ...                    'A(weekly)-2011': np.random.rand(3), 
+    ...                    'B(weekly)-2010': np.random.rand(3), 
+    ...                    'B(weekly)-2011': np.random.rand(3), 
+    ...                    'X' : np.random.randint(3, size=3)}) 
+    &gt;&gt;&gt; df['id'] = df.index 
+    &gt;&gt;&gt; df # doctest: +NORMALIZE_WHITESPACE, +ELLIPSIS 
+       A(weekly)-2010  A(weekly)-2011  B(weekly)-2010  B(weekly)-2011  X  id 
+    0        0.548814        0.544883        0.437587        0.383442  0   0 
+    1        0.715189        0.423655        0.891773        0.791725  1   1 
+    2        0.602763        0.645894        0.963663        0.528895  1   2 
+ 
+    &gt;&gt;&gt; pd.wide_to_long(df, ['A(weekly)', 'B(weekly)'], i='id', 
+    ...                 j='year', sep='-') 
+    ... # doctest: +NORMALIZE_WHITESPACE 
+             X  A(weekly)  B(weekly) 
+    id year 
+    0  2010  0   0.548814   0.437587 
+    1  2010  1   0.715189   0.891773 
+    2  2010  1   0.602763   0.963663 
+    0  2011  0   0.544883   0.383442 
+    1  2011  1   0.423655   0.791725 
+    2  2011  1   0.645894   0.528895 
+ 
+    If we have many columns, we could also use a regex to find our 
+    stubnames and pass that list on to wide_to_long 
+ 
+    &gt;&gt;&gt; stubnames = sorted( 
+    ...     set([match[0] for match in df.columns.str.findall( 
+    ...         r'[A-B]\(.*\)').values if match != []]) 
+    ... ) 
+    &gt;&gt;&gt; list(stubnames) 
+    ['A(weekly)', 'B(weekly)'] 
+ 
+    All of the above examples have integers as suffixes. It is possible to 
+    have non-integers as suffixes. 
+ 
+    &gt;&gt;&gt; df = pd.DataFrame({ 
+    ...     'famid': [1, 1, 1, 2, 2, 2, 3, 3, 3], 
+    ...     'birth': [1, 2, 3, 1, 2, 3, 1, 2, 3], 
+    ...     'ht_one': [2.8, 2.9, 2.2, 2, 1.8, 1.9, 2.2, 2.3, 2.1], 
+    ...     'ht_two': [3.4, 3.8, 2.9, 3.2, 2.8, 2.4, 3.3, 3.4, 2.9] 
+    ... }) 
+    &gt;&gt;&gt; df 
+       famid  birth  ht_one  ht_two 
+    0      1      1     2.8     3.4 
+    1      1      2     2.9     3.8 
+    2      1      3     2.2     2.9 
+    3      2      1     2.0     3.2 
+    4      2      2     1.8     2.8 
+    5      2      3     1.9     2.4 
+    6      3      1     2.2     3.3 
+    7      3      2     2.3     3.4 
+    8      3      3     2.1     2.9 
+ 
+    &gt;&gt;&gt; l = pd.wide_to_long(df, stubnames='ht', i=['famid', 'birth'], j='age', 
+    ...                     sep='_', suffix=r'\w+') 
+    &gt;&gt;&gt; l 
+    ... # doctest: +NORMALIZE_WHITESPACE 
+                      ht 
+    famid birth age 
+    1     1     one  2.8 
+                two  3.4 
+          2     one  2.9 
+                two  3.8 
+          3     one  2.2 
+                two  2.9 
+    2     1     one  2.0 
+                two  3.2 
+          2     one  1.8 
+                two  2.8 
+          3     one  1.9 
+                two  2.4 
+    3     1     one  2.2 
+                two  3.3 
+          2     one  2.3 
+                two  3.4 
+          3     one  2.1 
+                two  2.9 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">get_var_names(df</span><span class="s0">, </span><span class="s1">stub: str</span><span class="s0">, </span><span class="s1">sep: str</span><span class="s0">, </span><span class="s1">suffix: str) -&gt; list[str]:</span>
+        <span class="s1">regex = </span><span class="s2">fr&quot;^</span><span class="s0">{</span><span class="s1">re.escape(stub)</span><span class="s0">}{</span><span class="s1">re.escape(sep)</span><span class="s0">}{</span><span class="s1">suffix</span><span class="s0">}</span><span class="s2">$&quot;</span>
+        <span class="s1">pattern = re.compile(regex)</span>
+        <span class="s0">return </span><span class="s1">[col </span><span class="s0">for </span><span class="s1">col </span><span class="s0">in </span><span class="s1">df.columns </span><span class="s0">if </span><span class="s1">pattern.match(col)]</span>
+
+    <span class="s0">def </span><span class="s1">melt_stub(df</span><span class="s0">, </span><span class="s1">stub: str</span><span class="s0">, </span><span class="s1">i</span><span class="s0">, </span><span class="s1">j</span><span class="s0">, </span><span class="s1">value_vars</span><span class="s0">, </span><span class="s1">sep: str):</span>
+        <span class="s1">newdf = melt(</span>
+            <span class="s1">df</span><span class="s0">,</span>
+            <span class="s1">id_vars=i</span><span class="s0">,</span>
+            <span class="s1">value_vars=value_vars</span><span class="s0">,</span>
+            <span class="s1">value_name=stub.rstrip(sep)</span><span class="s0">,</span>
+            <span class="s1">var_name=j</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s1">newdf[j] = Categorical(newdf[j])</span>
+        <span class="s1">newdf[j] = newdf[j].str.replace(re.escape(stub + sep)</span><span class="s0">, </span><span class="s2">&quot;&quot;</span><span class="s0">, </span><span class="s1">regex=</span><span class="s0">True</span><span class="s1">)</span>
+
+        <span class="s3"># GH17627 Cast numerics suffixes to int/float</span>
+        <span class="s1">newdf[j] = to_numeric(newdf[j]</span><span class="s0">, </span><span class="s1">errors=</span><span class="s2">&quot;ignore&quot;</span><span class="s1">)</span>
+
+        <span class="s0">return </span><span class="s1">newdf.set_index(i + [j])</span>
+
+    <span class="s0">if not </span><span class="s1">is_list_like(stubnames):</span>
+        <span class="s1">stubnames = [stubnames]</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">stubnames = list(stubnames)</span>
+
+    <span class="s0">if </span><span class="s1">any(col </span><span class="s0">in </span><span class="s1">stubnames </span><span class="s0">for </span><span class="s1">col </span><span class="s0">in </span><span class="s1">df.columns):</span>
+        <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s2">&quot;stubname can't be identical to a column name&quot;</span><span class="s1">)</span>
+
+    <span class="s0">if not </span><span class="s1">is_list_like(i):</span>
+        <span class="s1">i = [i]</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">i = list(i)</span>
+
+    <span class="s0">if </span><span class="s1">df[i].duplicated().any():</span>
+        <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s2">&quot;the id variables need to uniquely identify each row&quot;</span><span class="s1">)</span>
+
+    <span class="s1">value_vars = [get_var_names(df</span><span class="s0">, </span><span class="s1">stub</span><span class="s0">, </span><span class="s1">sep</span><span class="s0">, </span><span class="s1">suffix) </span><span class="s0">for </span><span class="s1">stub </span><span class="s0">in </span><span class="s1">stubnames]</span>
+
+    <span class="s1">value_vars_flattened = [e </span><span class="s0">for </span><span class="s1">sublist </span><span class="s0">in </span><span class="s1">value_vars </span><span class="s0">for </span><span class="s1">e </span><span class="s0">in </span><span class="s1">sublist]</span>
+    <span class="s1">id_vars = list(set(df.columns.tolist()).difference(value_vars_flattened))</span>
+
+    <span class="s1">_melted = [melt_stub(df</span><span class="s0">, </span><span class="s1">s</span><span class="s0">, </span><span class="s1">i</span><span class="s0">, </span><span class="s1">j</span><span class="s0">, </span><span class="s1">v</span><span class="s0">, </span><span class="s1">sep) </span><span class="s0">for </span><span class="s1">s</span><span class="s0">, </span><span class="s1">v </span><span class="s0">in </span><span class="s1">zip(stubnames</span><span class="s0">, </span><span class="s1">value_vars)]</span>
+    <span class="s1">melted = _melted[</span><span class="s5">0</span><span class="s1">].join(_melted[</span><span class="s5">1</span><span class="s1">:]</span><span class="s0">, </span><span class="s1">how=</span><span class="s2">&quot;outer&quot;</span><span class="s1">)</span>
+
+    <span class="s0">if </span><span class="s1">len(i) == </span><span class="s5">1</span><span class="s1">:</span>
+        <span class="s1">new = df[id_vars].set_index(i).join(melted)</span>
+        <span class="s0">return </span><span class="s1">new</span>
+
+    <span class="s1">new = df[id_vars].merge(melted.reset_index()</span><span class="s0">, </span><span class="s1">on=i).set_index(i + [j])</span>
+
+    <span class="s0">return </span><span class="s1">new</span>
+</pre>
+</body>
+</html>

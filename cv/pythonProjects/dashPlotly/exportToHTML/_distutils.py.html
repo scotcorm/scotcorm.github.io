@@ -1,0 +1,191 @@
+<html>
+<head>
+<title>_distutils.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_distutils.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;Locations where we look for configs, install stuff, etc&quot;&quot;&quot;</span>
+
+<span class="s2"># The following comment should be removed at some point in the future.</span>
+<span class="s2"># mypy: strict-optional=False</span>
+
+<span class="s3">import </span><span class="s1">logging</span>
+<span class="s3">import </span><span class="s1">os</span>
+<span class="s3">import </span><span class="s1">sys</span>
+<span class="s3">from </span><span class="s1">distutils.cmd </span><span class="s3">import </span><span class="s1">Command </span><span class="s3">as </span><span class="s1">DistutilsCommand</span>
+<span class="s3">from </span><span class="s1">distutils.command.install </span><span class="s3">import </span><span class="s1">SCHEME_KEYS</span>
+<span class="s3">from </span><span class="s1">distutils.command.install </span><span class="s3">import </span><span class="s1">install </span><span class="s3">as </span><span class="s1">distutils_install_command</span>
+<span class="s3">from </span><span class="s1">distutils.sysconfig </span><span class="s3">import </span><span class="s1">get_python_lib</span>
+<span class="s3">from </span><span class="s1">typing </span><span class="s3">import </span><span class="s1">Dict</span><span class="s3">, </span><span class="s1">List</span><span class="s3">, </span><span class="s1">Optional</span><span class="s3">, </span><span class="s1">Tuple</span><span class="s3">, </span><span class="s1">Union</span><span class="s3">, </span><span class="s1">cast</span>
+
+<span class="s3">from </span><span class="s1">pip._internal.models.scheme </span><span class="s3">import </span><span class="s1">Scheme</span>
+<span class="s3">from </span><span class="s1">pip._internal.utils.compat </span><span class="s3">import </span><span class="s1">WINDOWS</span>
+<span class="s3">from </span><span class="s1">pip._internal.utils.virtualenv </span><span class="s3">import </span><span class="s1">running_under_virtualenv</span>
+
+<span class="s3">from </span><span class="s1">.base </span><span class="s3">import </span><span class="s1">get_major_minor_version</span>
+
+<span class="s1">logger = logging.getLogger(__name__)</span>
+
+
+<span class="s3">def </span><span class="s1">distutils_scheme(</span>
+    <span class="s1">dist_name: str</span><span class="s3">,</span>
+    <span class="s1">user: bool = </span><span class="s3">False,</span>
+    <span class="s1">home: str = </span><span class="s3">None,</span>
+    <span class="s1">root: str = </span><span class="s3">None,</span>
+    <span class="s1">isolated: bool = </span><span class="s3">False,</span>
+    <span class="s1">prefix: str = </span><span class="s3">None,</span>
+    <span class="s1">*</span><span class="s3">,</span>
+    <span class="s1">ignore_config_files: bool = </span><span class="s3">False,</span>
+<span class="s1">) -&gt; Dict[str</span><span class="s3">, </span><span class="s1">str]:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Return a distutils install scheme 
+    &quot;&quot;&quot;</span>
+    <span class="s3">from </span><span class="s1">distutils.dist </span><span class="s3">import </span><span class="s1">Distribution</span>
+
+    <span class="s1">dist_args: Dict[str</span><span class="s3">, </span><span class="s1">Union[str</span><span class="s3">, </span><span class="s1">List[str]]] = {</span><span class="s4">&quot;name&quot;</span><span class="s1">: dist_name}</span>
+    <span class="s3">if </span><span class="s1">isolated:</span>
+        <span class="s1">dist_args[</span><span class="s4">&quot;script_args&quot;</span><span class="s1">] = [</span><span class="s4">&quot;--no-user-cfg&quot;</span><span class="s1">]</span>
+
+    <span class="s1">d = Distribution(dist_args)</span>
+    <span class="s3">if not </span><span class="s1">ignore_config_files:</span>
+        <span class="s3">try</span><span class="s1">:</span>
+            <span class="s1">d.parse_config_files()</span>
+        <span class="s3">except </span><span class="s1">UnicodeDecodeError:</span>
+            <span class="s2"># Typeshed does not include find_config_files() for some reason.</span>
+            <span class="s1">paths = d.find_config_files()  </span><span class="s2"># type: ignore</span>
+            <span class="s1">logger.warning(</span>
+                <span class="s4">&quot;Ignore distutils configs in %s due to encoding errors.&quot;</span><span class="s3">,</span>
+                <span class="s4">&quot;, &quot;</span><span class="s1">.join(os.path.basename(p) </span><span class="s3">for </span><span class="s1">p </span><span class="s3">in </span><span class="s1">paths)</span><span class="s3">,</span>
+            <span class="s1">)</span>
+    <span class="s1">obj: Optional[DistutilsCommand] = </span><span class="s3">None</span>
+    <span class="s1">obj = d.get_command_obj(</span><span class="s4">&quot;install&quot;</span><span class="s3">, </span><span class="s1">create=</span><span class="s3">True</span><span class="s1">)</span>
+    <span class="s3">assert </span><span class="s1">obj </span><span class="s3">is not None</span>
+    <span class="s1">i = cast(distutils_install_command</span><span class="s3">, </span><span class="s1">obj)</span>
+    <span class="s2"># NOTE: setting user or home has the side-effect of creating the home dir</span>
+    <span class="s2"># or user base for installations during finalize_options()</span>
+    <span class="s2"># ideally, we'd prefer a scheme class that has no side-effects.</span>
+    <span class="s3">assert not </span><span class="s1">(user </span><span class="s3">and </span><span class="s1">prefix)</span><span class="s3">, </span><span class="s4">f&quot;user=</span><span class="s3">{</span><span class="s1">user</span><span class="s3">} </span><span class="s4">prefix=</span><span class="s3">{</span><span class="s1">prefix</span><span class="s3">}</span><span class="s4">&quot;</span>
+    <span class="s3">assert not </span><span class="s1">(home </span><span class="s3">and </span><span class="s1">prefix)</span><span class="s3">, </span><span class="s4">f&quot;home=</span><span class="s3">{</span><span class="s1">home</span><span class="s3">} </span><span class="s4">prefix=</span><span class="s3">{</span><span class="s1">prefix</span><span class="s3">}</span><span class="s4">&quot;</span>
+    <span class="s1">i.user = user </span><span class="s3">or </span><span class="s1">i.user</span>
+    <span class="s3">if </span><span class="s1">user </span><span class="s3">or </span><span class="s1">home:</span>
+        <span class="s1">i.prefix = </span><span class="s4">&quot;&quot;</span>
+    <span class="s1">i.prefix = prefix </span><span class="s3">or </span><span class="s1">i.prefix</span>
+    <span class="s1">i.home = home </span><span class="s3">or </span><span class="s1">i.home</span>
+    <span class="s1">i.root = root </span><span class="s3">or </span><span class="s1">i.root</span>
+    <span class="s1">i.finalize_options()</span>
+
+    <span class="s1">scheme = {}</span>
+    <span class="s3">for </span><span class="s1">key </span><span class="s3">in </span><span class="s1">SCHEME_KEYS:</span>
+        <span class="s1">scheme[key] = getattr(i</span><span class="s3">, </span><span class="s4">&quot;install_&quot; </span><span class="s1">+ key)</span>
+
+    <span class="s2"># install_lib specified in setup.cfg should install *everything*</span>
+    <span class="s2"># into there (i.e. it takes precedence over both purelib and</span>
+    <span class="s2"># platlib).  Note, i.install_lib is *always* set after</span>
+    <span class="s2"># finalize_options(); we only want to override here if the user</span>
+    <span class="s2"># has explicitly requested it hence going back to the config</span>
+    <span class="s3">if </span><span class="s4">&quot;install_lib&quot; </span><span class="s3">in </span><span class="s1">d.get_option_dict(</span><span class="s4">&quot;install&quot;</span><span class="s1">):</span>
+        <span class="s1">scheme.update(dict(purelib=i.install_lib</span><span class="s3">, </span><span class="s1">platlib=i.install_lib))</span>
+
+    <span class="s3">if </span><span class="s1">running_under_virtualenv():</span>
+        <span class="s3">if </span><span class="s1">home:</span>
+            <span class="s1">prefix = home</span>
+        <span class="s3">elif </span><span class="s1">user:</span>
+            <span class="s1">prefix = i.install_userbase  </span><span class="s2"># type: ignore</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">prefix = i.prefix</span>
+        <span class="s1">scheme[</span><span class="s4">&quot;headers&quot;</span><span class="s1">] = os.path.join(</span>
+            <span class="s1">prefix</span><span class="s3">,</span>
+            <span class="s4">&quot;include&quot;</span><span class="s3">,</span>
+            <span class="s4">&quot;site&quot;</span><span class="s3">,</span>
+            <span class="s4">f&quot;python</span><span class="s3">{</span><span class="s1">get_major_minor_version()</span><span class="s3">}</span><span class="s4">&quot;</span><span class="s3">,</span>
+            <span class="s1">dist_name</span><span class="s3">,</span>
+        <span class="s1">)</span>
+
+        <span class="s3">if </span><span class="s1">root </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s1">path_no_drive = os.path.splitdrive(os.path.abspath(scheme[</span><span class="s4">&quot;headers&quot;</span><span class="s1">]))[</span><span class="s5">1</span><span class="s1">]</span>
+            <span class="s1">scheme[</span><span class="s4">&quot;headers&quot;</span><span class="s1">] = os.path.join(root</span><span class="s3">, </span><span class="s1">path_no_drive[</span><span class="s5">1</span><span class="s1">:])</span>
+
+    <span class="s3">return </span><span class="s1">scheme</span>
+
+
+<span class="s3">def </span><span class="s1">get_scheme(</span>
+    <span class="s1">dist_name: str</span><span class="s3">,</span>
+    <span class="s1">user: bool = </span><span class="s3">False,</span>
+    <span class="s1">home: Optional[str] = </span><span class="s3">None,</span>
+    <span class="s1">root: Optional[str] = </span><span class="s3">None,</span>
+    <span class="s1">isolated: bool = </span><span class="s3">False,</span>
+    <span class="s1">prefix: Optional[str] = </span><span class="s3">None,</span>
+<span class="s1">) -&gt; Scheme:</span>
+    <span class="s0">&quot;&quot;&quot; 
+    Get the &quot;scheme&quot; corresponding to the input parameters. The distutils 
+    documentation provides the context for the available schemes: 
+    https://docs.python.org/3/install/index.html#alternate-installation 
+ 
+    :param dist_name: the name of the package to retrieve the scheme for, used 
+        in the headers scheme path 
+    :param user: indicates to use the &quot;user&quot; scheme 
+    :param home: indicates to use the &quot;home&quot; scheme and provides the base 
+        directory for the same 
+    :param root: root under which other directories are re-based 
+    :param isolated: equivalent to --no-user-cfg, i.e. do not consider 
+        ~/.pydistutils.cfg (posix) or ~/pydistutils.cfg (non-posix) for 
+        scheme paths 
+    :param prefix: indicates to use the &quot;prefix&quot; scheme and provides the 
+        base directory for the same 
+    &quot;&quot;&quot;</span>
+    <span class="s1">scheme = distutils_scheme(dist_name</span><span class="s3">, </span><span class="s1">user</span><span class="s3">, </span><span class="s1">home</span><span class="s3">, </span><span class="s1">root</span><span class="s3">, </span><span class="s1">isolated</span><span class="s3">, </span><span class="s1">prefix)</span>
+    <span class="s3">return </span><span class="s1">Scheme(</span>
+        <span class="s1">platlib=scheme[</span><span class="s4">&quot;platlib&quot;</span><span class="s1">]</span><span class="s3">,</span>
+        <span class="s1">purelib=scheme[</span><span class="s4">&quot;purelib&quot;</span><span class="s1">]</span><span class="s3">,</span>
+        <span class="s1">headers=scheme[</span><span class="s4">&quot;headers&quot;</span><span class="s1">]</span><span class="s3">,</span>
+        <span class="s1">scripts=scheme[</span><span class="s4">&quot;scripts&quot;</span><span class="s1">]</span><span class="s3">,</span>
+        <span class="s1">data=scheme[</span><span class="s4">&quot;data&quot;</span><span class="s1">]</span><span class="s3">,</span>
+    <span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">get_bin_prefix() -&gt; str:</span>
+    <span class="s2"># XXX: In old virtualenv versions, sys.prefix can contain '..' components,</span>
+    <span class="s2"># so we need to call normpath to eliminate them.</span>
+    <span class="s1">prefix = os.path.normpath(sys.prefix)</span>
+    <span class="s3">if </span><span class="s1">WINDOWS:</span>
+        <span class="s1">bin_py = os.path.join(prefix</span><span class="s3">, </span><span class="s4">&quot;Scripts&quot;</span><span class="s1">)</span>
+        <span class="s2"># buildout uses 'bin' on Windows too?</span>
+        <span class="s3">if not </span><span class="s1">os.path.exists(bin_py):</span>
+            <span class="s1">bin_py = os.path.join(prefix</span><span class="s3">, </span><span class="s4">&quot;bin&quot;</span><span class="s1">)</span>
+        <span class="s3">return </span><span class="s1">bin_py</span>
+    <span class="s2"># Forcing to use /usr/local/bin for standard macOS framework installs</span>
+    <span class="s2"># Also log to ~/Library/Logs/ for use with the Console.app log viewer</span>
+    <span class="s3">if </span><span class="s1">sys.platform[:</span><span class="s5">6</span><span class="s1">] == </span><span class="s4">&quot;darwin&quot; </span><span class="s3">and </span><span class="s1">prefix[:</span><span class="s5">16</span><span class="s1">] == </span><span class="s4">&quot;/System/Library/&quot;</span><span class="s1">:</span>
+        <span class="s3">return </span><span class="s4">&quot;/usr/local/bin&quot;</span>
+    <span class="s3">return </span><span class="s1">os.path.join(prefix</span><span class="s3">, </span><span class="s4">&quot;bin&quot;</span><span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">get_purelib() -&gt; str:</span>
+    <span class="s3">return </span><span class="s1">get_python_lib(plat_specific=</span><span class="s3">False</span><span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">get_platlib() -&gt; str:</span>
+    <span class="s3">return </span><span class="s1">get_python_lib(plat_specific=</span><span class="s3">True</span><span class="s1">)</span>
+
+
+<span class="s3">def </span><span class="s1">get_prefixed_libs(prefix: str) -&gt; Tuple[str</span><span class="s3">, </span><span class="s1">str]:</span>
+    <span class="s3">return </span><span class="s1">(</span>
+        <span class="s1">get_python_lib(plat_specific=</span><span class="s3">False, </span><span class="s1">prefix=prefix)</span><span class="s3">,</span>
+        <span class="s1">get_python_lib(plat_specific=</span><span class="s3">True, </span><span class="s1">prefix=prefix)</span><span class="s3">,</span>
+    <span class="s1">)</span>
+</pre>
+</body>
+</html>

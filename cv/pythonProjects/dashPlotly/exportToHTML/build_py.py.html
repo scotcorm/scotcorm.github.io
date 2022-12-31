@@ -1,0 +1,438 @@
+<html>
+<head>
+<title>build_py.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #808080;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+build_py.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;distutils.command.build_py 
+ 
+Implements the Distutils 'build_py' command.&quot;&quot;&quot;</span>
+
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">importlib.util</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">glob</span>
+
+<span class="s2">from </span><span class="s1">distutils.core </span><span class="s2">import </span><span class="s1">Command</span>
+<span class="s2">from </span><span class="s1">distutils.errors </span><span class="s2">import </span><span class="s1">*</span>
+<span class="s2">from </span><span class="s1">distutils.util </span><span class="s2">import </span><span class="s1">convert_path</span><span class="s2">, </span><span class="s1">Mixin2to3</span>
+<span class="s2">from </span><span class="s1">distutils </span><span class="s2">import </span><span class="s1">log</span>
+
+<span class="s2">class </span><span class="s1">build_py (Command):</span>
+
+    <span class="s1">description = </span><span class="s3">&quot;</span><span class="s2">\&quot;</span><span class="s3">build</span><span class="s2">\&quot; </span><span class="s3">pure Python modules (copy to build directory)&quot;</span>
+
+    <span class="s1">user_options = [</span>
+        <span class="s1">(</span><span class="s3">'build-lib='</span><span class="s2">, </span><span class="s3">'d'</span><span class="s2">, </span><span class="s3">&quot;directory to </span><span class="s2">\&quot;</span><span class="s3">build</span><span class="s2">\&quot; </span><span class="s3">(copy) to&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s3">'compile'</span><span class="s2">, </span><span class="s3">'c'</span><span class="s2">, </span><span class="s3">&quot;compile .py to .pyc&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s3">'no-compile'</span><span class="s2">, None, </span><span class="s3">&quot;don't compile .py files [default]&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s3">'optimize='</span><span class="s2">, </span><span class="s3">'O'</span><span class="s2">,</span>
+         <span class="s3">&quot;also compile with optimization: -O1 for </span><span class="s2">\&quot;</span><span class="s3">python -O</span><span class="s2">\&quot;</span><span class="s3">, &quot;</span>
+         <span class="s3">&quot;-O2 for </span><span class="s2">\&quot;</span><span class="s3">python -OO</span><span class="s2">\&quot;</span><span class="s3">, and -O0 to disable [default: -O0]&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">(</span><span class="s3">'force'</span><span class="s2">, </span><span class="s3">'f'</span><span class="s2">, </span><span class="s3">&quot;forcibly build everything (ignore file timestamps)&quot;</span><span class="s1">)</span><span class="s2">,</span>
+        <span class="s1">]</span>
+
+    <span class="s1">boolean_options = [</span><span class="s3">'compile'</span><span class="s2">, </span><span class="s3">'force'</span><span class="s1">]</span>
+    <span class="s1">negative_opt = {</span><span class="s3">'no-compile' </span><span class="s1">: </span><span class="s3">'compile'</span><span class="s1">}</span>
+
+    <span class="s2">def </span><span class="s1">initialize_options(self):</span>
+        <span class="s1">self.build_lib = </span><span class="s2">None</span>
+        <span class="s1">self.py_modules = </span><span class="s2">None</span>
+        <span class="s1">self.package = </span><span class="s2">None</span>
+        <span class="s1">self.package_data = </span><span class="s2">None</span>
+        <span class="s1">self.package_dir = </span><span class="s2">None</span>
+        <span class="s1">self.compile = </span><span class="s4">0</span>
+        <span class="s1">self.optimize = </span><span class="s4">0</span>
+        <span class="s1">self.force = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">finalize_options(self):</span>
+        <span class="s1">self.set_undefined_options(</span><span class="s3">'build'</span><span class="s2">,</span>
+                                   <span class="s1">(</span><span class="s3">'build_lib'</span><span class="s2">, </span><span class="s3">'build_lib'</span><span class="s1">)</span><span class="s2">,</span>
+                                   <span class="s1">(</span><span class="s3">'force'</span><span class="s2">, </span><span class="s3">'force'</span><span class="s1">))</span>
+
+        <span class="s5"># Get the distribution options that are aliases for build_py</span>
+        <span class="s5"># options -- list of packages and list of modules.</span>
+        <span class="s1">self.packages = self.distribution.packages</span>
+        <span class="s1">self.py_modules = self.distribution.py_modules</span>
+        <span class="s1">self.package_data = self.distribution.package_data</span>
+        <span class="s1">self.package_dir = {}</span>
+        <span class="s2">if </span><span class="s1">self.distribution.package_dir:</span>
+            <span class="s2">for </span><span class="s1">name</span><span class="s2">, </span><span class="s1">path </span><span class="s2">in </span><span class="s1">self.distribution.package_dir.items():</span>
+                <span class="s1">self.package_dir[name] = convert_path(path)</span>
+        <span class="s1">self.data_files = self.get_data_files()</span>
+
+        <span class="s5"># Ick, copied straight from install_lib.py (fancy_getopt needs a</span>
+        <span class="s5"># type system!  Hell, *everything* needs a type system!!!)</span>
+        <span class="s2">if not </span><span class="s1">isinstance(self.optimize</span><span class="s2">, </span><span class="s1">int):</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">self.optimize = int(self.optimize)</span>
+                <span class="s2">assert </span><span class="s4">0 </span><span class="s1">&lt;= self.optimize &lt;= </span><span class="s4">2</span>
+            <span class="s2">except </span><span class="s1">(ValueError</span><span class="s2">, </span><span class="s1">AssertionError):</span>
+                <span class="s2">raise </span><span class="s1">DistutilsOptionError(</span><span class="s3">&quot;optimize must be 0, 1, or 2&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">run(self):</span>
+        <span class="s5"># XXX copy_file by default preserves atime and mtime.  IMHO this is</span>
+        <span class="s5"># the right thing to do, but perhaps it should be an option -- in</span>
+        <span class="s5"># particular, a site administrator might want installed files to</span>
+        <span class="s5"># reflect the time of installation rather than the last</span>
+        <span class="s5"># modification time before the installed release.</span>
+
+        <span class="s5"># XXX copy_file by default preserves mode, which appears to be the</span>
+        <span class="s5"># wrong thing to do: if a file is read-only in the working</span>
+        <span class="s5"># directory, we want it to be installed read/write so that the next</span>
+        <span class="s5"># installation of the same module distribution can overwrite it</span>
+        <span class="s5"># without problems.  (This might be a Unix-specific issue.)  Thus</span>
+        <span class="s5"># we turn off 'preserve_mode' when copying to the build directory,</span>
+        <span class="s5"># since the build directory is supposed to be exactly what the</span>
+        <span class="s5"># installation will look like (ie. we preserve mode when</span>
+        <span class="s5"># installing).</span>
+
+        <span class="s5"># Two options control which modules will be installed: 'packages'</span>
+        <span class="s5"># and 'py_modules'.  The former lets us work with whole packages, not</span>
+        <span class="s5"># specifying individual modules at all; the latter is for</span>
+        <span class="s5"># specifying modules one-at-a-time.</span>
+
+        <span class="s2">if </span><span class="s1">self.py_modules:</span>
+            <span class="s1">self.build_modules()</span>
+        <span class="s2">if </span><span class="s1">self.packages:</span>
+            <span class="s1">self.build_packages()</span>
+            <span class="s1">self.build_package_data()</span>
+
+        <span class="s1">self.byte_compile(self.get_outputs(include_bytecode=</span><span class="s4">0</span><span class="s1">))</span>
+
+    <span class="s2">def </span><span class="s1">get_data_files(self):</span>
+        <span class="s0">&quot;&quot;&quot;Generate list of '(package,src_dir,build_dir,filenames)' tuples&quot;&quot;&quot;</span>
+        <span class="s1">data = []</span>
+        <span class="s2">if not </span><span class="s1">self.packages:</span>
+            <span class="s2">return </span><span class="s1">data</span>
+        <span class="s2">for </span><span class="s1">package </span><span class="s2">in </span><span class="s1">self.packages:</span>
+            <span class="s5"># Locate package source directory</span>
+            <span class="s1">src_dir = self.get_package_dir(package)</span>
+
+            <span class="s5"># Compute package build directory</span>
+            <span class="s1">build_dir = os.path.join(*([self.build_lib] + package.split(</span><span class="s3">'.'</span><span class="s1">)))</span>
+
+            <span class="s5"># Length of path to strip from found files</span>
+            <span class="s1">plen = </span><span class="s4">0</span>
+            <span class="s2">if </span><span class="s1">src_dir:</span>
+                <span class="s1">plen = len(src_dir)+</span><span class="s4">1</span>
+
+            <span class="s5"># Strip directory from globbed filenames</span>
+            <span class="s1">filenames = [</span>
+                <span class="s1">file[plen:] </span><span class="s2">for </span><span class="s1">file </span><span class="s2">in </span><span class="s1">self.find_data_files(package</span><span class="s2">, </span><span class="s1">src_dir)</span>
+                <span class="s1">]</span>
+            <span class="s1">data.append((package</span><span class="s2">, </span><span class="s1">src_dir</span><span class="s2">, </span><span class="s1">build_dir</span><span class="s2">, </span><span class="s1">filenames))</span>
+        <span class="s2">return </span><span class="s1">data</span>
+
+    <span class="s2">def </span><span class="s1">find_data_files(self</span><span class="s2">, </span><span class="s1">package</span><span class="s2">, </span><span class="s1">src_dir):</span>
+        <span class="s0">&quot;&quot;&quot;Return filenames for package's data files in 'src_dir'&quot;&quot;&quot;</span>
+        <span class="s1">globs = (self.package_data.get(</span><span class="s3">''</span><span class="s2">, </span><span class="s1">[])</span>
+                 <span class="s1">+ self.package_data.get(package</span><span class="s2">, </span><span class="s1">[]))</span>
+        <span class="s1">files = []</span>
+        <span class="s2">for </span><span class="s1">pattern </span><span class="s2">in </span><span class="s1">globs:</span>
+            <span class="s5"># Each pattern has to be converted to a platform-specific path</span>
+            <span class="s1">filelist = glob.glob(os.path.join(glob.escape(src_dir)</span><span class="s2">, </span><span class="s1">convert_path(pattern)))</span>
+            <span class="s5"># Files that match more than one pattern are only added once</span>
+            <span class="s1">files.extend([fn </span><span class="s2">for </span><span class="s1">fn </span><span class="s2">in </span><span class="s1">filelist </span><span class="s2">if </span><span class="s1">fn </span><span class="s2">not in </span><span class="s1">files</span>
+                <span class="s2">and </span><span class="s1">os.path.isfile(fn)])</span>
+        <span class="s2">return </span><span class="s1">files</span>
+
+    <span class="s2">def </span><span class="s1">build_package_data(self):</span>
+        <span class="s0">&quot;&quot;&quot;Copy data files into build directory&quot;&quot;&quot;</span>
+        <span class="s1">lastdir = </span><span class="s2">None</span>
+        <span class="s2">for </span><span class="s1">package</span><span class="s2">, </span><span class="s1">src_dir</span><span class="s2">, </span><span class="s1">build_dir</span><span class="s2">, </span><span class="s1">filenames </span><span class="s2">in </span><span class="s1">self.data_files:</span>
+            <span class="s2">for </span><span class="s1">filename </span><span class="s2">in </span><span class="s1">filenames:</span>
+                <span class="s1">target = os.path.join(build_dir</span><span class="s2">, </span><span class="s1">filename)</span>
+                <span class="s1">self.mkpath(os.path.dirname(target))</span>
+                <span class="s1">self.copy_file(os.path.join(src_dir</span><span class="s2">, </span><span class="s1">filename)</span><span class="s2">, </span><span class="s1">target</span><span class="s2">,</span>
+                               <span class="s1">preserve_mode=</span><span class="s2">False</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">get_package_dir(self</span><span class="s2">, </span><span class="s1">package):</span>
+        <span class="s0">&quot;&quot;&quot;Return the directory, relative to the top of the source 
+           distribution, where package 'package' should be found 
+           (at least according to the 'package_dir' option, if any).&quot;&quot;&quot;</span>
+        <span class="s1">path = package.split(</span><span class="s3">'.'</span><span class="s1">)</span>
+
+        <span class="s2">if not </span><span class="s1">self.package_dir:</span>
+            <span class="s2">if </span><span class="s1">path:</span>
+                <span class="s2">return </span><span class="s1">os.path.join(*path)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">return </span><span class="s3">''</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">tail = []</span>
+            <span class="s2">while </span><span class="s1">path:</span>
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s1">pdir = self.package_dir[</span><span class="s3">'.'</span><span class="s1">.join(path)]</span>
+                <span class="s2">except </span><span class="s1">KeyError:</span>
+                    <span class="s1">tail.insert(</span><span class="s4">0</span><span class="s2">, </span><span class="s1">path[-</span><span class="s4">1</span><span class="s1">])</span>
+                    <span class="s2">del </span><span class="s1">path[-</span><span class="s4">1</span><span class="s1">]</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">tail.insert(</span><span class="s4">0</span><span class="s2">, </span><span class="s1">pdir)</span>
+                    <span class="s2">return </span><span class="s1">os.path.join(*tail)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s5"># Oops, got all the way through 'path' without finding a</span>
+                <span class="s5"># match in package_dir.  If package_dir defines a directory</span>
+                <span class="s5"># for the root (nameless) package, then fallback on it;</span>
+                <span class="s5"># otherwise, we might as well have not consulted</span>
+                <span class="s5"># package_dir at all, as we just use the directory implied</span>
+                <span class="s5"># by 'tail' (which should be the same as the original value</span>
+                <span class="s5"># of 'path' at this point).</span>
+                <span class="s1">pdir = self.package_dir.get(</span><span class="s3">''</span><span class="s1">)</span>
+                <span class="s2">if </span><span class="s1">pdir </span><span class="s2">is not None</span><span class="s1">:</span>
+                    <span class="s1">tail.insert(</span><span class="s4">0</span><span class="s2">, </span><span class="s1">pdir)</span>
+
+                <span class="s2">if </span><span class="s1">tail:</span>
+                    <span class="s2">return </span><span class="s1">os.path.join(*tail)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s2">return </span><span class="s3">''</span>
+
+    <span class="s2">def </span><span class="s1">check_package(self</span><span class="s2">, </span><span class="s1">package</span><span class="s2">, </span><span class="s1">package_dir):</span>
+        <span class="s5"># Empty dir name means current directory, which we can probably</span>
+        <span class="s5"># assume exists.  Also, os.path.exists and isdir don't know about</span>
+        <span class="s5"># my &quot;empty string means current dir&quot; convention, so we have to</span>
+        <span class="s5"># circumvent them.</span>
+        <span class="s2">if </span><span class="s1">package_dir != </span><span class="s3">&quot;&quot;</span><span class="s1">:</span>
+            <span class="s2">if not </span><span class="s1">os.path.exists(package_dir):</span>
+                <span class="s2">raise </span><span class="s1">DistutilsFileError(</span>
+                      <span class="s3">&quot;package directory '%s' does not exist&quot; </span><span class="s1">% package_dir)</span>
+            <span class="s2">if not </span><span class="s1">os.path.isdir(package_dir):</span>
+                <span class="s2">raise </span><span class="s1">DistutilsFileError(</span>
+                       <span class="s3">&quot;supposed package directory '%s' exists, &quot;</span>
+                       <span class="s3">&quot;but is not a directory&quot; </span><span class="s1">% package_dir)</span>
+
+        <span class="s5"># Require __init__.py for all but the &quot;root package&quot;</span>
+        <span class="s2">if </span><span class="s1">package:</span>
+            <span class="s1">init_py = os.path.join(package_dir</span><span class="s2">, </span><span class="s3">&quot;__init__.py&quot;</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">os.path.isfile(init_py):</span>
+                <span class="s2">return </span><span class="s1">init_py</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">log.warn((</span><span class="s3">&quot;package init file '%s' not found &quot; </span><span class="s1">+</span>
+                          <span class="s3">&quot;(or not a regular file)&quot;</span><span class="s1">)</span><span class="s2">, </span><span class="s1">init_py)</span>
+
+        <span class="s5"># Either not in a package at all (__init__.py not expected), or</span>
+        <span class="s5"># __init__.py doesn't exist -- so don't return the filename.</span>
+        <span class="s2">return None</span>
+
+    <span class="s2">def </span><span class="s1">check_module(self</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s1">module_file):</span>
+        <span class="s2">if not </span><span class="s1">os.path.isfile(module_file):</span>
+            <span class="s1">log.warn(</span><span class="s3">&quot;file %s (for module %s) not found&quot;</span><span class="s2">, </span><span class="s1">module_file</span><span class="s2">, </span><span class="s1">module)</span>
+            <span class="s2">return False</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return True</span>
+
+    <span class="s2">def </span><span class="s1">find_package_modules(self</span><span class="s2">, </span><span class="s1">package</span><span class="s2">, </span><span class="s1">package_dir):</span>
+        <span class="s1">self.check_package(package</span><span class="s2">, </span><span class="s1">package_dir)</span>
+        <span class="s1">module_files = glob.glob(os.path.join(glob.escape(package_dir)</span><span class="s2">, </span><span class="s3">&quot;*.py&quot;</span><span class="s1">))</span>
+        <span class="s1">modules = []</span>
+        <span class="s1">setup_script = os.path.abspath(self.distribution.script_name)</span>
+
+        <span class="s2">for </span><span class="s1">f </span><span class="s2">in </span><span class="s1">module_files:</span>
+            <span class="s1">abs_f = os.path.abspath(f)</span>
+            <span class="s2">if </span><span class="s1">abs_f != setup_script:</span>
+                <span class="s1">module = os.path.splitext(os.path.basename(f))[</span><span class="s4">0</span><span class="s1">]</span>
+                <span class="s1">modules.append((package</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s1">f))</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">self.debug_print(</span><span class="s3">&quot;excluding %s&quot; </span><span class="s1">% setup_script)</span>
+        <span class="s2">return </span><span class="s1">modules</span>
+
+    <span class="s2">def </span><span class="s1">find_modules(self):</span>
+        <span class="s0">&quot;&quot;&quot;Finds individually-specified Python modules, ie. those listed by 
+        module name in 'self.py_modules'.  Returns a list of tuples (package, 
+        module_base, filename): 'package' is a tuple of the path through 
+        package-space to the module; 'module_base' is the bare (no 
+        packages, no dots) module name, and 'filename' is the path to the 
+        &quot;.py&quot; file (relative to the distribution root) that implements the 
+        module. 
+        &quot;&quot;&quot;</span>
+        <span class="s5"># Map package names to tuples of useful info about the package:</span>
+        <span class="s5">#    (package_dir, checked)</span>
+        <span class="s5"># package_dir - the directory where we'll find source files for</span>
+        <span class="s5">#   this package</span>
+        <span class="s5"># checked - true if we have checked that the package directory</span>
+        <span class="s5">#   is valid (exists, contains __init__.py, ... ?)</span>
+        <span class="s1">packages = {}</span>
+
+        <span class="s5"># List of (package, module, filename) tuples to return</span>
+        <span class="s1">modules = []</span>
+
+        <span class="s5"># We treat modules-in-packages almost the same as toplevel modules,</span>
+        <span class="s5"># just the &quot;package&quot; for a toplevel is empty (either an empty</span>
+        <span class="s5"># string or empty list, depending on context).  Differences:</span>
+        <span class="s5">#   - don't check for __init__.py in directory for empty package</span>
+        <span class="s2">for </span><span class="s1">module </span><span class="s2">in </span><span class="s1">self.py_modules:</span>
+            <span class="s1">path = module.split(</span><span class="s3">'.'</span><span class="s1">)</span>
+            <span class="s1">package = </span><span class="s3">'.'</span><span class="s1">.join(path[</span><span class="s4">0</span><span class="s1">:-</span><span class="s4">1</span><span class="s1">])</span>
+            <span class="s1">module_base = path[-</span><span class="s4">1</span><span class="s1">]</span>
+
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">(package_dir</span><span class="s2">, </span><span class="s1">checked) = packages[package]</span>
+            <span class="s2">except </span><span class="s1">KeyError:</span>
+                <span class="s1">package_dir = self.get_package_dir(package)</span>
+                <span class="s1">checked = </span><span class="s4">0</span>
+
+            <span class="s2">if not </span><span class="s1">checked:</span>
+                <span class="s1">init_py = self.check_package(package</span><span class="s2">, </span><span class="s1">package_dir)</span>
+                <span class="s1">packages[package] = (package_dir</span><span class="s2">, </span><span class="s4">1</span><span class="s1">)</span>
+                <span class="s2">if </span><span class="s1">init_py:</span>
+                    <span class="s1">modules.append((package</span><span class="s2">, </span><span class="s3">&quot;__init__&quot;</span><span class="s2">, </span><span class="s1">init_py))</span>
+
+            <span class="s5"># XXX perhaps we should also check for just .pyc files</span>
+            <span class="s5"># (so greedy closed-source bastards can distribute Python</span>
+            <span class="s5"># modules too)</span>
+            <span class="s1">module_file = os.path.join(package_dir</span><span class="s2">, </span><span class="s1">module_base + </span><span class="s3">&quot;.py&quot;</span><span class="s1">)</span>
+            <span class="s2">if not </span><span class="s1">self.check_module(module</span><span class="s2">, </span><span class="s1">module_file):</span>
+                <span class="s2">continue</span>
+
+            <span class="s1">modules.append((package</span><span class="s2">, </span><span class="s1">module_base</span><span class="s2">, </span><span class="s1">module_file))</span>
+
+        <span class="s2">return </span><span class="s1">modules</span>
+
+    <span class="s2">def </span><span class="s1">find_all_modules(self):</span>
+        <span class="s0">&quot;&quot;&quot;Compute the list of all modules that will be built, whether 
+        they are specified one-module-at-a-time ('self.py_modules') or 
+        by whole packages ('self.packages').  Return a list of tuples 
+        (package, module, module_file), just like 'find_modules()' and 
+        'find_package_modules()' do.&quot;&quot;&quot;</span>
+        <span class="s1">modules = []</span>
+        <span class="s2">if </span><span class="s1">self.py_modules:</span>
+            <span class="s1">modules.extend(self.find_modules())</span>
+        <span class="s2">if </span><span class="s1">self.packages:</span>
+            <span class="s2">for </span><span class="s1">package </span><span class="s2">in </span><span class="s1">self.packages:</span>
+                <span class="s1">package_dir = self.get_package_dir(package)</span>
+                <span class="s1">m = self.find_package_modules(package</span><span class="s2">, </span><span class="s1">package_dir)</span>
+                <span class="s1">modules.extend(m)</span>
+        <span class="s2">return </span><span class="s1">modules</span>
+
+    <span class="s2">def </span><span class="s1">get_source_files(self):</span>
+        <span class="s2">return </span><span class="s1">[module[-</span><span class="s4">1</span><span class="s1">] </span><span class="s2">for </span><span class="s1">module </span><span class="s2">in </span><span class="s1">self.find_all_modules()]</span>
+
+    <span class="s2">def </span><span class="s1">get_module_outfile(self</span><span class="s2">, </span><span class="s1">build_dir</span><span class="s2">, </span><span class="s1">package</span><span class="s2">, </span><span class="s1">module):</span>
+        <span class="s1">outfile_path = [build_dir] + list(package) + [module + </span><span class="s3">&quot;.py&quot;</span><span class="s1">]</span>
+        <span class="s2">return </span><span class="s1">os.path.join(*outfile_path)</span>
+
+    <span class="s2">def </span><span class="s1">get_outputs(self</span><span class="s2">, </span><span class="s1">include_bytecode=</span><span class="s4">1</span><span class="s1">):</span>
+        <span class="s1">modules = self.find_all_modules()</span>
+        <span class="s1">outputs = []</span>
+        <span class="s2">for </span><span class="s1">(package</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s1">module_file) </span><span class="s2">in </span><span class="s1">modules:</span>
+            <span class="s1">package = package.split(</span><span class="s3">'.'</span><span class="s1">)</span>
+            <span class="s1">filename = self.get_module_outfile(self.build_lib</span><span class="s2">, </span><span class="s1">package</span><span class="s2">, </span><span class="s1">module)</span>
+            <span class="s1">outputs.append(filename)</span>
+            <span class="s2">if </span><span class="s1">include_bytecode:</span>
+                <span class="s2">if </span><span class="s1">self.compile:</span>
+                    <span class="s1">outputs.append(importlib.util.cache_from_source(</span>
+                        <span class="s1">filename</span><span class="s2">, </span><span class="s1">optimization=</span><span class="s3">''</span><span class="s1">))</span>
+                <span class="s2">if </span><span class="s1">self.optimize &gt; </span><span class="s4">0</span><span class="s1">:</span>
+                    <span class="s1">outputs.append(importlib.util.cache_from_source(</span>
+                        <span class="s1">filename</span><span class="s2">, </span><span class="s1">optimization=self.optimize))</span>
+
+        <span class="s1">outputs += [</span>
+            <span class="s1">os.path.join(build_dir</span><span class="s2">, </span><span class="s1">filename)</span>
+            <span class="s2">for </span><span class="s1">package</span><span class="s2">, </span><span class="s1">src_dir</span><span class="s2">, </span><span class="s1">build_dir</span><span class="s2">, </span><span class="s1">filenames </span><span class="s2">in </span><span class="s1">self.data_files</span>
+            <span class="s2">for </span><span class="s1">filename </span><span class="s2">in </span><span class="s1">filenames</span>
+            <span class="s1">]</span>
+
+        <span class="s2">return </span><span class="s1">outputs</span>
+
+    <span class="s2">def </span><span class="s1">build_module(self</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s1">module_file</span><span class="s2">, </span><span class="s1">package):</span>
+        <span class="s2">if </span><span class="s1">isinstance(package</span><span class="s2">, </span><span class="s1">str):</span>
+            <span class="s1">package = package.split(</span><span class="s3">'.'</span><span class="s1">)</span>
+        <span class="s2">elif not </span><span class="s1">isinstance(package</span><span class="s2">, </span><span class="s1">(list</span><span class="s2">, </span><span class="s1">tuple)):</span>
+            <span class="s2">raise </span><span class="s1">TypeError(</span>
+                  <span class="s3">&quot;'package' must be a string (dot-separated), list, or tuple&quot;</span><span class="s1">)</span>
+
+        <span class="s5"># Now put the module source file into the &quot;build&quot; area -- this is</span>
+        <span class="s5"># easy, we just copy it somewhere under self.build_lib (the build</span>
+        <span class="s5"># directory for Python source).</span>
+        <span class="s1">outfile = self.get_module_outfile(self.build_lib</span><span class="s2">, </span><span class="s1">package</span><span class="s2">, </span><span class="s1">module)</span>
+        <span class="s1">dir = os.path.dirname(outfile)</span>
+        <span class="s1">self.mkpath(dir)</span>
+        <span class="s2">return </span><span class="s1">self.copy_file(module_file</span><span class="s2">, </span><span class="s1">outfile</span><span class="s2">, </span><span class="s1">preserve_mode=</span><span class="s4">0</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">build_modules(self):</span>
+        <span class="s1">modules = self.find_modules()</span>
+        <span class="s2">for </span><span class="s1">(package</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s1">module_file) </span><span class="s2">in </span><span class="s1">modules:</span>
+            <span class="s5"># Now &quot;build&quot; the module -- ie. copy the source file to</span>
+            <span class="s5"># self.build_lib (the build directory for Python source).</span>
+            <span class="s5"># (Actually, it gets copied to the directory for this package</span>
+            <span class="s5"># under self.build_lib.)</span>
+            <span class="s1">self.build_module(module</span><span class="s2">, </span><span class="s1">module_file</span><span class="s2">, </span><span class="s1">package)</span>
+
+    <span class="s2">def </span><span class="s1">build_packages(self):</span>
+        <span class="s2">for </span><span class="s1">package </span><span class="s2">in </span><span class="s1">self.packages:</span>
+            <span class="s5"># Get list of (package, module, module_file) tuples based on</span>
+            <span class="s5"># scanning the package directory.  'package' is only included</span>
+            <span class="s5"># in the tuple so that 'find_modules()' and</span>
+            <span class="s5"># 'find_package_tuples()' have a consistent interface; it's</span>
+            <span class="s5"># ignored here (apart from a sanity check).  Also, 'module' is</span>
+            <span class="s5"># the *unqualified* module name (ie. no dots, no package -- we</span>
+            <span class="s5"># already know its package!), and 'module_file' is the path to</span>
+            <span class="s5"># the .py file, relative to the current directory</span>
+            <span class="s5"># (ie. including 'package_dir').</span>
+            <span class="s1">package_dir = self.get_package_dir(package)</span>
+            <span class="s1">modules = self.find_package_modules(package</span><span class="s2">, </span><span class="s1">package_dir)</span>
+
+            <span class="s5"># Now loop over the modules we found, &quot;building&quot; each one (just</span>
+            <span class="s5"># copy it to self.build_lib).</span>
+            <span class="s2">for </span><span class="s1">(package_</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s1">module_file) </span><span class="s2">in </span><span class="s1">modules:</span>
+                <span class="s2">assert </span><span class="s1">package == package_</span>
+                <span class="s1">self.build_module(module</span><span class="s2">, </span><span class="s1">module_file</span><span class="s2">, </span><span class="s1">package)</span>
+
+    <span class="s2">def </span><span class="s1">byte_compile(self</span><span class="s2">, </span><span class="s1">files):</span>
+        <span class="s2">if </span><span class="s1">sys.dont_write_bytecode:</span>
+            <span class="s1">self.warn(</span><span class="s3">'byte-compiling is disabled, skipping.'</span><span class="s1">)</span>
+            <span class="s2">return</span>
+
+        <span class="s2">from </span><span class="s1">distutils.util </span><span class="s2">import </span><span class="s1">byte_compile</span>
+        <span class="s1">prefix = self.build_lib</span>
+        <span class="s2">if </span><span class="s1">prefix[-</span><span class="s4">1</span><span class="s1">] != os.sep:</span>
+            <span class="s1">prefix = prefix + os.sep</span>
+
+        <span class="s5"># XXX this code is essentially the same as the 'byte_compile()</span>
+        <span class="s5"># method of the &quot;install_lib&quot; command, except for the determination</span>
+        <span class="s5"># of the 'prefix' string.  Hmmm.</span>
+        <span class="s2">if </span><span class="s1">self.compile:</span>
+            <span class="s1">byte_compile(files</span><span class="s2">, </span><span class="s1">optimize=</span><span class="s4">0</span><span class="s2">,</span>
+                         <span class="s1">force=self.force</span><span class="s2">, </span><span class="s1">prefix=prefix</span><span class="s2">, </span><span class="s1">dry_run=self.dry_run)</span>
+        <span class="s2">if </span><span class="s1">self.optimize &gt; </span><span class="s4">0</span><span class="s1">:</span>
+            <span class="s1">byte_compile(files</span><span class="s2">, </span><span class="s1">optimize=self.optimize</span><span class="s2">,</span>
+                         <span class="s1">force=self.force</span><span class="s2">, </span><span class="s1">prefix=prefix</span><span class="s2">, </span><span class="s1">dry_run=self.dry_run)</span>
+
+<span class="s2">class </span><span class="s1">build_py_2to3(build_py</span><span class="s2">, </span><span class="s1">Mixin2to3):</span>
+    <span class="s2">def </span><span class="s1">run(self):</span>
+        <span class="s1">self.updated_files = []</span>
+
+        <span class="s5"># Base class code</span>
+        <span class="s2">if </span><span class="s1">self.py_modules:</span>
+            <span class="s1">self.build_modules()</span>
+        <span class="s2">if </span><span class="s1">self.packages:</span>
+            <span class="s1">self.build_packages()</span>
+            <span class="s1">self.build_package_data()</span>
+
+        <span class="s5"># 2to3</span>
+        <span class="s1">self.run_2to3(self.updated_files)</span>
+
+        <span class="s5"># Remaining base class code</span>
+        <span class="s1">self.byte_compile(self.get_outputs(include_bytecode=</span><span class="s4">0</span><span class="s1">))</span>
+
+    <span class="s2">def </span><span class="s1">build_module(self</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s1">module_file</span><span class="s2">, </span><span class="s1">package):</span>
+        <span class="s1">res = build_py.build_module(self</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s1">module_file</span><span class="s2">, </span><span class="s1">package)</span>
+        <span class="s2">if </span><span class="s1">res[</span><span class="s4">1</span><span class="s1">]:</span>
+            <span class="s5"># file was copied</span>
+            <span class="s1">self.updated_files.append(res[</span><span class="s4">0</span><span class="s1">])</span>
+        <span class="s2">return </span><span class="s1">res</span>
+</pre>
+</body>
+</html>

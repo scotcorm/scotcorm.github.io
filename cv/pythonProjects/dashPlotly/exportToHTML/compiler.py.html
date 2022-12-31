@@ -1,0 +1,1979 @@
+<html>
+<head>
+<title>compiler.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #629755; font-style: italic;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #808080;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+compiler.py</font>
+</center></td></tr></table>
+<pre><span class="s0">&quot;&quot;&quot;Compiles nodes from the parser into Python code.&quot;&quot;&quot;</span>
+<span class="s2">import </span><span class="s1">typing </span><span class="s2">as </span><span class="s1">t</span>
+<span class="s2">from </span><span class="s1">contextlib </span><span class="s2">import </span><span class="s1">contextmanager</span>
+<span class="s2">from </span><span class="s1">functools </span><span class="s2">import </span><span class="s1">update_wrapper</span>
+<span class="s2">from </span><span class="s1">io </span><span class="s2">import </span><span class="s1">StringIO</span>
+<span class="s2">from </span><span class="s1">itertools </span><span class="s2">import </span><span class="s1">chain</span>
+<span class="s2">from </span><span class="s1">keyword </span><span class="s2">import </span><span class="s1">iskeyword </span><span class="s2">as </span><span class="s1">is_python_keyword</span>
+
+<span class="s2">from </span><span class="s1">markupsafe </span><span class="s2">import </span><span class="s1">escape</span>
+<span class="s2">from </span><span class="s1">markupsafe </span><span class="s2">import </span><span class="s1">Markup</span>
+
+<span class="s2">from </span><span class="s1">. </span><span class="s2">import </span><span class="s1">nodes</span>
+<span class="s2">from </span><span class="s1">.exceptions </span><span class="s2">import </span><span class="s1">TemplateAssertionError</span>
+<span class="s2">from </span><span class="s1">.idtracking </span><span class="s2">import </span><span class="s1">Symbols</span>
+<span class="s2">from </span><span class="s1">.idtracking </span><span class="s2">import </span><span class="s1">VAR_LOAD_ALIAS</span>
+<span class="s2">from </span><span class="s1">.idtracking </span><span class="s2">import </span><span class="s1">VAR_LOAD_PARAMETER</span>
+<span class="s2">from </span><span class="s1">.idtracking </span><span class="s2">import </span><span class="s1">VAR_LOAD_RESOLVE</span>
+<span class="s2">from </span><span class="s1">.idtracking </span><span class="s2">import </span><span class="s1">VAR_LOAD_UNDEFINED</span>
+<span class="s2">from </span><span class="s1">.nodes </span><span class="s2">import </span><span class="s1">EvalContext</span>
+<span class="s2">from </span><span class="s1">.optimizer </span><span class="s2">import </span><span class="s1">Optimizer</span>
+<span class="s2">from </span><span class="s1">.utils </span><span class="s2">import </span><span class="s1">_PassArg</span>
+<span class="s2">from </span><span class="s1">.utils </span><span class="s2">import </span><span class="s1">concat</span>
+<span class="s2">from </span><span class="s1">.visitor </span><span class="s2">import </span><span class="s1">NodeVisitor</span>
+
+<span class="s2">if </span><span class="s1">t.TYPE_CHECKING:</span>
+    <span class="s2">import </span><span class="s1">typing_extensions </span><span class="s2">as </span><span class="s1">te</span>
+    <span class="s2">from </span><span class="s1">.environment </span><span class="s2">import </span><span class="s1">Environment</span>
+
+<span class="s1">F = t.TypeVar(</span><span class="s3">&quot;F&quot;</span><span class="s2">, </span><span class="s1">bound=t.Callable[...</span><span class="s2">, </span><span class="s1">t.Any])</span>
+
+<span class="s1">operators = {</span>
+    <span class="s3">&quot;eq&quot;</span><span class="s1">: </span><span class="s3">&quot;==&quot;</span><span class="s2">,</span>
+    <span class="s3">&quot;ne&quot;</span><span class="s1">: </span><span class="s3">&quot;!=&quot;</span><span class="s2">,</span>
+    <span class="s3">&quot;gt&quot;</span><span class="s1">: </span><span class="s3">&quot;&gt;&quot;</span><span class="s2">,</span>
+    <span class="s3">&quot;gteq&quot;</span><span class="s1">: </span><span class="s3">&quot;&gt;=&quot;</span><span class="s2">,</span>
+    <span class="s3">&quot;lt&quot;</span><span class="s1">: </span><span class="s3">&quot;&lt;&quot;</span><span class="s2">,</span>
+    <span class="s3">&quot;lteq&quot;</span><span class="s1">: </span><span class="s3">&quot;&lt;=&quot;</span><span class="s2">,</span>
+    <span class="s3">&quot;in&quot;</span><span class="s1">: </span><span class="s3">&quot;in&quot;</span><span class="s2">,</span>
+    <span class="s3">&quot;notin&quot;</span><span class="s1">: </span><span class="s3">&quot;not in&quot;</span><span class="s2">,</span>
+<span class="s1">}</span>
+
+
+<span class="s2">def </span><span class="s1">optimizeconst(f: F) -&gt; F:</span>
+    <span class="s2">def </span><span class="s1">new_func(</span>
+        <span class="s1">self: </span><span class="s3">&quot;CodeGenerator&quot;</span><span class="s2">, </span><span class="s1">node: nodes.Expr</span><span class="s2">, </span><span class="s1">frame: </span><span class="s3">&quot;Frame&quot;</span><span class="s2">, </span><span class="s1">**kwargs: t.Any</span>
+    <span class="s1">) -&gt; t.Any:</span>
+        <span class="s4"># Only optimize if the frame is not volatile</span>
+        <span class="s2">if </span><span class="s1">self.optimizer </span><span class="s2">is not None and not </span><span class="s1">frame.eval_ctx.volatile:</span>
+            <span class="s1">new_node = self.optimizer.visit(node</span><span class="s2">, </span><span class="s1">frame.eval_ctx)</span>
+
+            <span class="s2">if </span><span class="s1">new_node != node:</span>
+                <span class="s2">return </span><span class="s1">self.visit(new_node</span><span class="s2">, </span><span class="s1">frame)</span>
+
+        <span class="s2">return </span><span class="s1">f(self</span><span class="s2">, </span><span class="s1">node</span><span class="s2">, </span><span class="s1">frame</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s2">return </span><span class="s1">update_wrapper(t.cast(F</span><span class="s2">, </span><span class="s1">new_func)</span><span class="s2">, </span><span class="s1">f)</span>
+
+
+<span class="s2">def </span><span class="s1">_make_binop(op: str) -&gt; t.Callable[[</span><span class="s3">&quot;CodeGenerator&quot;</span><span class="s2">, </span><span class="s1">nodes.BinExpr</span><span class="s2">, </span><span class="s3">&quot;Frame&quot;</span><span class="s1">]</span><span class="s2">, None</span><span class="s1">]:</span>
+    <span class="s1">@optimizeconst</span>
+    <span class="s2">def </span><span class="s1">visitor(self: </span><span class="s3">&quot;CodeGenerator&quot;</span><span class="s2">, </span><span class="s1">node: nodes.BinExpr</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">(</span>
+            <span class="s1">self.environment.sandboxed</span>
+            <span class="s2">and </span><span class="s1">op </span><span class="s2">in </span><span class="s1">self.environment.intercepted_binops  </span><span class="s4"># type: ignore</span>
+        <span class="s1">):</span>
+            <span class="s1">self.write(</span><span class="s3">f&quot;environment.call_binop(context, </span><span class="s2">{</span><span class="s1">op</span><span class="s2">!r}</span><span class="s3">, &quot;</span><span class="s1">)</span>
+            <span class="s1">self.visit(node.left</span><span class="s2">, </span><span class="s1">frame)</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;, &quot;</span><span class="s1">)</span>
+            <span class="s1">self.visit(node.right</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;(&quot;</span><span class="s1">)</span>
+            <span class="s1">self.visit(node.left</span><span class="s2">, </span><span class="s1">frame)</span>
+            <span class="s1">self.write(</span><span class="s3">f&quot; </span><span class="s2">{</span><span class="s1">op</span><span class="s2">} </span><span class="s3">&quot;</span><span class="s1">)</span>
+            <span class="s1">self.visit(node.right</span><span class="s2">, </span><span class="s1">frame)</span>
+
+        <span class="s1">self.write(</span><span class="s3">&quot;)&quot;</span><span class="s1">)</span>
+
+    <span class="s2">return </span><span class="s1">visitor</span>
+
+
+<span class="s2">def </span><span class="s1">_make_unop(</span>
+    <span class="s1">op: str</span><span class="s2">,</span>
+<span class="s1">) -&gt; t.Callable[[</span><span class="s3">&quot;CodeGenerator&quot;</span><span class="s2">, </span><span class="s1">nodes.UnaryExpr</span><span class="s2">, </span><span class="s3">&quot;Frame&quot;</span><span class="s1">]</span><span class="s2">, None</span><span class="s1">]:</span>
+    <span class="s1">@optimizeconst</span>
+    <span class="s2">def </span><span class="s1">visitor(self: </span><span class="s3">&quot;CodeGenerator&quot;</span><span class="s2">, </span><span class="s1">node: nodes.UnaryExpr</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">(</span>
+            <span class="s1">self.environment.sandboxed</span>
+            <span class="s2">and </span><span class="s1">op </span><span class="s2">in </span><span class="s1">self.environment.intercepted_unops  </span><span class="s4"># type: ignore</span>
+        <span class="s1">):</span>
+            <span class="s1">self.write(</span><span class="s3">f&quot;environment.call_unop(context, </span><span class="s2">{</span><span class="s1">op</span><span class="s2">!r}</span><span class="s3">, &quot;</span><span class="s1">)</span>
+            <span class="s1">self.visit(node.node</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;(&quot; </span><span class="s1">+ op)</span>
+            <span class="s1">self.visit(node.node</span><span class="s2">, </span><span class="s1">frame)</span>
+
+        <span class="s1">self.write(</span><span class="s3">&quot;)&quot;</span><span class="s1">)</span>
+
+    <span class="s2">return </span><span class="s1">visitor</span>
+
+
+<span class="s2">def </span><span class="s1">generate(</span>
+    <span class="s1">node: nodes.Template</span><span class="s2">,</span>
+    <span class="s1">environment: </span><span class="s3">&quot;Environment&quot;</span><span class="s2">,</span>
+    <span class="s1">name: t.Optional[str]</span><span class="s2">,</span>
+    <span class="s1">filename: t.Optional[str]</span><span class="s2">,</span>
+    <span class="s1">stream: t.Optional[t.TextIO] = </span><span class="s2">None,</span>
+    <span class="s1">defer_init: bool = </span><span class="s2">False,</span>
+    <span class="s1">optimized: bool = </span><span class="s2">True,</span>
+<span class="s1">) -&gt; t.Optional[str]:</span>
+    <span class="s0">&quot;&quot;&quot;Generate the python source for a node tree.&quot;&quot;&quot;</span>
+    <span class="s2">if not </span><span class="s1">isinstance(node</span><span class="s2">, </span><span class="s1">nodes.Template):</span>
+        <span class="s2">raise </span><span class="s1">TypeError(</span><span class="s3">&quot;Can't compile non template nodes&quot;</span><span class="s1">)</span>
+
+    <span class="s1">generator = environment.code_generator_class(</span>
+        <span class="s1">environment</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">filename</span><span class="s2">, </span><span class="s1">stream</span><span class="s2">, </span><span class="s1">defer_init</span><span class="s2">, </span><span class="s1">optimized</span>
+    <span class="s1">)</span>
+    <span class="s1">generator.visit(node)</span>
+
+    <span class="s2">if </span><span class="s1">stream </span><span class="s2">is None</span><span class="s1">:</span>
+        <span class="s2">return </span><span class="s1">generator.stream.getvalue()  </span><span class="s4"># type: ignore</span>
+
+    <span class="s2">return None</span>
+
+
+<span class="s2">def </span><span class="s1">has_safe_repr(value: t.Any) -&gt; bool:</span>
+    <span class="s0">&quot;&quot;&quot;Does the node have a safe representation?&quot;&quot;&quot;</span>
+    <span class="s2">if </span><span class="s1">value </span><span class="s2">is None or </span><span class="s1">value </span><span class="s2">is </span><span class="s1">NotImplemented </span><span class="s2">or </span><span class="s1">value </span><span class="s2">is </span><span class="s1">Ellipsis:</span>
+        <span class="s2">return True</span>
+
+    <span class="s2">if </span><span class="s1">type(value) </span><span class="s2">in </span><span class="s1">{bool</span><span class="s2">, </span><span class="s1">int</span><span class="s2">, </span><span class="s1">float</span><span class="s2">, </span><span class="s1">complex</span><span class="s2">, </span><span class="s1">range</span><span class="s2">, </span><span class="s1">str</span><span class="s2">, </span><span class="s1">Markup}:</span>
+        <span class="s2">return True</span>
+
+    <span class="s2">if </span><span class="s1">type(value) </span><span class="s2">in </span><span class="s1">{tuple</span><span class="s2">, </span><span class="s1">list</span><span class="s2">, </span><span class="s1">set</span><span class="s2">, </span><span class="s1">frozenset}:</span>
+        <span class="s2">return </span><span class="s1">all(has_safe_repr(v) </span><span class="s2">for </span><span class="s1">v </span><span class="s2">in </span><span class="s1">value)</span>
+
+    <span class="s2">if </span><span class="s1">type(value) </span><span class="s2">is </span><span class="s1">dict:</span>
+        <span class="s2">return </span><span class="s1">all(has_safe_repr(k) </span><span class="s2">and </span><span class="s1">has_safe_repr(v) </span><span class="s2">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">value.items())</span>
+
+    <span class="s2">return False</span>
+
+
+<span class="s2">def </span><span class="s1">find_undeclared(</span>
+    <span class="s1">nodes: t.Iterable[nodes.Node]</span><span class="s2">, </span><span class="s1">names: t.Iterable[str]</span>
+<span class="s1">) -&gt; t.Set[str]:</span>
+    <span class="s0">&quot;&quot;&quot;Check if the names passed are accessed undeclared.  The return value 
+    is a set of all the undeclared names from the sequence of names found. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">visitor = UndeclaredNameVisitor(names)</span>
+    <span class="s2">try</span><span class="s1">:</span>
+        <span class="s2">for </span><span class="s1">node </span><span class="s2">in </span><span class="s1">nodes:</span>
+            <span class="s1">visitor.visit(node)</span>
+    <span class="s2">except </span><span class="s1">VisitorExit:</span>
+        <span class="s2">pass</span>
+    <span class="s2">return </span><span class="s1">visitor.undeclared</span>
+
+
+<span class="s2">class </span><span class="s1">MacroRef:</span>
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">node: t.Union[nodes.Macro</span><span class="s2">, </span><span class="s1">nodes.CallBlock]) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.node = node</span>
+        <span class="s1">self.accesses_caller = </span><span class="s2">False</span>
+        <span class="s1">self.accesses_kwargs = </span><span class="s2">False</span>
+        <span class="s1">self.accesses_varargs = </span><span class="s2">False</span>
+
+
+<span class="s2">class </span><span class="s1">Frame:</span>
+    <span class="s0">&quot;&quot;&quot;Holds compile time information for us.&quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">eval_ctx: EvalContext</span><span class="s2">,</span>
+        <span class="s1">parent: t.Optional[</span><span class="s3">&quot;Frame&quot;</span><span class="s1">] = </span><span class="s2">None,</span>
+        <span class="s1">level: t.Optional[int] = </span><span class="s2">None,</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.eval_ctx = eval_ctx</span>
+
+        <span class="s4"># the parent of this frame</span>
+        <span class="s1">self.parent = parent</span>
+
+        <span class="s2">if </span><span class="s1">parent </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">self.symbols = Symbols(level=level)</span>
+
+            <span class="s4"># in some dynamic inheritance situations the compiler needs to add</span>
+            <span class="s4"># write tests around output statements.</span>
+            <span class="s1">self.require_output_check = </span><span class="s2">False</span>
+
+            <span class="s4"># inside some tags we are using a buffer rather than yield statements.</span>
+            <span class="s4"># this for example affects {% filter %} or {% macro %}.  If a frame</span>
+            <span class="s4"># is buffered this variable points to the name of the list used as</span>
+            <span class="s4"># buffer.</span>
+            <span class="s1">self.buffer: t.Optional[str] = </span><span class="s2">None</span>
+
+            <span class="s4"># the name of the block we're in, otherwise None.</span>
+            <span class="s1">self.block: t.Optional[str] = </span><span class="s2">None</span>
+
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.symbols = Symbols(parent.symbols</span><span class="s2">, </span><span class="s1">level=level)</span>
+            <span class="s1">self.require_output_check = parent.require_output_check</span>
+            <span class="s1">self.buffer = parent.buffer</span>
+            <span class="s1">self.block = parent.block</span>
+
+        <span class="s4"># a toplevel frame is the root + soft frames such as if conditions.</span>
+        <span class="s1">self.toplevel = </span><span class="s2">False</span>
+
+        <span class="s4"># the root frame is basically just the outermost frame, so no if</span>
+        <span class="s4"># conditions.  This information is used to optimize inheritance</span>
+        <span class="s4"># situations.</span>
+        <span class="s1">self.rootlevel = </span><span class="s2">False</span>
+
+        <span class="s4"># variables set inside of loops and blocks should not affect outer frames,</span>
+        <span class="s4"># but they still needs to be kept track of as part of the active context.</span>
+        <span class="s1">self.loop_frame = </span><span class="s2">False</span>
+        <span class="s1">self.block_frame = </span><span class="s2">False</span>
+
+        <span class="s4"># track whether the frame is being used in an if-statement or conditional</span>
+        <span class="s4"># expression as it determines which errors should be raised during runtime</span>
+        <span class="s4"># or compile time.</span>
+        <span class="s1">self.soft_frame = </span><span class="s2">False</span>
+
+    <span class="s2">def </span><span class="s1">copy(self) -&gt; </span><span class="s3">&quot;Frame&quot;</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Create a copy of the current one.&quot;&quot;&quot;</span>
+        <span class="s1">rv = t.cast(Frame</span><span class="s2">, </span><span class="s1">object.__new__(self.__class__))</span>
+        <span class="s1">rv.__dict__.update(self.__dict__)</span>
+        <span class="s1">rv.symbols = self.symbols.copy()</span>
+        <span class="s2">return </span><span class="s1">rv</span>
+
+    <span class="s2">def </span><span class="s1">inner(self</span><span class="s2">, </span><span class="s1">isolated: bool = </span><span class="s2">False</span><span class="s1">) -&gt; </span><span class="s3">&quot;Frame&quot;</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Return an inner frame.&quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">isolated:</span>
+            <span class="s2">return </span><span class="s1">Frame(self.eval_ctx</span><span class="s2">, </span><span class="s1">level=self.symbols.level + </span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s2">return </span><span class="s1">Frame(self.eval_ctx</span><span class="s2">, </span><span class="s1">self)</span>
+
+    <span class="s2">def </span><span class="s1">soft(self) -&gt; </span><span class="s3">&quot;Frame&quot;</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Return a soft frame.  A soft frame may not be modified as 
+        standalone thing as it shares the resources with the frame it 
+        was created of, but it's not a rootlevel frame any longer. 
+ 
+        This is only used to implement if-statements and conditional 
+        expressions. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">rv = self.copy()</span>
+        <span class="s1">rv.rootlevel = </span><span class="s2">False</span>
+        <span class="s1">rv.soft_frame = </span><span class="s2">True</span>
+        <span class="s2">return </span><span class="s1">rv</span>
+
+    <span class="s1">__copy__ = copy</span>
+
+
+<span class="s2">class </span><span class="s1">VisitorExit(RuntimeError):</span>
+    <span class="s0">&quot;&quot;&quot;Exception used by the `UndeclaredNameVisitor` to signal a stop.&quot;&quot;&quot;</span>
+
+
+<span class="s2">class </span><span class="s1">DependencyFinderVisitor(NodeVisitor):</span>
+    <span class="s0">&quot;&quot;&quot;A visitor that collects filter and test calls.&quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.filters: t.Set[str] = set()</span>
+        <span class="s1">self.tests: t.Set[str] = set()</span>
+
+    <span class="s2">def </span><span class="s1">visit_Filter(self</span><span class="s2">, </span><span class="s1">node: nodes.Filter) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.generic_visit(node)</span>
+        <span class="s1">self.filters.add(node.name)</span>
+
+    <span class="s2">def </span><span class="s1">visit_Test(self</span><span class="s2">, </span><span class="s1">node: nodes.Test) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.generic_visit(node)</span>
+        <span class="s1">self.tests.add(node.name)</span>
+
+    <span class="s2">def </span><span class="s1">visit_Block(self</span><span class="s2">, </span><span class="s1">node: nodes.Block) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Stop visiting at blocks.&quot;&quot;&quot;</span>
+
+
+<span class="s2">class </span><span class="s1">UndeclaredNameVisitor(NodeVisitor):</span>
+    <span class="s0">&quot;&quot;&quot;A visitor that checks if a name is accessed without being 
+    declared.  This is different from the frame visitor as it will 
+    not stop at closure frames. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">names: t.Iterable[str]) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.names = set(names)</span>
+        <span class="s1">self.undeclared: t.Set[str] = set()</span>
+
+    <span class="s2">def </span><span class="s1">visit_Name(self</span><span class="s2">, </span><span class="s1">node: nodes.Name) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">node.ctx == </span><span class="s3">&quot;load&quot; </span><span class="s2">and </span><span class="s1">node.name </span><span class="s2">in </span><span class="s1">self.names:</span>
+            <span class="s1">self.undeclared.add(node.name)</span>
+            <span class="s2">if </span><span class="s1">self.undeclared == self.names:</span>
+                <span class="s2">raise </span><span class="s1">VisitorExit()</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.names.discard(node.name)</span>
+
+    <span class="s2">def </span><span class="s1">visit_Block(self</span><span class="s2">, </span><span class="s1">node: nodes.Block) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Stop visiting a blocks.&quot;&quot;&quot;</span>
+
+
+<span class="s2">class </span><span class="s1">CompilerExit(Exception):</span>
+    <span class="s0">&quot;&quot;&quot;Raised if the compiler encountered a situation where it just 
+    doesn't make sense to further process the code.  Any block that 
+    raises such an exception is not further processed. 
+    &quot;&quot;&quot;</span>
+
+
+<span class="s2">class </span><span class="s1">CodeGenerator(NodeVisitor):</span>
+    <span class="s2">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">environment: </span><span class="s3">&quot;Environment&quot;</span><span class="s2">,</span>
+        <span class="s1">name: t.Optional[str]</span><span class="s2">,</span>
+        <span class="s1">filename: t.Optional[str]</span><span class="s2">,</span>
+        <span class="s1">stream: t.Optional[t.TextIO] = </span><span class="s2">None,</span>
+        <span class="s1">defer_init: bool = </span><span class="s2">False,</span>
+        <span class="s1">optimized: bool = </span><span class="s2">True,</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">stream </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">stream = StringIO()</span>
+        <span class="s1">self.environment = environment</span>
+        <span class="s1">self.name = name</span>
+        <span class="s1">self.filename = filename</span>
+        <span class="s1">self.stream = stream</span>
+        <span class="s1">self.created_block_context = </span><span class="s2">False</span>
+        <span class="s1">self.defer_init = defer_init</span>
+        <span class="s1">self.optimizer: t.Optional[Optimizer] = </span><span class="s2">None</span>
+
+        <span class="s2">if </span><span class="s1">optimized:</span>
+            <span class="s1">self.optimizer = Optimizer(environment)</span>
+
+        <span class="s4"># aliases for imports</span>
+        <span class="s1">self.import_aliases: t.Dict[str</span><span class="s2">, </span><span class="s1">str] = {}</span>
+
+        <span class="s4"># a registry for all blocks.  Because blocks are moved out</span>
+        <span class="s4"># into the global python scope they are registered here</span>
+        <span class="s1">self.blocks: t.Dict[str</span><span class="s2">, </span><span class="s1">nodes.Block] = {}</span>
+
+        <span class="s4"># the number of extends statements so far</span>
+        <span class="s1">self.extends_so_far = </span><span class="s5">0</span>
+
+        <span class="s4"># some templates have a rootlevel extends.  In this case we</span>
+        <span class="s4"># can safely assume that we're a child template and do some</span>
+        <span class="s4"># more optimizations.</span>
+        <span class="s1">self.has_known_extends = </span><span class="s2">False</span>
+
+        <span class="s4"># the current line number</span>
+        <span class="s1">self.code_lineno = </span><span class="s5">1</span>
+
+        <span class="s4"># registry of all filters and tests (global, not block local)</span>
+        <span class="s1">self.tests: t.Dict[str</span><span class="s2">, </span><span class="s1">str] = {}</span>
+        <span class="s1">self.filters: t.Dict[str</span><span class="s2">, </span><span class="s1">str] = {}</span>
+
+        <span class="s4"># the debug information</span>
+        <span class="s1">self.debug_info: t.List[t.Tuple[int</span><span class="s2">, </span><span class="s1">int]] = []</span>
+        <span class="s1">self._write_debug_info: t.Optional[int] = </span><span class="s2">None</span>
+
+        <span class="s4"># the number of new lines before the next write()</span>
+        <span class="s1">self._new_lines = </span><span class="s5">0</span>
+
+        <span class="s4"># the line number of the last written statement</span>
+        <span class="s1">self._last_line = </span><span class="s5">0</span>
+
+        <span class="s4"># true if nothing was written so far.</span>
+        <span class="s1">self._first_write = </span><span class="s2">True</span>
+
+        <span class="s4"># used by the `temporary_identifier` method to get new</span>
+        <span class="s4"># unique, temporary identifier</span>
+        <span class="s1">self._last_identifier = </span><span class="s5">0</span>
+
+        <span class="s4"># the current indentation</span>
+        <span class="s1">self._indentation = </span><span class="s5">0</span>
+
+        <span class="s4"># Tracks toplevel assignments</span>
+        <span class="s1">self._assign_stack: t.List[t.Set[str]] = []</span>
+
+        <span class="s4"># Tracks parameter definition blocks</span>
+        <span class="s1">self._param_def_block: t.List[t.Set[str]] = []</span>
+
+        <span class="s4"># Tracks the current context.</span>
+        <span class="s1">self._context_reference_stack = [</span><span class="s3">&quot;context&quot;</span><span class="s1">]</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">optimized(self) -&gt; bool:</span>
+        <span class="s2">return </span><span class="s1">self.optimizer </span><span class="s2">is not None</span>
+
+    <span class="s4"># -- Various compilation helpers</span>
+
+    <span class="s2">def </span><span class="s1">fail(self</span><span class="s2">, </span><span class="s1">msg: str</span><span class="s2">, </span><span class="s1">lineno: int) -&gt; </span><span class="s3">&quot;te.NoReturn&quot;</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Fail with a :exc:`TemplateAssertionError`.&quot;&quot;&quot;</span>
+        <span class="s2">raise </span><span class="s1">TemplateAssertionError(msg</span><span class="s2">, </span><span class="s1">lineno</span><span class="s2">, </span><span class="s1">self.name</span><span class="s2">, </span><span class="s1">self.filename)</span>
+
+    <span class="s2">def </span><span class="s1">temporary_identifier(self) -&gt; str:</span>
+        <span class="s0">&quot;&quot;&quot;Get a new unique identifier.&quot;&quot;&quot;</span>
+        <span class="s1">self._last_identifier += </span><span class="s5">1</span>
+        <span class="s2">return </span><span class="s3">f&quot;t_</span><span class="s2">{</span><span class="s1">self._last_identifier</span><span class="s2">}</span><span class="s3">&quot;</span>
+
+    <span class="s2">def </span><span class="s1">buffer(self</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Enable buffering for the frame from that point onwards.&quot;&quot;&quot;</span>
+        <span class="s1">frame.buffer = self.temporary_identifier()</span>
+        <span class="s1">self.writeline(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">frame.buffer</span><span class="s2">} </span><span class="s3">= []&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">return_buffer_contents(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">frame: Frame</span><span class="s2">, </span><span class="s1">force_unescaped: bool = </span><span class="s2">False</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Return the buffer contents of the frame.&quot;&quot;&quot;</span>
+        <span class="s2">if not </span><span class="s1">force_unescaped:</span>
+            <span class="s2">if </span><span class="s1">frame.eval_ctx.volatile:</span>
+                <span class="s1">self.writeline(</span><span class="s3">&quot;if context.eval_ctx.autoescape:&quot;</span><span class="s1">)</span>
+                <span class="s1">self.indent()</span>
+                <span class="s1">self.writeline(</span><span class="s3">f&quot;return Markup(concat(</span><span class="s2">{</span><span class="s1">frame.buffer</span><span class="s2">}</span><span class="s3">))&quot;</span><span class="s1">)</span>
+                <span class="s1">self.outdent()</span>
+                <span class="s1">self.writeline(</span><span class="s3">&quot;else:&quot;</span><span class="s1">)</span>
+                <span class="s1">self.indent()</span>
+                <span class="s1">self.writeline(</span><span class="s3">f&quot;return concat(</span><span class="s2">{</span><span class="s1">frame.buffer</span><span class="s2">}</span><span class="s3">)&quot;</span><span class="s1">)</span>
+                <span class="s1">self.outdent()</span>
+                <span class="s2">return</span>
+            <span class="s2">elif </span><span class="s1">frame.eval_ctx.autoescape:</span>
+                <span class="s1">self.writeline(</span><span class="s3">f&quot;return Markup(concat(</span><span class="s2">{</span><span class="s1">frame.buffer</span><span class="s2">}</span><span class="s3">))&quot;</span><span class="s1">)</span>
+                <span class="s2">return</span>
+        <span class="s1">self.writeline(</span><span class="s3">f&quot;return concat(</span><span class="s2">{</span><span class="s1">frame.buffer</span><span class="s2">}</span><span class="s3">)&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">indent(self) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Indent by one.&quot;&quot;&quot;</span>
+        <span class="s1">self._indentation += </span><span class="s5">1</span>
+
+    <span class="s2">def </span><span class="s1">outdent(self</span><span class="s2">, </span><span class="s1">step: int = </span><span class="s5">1</span><span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Outdent by step.&quot;&quot;&quot;</span>
+        <span class="s1">self._indentation -= step</span>
+
+    <span class="s2">def </span><span class="s1">start_write(self</span><span class="s2">, </span><span class="s1">frame: Frame</span><span class="s2">, </span><span class="s1">node: t.Optional[nodes.Node] = </span><span class="s2">None</span><span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Yield or write into the frame buffer.&quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">frame.buffer </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">self.writeline(</span><span class="s3">&quot;yield &quot;</span><span class="s2">, </span><span class="s1">node)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.writeline(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">frame.buffer</span><span class="s2">}</span><span class="s3">.append(&quot;</span><span class="s2">, </span><span class="s1">node)</span>
+
+    <span class="s2">def </span><span class="s1">end_write(self</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;End the writing process started by `start_write`.&quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">frame.buffer </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;)&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">simple_write(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">s: str</span><span class="s2">, </span><span class="s1">frame: Frame</span><span class="s2">, </span><span class="s1">node: t.Optional[nodes.Node] = </span><span class="s2">None</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Simple shortcut for start_write + write + end_write.&quot;&quot;&quot;</span>
+        <span class="s1">self.start_write(frame</span><span class="s2">, </span><span class="s1">node)</span>
+        <span class="s1">self.write(s)</span>
+        <span class="s1">self.end_write(frame)</span>
+
+    <span class="s2">def </span><span class="s1">blockvisit(self</span><span class="s2">, </span><span class="s1">nodes: t.Iterable[nodes.Node]</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Visit a list of nodes as block in a frame.  If the current frame 
+        is no buffer a dummy ``if 0: yield None`` is written automatically. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">self.writeline(</span><span class="s3">&quot;pass&quot;</span><span class="s1">)</span>
+            <span class="s2">for </span><span class="s1">node </span><span class="s2">in </span><span class="s1">nodes:</span>
+                <span class="s1">self.visit(node</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s2">except </span><span class="s1">CompilerExit:</span>
+            <span class="s2">pass</span>
+
+    <span class="s2">def </span><span class="s1">write(self</span><span class="s2">, </span><span class="s1">x: str) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Write a string into the output stream.&quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self._new_lines:</span>
+            <span class="s2">if not </span><span class="s1">self._first_write:</span>
+                <span class="s1">self.stream.write(</span><span class="s3">&quot;</span><span class="s2">\n</span><span class="s3">&quot; </span><span class="s1">* self._new_lines)</span>
+                <span class="s1">self.code_lineno += self._new_lines</span>
+                <span class="s2">if </span><span class="s1">self._write_debug_info </span><span class="s2">is not None</span><span class="s1">:</span>
+                    <span class="s1">self.debug_info.append((self._write_debug_info</span><span class="s2">, </span><span class="s1">self.code_lineno))</span>
+                    <span class="s1">self._write_debug_info = </span><span class="s2">None</span>
+            <span class="s1">self._first_write = </span><span class="s2">False</span>
+            <span class="s1">self.stream.write(</span><span class="s3">&quot;    &quot; </span><span class="s1">* self._indentation)</span>
+            <span class="s1">self._new_lines = </span><span class="s5">0</span>
+        <span class="s1">self.stream.write(x)</span>
+
+    <span class="s2">def </span><span class="s1">writeline(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">x: str</span><span class="s2">, </span><span class="s1">node: t.Optional[nodes.Node] = </span><span class="s2">None, </span><span class="s1">extra: int = </span><span class="s5">0</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Combination of newline and write.&quot;&quot;&quot;</span>
+        <span class="s1">self.newline(node</span><span class="s2">, </span><span class="s1">extra)</span>
+        <span class="s1">self.write(x)</span>
+
+    <span class="s2">def </span><span class="s1">newline(self</span><span class="s2">, </span><span class="s1">node: t.Optional[nodes.Node] = </span><span class="s2">None, </span><span class="s1">extra: int = </span><span class="s5">0</span><span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Add one or more newlines before the next write.&quot;&quot;&quot;</span>
+        <span class="s1">self._new_lines = max(self._new_lines</span><span class="s2">, </span><span class="s5">1 </span><span class="s1">+ extra)</span>
+        <span class="s2">if </span><span class="s1">node </span><span class="s2">is not None and </span><span class="s1">node.lineno != self._last_line:</span>
+            <span class="s1">self._write_debug_info = node.lineno</span>
+            <span class="s1">self._last_line = node.lineno</span>
+
+    <span class="s2">def </span><span class="s1">signature(</span>
+        <span class="s1">self</span><span class="s2">,</span>
+        <span class="s1">node: t.Union[nodes.Call</span><span class="s2">, </span><span class="s1">nodes.Filter</span><span class="s2">, </span><span class="s1">nodes.Test]</span><span class="s2">,</span>
+        <span class="s1">frame: Frame</span><span class="s2">,</span>
+        <span class="s1">extra_kwargs: t.Optional[t.Mapping[str</span><span class="s2">, </span><span class="s1">t.Any]] = </span><span class="s2">None,</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Writes a function call to the stream for the current node. 
+        A leading comma is added automatically.  The extra keyword 
+        arguments may not include python keywords otherwise a syntax 
+        error could occur.  The extra keyword arguments should be given 
+        as python dict. 
+        &quot;&quot;&quot;</span>
+        <span class="s4"># if any of the given keyword arguments is a python keyword</span>
+        <span class="s4"># we have to make sure that no invalid call is created.</span>
+        <span class="s1">kwarg_workaround = any(</span>
+            <span class="s1">is_python_keyword(t.cast(str</span><span class="s2">, </span><span class="s1">k))</span>
+            <span class="s2">for </span><span class="s1">k </span><span class="s2">in </span><span class="s1">chain((x.key </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">node.kwargs)</span><span class="s2">, </span><span class="s1">extra_kwargs </span><span class="s2">or </span><span class="s1">())</span>
+        <span class="s1">)</span>
+
+        <span class="s2">for </span><span class="s1">arg </span><span class="s2">in </span><span class="s1">node.args:</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;, &quot;</span><span class="s1">)</span>
+            <span class="s1">self.visit(arg</span><span class="s2">, </span><span class="s1">frame)</span>
+
+        <span class="s2">if not </span><span class="s1">kwarg_workaround:</span>
+            <span class="s2">for </span><span class="s1">kwarg </span><span class="s2">in </span><span class="s1">node.kwargs:</span>
+                <span class="s1">self.write(</span><span class="s3">&quot;, &quot;</span><span class="s1">)</span>
+                <span class="s1">self.visit(kwarg</span><span class="s2">, </span><span class="s1">frame)</span>
+            <span class="s2">if </span><span class="s1">extra_kwargs </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s2">for </span><span class="s1">key</span><span class="s2">, </span><span class="s1">value </span><span class="s2">in </span><span class="s1">extra_kwargs.items():</span>
+                    <span class="s1">self.write(</span><span class="s3">f&quot;, </span><span class="s2">{</span><span class="s1">key</span><span class="s2">}</span><span class="s3">=</span><span class="s2">{</span><span class="s1">value</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">node.dyn_args:</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;, *&quot;</span><span class="s1">)</span>
+            <span class="s1">self.visit(node.dyn_args</span><span class="s2">, </span><span class="s1">frame)</span>
+
+        <span class="s2">if </span><span class="s1">kwarg_workaround:</span>
+            <span class="s2">if </span><span class="s1">node.dyn_kwargs </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s1">self.write(</span><span class="s3">&quot;, **dict({&quot;</span><span class="s1">)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">self.write(</span><span class="s3">&quot;, **{&quot;</span><span class="s1">)</span>
+            <span class="s2">for </span><span class="s1">kwarg </span><span class="s2">in </span><span class="s1">node.kwargs:</span>
+                <span class="s1">self.write(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">kwarg.key</span><span class="s2">!r}</span><span class="s3">: &quot;</span><span class="s1">)</span>
+                <span class="s1">self.visit(kwarg.value</span><span class="s2">, </span><span class="s1">frame)</span>
+                <span class="s1">self.write(</span><span class="s3">&quot;, &quot;</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">extra_kwargs </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s2">for </span><span class="s1">key</span><span class="s2">, </span><span class="s1">value </span><span class="s2">in </span><span class="s1">extra_kwargs.items():</span>
+                    <span class="s1">self.write(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">key</span><span class="s2">!r}</span><span class="s3">: </span><span class="s2">{</span><span class="s1">value</span><span class="s2">}</span><span class="s3">, &quot;</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">node.dyn_kwargs </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s1">self.write(</span><span class="s3">&quot;}, **&quot;</span><span class="s1">)</span>
+                <span class="s1">self.visit(node.dyn_kwargs</span><span class="s2">, </span><span class="s1">frame)</span>
+                <span class="s1">self.write(</span><span class="s3">&quot;)&quot;</span><span class="s1">)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">self.write(</span><span class="s3">&quot;}&quot;</span><span class="s1">)</span>
+
+        <span class="s2">elif </span><span class="s1">node.dyn_kwargs </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;, **&quot;</span><span class="s1">)</span>
+            <span class="s1">self.visit(node.dyn_kwargs</span><span class="s2">, </span><span class="s1">frame)</span>
+
+    <span class="s2">def </span><span class="s1">pull_dependencies(self</span><span class="s2">, </span><span class="s1">nodes: t.Iterable[nodes.Node]) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Find all filter and test names used in the template and 
+        assign them to variables in the compiled namespace. Checking 
+        that the names are registered with the environment is done when 
+        compiling the Filter and Test nodes. If the node is in an If or 
+        CondExpr node, the check is done at runtime instead. 
+ 
+        .. versionchanged:: 3.0 
+            Filters and tests in If and CondExpr nodes are checked at 
+            runtime instead of compile time. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">visitor = DependencyFinderVisitor()</span>
+
+        <span class="s2">for </span><span class="s1">node </span><span class="s2">in </span><span class="s1">nodes:</span>
+            <span class="s1">visitor.visit(node)</span>
+
+        <span class="s2">for </span><span class="s1">id_map</span><span class="s2">, </span><span class="s1">names</span><span class="s2">, </span><span class="s1">dependency </span><span class="s2">in </span><span class="s1">(self.filters</span><span class="s2">, </span><span class="s1">visitor.filters</span><span class="s2">, </span><span class="s3">&quot;filters&quot;</span><span class="s1">)</span><span class="s2">, </span><span class="s1">(</span>
+            <span class="s1">self.tests</span><span class="s2">,</span>
+            <span class="s1">visitor.tests</span><span class="s2">,</span>
+            <span class="s3">&quot;tests&quot;</span><span class="s2">,</span>
+        <span class="s1">):</span>
+            <span class="s2">for </span><span class="s1">name </span><span class="s2">in </span><span class="s1">sorted(names):</span>
+                <span class="s2">if </span><span class="s1">name </span><span class="s2">not in </span><span class="s1">id_map:</span>
+                    <span class="s1">id_map[name] = self.temporary_identifier()</span>
+
+                <span class="s4"># add check during runtime that dependencies used inside of executed</span>
+                <span class="s4"># blocks are defined, as this step may be skipped during compile time</span>
+                <span class="s1">self.writeline(</span><span class="s3">&quot;try:&quot;</span><span class="s1">)</span>
+                <span class="s1">self.indent()</span>
+                <span class="s1">self.writeline(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">id_map[name]</span><span class="s2">} </span><span class="s3">= environment.</span><span class="s2">{</span><span class="s1">dependency</span><span class="s2">}</span><span class="s3">[</span><span class="s2">{</span><span class="s1">name</span><span class="s2">!r}</span><span class="s3">]&quot;</span><span class="s1">)</span>
+                <span class="s1">self.outdent()</span>
+                <span class="s1">self.writeline(</span><span class="s3">&quot;except KeyError:&quot;</span><span class="s1">)</span>
+                <span class="s1">self.indent()</span>
+                <span class="s1">self.writeline(</span><span class="s3">&quot;@internalcode&quot;</span><span class="s1">)</span>
+                <span class="s1">self.writeline(</span><span class="s3">f&quot;def </span><span class="s2">{</span><span class="s1">id_map[name]</span><span class="s2">}</span><span class="s3">(*unused):&quot;</span><span class="s1">)</span>
+                <span class="s1">self.indent()</span>
+                <span class="s1">self.writeline(</span>
+                    <span class="s3">f'raise TemplateRuntimeError(&quot;No </span><span class="s2">{</span><span class="s1">dependency[:-</span><span class="s5">1</span><span class="s1">]</span><span class="s2">}</span><span class="s3">'</span>
+                    <span class="s3">f' named </span><span class="s2">{</span><span class="s1">name</span><span class="s2">!r} </span><span class="s3">found.&quot;)'</span>
+                <span class="s1">)</span>
+                <span class="s1">self.outdent()</span>
+                <span class="s1">self.outdent()</span>
+
+    <span class="s2">def </span><span class="s1">enter_frame(self</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">undefs = []</span>
+        <span class="s2">for </span><span class="s1">target</span><span class="s2">, </span><span class="s1">(action</span><span class="s2">, </span><span class="s1">param) </span><span class="s2">in </span><span class="s1">frame.symbols.loads.items():</span>
+            <span class="s2">if </span><span class="s1">action == VAR_LOAD_PARAMETER:</span>
+                <span class="s2">pass</span>
+            <span class="s2">elif </span><span class="s1">action == VAR_LOAD_RESOLVE:</span>
+                <span class="s1">self.writeline(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">target</span><span class="s2">} </span><span class="s3">= </span><span class="s2">{</span><span class="s1">self.get_resolve_func()</span><span class="s2">}</span><span class="s3">(</span><span class="s2">{</span><span class="s1">param</span><span class="s2">!r}</span><span class="s3">)&quot;</span><span class="s1">)</span>
+            <span class="s2">elif </span><span class="s1">action == VAR_LOAD_ALIAS:</span>
+                <span class="s1">self.writeline(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">target</span><span class="s2">} </span><span class="s3">= </span><span class="s2">{</span><span class="s1">param</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+            <span class="s2">elif </span><span class="s1">action == VAR_LOAD_UNDEFINED:</span>
+                <span class="s1">undefs.append(target)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">raise </span><span class="s1">NotImplementedError(</span><span class="s3">&quot;unknown load instruction&quot;</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">undefs:</span>
+            <span class="s1">self.writeline(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s3">' = '</span><span class="s1">.join(undefs)</span><span class="s2">} </span><span class="s3">= missing&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">leave_frame(self</span><span class="s2">, </span><span class="s1">frame: Frame</span><span class="s2">, </span><span class="s1">with_python_scope: bool = </span><span class="s2">False</span><span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">if not </span><span class="s1">with_python_scope:</span>
+            <span class="s1">undefs = []</span>
+            <span class="s2">for </span><span class="s1">target </span><span class="s2">in </span><span class="s1">frame.symbols.loads:</span>
+                <span class="s1">undefs.append(target)</span>
+            <span class="s2">if </span><span class="s1">undefs:</span>
+                <span class="s1">self.writeline(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s3">' = '</span><span class="s1">.join(undefs)</span><span class="s2">} </span><span class="s3">= missing&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">choose_async(self</span><span class="s2">, </span><span class="s1">async_value: str = </span><span class="s3">&quot;async &quot;</span><span class="s2">, </span><span class="s1">sync_value: str = </span><span class="s3">&quot;&quot;</span><span class="s1">) -&gt; str:</span>
+        <span class="s2">return </span><span class="s1">async_value </span><span class="s2">if </span><span class="s1">self.environment.is_async </span><span class="s2">else </span><span class="s1">sync_value</span>
+
+    <span class="s2">def </span><span class="s1">func(self</span><span class="s2">, </span><span class="s1">name: str) -&gt; str:</span>
+        <span class="s2">return </span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">self.choose_async()</span><span class="s2">}</span><span class="s3">def </span><span class="s2">{</span><span class="s1">name</span><span class="s2">}</span><span class="s3">&quot;</span>
+
+    <span class="s2">def </span><span class="s1">macro_body(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">node: t.Union[nodes.Macro</span><span class="s2">, </span><span class="s1">nodes.CallBlock]</span><span class="s2">, </span><span class="s1">frame: Frame</span>
+    <span class="s1">) -&gt; t.Tuple[Frame</span><span class="s2">, </span><span class="s1">MacroRef]:</span>
+        <span class="s0">&quot;&quot;&quot;Dump the function def of a macro or call block.&quot;&quot;&quot;</span>
+        <span class="s1">frame = frame.inner()</span>
+        <span class="s1">frame.symbols.analyze_node(node)</span>
+        <span class="s1">macro_ref = MacroRef(node)</span>
+
+        <span class="s1">explicit_caller = </span><span class="s2">None</span>
+        <span class="s1">skip_special_params = set()</span>
+        <span class="s1">args = []</span>
+
+        <span class="s2">for </span><span class="s1">idx</span><span class="s2">, </span><span class="s1">arg </span><span class="s2">in </span><span class="s1">enumerate(node.args):</span>
+            <span class="s2">if </span><span class="s1">arg.name == </span><span class="s3">&quot;caller&quot;</span><span class="s1">:</span>
+                <span class="s1">explicit_caller = idx</span>
+            <span class="s2">if </span><span class="s1">arg.name </span><span class="s2">in </span><span class="s1">(</span><span class="s3">&quot;kwargs&quot;</span><span class="s2">, </span><span class="s3">&quot;varargs&quot;</span><span class="s1">):</span>
+                <span class="s1">skip_special_params.add(arg.name)</span>
+            <span class="s1">args.append(frame.symbols.ref(arg.name))</span>
+
+        <span class="s1">undeclared = find_undeclared(node.body</span><span class="s2">, </span><span class="s1">(</span><span class="s3">&quot;caller&quot;</span><span class="s2">, </span><span class="s3">&quot;kwargs&quot;</span><span class="s2">, </span><span class="s3">&quot;varargs&quot;</span><span class="s1">))</span>
+
+        <span class="s2">if </span><span class="s3">&quot;caller&quot; </span><span class="s2">in </span><span class="s1">undeclared:</span>
+            <span class="s4"># In older Jinja versions there was a bug that allowed caller</span>
+            <span class="s4"># to retain the special behavior even if it was mentioned in</span>
+            <span class="s4"># the argument list.  However thankfully this was only really</span>
+            <span class="s4"># working if it was the last argument.  So we are explicitly</span>
+            <span class="s4"># checking this now and error out if it is anywhere else in</span>
+            <span class="s4"># the argument list.</span>
+            <span class="s2">if </span><span class="s1">explicit_caller </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s1">node.defaults[explicit_caller - len(node.args)]</span>
+                <span class="s2">except </span><span class="s1">IndexError:</span>
+                    <span class="s1">self.fail(</span>
+                        <span class="s3">&quot;When defining macros or call blocks the &quot;</span>
+                        <span class="s3">'special &quot;caller&quot; argument must be omitted '</span>
+                        <span class="s3">&quot;or be given a default.&quot;</span><span class="s2">,</span>
+                        <span class="s1">node.lineno</span><span class="s2">,</span>
+                    <span class="s1">)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">args.append(frame.symbols.declare_parameter(</span><span class="s3">&quot;caller&quot;</span><span class="s1">))</span>
+            <span class="s1">macro_ref.accesses_caller = </span><span class="s2">True</span>
+        <span class="s2">if </span><span class="s3">&quot;kwargs&quot; </span><span class="s2">in </span><span class="s1">undeclared </span><span class="s2">and </span><span class="s3">&quot;kwargs&quot; </span><span class="s2">not in </span><span class="s1">skip_special_params:</span>
+            <span class="s1">args.append(frame.symbols.declare_parameter(</span><span class="s3">&quot;kwargs&quot;</span><span class="s1">))</span>
+            <span class="s1">macro_ref.accesses_kwargs = </span><span class="s2">True</span>
+        <span class="s2">if </span><span class="s3">&quot;varargs&quot; </span><span class="s2">in </span><span class="s1">undeclared </span><span class="s2">and </span><span class="s3">&quot;varargs&quot; </span><span class="s2">not in </span><span class="s1">skip_special_params:</span>
+            <span class="s1">args.append(frame.symbols.declare_parameter(</span><span class="s3">&quot;varargs&quot;</span><span class="s1">))</span>
+            <span class="s1">macro_ref.accesses_varargs = </span><span class="s2">True</span>
+
+        <span class="s4"># macros are delayed, they never require output checks</span>
+        <span class="s1">frame.require_output_check = </span><span class="s2">False</span>
+        <span class="s1">frame.symbols.analyze_node(node)</span>
+        <span class="s1">self.writeline(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">self.func(</span><span class="s3">'macro'</span><span class="s1">)</span><span class="s2">}</span><span class="s3">(</span><span class="s2">{</span><span class="s3">', '</span><span class="s1">.join(args)</span><span class="s2">}</span><span class="s3">):&quot;</span><span class="s2">, </span><span class="s1">node)</span>
+        <span class="s1">self.indent()</span>
+
+        <span class="s1">self.buffer(frame)</span>
+        <span class="s1">self.enter_frame(frame)</span>
+
+        <span class="s1">self.push_parameter_definitions(frame)</span>
+        <span class="s2">for </span><span class="s1">idx</span><span class="s2">, </span><span class="s1">arg </span><span class="s2">in </span><span class="s1">enumerate(node.args):</span>
+            <span class="s1">ref = frame.symbols.ref(arg.name)</span>
+            <span class="s1">self.writeline(</span><span class="s3">f&quot;if </span><span class="s2">{</span><span class="s1">ref</span><span class="s2">} </span><span class="s3">is missing:&quot;</span><span class="s1">)</span>
+            <span class="s1">self.indent()</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">default = node.defaults[idx - len(node.args)]</span>
+            <span class="s2">except </span><span class="s1">IndexError:</span>
+                <span class="s1">self.writeline(</span>
+                    <span class="s3">f'</span><span class="s2">{</span><span class="s1">ref</span><span class="s2">} </span><span class="s3">= undefined(&quot;parameter </span><span class="s2">{</span><span class="s1">arg.name</span><span class="s2">!r} </span><span class="s3">was not provided&quot;,'</span>
+                    <span class="s3">f&quot; name=</span><span class="s2">{</span><span class="s1">arg.name</span><span class="s2">!r}</span><span class="s3">)&quot;</span>
+                <span class="s1">)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">self.writeline(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">ref</span><span class="s2">} </span><span class="s3">= &quot;</span><span class="s1">)</span>
+                <span class="s1">self.visit(default</span><span class="s2">, </span><span class="s1">frame)</span>
+            <span class="s1">self.mark_parameter_stored(ref)</span>
+            <span class="s1">self.outdent()</span>
+        <span class="s1">self.pop_parameter_definitions()</span>
+
+        <span class="s1">self.blockvisit(node.body</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s1">self.return_buffer_contents(frame</span><span class="s2">, </span><span class="s1">force_unescaped=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s1">self.leave_frame(frame</span><span class="s2">, </span><span class="s1">with_python_scope=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s1">self.outdent()</span>
+
+        <span class="s2">return </span><span class="s1">frame</span><span class="s2">, </span><span class="s1">macro_ref</span>
+
+    <span class="s2">def </span><span class="s1">macro_def(self</span><span class="s2">, </span><span class="s1">macro_ref: MacroRef</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Dump the macro definition for the def created by macro_body.&quot;&quot;&quot;</span>
+        <span class="s1">arg_tuple = </span><span class="s3">&quot;, &quot;</span><span class="s1">.join(repr(x.name) </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">macro_ref.node.args)</span>
+        <span class="s1">name = getattr(macro_ref.node</span><span class="s2">, </span><span class="s3">&quot;name&quot;</span><span class="s2">, None</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">len(macro_ref.node.args) == </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s1">arg_tuple += </span><span class="s3">&quot;,&quot;</span>
+        <span class="s1">self.write(</span>
+            <span class="s3">f&quot;Macro(environment, macro, </span><span class="s2">{</span><span class="s1">name</span><span class="s2">!r}</span><span class="s3">, (</span><span class="s2">{</span><span class="s1">arg_tuple</span><span class="s2">}</span><span class="s3">),&quot;</span>
+            <span class="s3">f&quot; </span><span class="s2">{</span><span class="s1">macro_ref.accesses_kwargs</span><span class="s2">!r}</span><span class="s3">, </span><span class="s2">{</span><span class="s1">macro_ref.accesses_varargs</span><span class="s2">!r}</span><span class="s3">,&quot;</span>
+            <span class="s3">f&quot; </span><span class="s2">{</span><span class="s1">macro_ref.accesses_caller</span><span class="s2">!r}</span><span class="s3">, context.eval_ctx.autoescape)&quot;</span>
+        <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">position(self</span><span class="s2">, </span><span class="s1">node: nodes.Node) -&gt; str:</span>
+        <span class="s0">&quot;&quot;&quot;Return a human readable position for the node.&quot;&quot;&quot;</span>
+        <span class="s1">rv = </span><span class="s3">f&quot;line </span><span class="s2">{</span><span class="s1">node.lineno</span><span class="s2">}</span><span class="s3">&quot;</span>
+        <span class="s2">if </span><span class="s1">self.name </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">rv = </span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">rv</span><span class="s2">} </span><span class="s3">in </span><span class="s2">{</span><span class="s1">self.name</span><span class="s2">!r}</span><span class="s3">&quot;</span>
+        <span class="s2">return </span><span class="s1">rv</span>
+
+    <span class="s2">def </span><span class="s1">dump_local_context(self</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; str:</span>
+        <span class="s1">items_kv = </span><span class="s3">&quot;, &quot;</span><span class="s1">.join(</span>
+            <span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">name</span><span class="s2">!r}</span><span class="s3">: </span><span class="s2">{</span><span class="s1">target</span><span class="s2">}</span><span class="s3">&quot;</span>
+            <span class="s2">for </span><span class="s1">name</span><span class="s2">, </span><span class="s1">target </span><span class="s2">in </span><span class="s1">frame.symbols.dump_stores().items()</span>
+        <span class="s1">)</span>
+        <span class="s2">return </span><span class="s3">f&quot;</span><span class="s2">{{{</span><span class="s1">items_kv</span><span class="s2">}}}</span><span class="s3">&quot;</span>
+
+    <span class="s2">def </span><span class="s1">write_commons(self) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Writes a common preamble that is used by root and block functions. 
+        Primarily this sets up common local helpers and enforces a generator 
+        through a dead branch. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.writeline(</span><span class="s3">&quot;resolve = context.resolve_or_missing&quot;</span><span class="s1">)</span>
+        <span class="s1">self.writeline(</span><span class="s3">&quot;undefined = environment.undefined&quot;</span><span class="s1">)</span>
+        <span class="s4"># always use the standard Undefined class for the implicit else of</span>
+        <span class="s4"># conditional expressions</span>
+        <span class="s1">self.writeline(</span><span class="s3">&quot;cond_expr_undefined = Undefined&quot;</span><span class="s1">)</span>
+        <span class="s1">self.writeline(</span><span class="s3">&quot;if 0: yield None&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">push_parameter_definitions(self</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Pushes all parameter targets from the given frame into a local 
+        stack that permits tracking of yet to be assigned parameters.  In 
+        particular this enables the optimization from `visit_Name` to skip 
+        undefined expressions for parameters in macros as macros can reference 
+        otherwise unbound parameters. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self._param_def_block.append(frame.symbols.dump_param_targets())</span>
+
+    <span class="s2">def </span><span class="s1">pop_parameter_definitions(self) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Pops the current parameter definitions set.&quot;&quot;&quot;</span>
+        <span class="s1">self._param_def_block.pop()</span>
+
+    <span class="s2">def </span><span class="s1">mark_parameter_stored(self</span><span class="s2">, </span><span class="s1">target: str) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Marks a parameter in the current parameter definitions as stored. 
+        This will skip the enforced undefined checks. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self._param_def_block:</span>
+            <span class="s1">self._param_def_block[-</span><span class="s5">1</span><span class="s1">].discard(target)</span>
+
+    <span class="s2">def </span><span class="s1">push_context_reference(self</span><span class="s2">, </span><span class="s1">target: str) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self._context_reference_stack.append(target)</span>
+
+    <span class="s2">def </span><span class="s1">pop_context_reference(self) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self._context_reference_stack.pop()</span>
+
+    <span class="s2">def </span><span class="s1">get_context_ref(self) -&gt; str:</span>
+        <span class="s2">return </span><span class="s1">self._context_reference_stack[-</span><span class="s5">1</span><span class="s1">]</span>
+
+    <span class="s2">def </span><span class="s1">get_resolve_func(self) -&gt; str:</span>
+        <span class="s1">target = self._context_reference_stack[-</span><span class="s5">1</span><span class="s1">]</span>
+        <span class="s2">if </span><span class="s1">target == </span><span class="s3">&quot;context&quot;</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s3">&quot;resolve&quot;</span>
+        <span class="s2">return </span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">target</span><span class="s2">}</span><span class="s3">.resolve&quot;</span>
+
+    <span class="s2">def </span><span class="s1">derive_context(self</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; str:</span>
+        <span class="s2">return </span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">self.get_context_ref()</span><span class="s2">}</span><span class="s3">.derived(</span><span class="s2">{</span><span class="s1">self.dump_local_context(frame)</span><span class="s2">}</span><span class="s3">)&quot;</span>
+
+    <span class="s2">def </span><span class="s1">parameter_is_undeclared(self</span><span class="s2">, </span><span class="s1">target: str) -&gt; bool:</span>
+        <span class="s0">&quot;&quot;&quot;Checks if a given target is an undeclared parameter.&quot;&quot;&quot;</span>
+        <span class="s2">if not </span><span class="s1">self._param_def_block:</span>
+            <span class="s2">return False</span>
+        <span class="s2">return </span><span class="s1">target </span><span class="s2">in </span><span class="s1">self._param_def_block[-</span><span class="s5">1</span><span class="s1">]</span>
+
+    <span class="s2">def </span><span class="s1">push_assign_tracking(self) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Pushes a new layer for assignment tracking.&quot;&quot;&quot;</span>
+        <span class="s1">self._assign_stack.append(set())</span>
+
+    <span class="s2">def </span><span class="s1">pop_assign_tracking(self</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Pops the topmost level for assignment tracking and updates the 
+        context variables if necessary. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">vars = self._assign_stack.pop()</span>
+        <span class="s2">if </span><span class="s1">(</span>
+            <span class="s2">not </span><span class="s1">frame.block_frame</span>
+            <span class="s2">and not </span><span class="s1">frame.loop_frame</span>
+            <span class="s2">and not </span><span class="s1">frame.toplevel</span>
+            <span class="s2">or not </span><span class="s1">vars</span>
+        <span class="s1">):</span>
+            <span class="s2">return</span>
+        <span class="s1">public_names = [x </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">vars </span><span class="s2">if </span><span class="s1">x[:</span><span class="s5">1</span><span class="s1">] != </span><span class="s3">&quot;_&quot;</span><span class="s1">]</span>
+        <span class="s2">if </span><span class="s1">len(vars) == </span><span class="s5">1</span><span class="s1">:</span>
+            <span class="s1">name = next(iter(vars))</span>
+            <span class="s1">ref = frame.symbols.ref(name)</span>
+            <span class="s2">if </span><span class="s1">frame.loop_frame:</span>
+                <span class="s1">self.writeline(</span><span class="s3">f&quot;_loop_vars[</span><span class="s2">{</span><span class="s1">name</span><span class="s2">!r}</span><span class="s3">] = </span><span class="s2">{</span><span class="s1">ref</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+                <span class="s2">return</span>
+            <span class="s2">if </span><span class="s1">frame.block_frame:</span>
+                <span class="s1">self.writeline(</span><span class="s3">f&quot;_block_vars[</span><span class="s2">{</span><span class="s1">name</span><span class="s2">!r}</span><span class="s3">] = </span><span class="s2">{</span><span class="s1">ref</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+                <span class="s2">return</span>
+            <span class="s1">self.writeline(</span><span class="s3">f&quot;context.vars[</span><span class="s2">{</span><span class="s1">name</span><span class="s2">!r}</span><span class="s3">] = </span><span class="s2">{</span><span class="s1">ref</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">frame.loop_frame:</span>
+                <span class="s1">self.writeline(</span><span class="s3">&quot;_loop_vars.update({&quot;</span><span class="s1">)</span>
+            <span class="s2">elif </span><span class="s1">frame.block_frame:</span>
+                <span class="s1">self.writeline(</span><span class="s3">&quot;_block_vars.update({&quot;</span><span class="s1">)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">self.writeline(</span><span class="s3">&quot;context.vars.update({&quot;</span><span class="s1">)</span>
+            <span class="s2">for </span><span class="s1">idx</span><span class="s2">, </span><span class="s1">name </span><span class="s2">in </span><span class="s1">enumerate(vars):</span>
+                <span class="s2">if </span><span class="s1">idx:</span>
+                    <span class="s1">self.write(</span><span class="s3">&quot;, &quot;</span><span class="s1">)</span>
+                <span class="s1">ref = frame.symbols.ref(name)</span>
+                <span class="s1">self.write(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">name</span><span class="s2">!r}</span><span class="s3">: </span><span class="s2">{</span><span class="s1">ref</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;})&quot;</span><span class="s1">)</span>
+        <span class="s2">if not </span><span class="s1">frame.block_frame </span><span class="s2">and not </span><span class="s1">frame.loop_frame </span><span class="s2">and </span><span class="s1">public_names:</span>
+            <span class="s2">if </span><span class="s1">len(public_names) == </span><span class="s5">1</span><span class="s1">:</span>
+                <span class="s1">self.writeline(</span><span class="s3">f&quot;context.exported_vars.add(</span><span class="s2">{</span><span class="s1">public_names[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">!r}</span><span class="s3">)&quot;</span><span class="s1">)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">names_str = </span><span class="s3">&quot;, &quot;</span><span class="s1">.join(map(repr</span><span class="s2">, </span><span class="s1">public_names))</span>
+                <span class="s1">self.writeline(</span><span class="s3">f&quot;context.exported_vars.update((</span><span class="s2">{</span><span class="s1">names_str</span><span class="s2">}</span><span class="s3">))&quot;</span><span class="s1">)</span>
+
+    <span class="s4"># -- Statement Visitors</span>
+
+    <span class="s2">def </span><span class="s1">visit_Template(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">node: nodes.Template</span><span class="s2">, </span><span class="s1">frame: t.Optional[Frame] = </span><span class="s2">None</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">assert </span><span class="s1">frame </span><span class="s2">is None, </span><span class="s3">&quot;no root frame allowed&quot;</span>
+        <span class="s1">eval_ctx = EvalContext(self.environment</span><span class="s2">, </span><span class="s1">self.name)</span>
+
+        <span class="s2">from </span><span class="s1">.runtime </span><span class="s2">import </span><span class="s1">exported</span><span class="s2">, </span><span class="s1">async_exported</span>
+
+        <span class="s2">if </span><span class="s1">self.environment.is_async:</span>
+            <span class="s1">exported_names = sorted(exported + async_exported)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">exported_names = sorted(exported)</span>
+
+        <span class="s1">self.writeline(</span><span class="s3">&quot;from __future__ import generator_stop&quot;</span><span class="s1">)  </span><span class="s4"># Python &lt; 3.7</span>
+        <span class="s1">self.writeline(</span><span class="s3">&quot;from jinja2.runtime import &quot; </span><span class="s1">+ </span><span class="s3">&quot;, &quot;</span><span class="s1">.join(exported_names))</span>
+
+        <span class="s4"># if we want a deferred initialization we cannot move the</span>
+        <span class="s4"># environment into a local name</span>
+        <span class="s1">envenv = </span><span class="s3">&quot;&quot; </span><span class="s2">if </span><span class="s1">self.defer_init </span><span class="s2">else </span><span class="s3">&quot;, environment=environment&quot;</span>
+
+        <span class="s4"># do we have an extends tag at all?  If not, we can save some</span>
+        <span class="s4"># overhead by just not processing any inheritance code.</span>
+        <span class="s1">have_extends = node.find(nodes.Extends) </span><span class="s2">is not None</span>
+
+        <span class="s4"># find all blocks</span>
+        <span class="s2">for </span><span class="s1">block </span><span class="s2">in </span><span class="s1">node.find_all(nodes.Block):</span>
+            <span class="s2">if </span><span class="s1">block.name </span><span class="s2">in </span><span class="s1">self.blocks:</span>
+                <span class="s1">self.fail(</span><span class="s3">f&quot;block </span><span class="s2">{</span><span class="s1">block.name</span><span class="s2">!r} </span><span class="s3">defined twice&quot;</span><span class="s2">, </span><span class="s1">block.lineno)</span>
+            <span class="s1">self.blocks[block.name] = block</span>
+
+        <span class="s4"># find all imports and import them</span>
+        <span class="s2">for </span><span class="s1">import_ </span><span class="s2">in </span><span class="s1">node.find_all(nodes.ImportedName):</span>
+            <span class="s2">if </span><span class="s1">import_.importname </span><span class="s2">not in </span><span class="s1">self.import_aliases:</span>
+                <span class="s1">imp = import_.importname</span>
+                <span class="s1">self.import_aliases[imp] = alias = self.temporary_identifier()</span>
+                <span class="s2">if </span><span class="s3">&quot;.&quot; </span><span class="s2">in </span><span class="s1">imp:</span>
+                    <span class="s1">module</span><span class="s2">, </span><span class="s1">obj = imp.rsplit(</span><span class="s3">&quot;.&quot;</span><span class="s2">, </span><span class="s5">1</span><span class="s1">)</span>
+                    <span class="s1">self.writeline(</span><span class="s3">f&quot;from </span><span class="s2">{</span><span class="s1">module</span><span class="s2">} </span><span class="s3">import </span><span class="s2">{</span><span class="s1">obj</span><span class="s2">} </span><span class="s3">as </span><span class="s2">{</span><span class="s1">alias</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">self.writeline(</span><span class="s3">f&quot;import </span><span class="s2">{</span><span class="s1">imp</span><span class="s2">} </span><span class="s3">as </span><span class="s2">{</span><span class="s1">alias</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+
+        <span class="s4"># add the load name</span>
+        <span class="s1">self.writeline(</span><span class="s3">f&quot;name = </span><span class="s2">{</span><span class="s1">self.name</span><span class="s2">!r}</span><span class="s3">&quot;</span><span class="s1">)</span>
+
+        <span class="s4"># generate the root render function.</span>
+        <span class="s1">self.writeline(</span>
+            <span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">self.func(</span><span class="s3">'root'</span><span class="s1">)</span><span class="s2">}</span><span class="s3">(context, missing=missing</span><span class="s2">{</span><span class="s1">envenv</span><span class="s2">}</span><span class="s3">):&quot;</span><span class="s2">, </span><span class="s1">extra=</span><span class="s5">1</span>
+        <span class="s1">)</span>
+        <span class="s1">self.indent()</span>
+        <span class="s1">self.write_commons()</span>
+
+        <span class="s4"># process the root</span>
+        <span class="s1">frame = Frame(eval_ctx)</span>
+        <span class="s2">if </span><span class="s3">&quot;self&quot; </span><span class="s2">in </span><span class="s1">find_undeclared(node.body</span><span class="s2">, </span><span class="s1">(</span><span class="s3">&quot;self&quot;</span><span class="s2">,</span><span class="s1">)):</span>
+            <span class="s1">ref = frame.symbols.declare_parameter(</span><span class="s3">&quot;self&quot;</span><span class="s1">)</span>
+            <span class="s1">self.writeline(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">ref</span><span class="s2">} </span><span class="s3">= TemplateReference(context)&quot;</span><span class="s1">)</span>
+        <span class="s1">frame.symbols.analyze_node(node)</span>
+        <span class="s1">frame.toplevel = frame.rootlevel = </span><span class="s2">True</span>
+        <span class="s1">frame.require_output_check = have_extends </span><span class="s2">and not </span><span class="s1">self.has_known_extends</span>
+        <span class="s2">if </span><span class="s1">have_extends:</span>
+            <span class="s1">self.writeline(</span><span class="s3">&quot;parent_template = None&quot;</span><span class="s1">)</span>
+        <span class="s1">self.enter_frame(frame)</span>
+        <span class="s1">self.pull_dependencies(node.body)</span>
+        <span class="s1">self.blockvisit(node.body</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s1">self.leave_frame(frame</span><span class="s2">, </span><span class="s1">with_python_scope=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s1">self.outdent()</span>
+
+        <span class="s4"># make sure that the parent root is called.</span>
+        <span class="s2">if </span><span class="s1">have_extends:</span>
+            <span class="s2">if not </span><span class="s1">self.has_known_extends:</span>
+                <span class="s1">self.indent()</span>
+                <span class="s1">self.writeline(</span><span class="s3">&quot;if parent_template is not None:&quot;</span><span class="s1">)</span>
+            <span class="s1">self.indent()</span>
+            <span class="s2">if not </span><span class="s1">self.environment.is_async:</span>
+                <span class="s1">self.writeline(</span><span class="s3">&quot;yield from parent_template.root_render_func(context)&quot;</span><span class="s1">)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">self.writeline(</span>
+                    <span class="s3">&quot;async for event in parent_template.root_render_func(context):&quot;</span>
+                <span class="s1">)</span>
+                <span class="s1">self.indent()</span>
+                <span class="s1">self.writeline(</span><span class="s3">&quot;yield event&quot;</span><span class="s1">)</span>
+                <span class="s1">self.outdent()</span>
+            <span class="s1">self.outdent(</span><span class="s5">1 </span><span class="s1">+ (</span><span class="s2">not </span><span class="s1">self.has_known_extends))</span>
+
+        <span class="s4"># at this point we now have the blocks collected and can visit them too.</span>
+        <span class="s2">for </span><span class="s1">name</span><span class="s2">, </span><span class="s1">block </span><span class="s2">in </span><span class="s1">self.blocks.items():</span>
+            <span class="s1">self.writeline(</span>
+                <span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">self.func(</span><span class="s3">'block_' </span><span class="s1">+ name)</span><span class="s2">}</span><span class="s3">(context, missing=missing</span><span class="s2">{</span><span class="s1">envenv</span><span class="s2">}</span><span class="s3">):&quot;</span><span class="s2">,</span>
+                <span class="s1">block</span><span class="s2">,</span>
+                <span class="s5">1</span><span class="s2">,</span>
+            <span class="s1">)</span>
+            <span class="s1">self.indent()</span>
+            <span class="s1">self.write_commons()</span>
+            <span class="s4"># It's important that we do not make this frame a child of the</span>
+            <span class="s4"># toplevel template.  This would cause a variety of</span>
+            <span class="s4"># interesting issues with identifier tracking.</span>
+            <span class="s1">block_frame = Frame(eval_ctx)</span>
+            <span class="s1">block_frame.block_frame = </span><span class="s2">True</span>
+            <span class="s1">undeclared = find_undeclared(block.body</span><span class="s2">, </span><span class="s1">(</span><span class="s3">&quot;self&quot;</span><span class="s2">, </span><span class="s3">&quot;super&quot;</span><span class="s1">))</span>
+            <span class="s2">if </span><span class="s3">&quot;self&quot; </span><span class="s2">in </span><span class="s1">undeclared:</span>
+                <span class="s1">ref = block_frame.symbols.declare_parameter(</span><span class="s3">&quot;self&quot;</span><span class="s1">)</span>
+                <span class="s1">self.writeline(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">ref</span><span class="s2">} </span><span class="s3">= TemplateReference(context)&quot;</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s3">&quot;super&quot; </span><span class="s2">in </span><span class="s1">undeclared:</span>
+                <span class="s1">ref = block_frame.symbols.declare_parameter(</span><span class="s3">&quot;super&quot;</span><span class="s1">)</span>
+                <span class="s1">self.writeline(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">ref</span><span class="s2">} </span><span class="s3">= context.super(</span><span class="s2">{</span><span class="s1">name</span><span class="s2">!r}</span><span class="s3">, block_</span><span class="s2">{</span><span class="s1">name</span><span class="s2">}</span><span class="s3">)&quot;</span><span class="s1">)</span>
+            <span class="s1">block_frame.symbols.analyze_node(block)</span>
+            <span class="s1">block_frame.block = name</span>
+            <span class="s1">self.writeline(</span><span class="s3">&quot;_block_vars = {}&quot;</span><span class="s1">)</span>
+            <span class="s1">self.enter_frame(block_frame)</span>
+            <span class="s1">self.pull_dependencies(block.body)</span>
+            <span class="s1">self.blockvisit(block.body</span><span class="s2">, </span><span class="s1">block_frame)</span>
+            <span class="s1">self.leave_frame(block_frame</span><span class="s2">, </span><span class="s1">with_python_scope=</span><span class="s2">True</span><span class="s1">)</span>
+            <span class="s1">self.outdent()</span>
+
+        <span class="s1">blocks_kv_str = </span><span class="s3">&quot;, &quot;</span><span class="s1">.join(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">x</span><span class="s2">!r}</span><span class="s3">: block_</span><span class="s2">{</span><span class="s1">x</span><span class="s2">}</span><span class="s3">&quot; </span><span class="s2">for </span><span class="s1">x </span><span class="s2">in </span><span class="s1">self.blocks)</span>
+        <span class="s1">self.writeline(</span><span class="s3">f&quot;blocks = </span><span class="s2">{{{</span><span class="s1">blocks_kv_str</span><span class="s2">}}}</span><span class="s3">&quot;</span><span class="s2">, </span><span class="s1">extra=</span><span class="s5">1</span><span class="s1">)</span>
+        <span class="s1">debug_kv_str = </span><span class="s3">&quot;&amp;&quot;</span><span class="s1">.join(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">k</span><span class="s2">}</span><span class="s3">=</span><span class="s2">{</span><span class="s1">v</span><span class="s2">}</span><span class="s3">&quot; </span><span class="s2">for </span><span class="s1">k</span><span class="s2">, </span><span class="s1">v </span><span class="s2">in </span><span class="s1">self.debug_info)</span>
+        <span class="s1">self.writeline(</span><span class="s3">f&quot;debug_info = </span><span class="s2">{</span><span class="s1">debug_kv_str</span><span class="s2">!r}</span><span class="s3">&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">visit_Block(self</span><span class="s2">, </span><span class="s1">node: nodes.Block</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Call a block and register it for the template.&quot;&quot;&quot;</span>
+        <span class="s1">level = </span><span class="s5">0</span>
+        <span class="s2">if </span><span class="s1">frame.toplevel:</span>
+            <span class="s4"># if we know that we are a child template, there is no need to</span>
+            <span class="s4"># check if we are one</span>
+            <span class="s2">if </span><span class="s1">self.has_known_extends:</span>
+                <span class="s2">return</span>
+            <span class="s2">if </span><span class="s1">self.extends_so_far &gt; </span><span class="s5">0</span><span class="s1">:</span>
+                <span class="s1">self.writeline(</span><span class="s3">&quot;if parent_template is None:&quot;</span><span class="s1">)</span>
+                <span class="s1">self.indent()</span>
+                <span class="s1">level += </span><span class="s5">1</span>
+
+        <span class="s2">if </span><span class="s1">node.scoped:</span>
+            <span class="s1">context = self.derive_context(frame)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">context = self.get_context_ref()</span>
+
+        <span class="s2">if </span><span class="s1">node.required:</span>
+            <span class="s1">self.writeline(</span><span class="s3">f&quot;if len(context.blocks[</span><span class="s2">{</span><span class="s1">node.name</span><span class="s2">!r}</span><span class="s3">]) &lt;= 1:&quot;</span><span class="s2">, </span><span class="s1">node)</span>
+            <span class="s1">self.indent()</span>
+            <span class="s1">self.writeline(</span>
+                <span class="s3">f'raise TemplateRuntimeError(&quot;Required block </span><span class="s2">{</span><span class="s1">node.name</span><span class="s2">!r} </span><span class="s3">not found&quot;)'</span><span class="s2">,</span>
+                <span class="s1">node</span><span class="s2">,</span>
+            <span class="s1">)</span>
+            <span class="s1">self.outdent()</span>
+
+        <span class="s2">if not </span><span class="s1">self.environment.is_async </span><span class="s2">and </span><span class="s1">frame.buffer </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">self.writeline(</span>
+                <span class="s3">f&quot;yield from context.blocks[</span><span class="s2">{</span><span class="s1">node.name</span><span class="s2">!r}</span><span class="s3">][0](</span><span class="s2">{</span><span class="s1">context</span><span class="s2">}</span><span class="s3">)&quot;</span><span class="s2">, </span><span class="s1">node</span>
+            <span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.writeline(</span>
+                <span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">self.choose_async()</span><span class="s2">}</span><span class="s3">for event in&quot;</span>
+                <span class="s3">f&quot; context.blocks[</span><span class="s2">{</span><span class="s1">node.name</span><span class="s2">!r}</span><span class="s3">][0](</span><span class="s2">{</span><span class="s1">context</span><span class="s2">}</span><span class="s3">):&quot;</span><span class="s2">,</span>
+                <span class="s1">node</span><span class="s2">,</span>
+            <span class="s1">)</span>
+            <span class="s1">self.indent()</span>
+            <span class="s1">self.simple_write(</span><span class="s3">&quot;event&quot;</span><span class="s2">, </span><span class="s1">frame)</span>
+            <span class="s1">self.outdent()</span>
+
+        <span class="s1">self.outdent(level)</span>
+
+    <span class="s2">def </span><span class="s1">visit_Extends(self</span><span class="s2">, </span><span class="s1">node: nodes.Extends</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Calls the extender.&quot;&quot;&quot;</span>
+        <span class="s2">if not </span><span class="s1">frame.toplevel:</span>
+            <span class="s1">self.fail(</span><span class="s3">&quot;cannot use extend from a non top-level scope&quot;</span><span class="s2">, </span><span class="s1">node.lineno)</span>
+
+        <span class="s4"># if the number of extends statements in general is zero so</span>
+        <span class="s4"># far, we don't have to add a check if something extended</span>
+        <span class="s4"># the template before this one.</span>
+        <span class="s2">if </span><span class="s1">self.extends_so_far &gt; </span><span class="s5">0</span><span class="s1">:</span>
+
+            <span class="s4"># if we have a known extends we just add a template runtime</span>
+            <span class="s4"># error into the generated code.  We could catch that at compile</span>
+            <span class="s4"># time too, but i welcome it not to confuse users by throwing the</span>
+            <span class="s4"># same error at different times just &quot;because we can&quot;.</span>
+            <span class="s2">if not </span><span class="s1">self.has_known_extends:</span>
+                <span class="s1">self.writeline(</span><span class="s3">&quot;if parent_template is not None:&quot;</span><span class="s1">)</span>
+                <span class="s1">self.indent()</span>
+            <span class="s1">self.writeline(</span><span class="s3">'raise TemplateRuntimeError(&quot;extended multiple times&quot;)'</span><span class="s1">)</span>
+
+            <span class="s4"># if we have a known extends already we don't need that code here</span>
+            <span class="s4"># as we know that the template execution will end here.</span>
+            <span class="s2">if </span><span class="s1">self.has_known_extends:</span>
+                <span class="s2">raise </span><span class="s1">CompilerExit()</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">self.outdent()</span>
+
+        <span class="s1">self.writeline(</span><span class="s3">&quot;parent_template = environment.get_template(&quot;</span><span class="s2">, </span><span class="s1">node)</span>
+        <span class="s1">self.visit(node.template</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s1">self.write(</span><span class="s3">f&quot;, </span><span class="s2">{</span><span class="s1">self.name</span><span class="s2">!r}</span><span class="s3">)&quot;</span><span class="s1">)</span>
+        <span class="s1">self.writeline(</span><span class="s3">&quot;for name, parent_block in parent_template.blocks.items():&quot;</span><span class="s1">)</span>
+        <span class="s1">self.indent()</span>
+        <span class="s1">self.writeline(</span><span class="s3">&quot;context.blocks.setdefault(name, []).append(parent_block)&quot;</span><span class="s1">)</span>
+        <span class="s1">self.outdent()</span>
+
+        <span class="s4"># if this extends statement was in the root level we can take</span>
+        <span class="s4"># advantage of that information and simplify the generated code</span>
+        <span class="s4"># in the top level from this point onwards</span>
+        <span class="s2">if </span><span class="s1">frame.rootlevel:</span>
+            <span class="s1">self.has_known_extends = </span><span class="s2">True</span>
+
+        <span class="s4"># and now we have one more</span>
+        <span class="s1">self.extends_so_far += </span><span class="s5">1</span>
+
+    <span class="s2">def </span><span class="s1">visit_Include(self</span><span class="s2">, </span><span class="s1">node: nodes.Include</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Handles includes.&quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">node.ignore_missing:</span>
+            <span class="s1">self.writeline(</span><span class="s3">&quot;try:&quot;</span><span class="s1">)</span>
+            <span class="s1">self.indent()</span>
+
+        <span class="s1">func_name = </span><span class="s3">&quot;get_or_select_template&quot;</span>
+        <span class="s2">if </span><span class="s1">isinstance(node.template</span><span class="s2">, </span><span class="s1">nodes.Const):</span>
+            <span class="s2">if </span><span class="s1">isinstance(node.template.value</span><span class="s2">, </span><span class="s1">str):</span>
+                <span class="s1">func_name = </span><span class="s3">&quot;get_template&quot;</span>
+            <span class="s2">elif </span><span class="s1">isinstance(node.template.value</span><span class="s2">, </span><span class="s1">(tuple</span><span class="s2">, </span><span class="s1">list)):</span>
+                <span class="s1">func_name = </span><span class="s3">&quot;select_template&quot;</span>
+        <span class="s2">elif </span><span class="s1">isinstance(node.template</span><span class="s2">, </span><span class="s1">(nodes.Tuple</span><span class="s2">, </span><span class="s1">nodes.List)):</span>
+            <span class="s1">func_name = </span><span class="s3">&quot;select_template&quot;</span>
+
+        <span class="s1">self.writeline(</span><span class="s3">f&quot;template = environment.</span><span class="s2">{</span><span class="s1">func_name</span><span class="s2">}</span><span class="s3">(&quot;</span><span class="s2">, </span><span class="s1">node)</span>
+        <span class="s1">self.visit(node.template</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s1">self.write(</span><span class="s3">f&quot;, </span><span class="s2">{</span><span class="s1">self.name</span><span class="s2">!r}</span><span class="s3">)&quot;</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">node.ignore_missing:</span>
+            <span class="s1">self.outdent()</span>
+            <span class="s1">self.writeline(</span><span class="s3">&quot;except TemplateNotFound:&quot;</span><span class="s1">)</span>
+            <span class="s1">self.indent()</span>
+            <span class="s1">self.writeline(</span><span class="s3">&quot;pass&quot;</span><span class="s1">)</span>
+            <span class="s1">self.outdent()</span>
+            <span class="s1">self.writeline(</span><span class="s3">&quot;else:&quot;</span><span class="s1">)</span>
+            <span class="s1">self.indent()</span>
+
+        <span class="s1">skip_event_yield = </span><span class="s2">False</span>
+        <span class="s2">if </span><span class="s1">node.with_context:</span>
+            <span class="s1">self.writeline(</span>
+                <span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">self.choose_async()</span><span class="s2">}</span><span class="s3">for event in template.root_render_func(&quot;</span>
+                <span class="s3">&quot;template.new_context(context.get_all(), True,&quot;</span>
+                <span class="s3">f&quot; </span><span class="s2">{</span><span class="s1">self.dump_local_context(frame)</span><span class="s2">}</span><span class="s3">)):&quot;</span>
+            <span class="s1">)</span>
+        <span class="s2">elif </span><span class="s1">self.environment.is_async:</span>
+            <span class="s1">self.writeline(</span>
+                <span class="s3">&quot;for event in (await template._get_default_module_async())&quot;</span>
+                <span class="s3">&quot;._body_stream:&quot;</span>
+            <span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.writeline(</span><span class="s3">&quot;yield from template._get_default_module()._body_stream&quot;</span><span class="s1">)</span>
+            <span class="s1">skip_event_yield = </span><span class="s2">True</span>
+
+        <span class="s2">if not </span><span class="s1">skip_event_yield:</span>
+            <span class="s1">self.indent()</span>
+            <span class="s1">self.simple_write(</span><span class="s3">&quot;event&quot;</span><span class="s2">, </span><span class="s1">frame)</span>
+            <span class="s1">self.outdent()</span>
+
+        <span class="s2">if </span><span class="s1">node.ignore_missing:</span>
+            <span class="s1">self.outdent()</span>
+
+    <span class="s2">def </span><span class="s1">_import_common(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">node: t.Union[nodes.Import</span><span class="s2">, </span><span class="s1">nodes.FromImport]</span><span class="s2">, </span><span class="s1">frame: Frame</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.write(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">self.choose_async(</span><span class="s3">'await '</span><span class="s1">)</span><span class="s2">}</span><span class="s3">environment.get_template(&quot;</span><span class="s1">)</span>
+        <span class="s1">self.visit(node.template</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s1">self.write(</span><span class="s3">f&quot;, </span><span class="s2">{</span><span class="s1">self.name</span><span class="s2">!r}</span><span class="s3">).&quot;</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">node.with_context:</span>
+            <span class="s1">f_name = </span><span class="s3">f&quot;make_module</span><span class="s2">{</span><span class="s1">self.choose_async(</span><span class="s3">'_async'</span><span class="s1">)</span><span class="s2">}</span><span class="s3">&quot;</span>
+            <span class="s1">self.write(</span>
+                <span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">f_name</span><span class="s2">}</span><span class="s3">(context.get_all(), True, </span><span class="s2">{</span><span class="s1">self.dump_local_context(frame)</span><span class="s2">}</span><span class="s3">)&quot;</span>
+            <span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.write(</span><span class="s3">f&quot;_get_default_module</span><span class="s2">{</span><span class="s1">self.choose_async(</span><span class="s3">'_async'</span><span class="s1">)</span><span class="s2">}</span><span class="s3">(context)&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">visit_Import(self</span><span class="s2">, </span><span class="s1">node: nodes.Import</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Visit regular imports.&quot;&quot;&quot;</span>
+        <span class="s1">self.writeline(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">frame.symbols.ref(node.target)</span><span class="s2">} </span><span class="s3">= &quot;</span><span class="s2">, </span><span class="s1">node)</span>
+        <span class="s2">if </span><span class="s1">frame.toplevel:</span>
+            <span class="s1">self.write(</span><span class="s3">f&quot;context.vars[</span><span class="s2">{</span><span class="s1">node.target</span><span class="s2">!r}</span><span class="s3">] = &quot;</span><span class="s1">)</span>
+
+        <span class="s1">self._import_common(node</span><span class="s2">, </span><span class="s1">frame)</span>
+
+        <span class="s2">if </span><span class="s1">frame.toplevel </span><span class="s2">and not </span><span class="s1">node.target.startswith(</span><span class="s3">&quot;_&quot;</span><span class="s1">):</span>
+            <span class="s1">self.writeline(</span><span class="s3">f&quot;context.exported_vars.discard(</span><span class="s2">{</span><span class="s1">node.target</span><span class="s2">!r}</span><span class="s3">)&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">visit_FromImport(self</span><span class="s2">, </span><span class="s1">node: nodes.FromImport</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Visit named imports.&quot;&quot;&quot;</span>
+        <span class="s1">self.newline(node)</span>
+        <span class="s1">self.write(</span><span class="s3">&quot;included_template = &quot;</span><span class="s1">)</span>
+        <span class="s1">self._import_common(node</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s1">var_names = []</span>
+        <span class="s1">discarded_names = []</span>
+        <span class="s2">for </span><span class="s1">name </span><span class="s2">in </span><span class="s1">node.names:</span>
+            <span class="s2">if </span><span class="s1">isinstance(name</span><span class="s2">, </span><span class="s1">tuple):</span>
+                <span class="s1">name</span><span class="s2">, </span><span class="s1">alias = name</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">alias = name</span>
+            <span class="s1">self.writeline(</span>
+                <span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">frame.symbols.ref(alias)</span><span class="s2">} </span><span class="s3">=&quot;</span>
+                <span class="s3">f&quot; getattr(included_template, </span><span class="s2">{</span><span class="s1">name</span><span class="s2">!r}</span><span class="s3">, missing)&quot;</span>
+            <span class="s1">)</span>
+            <span class="s1">self.writeline(</span><span class="s3">f&quot;if </span><span class="s2">{</span><span class="s1">frame.symbols.ref(alias)</span><span class="s2">} </span><span class="s3">is missing:&quot;</span><span class="s1">)</span>
+            <span class="s1">self.indent()</span>
+            <span class="s1">message = (</span>
+                <span class="s3">&quot;the template {included_template.__name__!r}&quot;</span>
+                <span class="s3">f&quot; (imported on </span><span class="s2">{</span><span class="s1">self.position(node)</span><span class="s2">}</span><span class="s3">)&quot;</span>
+                <span class="s3">f&quot; does not export the requested name </span><span class="s2">{</span><span class="s1">name</span><span class="s2">!r}</span><span class="s3">&quot;</span>
+            <span class="s1">)</span>
+            <span class="s1">self.writeline(</span>
+                <span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">frame.symbols.ref(alias)</span><span class="s2">} </span><span class="s3">= undefined(f</span><span class="s2">{</span><span class="s1">message</span><span class="s2">!r}</span><span class="s3">, name=</span><span class="s2">{</span><span class="s1">name</span><span class="s2">!r}</span><span class="s3">)&quot;</span>
+            <span class="s1">)</span>
+            <span class="s1">self.outdent()</span>
+            <span class="s2">if </span><span class="s1">frame.toplevel:</span>
+                <span class="s1">var_names.append(alias)</span>
+                <span class="s2">if not </span><span class="s1">alias.startswith(</span><span class="s3">&quot;_&quot;</span><span class="s1">):</span>
+                    <span class="s1">discarded_names.append(alias)</span>
+
+        <span class="s2">if </span><span class="s1">var_names:</span>
+            <span class="s2">if </span><span class="s1">len(var_names) == </span><span class="s5">1</span><span class="s1">:</span>
+                <span class="s1">name = var_names[</span><span class="s5">0</span><span class="s1">]</span>
+                <span class="s1">self.writeline(</span><span class="s3">f&quot;context.vars[</span><span class="s2">{</span><span class="s1">name</span><span class="s2">!r}</span><span class="s3">] = </span><span class="s2">{</span><span class="s1">frame.symbols.ref(name)</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">names_kv = </span><span class="s3">&quot;, &quot;</span><span class="s1">.join(</span>
+                    <span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">name</span><span class="s2">!r}</span><span class="s3">: </span><span class="s2">{</span><span class="s1">frame.symbols.ref(name)</span><span class="s2">}</span><span class="s3">&quot; </span><span class="s2">for </span><span class="s1">name </span><span class="s2">in </span><span class="s1">var_names</span>
+                <span class="s1">)</span>
+                <span class="s1">self.writeline(</span><span class="s3">f&quot;context.vars.update(</span><span class="s2">{{{</span><span class="s1">names_kv</span><span class="s2">}}}</span><span class="s3">)&quot;</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">discarded_names:</span>
+            <span class="s2">if </span><span class="s1">len(discarded_names) == </span><span class="s5">1</span><span class="s1">:</span>
+                <span class="s1">self.writeline(</span><span class="s3">f&quot;context.exported_vars.discard(</span><span class="s2">{</span><span class="s1">discarded_names[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">!r}</span><span class="s3">)&quot;</span><span class="s1">)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">names_str = </span><span class="s3">&quot;, &quot;</span><span class="s1">.join(map(repr</span><span class="s2">, </span><span class="s1">discarded_names))</span>
+                <span class="s1">self.writeline(</span>
+                    <span class="s3">f&quot;context.exported_vars.difference_update((</span><span class="s2">{</span><span class="s1">names_str</span><span class="s2">}</span><span class="s3">))&quot;</span>
+                <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">visit_For(self</span><span class="s2">, </span><span class="s1">node: nodes.For</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">loop_frame = frame.inner()</span>
+        <span class="s1">loop_frame.loop_frame = </span><span class="s2">True</span>
+        <span class="s1">test_frame = frame.inner()</span>
+        <span class="s1">else_frame = frame.inner()</span>
+
+        <span class="s4"># try to figure out if we have an extended loop.  An extended loop</span>
+        <span class="s4"># is necessary if the loop is in recursive mode if the special loop</span>
+        <span class="s4"># variable is accessed in the body if the body is a scoped block.</span>
+        <span class="s1">extended_loop = (</span>
+            <span class="s1">node.recursive</span>
+            <span class="s2">or </span><span class="s3">&quot;loop&quot;</span>
+            <span class="s2">in </span><span class="s1">find_undeclared(node.iter_child_nodes(only=(</span><span class="s3">&quot;body&quot;</span><span class="s2">,</span><span class="s1">))</span><span class="s2">, </span><span class="s1">(</span><span class="s3">&quot;loop&quot;</span><span class="s2">,</span><span class="s1">))</span>
+            <span class="s2">or </span><span class="s1">any(block.scoped </span><span class="s2">for </span><span class="s1">block </span><span class="s2">in </span><span class="s1">node.find_all(nodes.Block))</span>
+        <span class="s1">)</span>
+
+        <span class="s1">loop_ref = </span><span class="s2">None</span>
+        <span class="s2">if </span><span class="s1">extended_loop:</span>
+            <span class="s1">loop_ref = loop_frame.symbols.declare_parameter(</span><span class="s3">&quot;loop&quot;</span><span class="s1">)</span>
+
+        <span class="s1">loop_frame.symbols.analyze_node(node</span><span class="s2">, </span><span class="s1">for_branch=</span><span class="s3">&quot;body&quot;</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">node.else_:</span>
+            <span class="s1">else_frame.symbols.analyze_node(node</span><span class="s2">, </span><span class="s1">for_branch=</span><span class="s3">&quot;else&quot;</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">node.test:</span>
+            <span class="s1">loop_filter_func = self.temporary_identifier()</span>
+            <span class="s1">test_frame.symbols.analyze_node(node</span><span class="s2">, </span><span class="s1">for_branch=</span><span class="s3">&quot;test&quot;</span><span class="s1">)</span>
+            <span class="s1">self.writeline(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">self.func(loop_filter_func)</span><span class="s2">}</span><span class="s3">(fiter):&quot;</span><span class="s2">, </span><span class="s1">node.test)</span>
+            <span class="s1">self.indent()</span>
+            <span class="s1">self.enter_frame(test_frame)</span>
+            <span class="s1">self.writeline(self.choose_async(</span><span class="s3">&quot;async for &quot;</span><span class="s2">, </span><span class="s3">&quot;for &quot;</span><span class="s1">))</span>
+            <span class="s1">self.visit(node.target</span><span class="s2">, </span><span class="s1">loop_frame)</span>
+            <span class="s1">self.write(</span><span class="s3">&quot; in &quot;</span><span class="s1">)</span>
+            <span class="s1">self.write(self.choose_async(</span><span class="s3">&quot;auto_aiter(fiter)&quot;</span><span class="s2">, </span><span class="s3">&quot;fiter&quot;</span><span class="s1">))</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;:&quot;</span><span class="s1">)</span>
+            <span class="s1">self.indent()</span>
+            <span class="s1">self.writeline(</span><span class="s3">&quot;if &quot;</span><span class="s2">, </span><span class="s1">node.test)</span>
+            <span class="s1">self.visit(node.test</span><span class="s2">, </span><span class="s1">test_frame)</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;:&quot;</span><span class="s1">)</span>
+            <span class="s1">self.indent()</span>
+            <span class="s1">self.writeline(</span><span class="s3">&quot;yield &quot;</span><span class="s1">)</span>
+            <span class="s1">self.visit(node.target</span><span class="s2">, </span><span class="s1">loop_frame)</span>
+            <span class="s1">self.outdent(</span><span class="s5">3</span><span class="s1">)</span>
+            <span class="s1">self.leave_frame(test_frame</span><span class="s2">, </span><span class="s1">with_python_scope=</span><span class="s2">True</span><span class="s1">)</span>
+
+        <span class="s4"># if we don't have an recursive loop we have to find the shadowed</span>
+        <span class="s4"># variables at that point.  Because loops can be nested but the loop</span>
+        <span class="s4"># variable is a special one we have to enforce aliasing for it.</span>
+        <span class="s2">if </span><span class="s1">node.recursive:</span>
+            <span class="s1">self.writeline(</span>
+                <span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">self.func(</span><span class="s3">'loop'</span><span class="s1">)</span><span class="s2">}</span><span class="s3">(reciter, loop_render_func, depth=0):&quot;</span><span class="s2">, </span><span class="s1">node</span>
+            <span class="s1">)</span>
+            <span class="s1">self.indent()</span>
+            <span class="s1">self.buffer(loop_frame)</span>
+
+            <span class="s4"># Use the same buffer for the else frame</span>
+            <span class="s1">else_frame.buffer = loop_frame.buffer</span>
+
+        <span class="s4"># make sure the loop variable is a special one and raise a template</span>
+        <span class="s4"># assertion error if a loop tries to write to loop</span>
+        <span class="s2">if </span><span class="s1">extended_loop:</span>
+            <span class="s1">self.writeline(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">loop_ref</span><span class="s2">} </span><span class="s3">= missing&quot;</span><span class="s1">)</span>
+
+        <span class="s2">for </span><span class="s1">name </span><span class="s2">in </span><span class="s1">node.find_all(nodes.Name):</span>
+            <span class="s2">if </span><span class="s1">name.ctx == </span><span class="s3">&quot;store&quot; </span><span class="s2">and </span><span class="s1">name.name == </span><span class="s3">&quot;loop&quot;</span><span class="s1">:</span>
+                <span class="s1">self.fail(</span>
+                    <span class="s3">&quot;Can't assign to special loop variable in for-loop target&quot;</span><span class="s2">,</span>
+                    <span class="s1">name.lineno</span><span class="s2">,</span>
+                <span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">node.else_:</span>
+            <span class="s1">iteration_indicator = self.temporary_identifier()</span>
+            <span class="s1">self.writeline(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">iteration_indicator</span><span class="s2">} </span><span class="s3">= 1&quot;</span><span class="s1">)</span>
+
+        <span class="s1">self.writeline(self.choose_async(</span><span class="s3">&quot;async for &quot;</span><span class="s2">, </span><span class="s3">&quot;for &quot;</span><span class="s1">)</span><span class="s2">, </span><span class="s1">node)</span>
+        <span class="s1">self.visit(node.target</span><span class="s2">, </span><span class="s1">loop_frame)</span>
+        <span class="s2">if </span><span class="s1">extended_loop:</span>
+            <span class="s1">self.write(</span><span class="s3">f&quot;, </span><span class="s2">{</span><span class="s1">loop_ref</span><span class="s2">} </span><span class="s3">in </span><span class="s2">{</span><span class="s1">self.choose_async(</span><span class="s3">'Async'</span><span class="s1">)</span><span class="s2">}</span><span class="s3">LoopContext(&quot;</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.write(</span><span class="s3">&quot; in &quot;</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">node.test:</span>
+            <span class="s1">self.write(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">loop_filter_func</span><span class="s2">}</span><span class="s3">(&quot;</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">node.recursive:</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;reciter&quot;</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">self.environment.is_async </span><span class="s2">and not </span><span class="s1">extended_loop:</span>
+                <span class="s1">self.write(</span><span class="s3">&quot;auto_aiter(&quot;</span><span class="s1">)</span>
+            <span class="s1">self.visit(node.iter</span><span class="s2">, </span><span class="s1">frame)</span>
+            <span class="s2">if </span><span class="s1">self.environment.is_async </span><span class="s2">and not </span><span class="s1">extended_loop:</span>
+                <span class="s1">self.write(</span><span class="s3">&quot;)&quot;</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">node.test:</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;)&quot;</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">node.recursive:</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;, undefined, loop_render_func, depth):&quot;</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;, undefined):&quot; </span><span class="s2">if </span><span class="s1">extended_loop </span><span class="s2">else </span><span class="s3">&quot;:&quot;</span><span class="s1">)</span>
+
+        <span class="s1">self.indent()</span>
+        <span class="s1">self.enter_frame(loop_frame)</span>
+
+        <span class="s1">self.writeline(</span><span class="s3">&quot;_loop_vars = {}&quot;</span><span class="s1">)</span>
+        <span class="s1">self.blockvisit(node.body</span><span class="s2">, </span><span class="s1">loop_frame)</span>
+        <span class="s2">if </span><span class="s1">node.else_:</span>
+            <span class="s1">self.writeline(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">iteration_indicator</span><span class="s2">} </span><span class="s3">= 0&quot;</span><span class="s1">)</span>
+        <span class="s1">self.outdent()</span>
+        <span class="s1">self.leave_frame(</span>
+            <span class="s1">loop_frame</span><span class="s2">, </span><span class="s1">with_python_scope=node.recursive </span><span class="s2">and not </span><span class="s1">node.else_</span>
+        <span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">node.else_:</span>
+            <span class="s1">self.writeline(</span><span class="s3">f&quot;if </span><span class="s2">{</span><span class="s1">iteration_indicator</span><span class="s2">}</span><span class="s3">:&quot;</span><span class="s1">)</span>
+            <span class="s1">self.indent()</span>
+            <span class="s1">self.enter_frame(else_frame)</span>
+            <span class="s1">self.blockvisit(node.else_</span><span class="s2">, </span><span class="s1">else_frame)</span>
+            <span class="s1">self.leave_frame(else_frame)</span>
+            <span class="s1">self.outdent()</span>
+
+        <span class="s4"># if the node was recursive we have to return the buffer contents</span>
+        <span class="s4"># and start the iteration code</span>
+        <span class="s2">if </span><span class="s1">node.recursive:</span>
+            <span class="s1">self.return_buffer_contents(loop_frame)</span>
+            <span class="s1">self.outdent()</span>
+            <span class="s1">self.start_write(frame</span><span class="s2">, </span><span class="s1">node)</span>
+            <span class="s1">self.write(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">self.choose_async(</span><span class="s3">'await '</span><span class="s1">)</span><span class="s2">}</span><span class="s3">loop(&quot;</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">self.environment.is_async:</span>
+                <span class="s1">self.write(</span><span class="s3">&quot;auto_aiter(&quot;</span><span class="s1">)</span>
+            <span class="s1">self.visit(node.iter</span><span class="s2">, </span><span class="s1">frame)</span>
+            <span class="s2">if </span><span class="s1">self.environment.is_async:</span>
+                <span class="s1">self.write(</span><span class="s3">&quot;)&quot;</span><span class="s1">)</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;, loop)&quot;</span><span class="s1">)</span>
+            <span class="s1">self.end_write(frame)</span>
+
+        <span class="s4"># at the end of the iteration, clear any assignments made in the</span>
+        <span class="s4"># loop from the top level</span>
+        <span class="s2">if </span><span class="s1">self._assign_stack:</span>
+            <span class="s1">self._assign_stack[-</span><span class="s5">1</span><span class="s1">].difference_update(loop_frame.symbols.stores)</span>
+
+    <span class="s2">def </span><span class="s1">visit_If(self</span><span class="s2">, </span><span class="s1">node: nodes.If</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">if_frame = frame.soft()</span>
+        <span class="s1">self.writeline(</span><span class="s3">&quot;if &quot;</span><span class="s2">, </span><span class="s1">node)</span>
+        <span class="s1">self.visit(node.test</span><span class="s2">, </span><span class="s1">if_frame)</span>
+        <span class="s1">self.write(</span><span class="s3">&quot;:&quot;</span><span class="s1">)</span>
+        <span class="s1">self.indent()</span>
+        <span class="s1">self.blockvisit(node.body</span><span class="s2">, </span><span class="s1">if_frame)</span>
+        <span class="s1">self.outdent()</span>
+        <span class="s2">for </span><span class="s1">elif_ </span><span class="s2">in </span><span class="s1">node.elif_:</span>
+            <span class="s1">self.writeline(</span><span class="s3">&quot;elif &quot;</span><span class="s2">, </span><span class="s1">elif_)</span>
+            <span class="s1">self.visit(elif_.test</span><span class="s2">, </span><span class="s1">if_frame)</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;:&quot;</span><span class="s1">)</span>
+            <span class="s1">self.indent()</span>
+            <span class="s1">self.blockvisit(elif_.body</span><span class="s2">, </span><span class="s1">if_frame)</span>
+            <span class="s1">self.outdent()</span>
+        <span class="s2">if </span><span class="s1">node.else_:</span>
+            <span class="s1">self.writeline(</span><span class="s3">&quot;else:&quot;</span><span class="s1">)</span>
+            <span class="s1">self.indent()</span>
+            <span class="s1">self.blockvisit(node.else_</span><span class="s2">, </span><span class="s1">if_frame)</span>
+            <span class="s1">self.outdent()</span>
+
+    <span class="s2">def </span><span class="s1">visit_Macro(self</span><span class="s2">, </span><span class="s1">node: nodes.Macro</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">macro_frame</span><span class="s2">, </span><span class="s1">macro_ref = self.macro_body(node</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s1">self.newline()</span>
+        <span class="s2">if </span><span class="s1">frame.toplevel:</span>
+            <span class="s2">if not </span><span class="s1">node.name.startswith(</span><span class="s3">&quot;_&quot;</span><span class="s1">):</span>
+                <span class="s1">self.write(</span><span class="s3">f&quot;context.exported_vars.add(</span><span class="s2">{</span><span class="s1">node.name</span><span class="s2">!r}</span><span class="s3">)&quot;</span><span class="s1">)</span>
+            <span class="s1">self.writeline(</span><span class="s3">f&quot;context.vars[</span><span class="s2">{</span><span class="s1">node.name</span><span class="s2">!r}</span><span class="s3">] = &quot;</span><span class="s1">)</span>
+        <span class="s1">self.write(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">frame.symbols.ref(node.name)</span><span class="s2">} </span><span class="s3">= &quot;</span><span class="s1">)</span>
+        <span class="s1">self.macro_def(macro_ref</span><span class="s2">, </span><span class="s1">macro_frame)</span>
+
+    <span class="s2">def </span><span class="s1">visit_CallBlock(self</span><span class="s2">, </span><span class="s1">node: nodes.CallBlock</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">call_frame</span><span class="s2">, </span><span class="s1">macro_ref = self.macro_body(node</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s1">self.writeline(</span><span class="s3">&quot;caller = &quot;</span><span class="s1">)</span>
+        <span class="s1">self.macro_def(macro_ref</span><span class="s2">, </span><span class="s1">call_frame)</span>
+        <span class="s1">self.start_write(frame</span><span class="s2">, </span><span class="s1">node)</span>
+        <span class="s1">self.visit_Call(node.call</span><span class="s2">, </span><span class="s1">frame</span><span class="s2">, </span><span class="s1">forward_caller=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s1">self.end_write(frame)</span>
+
+    <span class="s2">def </span><span class="s1">visit_FilterBlock(self</span><span class="s2">, </span><span class="s1">node: nodes.FilterBlock</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">filter_frame = frame.inner()</span>
+        <span class="s1">filter_frame.symbols.analyze_node(node)</span>
+        <span class="s1">self.enter_frame(filter_frame)</span>
+        <span class="s1">self.buffer(filter_frame)</span>
+        <span class="s1">self.blockvisit(node.body</span><span class="s2">, </span><span class="s1">filter_frame)</span>
+        <span class="s1">self.start_write(frame</span><span class="s2">, </span><span class="s1">node)</span>
+        <span class="s1">self.visit_Filter(node.filter</span><span class="s2">, </span><span class="s1">filter_frame)</span>
+        <span class="s1">self.end_write(frame)</span>
+        <span class="s1">self.leave_frame(filter_frame)</span>
+
+    <span class="s2">def </span><span class="s1">visit_With(self</span><span class="s2">, </span><span class="s1">node: nodes.With</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">with_frame = frame.inner()</span>
+        <span class="s1">with_frame.symbols.analyze_node(node)</span>
+        <span class="s1">self.enter_frame(with_frame)</span>
+        <span class="s2">for </span><span class="s1">target</span><span class="s2">, </span><span class="s1">expr </span><span class="s2">in </span><span class="s1">zip(node.targets</span><span class="s2">, </span><span class="s1">node.values):</span>
+            <span class="s1">self.newline()</span>
+            <span class="s1">self.visit(target</span><span class="s2">, </span><span class="s1">with_frame)</span>
+            <span class="s1">self.write(</span><span class="s3">&quot; = &quot;</span><span class="s1">)</span>
+            <span class="s1">self.visit(expr</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s1">self.blockvisit(node.body</span><span class="s2">, </span><span class="s1">with_frame)</span>
+        <span class="s1">self.leave_frame(with_frame)</span>
+
+    <span class="s2">def </span><span class="s1">visit_ExprStmt(self</span><span class="s2">, </span><span class="s1">node: nodes.ExprStmt</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.newline(node)</span>
+        <span class="s1">self.visit(node.node</span><span class="s2">, </span><span class="s1">frame)</span>
+
+    <span class="s2">class </span><span class="s1">_FinalizeInfo(t.NamedTuple):</span>
+        <span class="s1">const: t.Optional[t.Callable[...</span><span class="s2">, </span><span class="s1">str]]</span>
+        <span class="s1">src: t.Optional[str]</span>
+
+    <span class="s1">@staticmethod</span>
+    <span class="s2">def </span><span class="s1">_default_finalize(value: t.Any) -&gt; t.Any:</span>
+        <span class="s0">&quot;&quot;&quot;The default finalize function if the environment isn't 
+        configured with one. Or, if the environment has one, this is 
+        called on that function's output for constants. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">str(value)</span>
+
+    <span class="s1">_finalize: t.Optional[_FinalizeInfo] = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">_make_finalize(self) -&gt; _FinalizeInfo:</span>
+        <span class="s0">&quot;&quot;&quot;Build the finalize function to be used on constants and at 
+        runtime. Cached so it's only created once for all output nodes. 
+ 
+        Returns a ``namedtuple`` with the following attributes: 
+ 
+        ``const`` 
+            A function to finalize constant data at compile time. 
+ 
+        ``src`` 
+            Source code to output around nodes to be evaluated at 
+            runtime. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self._finalize </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">self._finalize</span>
+
+        <span class="s1">finalize: t.Optional[t.Callable[...</span><span class="s2">, </span><span class="s1">t.Any]]</span>
+        <span class="s1">finalize = default = self._default_finalize</span>
+        <span class="s1">src = </span><span class="s2">None</span>
+
+        <span class="s2">if </span><span class="s1">self.environment.finalize:</span>
+            <span class="s1">src = </span><span class="s3">&quot;environment.finalize(&quot;</span>
+            <span class="s1">env_finalize = self.environment.finalize</span>
+            <span class="s1">pass_arg = {</span>
+                <span class="s1">_PassArg.context: </span><span class="s3">&quot;context&quot;</span><span class="s2">,</span>
+                <span class="s1">_PassArg.eval_context: </span><span class="s3">&quot;context.eval_ctx&quot;</span><span class="s2">,</span>
+                <span class="s1">_PassArg.environment: </span><span class="s3">&quot;environment&quot;</span><span class="s2">,</span>
+            <span class="s1">}.get(</span>
+                <span class="s1">_PassArg.from_obj(env_finalize)  </span><span class="s4"># type: ignore</span>
+            <span class="s1">)</span>
+            <span class="s1">finalize = </span><span class="s2">None</span>
+
+            <span class="s2">if </span><span class="s1">pass_arg </span><span class="s2">is None</span><span class="s1">:</span>
+
+                <span class="s2">def </span><span class="s1">finalize(value: t.Any) -&gt; t.Any:</span>
+                    <span class="s2">return </span><span class="s1">default(env_finalize(value))</span>
+
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">src = </span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">src</span><span class="s2">}{</span><span class="s1">pass_arg</span><span class="s2">}</span><span class="s3">, &quot;</span>
+
+                <span class="s2">if </span><span class="s1">pass_arg == </span><span class="s3">&quot;environment&quot;</span><span class="s1">:</span>
+
+                    <span class="s2">def </span><span class="s1">finalize(value: t.Any) -&gt; t.Any:</span>
+                        <span class="s2">return </span><span class="s1">default(env_finalize(self.environment</span><span class="s2">, </span><span class="s1">value))</span>
+
+        <span class="s1">self._finalize = self._FinalizeInfo(finalize</span><span class="s2">, </span><span class="s1">src)</span>
+        <span class="s2">return </span><span class="s1">self._finalize</span>
+
+    <span class="s2">def </span><span class="s1">_output_const_repr(self</span><span class="s2">, </span><span class="s1">group: t.Iterable[t.Any]) -&gt; str:</span>
+        <span class="s0">&quot;&quot;&quot;Given a group of constant values converted from ``Output`` 
+        child nodes, produce a string to write to the template module 
+        source. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">repr(concat(group))</span>
+
+    <span class="s2">def </span><span class="s1">_output_child_to_const(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">node: nodes.Expr</span><span class="s2">, </span><span class="s1">frame: Frame</span><span class="s2">, </span><span class="s1">finalize: _FinalizeInfo</span>
+    <span class="s1">) -&gt; str:</span>
+        <span class="s0">&quot;&quot;&quot;Try to optimize a child of an ``Output`` node by trying to 
+        convert it to constant, finalized data at compile time. 
+ 
+        If :exc:`Impossible` is raised, the node is not constant and 
+        will be evaluated at runtime. Any other exception will also be 
+        evaluated at runtime for easier debugging. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">const = node.as_const(frame.eval_ctx)</span>
+
+        <span class="s2">if </span><span class="s1">frame.eval_ctx.autoescape:</span>
+            <span class="s1">const = escape(const)</span>
+
+        <span class="s4"># Template data doesn't go through finalize.</span>
+        <span class="s2">if </span><span class="s1">isinstance(node</span><span class="s2">, </span><span class="s1">nodes.TemplateData):</span>
+            <span class="s2">return </span><span class="s1">str(const)</span>
+
+        <span class="s2">return </span><span class="s1">finalize.const(const)  </span><span class="s4"># type: ignore</span>
+
+    <span class="s2">def </span><span class="s1">_output_child_pre(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">node: nodes.Expr</span><span class="s2">, </span><span class="s1">frame: Frame</span><span class="s2">, </span><span class="s1">finalize: _FinalizeInfo</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Output extra source code before visiting a child of an 
+        ``Output`` node. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">frame.eval_ctx.volatile:</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;(escape if context.eval_ctx.autoescape else str)(&quot;</span><span class="s1">)</span>
+        <span class="s2">elif </span><span class="s1">frame.eval_ctx.autoescape:</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;escape(&quot;</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;str(&quot;</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">finalize.src </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self.write(finalize.src)</span>
+
+    <span class="s2">def </span><span class="s1">_output_child_post(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">node: nodes.Expr</span><span class="s2">, </span><span class="s1">frame: Frame</span><span class="s2">, </span><span class="s1">finalize: _FinalizeInfo</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s0">&quot;&quot;&quot;Output extra source code after visiting a child of an 
+        ``Output`` node. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.write(</span><span class="s3">&quot;)&quot;</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">finalize.src </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;)&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">visit_Output(self</span><span class="s2">, </span><span class="s1">node: nodes.Output</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s4"># If an extends is active, don't render outside a block.</span>
+        <span class="s2">if </span><span class="s1">frame.require_output_check:</span>
+            <span class="s4"># A top-level extends is known to exist at compile time.</span>
+            <span class="s2">if </span><span class="s1">self.has_known_extends:</span>
+                <span class="s2">return</span>
+
+            <span class="s1">self.writeline(</span><span class="s3">&quot;if parent_template is None:&quot;</span><span class="s1">)</span>
+            <span class="s1">self.indent()</span>
+
+        <span class="s1">finalize = self._make_finalize()</span>
+        <span class="s1">body: t.List[t.Union[t.List[t.Any]</span><span class="s2">, </span><span class="s1">nodes.Expr]] = []</span>
+
+        <span class="s4"># Evaluate constants at compile time if possible. Each item in</span>
+        <span class="s4"># body will be either a list of static data or a node to be</span>
+        <span class="s4"># evaluated at runtime.</span>
+        <span class="s2">for </span><span class="s1">child </span><span class="s2">in </span><span class="s1">node.nodes:</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s2">if not </span><span class="s1">(</span>
+                    <span class="s4"># If the finalize function requires runtime context,</span>
+                    <span class="s4"># constants can't be evaluated at compile time.</span>
+                    <span class="s1">finalize.const</span>
+                    <span class="s4"># Unless it's basic template data that won't be</span>
+                    <span class="s4"># finalized anyway.</span>
+                    <span class="s2">or </span><span class="s1">isinstance(child</span><span class="s2">, </span><span class="s1">nodes.TemplateData)</span>
+                <span class="s1">):</span>
+                    <span class="s2">raise </span><span class="s1">nodes.Impossible()</span>
+
+                <span class="s1">const = self._output_child_to_const(child</span><span class="s2">, </span><span class="s1">frame</span><span class="s2">, </span><span class="s1">finalize)</span>
+            <span class="s2">except </span><span class="s1">(nodes.Impossible</span><span class="s2">, </span><span class="s1">Exception):</span>
+                <span class="s4"># The node was not constant and needs to be evaluated at</span>
+                <span class="s4"># runtime. Or another error was raised, which is easier</span>
+                <span class="s4"># to debug at runtime.</span>
+                <span class="s1">body.append(child)</span>
+                <span class="s2">continue</span>
+
+            <span class="s2">if </span><span class="s1">body </span><span class="s2">and </span><span class="s1">isinstance(body[-</span><span class="s5">1</span><span class="s1">]</span><span class="s2">, </span><span class="s1">list):</span>
+                <span class="s1">body[-</span><span class="s5">1</span><span class="s1">].append(const)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">body.append([const])</span>
+
+        <span class="s2">if </span><span class="s1">frame.buffer </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">len(body) == </span><span class="s5">1</span><span class="s1">:</span>
+                <span class="s1">self.writeline(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">frame.buffer</span><span class="s2">}</span><span class="s3">.append(&quot;</span><span class="s1">)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">self.writeline(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">frame.buffer</span><span class="s2">}</span><span class="s3">.extend((&quot;</span><span class="s1">)</span>
+
+            <span class="s1">self.indent()</span>
+
+        <span class="s2">for </span><span class="s1">item </span><span class="s2">in </span><span class="s1">body:</span>
+            <span class="s2">if </span><span class="s1">isinstance(item</span><span class="s2">, </span><span class="s1">list):</span>
+                <span class="s4"># A group of constant data to join and output.</span>
+                <span class="s1">val = self._output_const_repr(item)</span>
+
+                <span class="s2">if </span><span class="s1">frame.buffer </span><span class="s2">is None</span><span class="s1">:</span>
+                    <span class="s1">self.writeline(</span><span class="s3">&quot;yield &quot; </span><span class="s1">+ val)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">self.writeline(val + </span><span class="s3">&quot;,&quot;</span><span class="s1">)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s2">if </span><span class="s1">frame.buffer </span><span class="s2">is None</span><span class="s1">:</span>
+                    <span class="s1">self.writeline(</span><span class="s3">&quot;yield &quot;</span><span class="s2">, </span><span class="s1">item)</span>
+                <span class="s2">else</span><span class="s1">:</span>
+                    <span class="s1">self.newline(item)</span>
+
+                <span class="s4"># A node to be evaluated at runtime.</span>
+                <span class="s1">self._output_child_pre(item</span><span class="s2">, </span><span class="s1">frame</span><span class="s2">, </span><span class="s1">finalize)</span>
+                <span class="s1">self.visit(item</span><span class="s2">, </span><span class="s1">frame)</span>
+                <span class="s1">self._output_child_post(item</span><span class="s2">, </span><span class="s1">frame</span><span class="s2">, </span><span class="s1">finalize)</span>
+
+                <span class="s2">if </span><span class="s1">frame.buffer </span><span class="s2">is not None</span><span class="s1">:</span>
+                    <span class="s1">self.write(</span><span class="s3">&quot;,&quot;</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">frame.buffer </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self.outdent()</span>
+            <span class="s1">self.writeline(</span><span class="s3">&quot;)&quot; </span><span class="s2">if </span><span class="s1">len(body) == </span><span class="s5">1 </span><span class="s2">else </span><span class="s3">&quot;))&quot;</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">frame.require_output_check:</span>
+            <span class="s1">self.outdent()</span>
+
+    <span class="s2">def </span><span class="s1">visit_Assign(self</span><span class="s2">, </span><span class="s1">node: nodes.Assign</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.push_assign_tracking()</span>
+        <span class="s1">self.newline(node)</span>
+        <span class="s1">self.visit(node.target</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s1">self.write(</span><span class="s3">&quot; = &quot;</span><span class="s1">)</span>
+        <span class="s1">self.visit(node.node</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s1">self.pop_assign_tracking(frame)</span>
+
+    <span class="s2">def </span><span class="s1">visit_AssignBlock(self</span><span class="s2">, </span><span class="s1">node: nodes.AssignBlock</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.push_assign_tracking()</span>
+        <span class="s1">block_frame = frame.inner()</span>
+        <span class="s4"># This is a special case.  Since a set block always captures we</span>
+        <span class="s4"># will disable output checks.  This way one can use set blocks</span>
+        <span class="s4"># toplevel even in extended templates.</span>
+        <span class="s1">block_frame.require_output_check = </span><span class="s2">False</span>
+        <span class="s1">block_frame.symbols.analyze_node(node)</span>
+        <span class="s1">self.enter_frame(block_frame)</span>
+        <span class="s1">self.buffer(block_frame)</span>
+        <span class="s1">self.blockvisit(node.body</span><span class="s2">, </span><span class="s1">block_frame)</span>
+        <span class="s1">self.newline(node)</span>
+        <span class="s1">self.visit(node.target</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s1">self.write(</span><span class="s3">&quot; = (Markup if context.eval_ctx.autoescape else identity)(&quot;</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">node.filter </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self.visit_Filter(node.filter</span><span class="s2">, </span><span class="s1">block_frame)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.write(</span><span class="s3">f&quot;concat(</span><span class="s2">{</span><span class="s1">block_frame.buffer</span><span class="s2">}</span><span class="s3">)&quot;</span><span class="s1">)</span>
+        <span class="s1">self.write(</span><span class="s3">&quot;)&quot;</span><span class="s1">)</span>
+        <span class="s1">self.pop_assign_tracking(frame)</span>
+        <span class="s1">self.leave_frame(block_frame)</span>
+
+    <span class="s4"># -- Expression Visitors</span>
+
+    <span class="s2">def </span><span class="s1">visit_Name(self</span><span class="s2">, </span><span class="s1">node: nodes.Name</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">node.ctx == </span><span class="s3">&quot;store&quot; </span><span class="s2">and </span><span class="s1">(</span>
+            <span class="s1">frame.toplevel </span><span class="s2">or </span><span class="s1">frame.loop_frame </span><span class="s2">or </span><span class="s1">frame.block_frame</span>
+        <span class="s1">):</span>
+            <span class="s2">if </span><span class="s1">self._assign_stack:</span>
+                <span class="s1">self._assign_stack[-</span><span class="s5">1</span><span class="s1">].add(node.name)</span>
+        <span class="s1">ref = frame.symbols.ref(node.name)</span>
+
+        <span class="s4"># If we are looking up a variable we might have to deal with the</span>
+        <span class="s4"># case where it's undefined.  We can skip that case if the load</span>
+        <span class="s4"># instruction indicates a parameter which are always defined.</span>
+        <span class="s2">if </span><span class="s1">node.ctx == </span><span class="s3">&quot;load&quot;</span><span class="s1">:</span>
+            <span class="s1">load = frame.symbols.find_load(ref)</span>
+            <span class="s2">if not </span><span class="s1">(</span>
+                <span class="s1">load </span><span class="s2">is not None</span>
+                <span class="s2">and </span><span class="s1">load[</span><span class="s5">0</span><span class="s1">] == VAR_LOAD_PARAMETER</span>
+                <span class="s2">and not </span><span class="s1">self.parameter_is_undeclared(ref)</span>
+            <span class="s1">):</span>
+                <span class="s1">self.write(</span>
+                    <span class="s3">f&quot;(undefined(name=</span><span class="s2">{</span><span class="s1">node.name</span><span class="s2">!r}</span><span class="s3">) if </span><span class="s2">{</span><span class="s1">ref</span><span class="s2">} </span><span class="s3">is missing else </span><span class="s2">{</span><span class="s1">ref</span><span class="s2">}</span><span class="s3">)&quot;</span>
+                <span class="s1">)</span>
+                <span class="s2">return</span>
+
+        <span class="s1">self.write(ref)</span>
+
+    <span class="s2">def </span><span class="s1">visit_NSRef(self</span><span class="s2">, </span><span class="s1">node: nodes.NSRef</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s4"># NSRefs can only be used to store values; since they use the normal</span>
+        <span class="s4"># `foo.bar` notation they will be parsed as a normal attribute access</span>
+        <span class="s4"># when used anywhere but in a `set` context</span>
+        <span class="s1">ref = frame.symbols.ref(node.name)</span>
+        <span class="s1">self.writeline(</span><span class="s3">f&quot;if not isinstance(</span><span class="s2">{</span><span class="s1">ref</span><span class="s2">}</span><span class="s3">, Namespace):&quot;</span><span class="s1">)</span>
+        <span class="s1">self.indent()</span>
+        <span class="s1">self.writeline(</span>
+            <span class="s3">&quot;raise TemplateRuntimeError&quot;</span>
+            <span class="s3">'(&quot;cannot assign attribute on non-namespace object&quot;)'</span>
+        <span class="s1">)</span>
+        <span class="s1">self.outdent()</span>
+        <span class="s1">self.writeline(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">ref</span><span class="s2">}</span><span class="s3">[</span><span class="s2">{</span><span class="s1">node.attr</span><span class="s2">!r}</span><span class="s3">]&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">visit_Const(self</span><span class="s2">, </span><span class="s1">node: nodes.Const</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">val = node.as_const(frame.eval_ctx)</span>
+        <span class="s2">if </span><span class="s1">isinstance(val</span><span class="s2">, </span><span class="s1">float):</span>
+            <span class="s1">self.write(str(val))</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.write(repr(val))</span>
+
+    <span class="s2">def </span><span class="s1">visit_TemplateData(self</span><span class="s2">, </span><span class="s1">node: nodes.TemplateData</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">self.write(repr(node.as_const(frame.eval_ctx)))</span>
+        <span class="s2">except </span><span class="s1">nodes.Impossible:</span>
+            <span class="s1">self.write(</span>
+                <span class="s3">f&quot;(Markup if context.eval_ctx.autoescape else identity)(</span><span class="s2">{</span><span class="s1">node.data</span><span class="s2">!r}</span><span class="s3">)&quot;</span>
+            <span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">visit_Tuple(self</span><span class="s2">, </span><span class="s1">node: nodes.Tuple</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.write(</span><span class="s3">&quot;(&quot;</span><span class="s1">)</span>
+        <span class="s1">idx = -</span><span class="s5">1</span>
+        <span class="s2">for </span><span class="s1">idx</span><span class="s2">, </span><span class="s1">item </span><span class="s2">in </span><span class="s1">enumerate(node.items):</span>
+            <span class="s2">if </span><span class="s1">idx:</span>
+                <span class="s1">self.write(</span><span class="s3">&quot;, &quot;</span><span class="s1">)</span>
+            <span class="s1">self.visit(item</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s1">self.write(</span><span class="s3">&quot;,)&quot; </span><span class="s2">if </span><span class="s1">idx == </span><span class="s5">0 </span><span class="s2">else </span><span class="s3">&quot;)&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">visit_List(self</span><span class="s2">, </span><span class="s1">node: nodes.List</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.write(</span><span class="s3">&quot;[&quot;</span><span class="s1">)</span>
+        <span class="s2">for </span><span class="s1">idx</span><span class="s2">, </span><span class="s1">item </span><span class="s2">in </span><span class="s1">enumerate(node.items):</span>
+            <span class="s2">if </span><span class="s1">idx:</span>
+                <span class="s1">self.write(</span><span class="s3">&quot;, &quot;</span><span class="s1">)</span>
+            <span class="s1">self.visit(item</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s1">self.write(</span><span class="s3">&quot;]&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">visit_Dict(self</span><span class="s2">, </span><span class="s1">node: nodes.Dict</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.write(</span><span class="s3">&quot;{&quot;</span><span class="s1">)</span>
+        <span class="s2">for </span><span class="s1">idx</span><span class="s2">, </span><span class="s1">item </span><span class="s2">in </span><span class="s1">enumerate(node.items):</span>
+            <span class="s2">if </span><span class="s1">idx:</span>
+                <span class="s1">self.write(</span><span class="s3">&quot;, &quot;</span><span class="s1">)</span>
+            <span class="s1">self.visit(item.key</span><span class="s2">, </span><span class="s1">frame)</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;: &quot;</span><span class="s1">)</span>
+            <span class="s1">self.visit(item.value</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s1">self.write(</span><span class="s3">&quot;}&quot;</span><span class="s1">)</span>
+
+    <span class="s1">visit_Add = _make_binop(</span><span class="s3">&quot;+&quot;</span><span class="s1">)</span>
+    <span class="s1">visit_Sub = _make_binop(</span><span class="s3">&quot;-&quot;</span><span class="s1">)</span>
+    <span class="s1">visit_Mul = _make_binop(</span><span class="s3">&quot;*&quot;</span><span class="s1">)</span>
+    <span class="s1">visit_Div = _make_binop(</span><span class="s3">&quot;/&quot;</span><span class="s1">)</span>
+    <span class="s1">visit_FloorDiv = _make_binop(</span><span class="s3">&quot;//&quot;</span><span class="s1">)</span>
+    <span class="s1">visit_Pow = _make_binop(</span><span class="s3">&quot;**&quot;</span><span class="s1">)</span>
+    <span class="s1">visit_Mod = _make_binop(</span><span class="s3">&quot;%&quot;</span><span class="s1">)</span>
+    <span class="s1">visit_And = _make_binop(</span><span class="s3">&quot;and&quot;</span><span class="s1">)</span>
+    <span class="s1">visit_Or = _make_binop(</span><span class="s3">&quot;or&quot;</span><span class="s1">)</span>
+    <span class="s1">visit_Pos = _make_unop(</span><span class="s3">&quot;+&quot;</span><span class="s1">)</span>
+    <span class="s1">visit_Neg = _make_unop(</span><span class="s3">&quot;-&quot;</span><span class="s1">)</span>
+    <span class="s1">visit_Not = _make_unop(</span><span class="s3">&quot;not &quot;</span><span class="s1">)</span>
+
+    <span class="s1">@optimizeconst</span>
+    <span class="s2">def </span><span class="s1">visit_Concat(self</span><span class="s2">, </span><span class="s1">node: nodes.Concat</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">frame.eval_ctx.volatile:</span>
+            <span class="s1">func_name = </span><span class="s3">&quot;(markup_join if context.eval_ctx.volatile else str_join)&quot;</span>
+        <span class="s2">elif </span><span class="s1">frame.eval_ctx.autoescape:</span>
+            <span class="s1">func_name = </span><span class="s3">&quot;markup_join&quot;</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">func_name = </span><span class="s3">&quot;str_join&quot;</span>
+        <span class="s1">self.write(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">func_name</span><span class="s2">}</span><span class="s3">((&quot;</span><span class="s1">)</span>
+        <span class="s2">for </span><span class="s1">arg </span><span class="s2">in </span><span class="s1">node.nodes:</span>
+            <span class="s1">self.visit(arg</span><span class="s2">, </span><span class="s1">frame)</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;, &quot;</span><span class="s1">)</span>
+        <span class="s1">self.write(</span><span class="s3">&quot;))&quot;</span><span class="s1">)</span>
+
+    <span class="s1">@optimizeconst</span>
+    <span class="s2">def </span><span class="s1">visit_Compare(self</span><span class="s2">, </span><span class="s1">node: nodes.Compare</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.write(</span><span class="s3">&quot;(&quot;</span><span class="s1">)</span>
+        <span class="s1">self.visit(node.expr</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s2">for </span><span class="s1">op </span><span class="s2">in </span><span class="s1">node.ops:</span>
+            <span class="s1">self.visit(op</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s1">self.write(</span><span class="s3">&quot;)&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">visit_Operand(self</span><span class="s2">, </span><span class="s1">node: nodes.Operand</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.write(</span><span class="s3">f&quot; </span><span class="s2">{</span><span class="s1">operators[node.op]</span><span class="s2">} </span><span class="s3">&quot;</span><span class="s1">)</span>
+        <span class="s1">self.visit(node.expr</span><span class="s2">, </span><span class="s1">frame)</span>
+
+    <span class="s1">@optimizeconst</span>
+    <span class="s2">def </span><span class="s1">visit_Getattr(self</span><span class="s2">, </span><span class="s1">node: nodes.Getattr</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">self.environment.is_async:</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;(await auto_await(&quot;</span><span class="s1">)</span>
+
+        <span class="s1">self.write(</span><span class="s3">&quot;environment.getattr(&quot;</span><span class="s1">)</span>
+        <span class="s1">self.visit(node.node</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s1">self.write(</span><span class="s3">f&quot;, </span><span class="s2">{</span><span class="s1">node.attr</span><span class="s2">!r}</span><span class="s3">)&quot;</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">self.environment.is_async:</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;))&quot;</span><span class="s1">)</span>
+
+    <span class="s1">@optimizeconst</span>
+    <span class="s2">def </span><span class="s1">visit_Getitem(self</span><span class="s2">, </span><span class="s1">node: nodes.Getitem</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s4"># slices bypass the environment getitem method.</span>
+        <span class="s2">if </span><span class="s1">isinstance(node.arg</span><span class="s2">, </span><span class="s1">nodes.Slice):</span>
+            <span class="s1">self.visit(node.node</span><span class="s2">, </span><span class="s1">frame)</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;[&quot;</span><span class="s1">)</span>
+            <span class="s1">self.visit(node.arg</span><span class="s2">, </span><span class="s1">frame)</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;]&quot;</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">self.environment.is_async:</span>
+                <span class="s1">self.write(</span><span class="s3">&quot;(await auto_await(&quot;</span><span class="s1">)</span>
+
+            <span class="s1">self.write(</span><span class="s3">&quot;environment.getitem(&quot;</span><span class="s1">)</span>
+            <span class="s1">self.visit(node.node</span><span class="s2">, </span><span class="s1">frame)</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;, &quot;</span><span class="s1">)</span>
+            <span class="s1">self.visit(node.arg</span><span class="s2">, </span><span class="s1">frame)</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;)&quot;</span><span class="s1">)</span>
+
+            <span class="s2">if </span><span class="s1">self.environment.is_async:</span>
+                <span class="s1">self.write(</span><span class="s3">&quot;))&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">visit_Slice(self</span><span class="s2">, </span><span class="s1">node: nodes.Slice</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">node.start </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self.visit(node.start</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s1">self.write(</span><span class="s3">&quot;:&quot;</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">node.stop </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self.visit(node.stop</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s2">if </span><span class="s1">node.step </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;:&quot;</span><span class="s1">)</span>
+            <span class="s1">self.visit(node.step</span><span class="s2">, </span><span class="s1">frame)</span>
+
+    <span class="s1">@contextmanager</span>
+    <span class="s2">def </span><span class="s1">_filter_test_common(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">node: t.Union[nodes.Filter</span><span class="s2">, </span><span class="s1">nodes.Test]</span><span class="s2">, </span><span class="s1">frame: Frame</span><span class="s2">, </span><span class="s1">is_filter: bool</span>
+    <span class="s1">) -&gt; t.Iterator[</span><span class="s2">None</span><span class="s1">]:</span>
+        <span class="s2">if </span><span class="s1">self.environment.is_async:</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;await auto_await(&quot;</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">is_filter:</span>
+            <span class="s1">self.write(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">self.filters[node.name]</span><span class="s2">}</span><span class="s3">(&quot;</span><span class="s1">)</span>
+            <span class="s1">func = self.environment.filters.get(node.name)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.write(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">self.tests[node.name]</span><span class="s2">}</span><span class="s3">(&quot;</span><span class="s1">)</span>
+            <span class="s1">func = self.environment.tests.get(node.name)</span>
+
+        <span class="s4"># When inside an If or CondExpr frame, allow the filter to be</span>
+        <span class="s4"># undefined at compile time and only raise an error if it's</span>
+        <span class="s4"># actually called at runtime. See pull_dependencies.</span>
+        <span class="s2">if </span><span class="s1">func </span><span class="s2">is None and not </span><span class="s1">frame.soft_frame:</span>
+            <span class="s1">type_name = </span><span class="s3">&quot;filter&quot; </span><span class="s2">if </span><span class="s1">is_filter </span><span class="s2">else </span><span class="s3">&quot;test&quot;</span>
+            <span class="s1">self.fail(</span><span class="s3">f&quot;No </span><span class="s2">{</span><span class="s1">type_name</span><span class="s2">} </span><span class="s3">named </span><span class="s2">{</span><span class="s1">node.name</span><span class="s2">!r}</span><span class="s3">.&quot;</span><span class="s2">, </span><span class="s1">node.lineno)</span>
+
+        <span class="s1">pass_arg = {</span>
+            <span class="s1">_PassArg.context: </span><span class="s3">&quot;context&quot;</span><span class="s2">,</span>
+            <span class="s1">_PassArg.eval_context: </span><span class="s3">&quot;context.eval_ctx&quot;</span><span class="s2">,</span>
+            <span class="s1">_PassArg.environment: </span><span class="s3">&quot;environment&quot;</span><span class="s2">,</span>
+        <span class="s1">}.get(</span>
+            <span class="s1">_PassArg.from_obj(func)  </span><span class="s4"># type: ignore</span>
+        <span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">pass_arg </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self.write(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">pass_arg</span><span class="s2">}</span><span class="s3">, &quot;</span><span class="s1">)</span>
+
+        <span class="s4"># Back to the visitor function to handle visiting the target of</span>
+        <span class="s4"># the filter or test.</span>
+        <span class="s2">yield</span>
+
+        <span class="s1">self.signature(node</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s1">self.write(</span><span class="s3">&quot;)&quot;</span><span class="s1">)</span>
+
+        <span class="s2">if </span><span class="s1">self.environment.is_async:</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;)&quot;</span><span class="s1">)</span>
+
+    <span class="s1">@optimizeconst</span>
+    <span class="s2">def </span><span class="s1">visit_Filter(self</span><span class="s2">, </span><span class="s1">node: nodes.Filter</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">with </span><span class="s1">self._filter_test_common(node</span><span class="s2">, </span><span class="s1">frame</span><span class="s2">, True</span><span class="s1">):</span>
+            <span class="s4"># if the filter node is None we are inside a filter block</span>
+            <span class="s4"># and want to write to the current buffer</span>
+            <span class="s2">if </span><span class="s1">node.node </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s1">self.visit(node.node</span><span class="s2">, </span><span class="s1">frame)</span>
+            <span class="s2">elif </span><span class="s1">frame.eval_ctx.volatile:</span>
+                <span class="s1">self.write(</span>
+                    <span class="s3">f&quot;(Markup(concat(</span><span class="s2">{</span><span class="s1">frame.buffer</span><span class="s2">}</span><span class="s3">))&quot;</span>
+                    <span class="s3">f&quot; if context.eval_ctx.autoescape else concat(</span><span class="s2">{</span><span class="s1">frame.buffer</span><span class="s2">}</span><span class="s3">))&quot;</span>
+                <span class="s1">)</span>
+            <span class="s2">elif </span><span class="s1">frame.eval_ctx.autoescape:</span>
+                <span class="s1">self.write(</span><span class="s3">f&quot;Markup(concat(</span><span class="s2">{</span><span class="s1">frame.buffer</span><span class="s2">}</span><span class="s3">))&quot;</span><span class="s1">)</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">self.write(</span><span class="s3">f&quot;concat(</span><span class="s2">{</span><span class="s1">frame.buffer</span><span class="s2">}</span><span class="s3">)&quot;</span><span class="s1">)</span>
+
+    <span class="s1">@optimizeconst</span>
+    <span class="s2">def </span><span class="s1">visit_Test(self</span><span class="s2">, </span><span class="s1">node: nodes.Test</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">with </span><span class="s1">self._filter_test_common(node</span><span class="s2">, </span><span class="s1">frame</span><span class="s2">, False</span><span class="s1">):</span>
+            <span class="s1">self.visit(node.node</span><span class="s2">, </span><span class="s1">frame)</span>
+
+    <span class="s1">@optimizeconst</span>
+    <span class="s2">def </span><span class="s1">visit_CondExpr(self</span><span class="s2">, </span><span class="s1">node: nodes.CondExpr</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">frame = frame.soft()</span>
+
+        <span class="s2">def </span><span class="s1">write_expr2() -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+            <span class="s2">if </span><span class="s1">node.expr2 </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s1">self.visit(node.expr2</span><span class="s2">, </span><span class="s1">frame)</span>
+                <span class="s2">return</span>
+
+            <span class="s1">self.write(</span>
+                <span class="s3">f'cond_expr_undefined(&quot;the inline if-expression on'</span>
+                <span class="s3">f&quot; </span><span class="s2">{</span><span class="s1">self.position(node)</span><span class="s2">} </span><span class="s3">evaluated to false and no else&quot;</span>
+                <span class="s3">f' section was defined.&quot;)'</span>
+            <span class="s1">)</span>
+
+        <span class="s1">self.write(</span><span class="s3">&quot;(&quot;</span><span class="s1">)</span>
+        <span class="s1">self.visit(node.expr1</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s1">self.write(</span><span class="s3">&quot; if &quot;</span><span class="s1">)</span>
+        <span class="s1">self.visit(node.test</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s1">self.write(</span><span class="s3">&quot; else &quot;</span><span class="s1">)</span>
+        <span class="s1">write_expr2()</span>
+        <span class="s1">self.write(</span><span class="s3">&quot;)&quot;</span><span class="s1">)</span>
+
+    <span class="s1">@optimizeconst</span>
+    <span class="s2">def </span><span class="s1">visit_Call(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">node: nodes.Call</span><span class="s2">, </span><span class="s1">frame: Frame</span><span class="s2">, </span><span class="s1">forward_caller: bool = </span><span class="s2">False</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">if </span><span class="s1">self.environment.is_async:</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;await auto_await(&quot;</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">self.environment.sandboxed:</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;environment.call(context, &quot;</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;context.call(&quot;</span><span class="s1">)</span>
+        <span class="s1">self.visit(node.node</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s1">extra_kwargs = {</span><span class="s3">&quot;caller&quot;</span><span class="s1">: </span><span class="s3">&quot;caller&quot;</span><span class="s1">} </span><span class="s2">if </span><span class="s1">forward_caller </span><span class="s2">else None</span>
+        <span class="s1">loop_kwargs = {</span><span class="s3">&quot;_loop_vars&quot;</span><span class="s1">: </span><span class="s3">&quot;_loop_vars&quot;</span><span class="s1">} </span><span class="s2">if </span><span class="s1">frame.loop_frame </span><span class="s2">else </span><span class="s1">{}</span>
+        <span class="s1">block_kwargs = {</span><span class="s3">&quot;_block_vars&quot;</span><span class="s1">: </span><span class="s3">&quot;_block_vars&quot;</span><span class="s1">} </span><span class="s2">if </span><span class="s1">frame.block_frame </span><span class="s2">else </span><span class="s1">{}</span>
+        <span class="s2">if </span><span class="s1">extra_kwargs:</span>
+            <span class="s1">extra_kwargs.update(loop_kwargs</span><span class="s2">, </span><span class="s1">**block_kwargs)</span>
+        <span class="s2">elif </span><span class="s1">loop_kwargs </span><span class="s2">or </span><span class="s1">block_kwargs:</span>
+            <span class="s1">extra_kwargs = dict(loop_kwargs</span><span class="s2">, </span><span class="s1">**block_kwargs)</span>
+        <span class="s1">self.signature(node</span><span class="s2">, </span><span class="s1">frame</span><span class="s2">, </span><span class="s1">extra_kwargs)</span>
+        <span class="s1">self.write(</span><span class="s3">&quot;)&quot;</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">self.environment.is_async:</span>
+            <span class="s1">self.write(</span><span class="s3">&quot;)&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">visit_Keyword(self</span><span class="s2">, </span><span class="s1">node: nodes.Keyword</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.write(node.key + </span><span class="s3">&quot;=&quot;</span><span class="s1">)</span>
+        <span class="s1">self.visit(node.value</span><span class="s2">, </span><span class="s1">frame)</span>
+
+    <span class="s4"># -- Unused nodes for extensions</span>
+
+    <span class="s2">def </span><span class="s1">visit_MarkSafe(self</span><span class="s2">, </span><span class="s1">node: nodes.MarkSafe</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.write(</span><span class="s3">&quot;Markup(&quot;</span><span class="s1">)</span>
+        <span class="s1">self.visit(node.expr</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s1">self.write(</span><span class="s3">&quot;)&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">visit_MarkSafeIfAutoescape(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">node: nodes.MarkSafeIfAutoescape</span><span class="s2">, </span><span class="s1">frame: Frame</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.write(</span><span class="s3">&quot;(Markup if context.eval_ctx.autoescape else identity)(&quot;</span><span class="s1">)</span>
+        <span class="s1">self.visit(node.expr</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s1">self.write(</span><span class="s3">&quot;)&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">visit_EnvironmentAttribute(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">node: nodes.EnvironmentAttribute</span><span class="s2">, </span><span class="s1">frame: Frame</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.write(</span><span class="s3">&quot;environment.&quot; </span><span class="s1">+ node.name)</span>
+
+    <span class="s2">def </span><span class="s1">visit_ExtensionAttribute(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">node: nodes.ExtensionAttribute</span><span class="s2">, </span><span class="s1">frame: Frame</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.write(</span><span class="s3">f&quot;environment.extensions[</span><span class="s2">{</span><span class="s1">node.identifier</span><span class="s2">!r}</span><span class="s3">].</span><span class="s2">{</span><span class="s1">node.name</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">visit_ImportedName(self</span><span class="s2">, </span><span class="s1">node: nodes.ImportedName</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.write(self.import_aliases[node.importname])</span>
+
+    <span class="s2">def </span><span class="s1">visit_InternalName(self</span><span class="s2">, </span><span class="s1">node: nodes.InternalName</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.write(node.name)</span>
+
+    <span class="s2">def </span><span class="s1">visit_ContextReference(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">node: nodes.ContextReference</span><span class="s2">, </span><span class="s1">frame: Frame</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.write(</span><span class="s3">&quot;context&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">visit_DerivedContextReference(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">node: nodes.DerivedContextReference</span><span class="s2">, </span><span class="s1">frame: Frame</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.write(self.derive_context(frame))</span>
+
+    <span class="s2">def </span><span class="s1">visit_Continue(self</span><span class="s2">, </span><span class="s1">node: nodes.Continue</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.writeline(</span><span class="s3">&quot;continue&quot;</span><span class="s2">, </span><span class="s1">node)</span>
+
+    <span class="s2">def </span><span class="s1">visit_Break(self</span><span class="s2">, </span><span class="s1">node: nodes.Break</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">self.writeline(</span><span class="s3">&quot;break&quot;</span><span class="s2">, </span><span class="s1">node)</span>
+
+    <span class="s2">def </span><span class="s1">visit_Scope(self</span><span class="s2">, </span><span class="s1">node: nodes.Scope</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">scope_frame = frame.inner()</span>
+        <span class="s1">scope_frame.symbols.analyze_node(node)</span>
+        <span class="s1">self.enter_frame(scope_frame)</span>
+        <span class="s1">self.blockvisit(node.body</span><span class="s2">, </span><span class="s1">scope_frame)</span>
+        <span class="s1">self.leave_frame(scope_frame)</span>
+
+    <span class="s2">def </span><span class="s1">visit_OverlayScope(self</span><span class="s2">, </span><span class="s1">node: nodes.OverlayScope</span><span class="s2">, </span><span class="s1">frame: Frame) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">ctx = self.temporary_identifier()</span>
+        <span class="s1">self.writeline(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">ctx</span><span class="s2">} </span><span class="s3">= </span><span class="s2">{</span><span class="s1">self.derive_context(frame)</span><span class="s2">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+        <span class="s1">self.writeline(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">ctx</span><span class="s2">}</span><span class="s3">.vars = &quot;</span><span class="s1">)</span>
+        <span class="s1">self.visit(node.context</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s1">self.push_context_reference(ctx)</span>
+
+        <span class="s1">scope_frame = frame.inner(isolated=</span><span class="s2">True</span><span class="s1">)</span>
+        <span class="s1">scope_frame.symbols.analyze_node(node)</span>
+        <span class="s1">self.enter_frame(scope_frame)</span>
+        <span class="s1">self.blockvisit(node.body</span><span class="s2">, </span><span class="s1">scope_frame)</span>
+        <span class="s1">self.leave_frame(scope_frame)</span>
+        <span class="s1">self.pop_context_reference()</span>
+
+    <span class="s2">def </span><span class="s1">visit_EvalContextModifier(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">node: nodes.EvalContextModifier</span><span class="s2">, </span><span class="s1">frame: Frame</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s2">for </span><span class="s1">keyword </span><span class="s2">in </span><span class="s1">node.options:</span>
+            <span class="s1">self.writeline(</span><span class="s3">f&quot;context.eval_ctx.</span><span class="s2">{</span><span class="s1">keyword.key</span><span class="s2">} </span><span class="s3">= &quot;</span><span class="s1">)</span>
+            <span class="s1">self.visit(keyword.value</span><span class="s2">, </span><span class="s1">frame)</span>
+            <span class="s2">try</span><span class="s1">:</span>
+                <span class="s1">val = keyword.value.as_const(frame.eval_ctx)</span>
+            <span class="s2">except </span><span class="s1">nodes.Impossible:</span>
+                <span class="s1">frame.eval_ctx.volatile = </span><span class="s2">True</span>
+            <span class="s2">else</span><span class="s1">:</span>
+                <span class="s1">setattr(frame.eval_ctx</span><span class="s2">, </span><span class="s1">keyword.key</span><span class="s2">, </span><span class="s1">val)</span>
+
+    <span class="s2">def </span><span class="s1">visit_ScopedEvalContextModifier(</span>
+        <span class="s1">self</span><span class="s2">, </span><span class="s1">node: nodes.ScopedEvalContextModifier</span><span class="s2">, </span><span class="s1">frame: Frame</span>
+    <span class="s1">) -&gt; </span><span class="s2">None</span><span class="s1">:</span>
+        <span class="s1">old_ctx_name = self.temporary_identifier()</span>
+        <span class="s1">saved_ctx = frame.eval_ctx.save()</span>
+        <span class="s1">self.writeline(</span><span class="s3">f&quot;</span><span class="s2">{</span><span class="s1">old_ctx_name</span><span class="s2">} </span><span class="s3">= context.eval_ctx.save()&quot;</span><span class="s1">)</span>
+        <span class="s1">self.visit_EvalContextModifier(node</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s2">for </span><span class="s1">child </span><span class="s2">in </span><span class="s1">node.body:</span>
+            <span class="s1">self.visit(child</span><span class="s2">, </span><span class="s1">frame)</span>
+        <span class="s1">frame.eval_ctx.revert(saved_ctx)</span>
+        <span class="s1">self.writeline(</span><span class="s3">f&quot;context.eval_ctx.revert(</span><span class="s2">{</span><span class="s1">old_ctx_name</span><span class="s2">}</span><span class="s3">)&quot;</span><span class="s1">)</span>
+</pre>
+</body>
+</html>

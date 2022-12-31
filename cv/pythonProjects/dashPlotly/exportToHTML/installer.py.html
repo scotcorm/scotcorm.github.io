@@ -1,0 +1,119 @@
+<html>
+<head>
+<title>installer.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #808080;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+installer.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">glob</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">subprocess</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">import </span><span class="s1">tempfile</span>
+<span class="s0">from </span><span class="s1">distutils </span><span class="s0">import </span><span class="s1">log</span>
+<span class="s0">from </span><span class="s1">distutils.errors </span><span class="s0">import </span><span class="s1">DistutilsError</span>
+
+<span class="s0">import </span><span class="s1">pkg_resources</span>
+<span class="s0">from </span><span class="s1">setuptools.wheel </span><span class="s0">import </span><span class="s1">Wheel</span>
+
+
+<span class="s0">def </span><span class="s1">_fixup_find_links(find_links):</span>
+    <span class="s2">&quot;&quot;&quot;Ensure find-links option end-up being a list of strings.&quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">isinstance(find_links</span><span class="s0">, </span><span class="s1">str):</span>
+        <span class="s0">return </span><span class="s1">find_links.split()</span>
+    <span class="s0">assert </span><span class="s1">isinstance(find_links</span><span class="s0">, </span><span class="s1">(tuple</span><span class="s0">, </span><span class="s1">list))</span>
+    <span class="s0">return </span><span class="s1">find_links</span>
+
+
+<span class="s0">def </span><span class="s1">fetch_build_egg(dist</span><span class="s0">, </span><span class="s1">req):  </span><span class="s3"># noqa: C901  # is too complex (16)  # FIXME</span>
+    <span class="s2">&quot;&quot;&quot;Fetch an egg needed for building. 
+ 
+    Use pip/wheel to fetch/build a wheel.&quot;&quot;&quot;</span>
+    <span class="s3"># Warn if wheel is not available</span>
+    <span class="s0">try</span><span class="s1">:</span>
+        <span class="s1">pkg_resources.get_distribution(</span><span class="s4">'wheel'</span><span class="s1">)</span>
+    <span class="s0">except </span><span class="s1">pkg_resources.DistributionNotFound:</span>
+        <span class="s1">dist.announce(</span><span class="s4">'WARNING: The wheel package is not available.'</span><span class="s0">, </span><span class="s1">log.WARN)</span>
+    <span class="s3"># Ignore environment markers; if supplied, it is required.</span>
+    <span class="s1">req = strip_marker(req)</span>
+    <span class="s3"># Take easy_install options into account, but do not override relevant</span>
+    <span class="s3"># pip environment variables (like PIP_INDEX_URL or PIP_QUIET); they'll</span>
+    <span class="s3"># take precedence.</span>
+    <span class="s1">opts = dist.get_option_dict(</span><span class="s4">'easy_install'</span><span class="s1">)</span>
+    <span class="s0">if </span><span class="s4">'allow_hosts' </span><span class="s0">in </span><span class="s1">opts:</span>
+        <span class="s0">raise </span><span class="s1">DistutilsError(</span><span class="s4">'the `allow-hosts` option is not supported '</span>
+                             <span class="s4">'when using pip to install requirements.'</span><span class="s1">)</span>
+    <span class="s1">quiet = </span><span class="s4">'PIP_QUIET' </span><span class="s0">not in </span><span class="s1">os.environ </span><span class="s0">and </span><span class="s4">'PIP_VERBOSE' </span><span class="s0">not in </span><span class="s1">os.environ</span>
+    <span class="s0">if </span><span class="s4">'PIP_INDEX_URL' </span><span class="s0">in </span><span class="s1">os.environ:</span>
+        <span class="s1">index_url = </span><span class="s0">None</span>
+    <span class="s0">elif </span><span class="s4">'index_url' </span><span class="s0">in </span><span class="s1">opts:</span>
+        <span class="s1">index_url = opts[</span><span class="s4">'index_url'</span><span class="s1">][</span><span class="s5">1</span><span class="s1">]</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">index_url = </span><span class="s0">None</span>
+    <span class="s1">find_links = (</span>
+        <span class="s1">_fixup_find_links(opts[</span><span class="s4">'find_links'</span><span class="s1">][</span><span class="s5">1</span><span class="s1">])[:] </span><span class="s0">if </span><span class="s4">'find_links' </span><span class="s0">in </span><span class="s1">opts</span>
+        <span class="s0">else </span><span class="s1">[]</span>
+    <span class="s1">)</span>
+    <span class="s0">if </span><span class="s1">dist.dependency_links:</span>
+        <span class="s1">find_links.extend(dist.dependency_links)</span>
+    <span class="s1">eggs_dir = os.path.realpath(dist.get_egg_cache_dir())</span>
+    <span class="s1">environment = pkg_resources.Environment()</span>
+    <span class="s0">for </span><span class="s1">egg_dist </span><span class="s0">in </span><span class="s1">pkg_resources.find_distributions(eggs_dir):</span>
+        <span class="s0">if </span><span class="s1">egg_dist </span><span class="s0">in </span><span class="s1">req </span><span class="s0">and </span><span class="s1">environment.can_add(egg_dist):</span>
+            <span class="s0">return </span><span class="s1">egg_dist</span>
+    <span class="s0">with </span><span class="s1">tempfile.TemporaryDirectory() </span><span class="s0">as </span><span class="s1">tmpdir:</span>
+        <span class="s1">cmd = [</span>
+            <span class="s1">sys.executable</span><span class="s0">, </span><span class="s4">'-m'</span><span class="s0">, </span><span class="s4">'pip'</span><span class="s0">,</span>
+            <span class="s4">'--disable-pip-version-check'</span><span class="s0">,</span>
+            <span class="s4">'wheel'</span><span class="s0">, </span><span class="s4">'--no-deps'</span><span class="s0">,</span>
+            <span class="s4">'-w'</span><span class="s0">, </span><span class="s1">tmpdir</span><span class="s0">,</span>
+        <span class="s1">]</span>
+        <span class="s0">if </span><span class="s1">quiet:</span>
+            <span class="s1">cmd.append(</span><span class="s4">'--quiet'</span><span class="s1">)</span>
+        <span class="s0">if </span><span class="s1">index_url </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">cmd.extend((</span><span class="s4">'--index-url'</span><span class="s0">, </span><span class="s1">index_url))</span>
+        <span class="s0">for </span><span class="s1">link </span><span class="s0">in </span><span class="s1">find_links </span><span class="s0">or </span><span class="s1">[]:</span>
+            <span class="s1">cmd.extend((</span><span class="s4">'--find-links'</span><span class="s0">, </span><span class="s1">link))</span>
+        <span class="s3"># If requirement is a PEP 508 direct URL, directly pass</span>
+        <span class="s3"># the URL to pip, as `req @ url` does not work on the</span>
+        <span class="s3"># command line.</span>
+        <span class="s1">cmd.append(req.url </span><span class="s0">or </span><span class="s1">str(req))</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">subprocess.check_call(cmd)</span>
+        <span class="s0">except </span><span class="s1">subprocess.CalledProcessError </span><span class="s0">as </span><span class="s1">e:</span>
+            <span class="s0">raise </span><span class="s1">DistutilsError(str(e)) </span><span class="s0">from </span><span class="s1">e</span>
+        <span class="s1">wheel = Wheel(glob.glob(os.path.join(tmpdir</span><span class="s0">, </span><span class="s4">'*.whl'</span><span class="s1">))[</span><span class="s5">0</span><span class="s1">])</span>
+        <span class="s1">dist_location = os.path.join(eggs_dir</span><span class="s0">, </span><span class="s1">wheel.egg_name())</span>
+        <span class="s1">wheel.install_as_egg(dist_location)</span>
+        <span class="s1">dist_metadata = pkg_resources.PathMetadata(</span>
+            <span class="s1">dist_location</span><span class="s0">, </span><span class="s1">os.path.join(dist_location</span><span class="s0">, </span><span class="s4">'EGG-INFO'</span><span class="s1">))</span>
+        <span class="s1">dist = pkg_resources.Distribution.from_filename(</span>
+            <span class="s1">dist_location</span><span class="s0">, </span><span class="s1">metadata=dist_metadata)</span>
+        <span class="s0">return </span><span class="s1">dist</span>
+
+
+<span class="s0">def </span><span class="s1">strip_marker(req):</span>
+    <span class="s2">&quot;&quot;&quot; 
+    Return a new requirement without the environment marker to avoid 
+    calling pip with something like `babel; extra == &quot;i18n&quot;`, which 
+    would always be ignored. 
+    &quot;&quot;&quot;</span>
+    <span class="s3"># create a copy to avoid mutating the input</span>
+    <span class="s1">req = pkg_resources.Requirement.parse(str(req))</span>
+    <span class="s1">req.marker = </span><span class="s0">None</span>
+    <span class="s0">return </span><span class="s1">req</span>
+</pre>
+</body>
+</html>

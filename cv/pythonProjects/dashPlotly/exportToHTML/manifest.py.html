@@ -1,0 +1,415 @@
+<html>
+<head>
+<title>manifest.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #629755; font-style: italic;}
+.s3 { color: #cc7832;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+manifest.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># -*- coding: utf-8 -*-</span>
+<span class="s0">#</span>
+<span class="s0"># Copyright (C) 2012-2013 Python Software Foundation.</span>
+<span class="s0"># See LICENSE.txt and CONTRIBUTORS.txt.</span>
+<span class="s0">#</span>
+<span class="s2">&quot;&quot;&quot; 
+Class representing the list of files in a distribution. 
+ 
+Equivalent to distutils.filelist, but fixes some problems. 
+&quot;&quot;&quot;</span>
+<span class="s3">import </span><span class="s1">fnmatch</span>
+<span class="s3">import </span><span class="s1">logging</span>
+<span class="s3">import </span><span class="s1">os</span>
+<span class="s3">import </span><span class="s1">re</span>
+<span class="s3">import </span><span class="s1">sys</span>
+
+<span class="s3">from </span><span class="s1">. </span><span class="s3">import </span><span class="s1">DistlibException</span>
+<span class="s3">from </span><span class="s1">.compat </span><span class="s3">import </span><span class="s1">fsdecode</span>
+<span class="s3">from </span><span class="s1">.util </span><span class="s3">import </span><span class="s1">convert_path</span>
+
+
+<span class="s1">__all__ = [</span><span class="s4">'Manifest'</span><span class="s1">]</span>
+
+<span class="s1">logger = logging.getLogger(__name__)</span>
+
+<span class="s0"># a \ followed by some spaces + EOL</span>
+<span class="s1">_COLLAPSE_PATTERN = re.compile(</span><span class="s4">'</span><span class="s3">\\\\</span><span class="s4">w*</span><span class="s3">\n</span><span class="s4">'</span><span class="s3">, </span><span class="s1">re.M)</span>
+<span class="s1">_COMMENTED_LINE = re.compile(</span><span class="s4">'#.*?(?=</span><span class="s3">\n</span><span class="s4">)|</span><span class="s3">\n</span><span class="s4">(?=$)'</span><span class="s3">, </span><span class="s1">re.M | re.S)</span>
+
+<span class="s0">#</span>
+<span class="s0"># Due to the different results returned by fnmatch.translate, we need</span>
+<span class="s0"># to do slightly different processing for Python 2.7 and 3.2 ... this needed</span>
+<span class="s0"># to be brought in for Python 3.6 onwards.</span>
+<span class="s0">#</span>
+<span class="s1">_PYTHON_VERSION = sys.version_info[:</span><span class="s5">2</span><span class="s1">]</span>
+
+<span class="s3">class </span><span class="s1">Manifest(object):</span>
+    <span class="s2">&quot;&quot;&quot;A list of files built by on exploring the filesystem and filtered by 
+    applying various patterns to what we find there. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s3">def </span><span class="s1">__init__(self</span><span class="s3">, </span><span class="s1">base=</span><span class="s3">None</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Initialise an instance. 
+ 
+        :param base: The base directory to explore under. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.base = os.path.abspath(os.path.normpath(base </span><span class="s3">or </span><span class="s1">os.getcwd()))</span>
+        <span class="s1">self.prefix = self.base + os.sep</span>
+        <span class="s1">self.allfiles = </span><span class="s3">None</span>
+        <span class="s1">self.files = set()</span>
+
+    <span class="s0">#</span>
+    <span class="s0"># Public API</span>
+    <span class="s0">#</span>
+
+    <span class="s3">def </span><span class="s1">findall(self):</span>
+        <span class="s2">&quot;&quot;&quot;Find all files under the base and set ``allfiles`` to the absolute 
+        pathnames of files found. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">from </span><span class="s1">stat </span><span class="s3">import </span><span class="s1">S_ISREG</span><span class="s3">, </span><span class="s1">S_ISDIR</span><span class="s3">, </span><span class="s1">S_ISLNK</span>
+
+        <span class="s1">self.allfiles = allfiles = []</span>
+        <span class="s1">root = self.base</span>
+        <span class="s1">stack = [root]</span>
+        <span class="s1">pop = stack.pop</span>
+        <span class="s1">push = stack.append</span>
+
+        <span class="s3">while </span><span class="s1">stack:</span>
+            <span class="s1">root = pop()</span>
+            <span class="s1">names = os.listdir(root)</span>
+
+            <span class="s3">for </span><span class="s1">name </span><span class="s3">in </span><span class="s1">names:</span>
+                <span class="s1">fullname = os.path.join(root</span><span class="s3">, </span><span class="s1">name)</span>
+
+                <span class="s0"># Avoid excess stat calls -- just one will do, thank you!</span>
+                <span class="s1">stat = os.stat(fullname)</span>
+                <span class="s1">mode = stat.st_mode</span>
+                <span class="s3">if </span><span class="s1">S_ISREG(mode):</span>
+                    <span class="s1">allfiles.append(fsdecode(fullname))</span>
+                <span class="s3">elif </span><span class="s1">S_ISDIR(mode) </span><span class="s3">and not </span><span class="s1">S_ISLNK(mode):</span>
+                    <span class="s1">push(fullname)</span>
+
+    <span class="s3">def </span><span class="s1">add(self</span><span class="s3">, </span><span class="s1">item):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Add a file to the manifest. 
+ 
+        :param item: The pathname to add. This can be relative to the base. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if not </span><span class="s1">item.startswith(self.prefix):</span>
+            <span class="s1">item = os.path.join(self.base</span><span class="s3">, </span><span class="s1">item)</span>
+        <span class="s1">self.files.add(os.path.normpath(item))</span>
+
+    <span class="s3">def </span><span class="s1">add_many(self</span><span class="s3">, </span><span class="s1">items):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Add a list of files to the manifest. 
+ 
+        :param items: The pathnames to add. These can be relative to the base. 
+        &quot;&quot;&quot;</span>
+        <span class="s3">for </span><span class="s1">item </span><span class="s3">in </span><span class="s1">items:</span>
+            <span class="s1">self.add(item)</span>
+
+    <span class="s3">def </span><span class="s1">sorted(self</span><span class="s3">, </span><span class="s1">wantdirs=</span><span class="s3">False</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Return sorted files in directory order 
+        &quot;&quot;&quot;</span>
+
+        <span class="s3">def </span><span class="s1">add_dir(dirs</span><span class="s3">, </span><span class="s1">d):</span>
+            <span class="s1">dirs.add(d)</span>
+            <span class="s1">logger.debug(</span><span class="s4">'add_dir added %s'</span><span class="s3">, </span><span class="s1">d)</span>
+            <span class="s3">if </span><span class="s1">d != self.base:</span>
+                <span class="s1">parent</span><span class="s3">, </span><span class="s1">_ = os.path.split(d)</span>
+                <span class="s3">assert </span><span class="s1">parent </span><span class="s3">not in </span><span class="s1">(</span><span class="s4">''</span><span class="s3">, </span><span class="s4">'/'</span><span class="s1">)</span>
+                <span class="s1">add_dir(dirs</span><span class="s3">, </span><span class="s1">parent)</span>
+
+        <span class="s1">result = set(self.files)    </span><span class="s0"># make a copy!</span>
+        <span class="s3">if </span><span class="s1">wantdirs:</span>
+            <span class="s1">dirs = set()</span>
+            <span class="s3">for </span><span class="s1">f </span><span class="s3">in </span><span class="s1">result:</span>
+                <span class="s1">add_dir(dirs</span><span class="s3">, </span><span class="s1">os.path.dirname(f))</span>
+            <span class="s1">result |= dirs</span>
+        <span class="s3">return </span><span class="s1">[os.path.join(*path_tuple) </span><span class="s3">for </span><span class="s1">path_tuple </span><span class="s3">in</span>
+                <span class="s1">sorted(os.path.split(path) </span><span class="s3">for </span><span class="s1">path </span><span class="s3">in </span><span class="s1">result)]</span>
+
+    <span class="s3">def </span><span class="s1">clear(self):</span>
+        <span class="s2">&quot;&quot;&quot;Clear all collected files.&quot;&quot;&quot;</span>
+        <span class="s1">self.files = set()</span>
+        <span class="s1">self.allfiles = []</span>
+
+    <span class="s3">def </span><span class="s1">process_directive(self</span><span class="s3">, </span><span class="s1">directive):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Process a directive which either adds some files from ``allfiles`` to 
+        ``files``, or removes some files from ``files``. 
+ 
+        :param directive: The directive to process. This should be in a format 
+                     compatible with distutils ``MANIFEST.in`` files: 
+ 
+                     http://docs.python.org/distutils/sourcedist.html#commands 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># Parse the line: split it up, make sure the right number of words</span>
+        <span class="s0"># is there, and return the relevant words.  'action' is always</span>
+        <span class="s0"># defined: it's the first word of the line.  Which of the other</span>
+        <span class="s0"># three are defined depends on the action; it'll be either</span>
+        <span class="s0"># patterns, (dir and patterns), or (dirpattern).</span>
+        <span class="s1">action</span><span class="s3">, </span><span class="s1">patterns</span><span class="s3">, </span><span class="s1">thedir</span><span class="s3">, </span><span class="s1">dirpattern = self._parse_directive(directive)</span>
+
+        <span class="s0"># OK, now we know that the action is valid and we have the</span>
+        <span class="s0"># right number of words on the line for that action -- so we</span>
+        <span class="s0"># can proceed with minimal error-checking.</span>
+        <span class="s3">if </span><span class="s1">action == </span><span class="s4">'include'</span><span class="s1">:</span>
+            <span class="s3">for </span><span class="s1">pattern </span><span class="s3">in </span><span class="s1">patterns:</span>
+                <span class="s3">if not </span><span class="s1">self._include_pattern(pattern</span><span class="s3">, </span><span class="s1">anchor=</span><span class="s3">True</span><span class="s1">):</span>
+                    <span class="s1">logger.warning(</span><span class="s4">'no files found matching %r'</span><span class="s3">, </span><span class="s1">pattern)</span>
+
+        <span class="s3">elif </span><span class="s1">action == </span><span class="s4">'exclude'</span><span class="s1">:</span>
+            <span class="s3">for </span><span class="s1">pattern </span><span class="s3">in </span><span class="s1">patterns:</span>
+                <span class="s1">found = self._exclude_pattern(pattern</span><span class="s3">, </span><span class="s1">anchor=</span><span class="s3">True</span><span class="s1">)</span>
+                <span class="s0">#if not found:</span>
+                <span class="s0">#    logger.warning('no previously-included files '</span>
+                <span class="s0">#                   'found matching %r', pattern)</span>
+
+        <span class="s3">elif </span><span class="s1">action == </span><span class="s4">'global-include'</span><span class="s1">:</span>
+            <span class="s3">for </span><span class="s1">pattern </span><span class="s3">in </span><span class="s1">patterns:</span>
+                <span class="s3">if not </span><span class="s1">self._include_pattern(pattern</span><span class="s3">, </span><span class="s1">anchor=</span><span class="s3">False</span><span class="s1">):</span>
+                    <span class="s1">logger.warning(</span><span class="s4">'no files found matching %r '</span>
+                                   <span class="s4">'anywhere in distribution'</span><span class="s3">, </span><span class="s1">pattern)</span>
+
+        <span class="s3">elif </span><span class="s1">action == </span><span class="s4">'global-exclude'</span><span class="s1">:</span>
+            <span class="s3">for </span><span class="s1">pattern </span><span class="s3">in </span><span class="s1">patterns:</span>
+                <span class="s1">found = self._exclude_pattern(pattern</span><span class="s3">, </span><span class="s1">anchor=</span><span class="s3">False</span><span class="s1">)</span>
+                <span class="s0">#if not found:</span>
+                <span class="s0">#    logger.warning('no previously-included files '</span>
+                <span class="s0">#                   'matching %r found anywhere in '</span>
+                <span class="s0">#                   'distribution', pattern)</span>
+
+        <span class="s3">elif </span><span class="s1">action == </span><span class="s4">'recursive-include'</span><span class="s1">:</span>
+            <span class="s3">for </span><span class="s1">pattern </span><span class="s3">in </span><span class="s1">patterns:</span>
+                <span class="s3">if not </span><span class="s1">self._include_pattern(pattern</span><span class="s3">, </span><span class="s1">prefix=thedir):</span>
+                    <span class="s1">logger.warning(</span><span class="s4">'no files found matching %r '</span>
+                                   <span class="s4">'under directory %r'</span><span class="s3">, </span><span class="s1">pattern</span><span class="s3">, </span><span class="s1">thedir)</span>
+
+        <span class="s3">elif </span><span class="s1">action == </span><span class="s4">'recursive-exclude'</span><span class="s1">:</span>
+            <span class="s3">for </span><span class="s1">pattern </span><span class="s3">in </span><span class="s1">patterns:</span>
+                <span class="s1">found = self._exclude_pattern(pattern</span><span class="s3">, </span><span class="s1">prefix=thedir)</span>
+                <span class="s0">#if not found:</span>
+                <span class="s0">#    logger.warning('no previously-included files '</span>
+                <span class="s0">#                   'matching %r found under directory %r',</span>
+                <span class="s0">#                   pattern, thedir)</span>
+
+        <span class="s3">elif </span><span class="s1">action == </span><span class="s4">'graft'</span><span class="s1">:</span>
+            <span class="s3">if not </span><span class="s1">self._include_pattern(</span><span class="s3">None, </span><span class="s1">prefix=dirpattern):</span>
+                <span class="s1">logger.warning(</span><span class="s4">'no directories found matching %r'</span><span class="s3">,</span>
+                               <span class="s1">dirpattern)</span>
+
+        <span class="s3">elif </span><span class="s1">action == </span><span class="s4">'prune'</span><span class="s1">:</span>
+            <span class="s3">if not </span><span class="s1">self._exclude_pattern(</span><span class="s3">None, </span><span class="s1">prefix=dirpattern):</span>
+                <span class="s1">logger.warning(</span><span class="s4">'no previously-included directories found '</span>
+                               <span class="s4">'matching %r'</span><span class="s3">, </span><span class="s1">dirpattern)</span>
+        <span class="s3">else</span><span class="s1">:   </span><span class="s0"># pragma: no cover</span>
+            <span class="s0"># This should never happen, as it should be caught in</span>
+            <span class="s0"># _parse_template_line</span>
+            <span class="s3">raise </span><span class="s1">DistlibException(</span>
+                <span class="s4">'invalid action %r' </span><span class="s1">% action)</span>
+
+    <span class="s0">#</span>
+    <span class="s0"># Private API</span>
+    <span class="s0">#</span>
+
+    <span class="s3">def </span><span class="s1">_parse_directive(self</span><span class="s3">, </span><span class="s1">directive):</span>
+        <span class="s2">&quot;&quot;&quot; 
+        Validate a directive. 
+        :param directive: The directive to validate. 
+        :return: A tuple of action, patterns, thedir, dir_patterns 
+        &quot;&quot;&quot;</span>
+        <span class="s1">words = directive.split()</span>
+        <span class="s3">if </span><span class="s1">len(words) == </span><span class="s5">1 </span><span class="s3">and </span><span class="s1">words[</span><span class="s5">0</span><span class="s1">] </span><span class="s3">not in </span><span class="s1">(</span><span class="s4">'include'</span><span class="s3">, </span><span class="s4">'exclude'</span><span class="s3">,</span>
+                                                <span class="s4">'global-include'</span><span class="s3">,</span>
+                                                <span class="s4">'global-exclude'</span><span class="s3">,</span>
+                                                <span class="s4">'recursive-include'</span><span class="s3">,</span>
+                                                <span class="s4">'recursive-exclude'</span><span class="s3">,</span>
+                                                <span class="s4">'graft'</span><span class="s3">, </span><span class="s4">'prune'</span><span class="s1">):</span>
+            <span class="s0"># no action given, let's use the default 'include'</span>
+            <span class="s1">words.insert(</span><span class="s5">0</span><span class="s3">, </span><span class="s4">'include'</span><span class="s1">)</span>
+
+        <span class="s1">action = words[</span><span class="s5">0</span><span class="s1">]</span>
+        <span class="s1">patterns = thedir = dir_pattern = </span><span class="s3">None</span>
+
+        <span class="s3">if </span><span class="s1">action </span><span class="s3">in </span><span class="s1">(</span><span class="s4">'include'</span><span class="s3">, </span><span class="s4">'exclude'</span><span class="s3">,</span>
+                      <span class="s4">'global-include'</span><span class="s3">, </span><span class="s4">'global-exclude'</span><span class="s1">):</span>
+            <span class="s3">if </span><span class="s1">len(words) &lt; </span><span class="s5">2</span><span class="s1">:</span>
+                <span class="s3">raise </span><span class="s1">DistlibException(</span>
+                    <span class="s4">'%r expects &lt;pattern1&gt; &lt;pattern2&gt; ...' </span><span class="s1">% action)</span>
+
+            <span class="s1">patterns = [convert_path(word) </span><span class="s3">for </span><span class="s1">word </span><span class="s3">in </span><span class="s1">words[</span><span class="s5">1</span><span class="s1">:]]</span>
+
+        <span class="s3">elif </span><span class="s1">action </span><span class="s3">in </span><span class="s1">(</span><span class="s4">'recursive-include'</span><span class="s3">, </span><span class="s4">'recursive-exclude'</span><span class="s1">):</span>
+            <span class="s3">if </span><span class="s1">len(words) &lt; </span><span class="s5">3</span><span class="s1">:</span>
+                <span class="s3">raise </span><span class="s1">DistlibException(</span>
+                    <span class="s4">'%r expects &lt;dir&gt; &lt;pattern1&gt; &lt;pattern2&gt; ...' </span><span class="s1">% action)</span>
+
+            <span class="s1">thedir = convert_path(words[</span><span class="s5">1</span><span class="s1">])</span>
+            <span class="s1">patterns = [convert_path(word) </span><span class="s3">for </span><span class="s1">word </span><span class="s3">in </span><span class="s1">words[</span><span class="s5">2</span><span class="s1">:]]</span>
+
+        <span class="s3">elif </span><span class="s1">action </span><span class="s3">in </span><span class="s1">(</span><span class="s4">'graft'</span><span class="s3">, </span><span class="s4">'prune'</span><span class="s1">):</span>
+            <span class="s3">if </span><span class="s1">len(words) != </span><span class="s5">2</span><span class="s1">:</span>
+                <span class="s3">raise </span><span class="s1">DistlibException(</span>
+                    <span class="s4">'%r expects a single &lt;dir_pattern&gt;' </span><span class="s1">% action)</span>
+
+            <span class="s1">dir_pattern = convert_path(words[</span><span class="s5">1</span><span class="s1">])</span>
+
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s3">raise </span><span class="s1">DistlibException(</span><span class="s4">'unknown action %r' </span><span class="s1">% action)</span>
+
+        <span class="s3">return </span><span class="s1">action</span><span class="s3">, </span><span class="s1">patterns</span><span class="s3">, </span><span class="s1">thedir</span><span class="s3">, </span><span class="s1">dir_pattern</span>
+
+    <span class="s3">def </span><span class="s1">_include_pattern(self</span><span class="s3">, </span><span class="s1">pattern</span><span class="s3">, </span><span class="s1">anchor=</span><span class="s3">True, </span><span class="s1">prefix=</span><span class="s3">None,</span>
+                         <span class="s1">is_regex=</span><span class="s3">False</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot;Select strings (presumably filenames) from 'self.files' that 
+        match 'pattern', a Unix-style wildcard (glob) pattern. 
+ 
+        Patterns are not quite the same as implemented by the 'fnmatch' 
+        module: '*' and '?'  match non-special characters, where &quot;special&quot; 
+        is platform-dependent: slash on Unix; colon, slash, and backslash on 
+        DOS/Windows; and colon on Mac OS. 
+ 
+        If 'anchor' is true (the default), then the pattern match is more 
+        stringent: &quot;*.py&quot; will match &quot;foo.py&quot; but not &quot;foo/bar.py&quot;.  If 
+        'anchor' is false, both of these will match. 
+ 
+        If 'prefix' is supplied, then only filenames starting with 'prefix' 
+        (itself a pattern) and ending with 'pattern', with anything in between 
+        them, will match.  'anchor' is ignored in this case. 
+ 
+        If 'is_regex' is true, 'anchor' and 'prefix' are ignored, and 
+        'pattern' is assumed to be either a string containing a regex or a 
+        regex object -- no translation is done, the regex is just compiled 
+        and used as-is. 
+ 
+        Selected strings will be added to self.files. 
+ 
+        Return True if files are found. 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># XXX docstring lying about what the special chars are?</span>
+        <span class="s1">found = </span><span class="s3">False</span>
+        <span class="s1">pattern_re = self._translate_pattern(pattern</span><span class="s3">, </span><span class="s1">anchor</span><span class="s3">, </span><span class="s1">prefix</span><span class="s3">, </span><span class="s1">is_regex)</span>
+
+        <span class="s0"># delayed loading of allfiles list</span>
+        <span class="s3">if </span><span class="s1">self.allfiles </span><span class="s3">is None</span><span class="s1">:</span>
+            <span class="s1">self.findall()</span>
+
+        <span class="s3">for </span><span class="s1">name </span><span class="s3">in </span><span class="s1">self.allfiles:</span>
+            <span class="s3">if </span><span class="s1">pattern_re.search(name):</span>
+                <span class="s1">self.files.add(name)</span>
+                <span class="s1">found = </span><span class="s3">True</span>
+        <span class="s3">return </span><span class="s1">found</span>
+
+    <span class="s3">def </span><span class="s1">_exclude_pattern(self</span><span class="s3">, </span><span class="s1">pattern</span><span class="s3">, </span><span class="s1">anchor=</span><span class="s3">True, </span><span class="s1">prefix=</span><span class="s3">None,</span>
+                         <span class="s1">is_regex=</span><span class="s3">False</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot;Remove strings (presumably filenames) from 'files' that match 
+        'pattern'. 
+ 
+        Other parameters are the same as for 'include_pattern()', above. 
+        The list 'self.files' is modified in place. Return True if files are 
+        found. 
+ 
+        This API is public to allow e.g. exclusion of SCM subdirs, e.g. when 
+        packaging source distributions 
+        &quot;&quot;&quot;</span>
+        <span class="s1">found = </span><span class="s3">False</span>
+        <span class="s1">pattern_re = self._translate_pattern(pattern</span><span class="s3">, </span><span class="s1">anchor</span><span class="s3">, </span><span class="s1">prefix</span><span class="s3">, </span><span class="s1">is_regex)</span>
+        <span class="s3">for </span><span class="s1">f </span><span class="s3">in </span><span class="s1">list(self.files):</span>
+            <span class="s3">if </span><span class="s1">pattern_re.search(f):</span>
+                <span class="s1">self.files.remove(f)</span>
+                <span class="s1">found = </span><span class="s3">True</span>
+        <span class="s3">return </span><span class="s1">found</span>
+
+    <span class="s3">def </span><span class="s1">_translate_pattern(self</span><span class="s3">, </span><span class="s1">pattern</span><span class="s3">, </span><span class="s1">anchor=</span><span class="s3">True, </span><span class="s1">prefix=</span><span class="s3">None,</span>
+                           <span class="s1">is_regex=</span><span class="s3">False</span><span class="s1">):</span>
+        <span class="s2">&quot;&quot;&quot;Translate a shell-like wildcard pattern to a compiled regular 
+        expression. 
+ 
+        Return the compiled regex.  If 'is_regex' true, 
+        then 'pattern' is directly compiled to a regex (if it's a string) 
+        or just returned as-is (assumes it's a regex object). 
+        &quot;&quot;&quot;</span>
+        <span class="s3">if </span><span class="s1">is_regex:</span>
+            <span class="s3">if </span><span class="s1">isinstance(pattern</span><span class="s3">, </span><span class="s1">str):</span>
+                <span class="s3">return </span><span class="s1">re.compile(pattern)</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s3">return </span><span class="s1">pattern</span>
+
+        <span class="s3">if </span><span class="s1">_PYTHON_VERSION &gt; (</span><span class="s5">3</span><span class="s3">, </span><span class="s5">2</span><span class="s1">):</span>
+            <span class="s0"># ditch start and end characters</span>
+            <span class="s1">start</span><span class="s3">, </span><span class="s1">_</span><span class="s3">, </span><span class="s1">end = self._glob_to_re(</span><span class="s4">'_'</span><span class="s1">).partition(</span><span class="s4">'_'</span><span class="s1">)</span>
+
+        <span class="s3">if </span><span class="s1">pattern:</span>
+            <span class="s1">pattern_re = self._glob_to_re(pattern)</span>
+            <span class="s3">if </span><span class="s1">_PYTHON_VERSION &gt; (</span><span class="s5">3</span><span class="s3">, </span><span class="s5">2</span><span class="s1">):</span>
+                <span class="s3">assert </span><span class="s1">pattern_re.startswith(start) </span><span class="s3">and </span><span class="s1">pattern_re.endswith(end)</span>
+        <span class="s3">else</span><span class="s1">:</span>
+            <span class="s1">pattern_re = </span><span class="s4">''</span>
+
+        <span class="s1">base = re.escape(os.path.join(self.base</span><span class="s3">, </span><span class="s4">''</span><span class="s1">))</span>
+        <span class="s3">if </span><span class="s1">prefix </span><span class="s3">is not None</span><span class="s1">:</span>
+            <span class="s0"># ditch end of pattern character</span>
+            <span class="s3">if </span><span class="s1">_PYTHON_VERSION &lt;= (</span><span class="s5">3</span><span class="s3">, </span><span class="s5">2</span><span class="s1">):</span>
+                <span class="s1">empty_pattern = self._glob_to_re(</span><span class="s4">''</span><span class="s1">)</span>
+                <span class="s1">prefix_re = self._glob_to_re(prefix)[:-len(empty_pattern)]</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">prefix_re = self._glob_to_re(prefix)</span>
+                <span class="s3">assert </span><span class="s1">prefix_re.startswith(start) </span><span class="s3">and </span><span class="s1">prefix_re.endswith(end)</span>
+                <span class="s1">prefix_re = prefix_re[len(start): len(prefix_re) - len(end)]</span>
+            <span class="s1">sep = os.sep</span>
+            <span class="s3">if </span><span class="s1">os.sep == </span><span class="s4">'</span><span class="s3">\\</span><span class="s4">'</span><span class="s1">:</span>
+                <span class="s1">sep = </span><span class="s4">r'\\'</span>
+            <span class="s3">if </span><span class="s1">_PYTHON_VERSION &lt;= (</span><span class="s5">3</span><span class="s3">, </span><span class="s5">2</span><span class="s1">):</span>
+                <span class="s1">pattern_re = </span><span class="s4">'^' </span><span class="s1">+ base + sep.join((prefix_re</span><span class="s3">,</span>
+                                                    <span class="s4">'.*' </span><span class="s1">+ pattern_re))</span>
+            <span class="s3">else</span><span class="s1">:</span>
+                <span class="s1">pattern_re = pattern_re[len(start): len(pattern_re) - len(end)]</span>
+                <span class="s1">pattern_re = </span><span class="s4">r'%s%s%s%s.*%s%s' </span><span class="s1">% (start</span><span class="s3">, </span><span class="s1">base</span><span class="s3">, </span><span class="s1">prefix_re</span><span class="s3">, </span><span class="s1">sep</span><span class="s3">,</span>
+                                                  <span class="s1">pattern_re</span><span class="s3">, </span><span class="s1">end)</span>
+        <span class="s3">else</span><span class="s1">:  </span><span class="s0"># no prefix -- respect anchor flag</span>
+            <span class="s3">if </span><span class="s1">anchor:</span>
+                <span class="s3">if </span><span class="s1">_PYTHON_VERSION &lt;= (</span><span class="s5">3</span><span class="s3">, </span><span class="s5">2</span><span class="s1">):</span>
+                    <span class="s1">pattern_re = </span><span class="s4">'^' </span><span class="s1">+ base + pattern_re</span>
+                <span class="s3">else</span><span class="s1">:</span>
+                    <span class="s1">pattern_re = </span><span class="s4">r'%s%s%s' </span><span class="s1">% (start</span><span class="s3">, </span><span class="s1">base</span><span class="s3">, </span><span class="s1">pattern_re[len(start):])</span>
+
+        <span class="s3">return </span><span class="s1">re.compile(pattern_re)</span>
+
+    <span class="s3">def </span><span class="s1">_glob_to_re(self</span><span class="s3">, </span><span class="s1">pattern):</span>
+        <span class="s2">&quot;&quot;&quot;Translate a shell-like glob pattern to a regular expression. 
+ 
+        Return a string containing the regex.  Differs from 
+        'fnmatch.translate()' in that '*' does not match &quot;special characters&quot; 
+        (which are platform-specific). 
+        &quot;&quot;&quot;</span>
+        <span class="s1">pattern_re = fnmatch.translate(pattern)</span>
+
+        <span class="s0"># '?' and '*' in the glob pattern become '.' and '.*' in the RE, which</span>
+        <span class="s0"># IMHO is wrong -- '?' and '*' aren't supposed to match slash in Unix,</span>
+        <span class="s0"># and by extension they shouldn't match such &quot;special characters&quot; under</span>
+        <span class="s0"># any OS.  So change all non-escaped dots in the RE to match any</span>
+        <span class="s0"># character except the special characters (currently: just os.sep).</span>
+        <span class="s1">sep = os.sep</span>
+        <span class="s3">if </span><span class="s1">os.sep == </span><span class="s4">'</span><span class="s3">\\</span><span class="s4">'</span><span class="s1">:</span>
+            <span class="s0"># we're using a regex to manipulate a regex, so we need</span>
+            <span class="s0"># to escape the backslash twice</span>
+            <span class="s1">sep = </span><span class="s4">r'\\\\'</span>
+        <span class="s1">escaped = </span><span class="s4">r'\1[^%s]' </span><span class="s1">% sep</span>
+        <span class="s1">pattern_re = re.sub(</span><span class="s4">r'((?&lt;!\\)(\\\\)*)\.'</span><span class="s3">, </span><span class="s1">escaped</span><span class="s3">, </span><span class="s1">pattern_re)</span>
+        <span class="s3">return </span><span class="s1">pattern_re</span>
+</pre>
+</body>
+</html>

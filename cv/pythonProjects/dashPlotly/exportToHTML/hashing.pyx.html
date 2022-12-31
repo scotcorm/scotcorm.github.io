@@ -1,0 +1,215 @@
+<html>
+<head>
+<title>hashing.pyx</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+hashing.pyx</font>
+</center></td></tr></table>
+<pre><span class="s0"># Translated from the reference implementation</span>
+<span class="s0"># at https://github.com/veorq/SipHash</span>
+
+<span class="s0">import cython</span>
+
+<span class="s0">from libc.stdlib cimport (</span>
+    <span class="s0">free,</span>
+    <span class="s0">malloc,</span>
+<span class="s0">)</span>
+
+<span class="s0">import numpy as np</span>
+
+<span class="s0">from numpy cimport (</span>
+    <span class="s0">import_array,</span>
+    <span class="s0">ndarray,</span>
+    <span class="s0">uint8_t,</span>
+    <span class="s0">uint32_t,</span>
+    <span class="s0">uint64_t,</span>
+<span class="s0">)</span>
+
+<span class="s0">import_array()</span>
+
+<span class="s0">from pandas._libs.util cimport is_nan</span>
+
+<span class="s0">DEF cROUNDS = 2</span>
+<span class="s0">DEF dROUNDS = 4</span>
+
+
+<span class="s0">@cython.boundscheck(False)</span>
+<span class="s0">def hash_object_array(</span>
+    <span class="s0">ndarray[object] arr, str key, str encoding=&quot;utf8&quot;</span>
+<span class="s0">) -&gt; np.ndarray[np.uint64]:</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Parameters</span>
+    <span class="s0">----------</span>
+    <span class="s0">arr : 1-d object ndarray of objects</span>
+    <span class="s0">key : hash key, must be 16 byte len encoded</span>
+    <span class="s0">encoding : encoding for key &amp; arr, default to 'utf8'</span>
+
+    <span class="s0">Returns</span>
+    <span class="s0">-------</span>
+    <span class="s0">1-d uint64 ndarray of hashes.</span>
+
+    <span class="s0">Raises</span>
+    <span class="s0">------</span>
+    <span class="s0">TypeError</span>
+        <span class="s0">If the array contains mixed types.</span>
+
+    <span class="s0">Notes</span>
+    <span class="s0">-----</span>
+    <span class="s0">Allowed values must be strings, or nulls</span>
+    <span class="s0">mixed array types will raise TypeError.</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">Py_ssize_t i, n</span>
+        <span class="s0">uint64_t[:] result</span>
+        <span class="s0">bytes data, k</span>
+        <span class="s0">uint8_t *kb</span>
+        <span class="s0">uint64_t *lens</span>
+        <span class="s0">char **vecs</span>
+        <span class="s0">char *cdata</span>
+        <span class="s0">object val</span>
+        <span class="s0">list datas = []</span>
+
+    <span class="s0">k = &lt;bytes&gt;key.encode(encoding)</span>
+    <span class="s0">kb = &lt;uint8_t *&gt;k</span>
+    <span class="s0">if len(k) != 16:</span>
+        <span class="s0">raise ValueError(</span>
+            <span class="s0">f&quot;key should be a 16-byte string encoded, got {k} (len {len(k)})&quot;</span>
+        <span class="s0">)</span>
+
+    <span class="s0">n = len(arr)</span>
+
+    <span class="s0"># create an array of bytes</span>
+    <span class="s0">vecs = &lt;char **&gt;malloc(n * sizeof(char *))</span>
+    <span class="s0">lens = &lt;uint64_t*&gt;malloc(n * sizeof(uint64_t))</span>
+
+    <span class="s0">for i in range(n):</span>
+        <span class="s0">val = arr[i]</span>
+        <span class="s0">if isinstance(val, bytes):</span>
+            <span class="s0">data = &lt;bytes&gt;val</span>
+        <span class="s0">elif isinstance(val, str):</span>
+            <span class="s0">data = &lt;bytes&gt;val.encode(encoding)</span>
+        <span class="s0">elif val is None or is_nan(val):</span>
+            <span class="s0"># null, stringify and encode</span>
+            <span class="s0">data = &lt;bytes&gt;str(val).encode(encoding)</span>
+
+        <span class="s0">elif isinstance(val, tuple):</span>
+            <span class="s0"># GH#28969 we could have a tuple, but need to ensure that</span>
+            <span class="s0">#  the tuple entries are themselves hashable before converting</span>
+            <span class="s0">#  to str</span>
+            <span class="s0">hash(val)</span>
+            <span class="s0">data = &lt;bytes&gt;str(val).encode(encoding)</span>
+        <span class="s0">else:</span>
+            <span class="s0">raise TypeError(</span>
+                <span class="s0">f&quot;{val} of type {type(val)} is not a valid type for hashing, &quot;</span>
+                <span class="s0">&quot;must be string or null&quot;</span>
+            <span class="s0">)</span>
+
+        <span class="s0">lens[i] = len(data)</span>
+        <span class="s0">cdata = data</span>
+
+        <span class="s0"># keep the references alive through the end of the</span>
+        <span class="s0"># function</span>
+        <span class="s0">datas.append(data)</span>
+        <span class="s0">vecs[i] = cdata</span>
+
+    <span class="s0">result = np.empty(n, dtype=np.uint64)</span>
+    <span class="s0">with nogil:</span>
+        <span class="s0">for i in range(n):</span>
+            <span class="s0">result[i] = low_level_siphash(&lt;uint8_t *&gt;vecs[i], lens[i], kb)</span>
+
+    <span class="s0">free(vecs)</span>
+    <span class="s0">free(lens)</span>
+    <span class="s0">return result.base  # .base to retrieve underlying np.ndarray</span>
+
+
+<span class="s0">cdef inline uint64_t _rotl(uint64_t x, uint64_t b) nogil:</span>
+    <span class="s0">return (x &lt;&lt; b) | (x &gt;&gt; (64 - b))</span>
+
+
+<span class="s0">cdef inline uint64_t u8to64_le(uint8_t* p) nogil:</span>
+    <span class="s0">return (&lt;uint64_t&gt;p[0] |</span>
+            <span class="s0">&lt;uint64_t&gt;p[1] &lt;&lt; 8 |</span>
+            <span class="s0">&lt;uint64_t&gt;p[2] &lt;&lt; 16 |</span>
+            <span class="s0">&lt;uint64_t&gt;p[3] &lt;&lt; 24 |</span>
+            <span class="s0">&lt;uint64_t&gt;p[4] &lt;&lt; 32 |</span>
+            <span class="s0">&lt;uint64_t&gt;p[5] &lt;&lt; 40 |</span>
+            <span class="s0">&lt;uint64_t&gt;p[6] &lt;&lt; 48 |</span>
+            <span class="s0">&lt;uint64_t&gt;p[7] &lt;&lt; 56)</span>
+
+
+<span class="s0">cdef inline void _sipround(uint64_t* v0, uint64_t* v1,</span>
+                           <span class="s0">uint64_t* v2, uint64_t* v3) nogil:</span>
+    <span class="s0">v0[0] += v1[0]</span>
+    <span class="s0">v1[0] = _rotl(v1[0], 13)</span>
+    <span class="s0">v1[0] ^= v0[0]</span>
+    <span class="s0">v0[0] = _rotl(v0[0], 32)</span>
+    <span class="s0">v2[0] += v3[0]</span>
+    <span class="s0">v3[0] = _rotl(v3[0], 16)</span>
+    <span class="s0">v3[0] ^= v2[0]</span>
+    <span class="s0">v0[0] += v3[0]</span>
+    <span class="s0">v3[0] = _rotl(v3[0], 21)</span>
+    <span class="s0">v3[0] ^= v0[0]</span>
+    <span class="s0">v2[0] += v1[0]</span>
+    <span class="s0">v1[0] = _rotl(v1[0], 17)</span>
+    <span class="s0">v1[0] ^= v2[0]</span>
+    <span class="s0">v2[0] = _rotl(v2[0], 32)</span>
+
+
+<span class="s0">@cython.cdivision(True)</span>
+<span class="s0">cdef uint64_t low_level_siphash(uint8_t* data, size_t datalen,</span>
+                                <span class="s0">uint8_t* key) nogil:</span>
+    <span class="s0">cdef uint64_t v0 = 0x736f6d6570736575ULL</span>
+    <span class="s0">cdef uint64_t v1 = 0x646f72616e646f6dULL</span>
+    <span class="s0">cdef uint64_t v2 = 0x6c7967656e657261ULL</span>
+    <span class="s0">cdef uint64_t v3 = 0x7465646279746573ULL</span>
+    <span class="s0">cdef uint64_t b</span>
+    <span class="s0">cdef uint64_t k0 = u8to64_le(key)</span>
+    <span class="s0">cdef uint64_t k1 = u8to64_le(key + 8)</span>
+    <span class="s0">cdef uint64_t m</span>
+    <span class="s0">cdef int i</span>
+    <span class="s0">cdef uint8_t* end = data + datalen - (datalen % sizeof(uint64_t))</span>
+    <span class="s0">cdef int left = datalen &amp; 7</span>
+    <span class="s0">cdef int left_byte</span>
+
+    <span class="s0">b = (&lt;uint64_t&gt;datalen) &lt;&lt; 56</span>
+    <span class="s0">v3 ^= k1</span>
+    <span class="s0">v2 ^= k0</span>
+    <span class="s0">v1 ^= k1</span>
+    <span class="s0">v0 ^= k0</span>
+
+    <span class="s0">while (data != end):</span>
+        <span class="s0">m = u8to64_le(data)</span>
+        <span class="s0">v3 ^= m</span>
+        <span class="s0">for i in range(cROUNDS):</span>
+            <span class="s0">_sipround(&amp;v0, &amp;v1, &amp;v2, &amp;v3)</span>
+        <span class="s0">v0 ^= m</span>
+
+        <span class="s0">data += sizeof(uint64_t)</span>
+
+    <span class="s0">for i in range(left-1, -1, -1):</span>
+        <span class="s0">b |= (&lt;uint64_t&gt;data[i]) &lt;&lt; (i * 8)</span>
+
+    <span class="s0">v3 ^= b</span>
+
+    <span class="s0">for i in range(cROUNDS):</span>
+        <span class="s0">_sipround(&amp;v0, &amp;v1, &amp;v2, &amp;v3)</span>
+
+    <span class="s0">v0 ^= b</span>
+    <span class="s0">v2 ^= 0xff</span>
+
+    <span class="s0">for i in range(dROUNDS):</span>
+        <span class="s0">_sipround(&amp;v0, &amp;v1, &amp;v2, &amp;v3)</span>
+
+    <span class="s0">b = v0 ^ v1 ^ v2 ^ v3</span>
+
+    <span class="s0">return b</span>
+</pre>
+</body>
+</html>

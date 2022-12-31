@@ -1,0 +1,165 @@
+<html>
+<head>
+<title>hashes.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #6a8759;}
+.s4 { color: #629755; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+hashes.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">hashlib</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">TYPE_CHECKING</span><span class="s0">, </span><span class="s1">BinaryIO</span><span class="s0">, </span><span class="s1">Dict</span><span class="s0">, </span><span class="s1">Iterator</span><span class="s0">, </span><span class="s1">List</span>
+
+<span class="s0">from </span><span class="s1">pip._internal.exceptions </span><span class="s0">import </span><span class="s1">HashMismatch</span><span class="s0">, </span><span class="s1">HashMissing</span><span class="s0">, </span><span class="s1">InstallationError</span>
+<span class="s0">from </span><span class="s1">pip._internal.utils.misc </span><span class="s0">import </span><span class="s1">read_chunks</span>
+
+<span class="s0">if </span><span class="s1">TYPE_CHECKING:</span>
+    <span class="s0">from </span><span class="s1">hashlib </span><span class="s0">import </span><span class="s1">_Hash</span>
+
+    <span class="s2"># NoReturn introduced in 3.6.2; imported only for type checking to maintain</span>
+    <span class="s2"># pip compatibility with older patch versions of Python 3.6</span>
+    <span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">NoReturn</span>
+
+
+<span class="s2"># The recommended hash algo of the moment. Change this whenever the state of</span>
+<span class="s2"># the art changes; it won't hurt backward compatibility.</span>
+<span class="s1">FAVORITE_HASH = </span><span class="s3">&quot;sha256&quot;</span>
+
+
+<span class="s2"># Names of hashlib algorithms allowed by the --hash option and ``pip hash``</span>
+<span class="s2"># Currently, those are the ones at least as collision-resistant as sha256.</span>
+<span class="s1">STRONG_HASHES = [</span><span class="s3">&quot;sha256&quot;</span><span class="s0">, </span><span class="s3">&quot;sha384&quot;</span><span class="s0">, </span><span class="s3">&quot;sha512&quot;</span><span class="s1">]</span>
+
+
+<span class="s0">class </span><span class="s1">Hashes:</span>
+    <span class="s4">&quot;&quot;&quot;A wrapper that builds multiple hashes at once and checks them against 
+    known-good values 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">hashes: Dict[str</span><span class="s0">, </span><span class="s1">List[str]] = </span><span class="s0">None</span><span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s4">&quot;&quot;&quot; 
+        :param hashes: A dict of algorithm names pointing to lists of allowed 
+            hex digests 
+        &quot;&quot;&quot;</span>
+        <span class="s1">allowed = {}</span>
+        <span class="s0">if </span><span class="s1">hashes </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s0">for </span><span class="s1">alg</span><span class="s0">, </span><span class="s1">keys </span><span class="s0">in </span><span class="s1">hashes.items():</span>
+                <span class="s2"># Make sure values are always sorted (to ease equality checks)</span>
+                <span class="s1">allowed[alg] = sorted(keys)</span>
+        <span class="s1">self._allowed = allowed</span>
+
+    <span class="s0">def </span><span class="s1">__and__(self</span><span class="s0">, </span><span class="s1">other: </span><span class="s3">&quot;Hashes&quot;</span><span class="s1">) -&gt; </span><span class="s3">&quot;Hashes&quot;</span><span class="s1">:</span>
+        <span class="s0">if not </span><span class="s1">isinstance(other</span><span class="s0">, </span><span class="s1">Hashes):</span>
+            <span class="s0">return </span><span class="s1">NotImplemented</span>
+
+        <span class="s2"># If either of the Hashes object is entirely empty (i.e. no hash</span>
+        <span class="s2"># specified at all), all hashes from the other object are allowed.</span>
+        <span class="s0">if not </span><span class="s1">other:</span>
+            <span class="s0">return </span><span class="s1">self</span>
+        <span class="s0">if not </span><span class="s1">self:</span>
+            <span class="s0">return </span><span class="s1">other</span>
+
+        <span class="s2"># Otherwise only hashes that present in both objects are allowed.</span>
+        <span class="s1">new = {}</span>
+        <span class="s0">for </span><span class="s1">alg</span><span class="s0">, </span><span class="s1">values </span><span class="s0">in </span><span class="s1">other._allowed.items():</span>
+            <span class="s0">if </span><span class="s1">alg </span><span class="s0">not in </span><span class="s1">self._allowed:</span>
+                <span class="s0">continue</span>
+            <span class="s1">new[alg] = [v </span><span class="s0">for </span><span class="s1">v </span><span class="s0">in </span><span class="s1">values </span><span class="s0">if </span><span class="s1">v </span><span class="s0">in </span><span class="s1">self._allowed[alg]]</span>
+        <span class="s0">return </span><span class="s1">Hashes(new)</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">digest_count(self) -&gt; int:</span>
+        <span class="s0">return </span><span class="s1">sum(len(digests) </span><span class="s0">for </span><span class="s1">digests </span><span class="s0">in </span><span class="s1">self._allowed.values())</span>
+
+    <span class="s0">def </span><span class="s1">is_hash_allowed(self</span><span class="s0">, </span><span class="s1">hash_name: str</span><span class="s0">, </span><span class="s1">hex_digest: str) -&gt; bool:</span>
+        <span class="s4">&quot;&quot;&quot;Return whether the given hex digest is allowed.&quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">hex_digest </span><span class="s0">in </span><span class="s1">self._allowed.get(hash_name</span><span class="s0">, </span><span class="s1">[])</span>
+
+    <span class="s0">def </span><span class="s1">check_against_chunks(self</span><span class="s0">, </span><span class="s1">chunks: Iterator[bytes]) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s4">&quot;&quot;&quot;Check good hashes against ones built from iterable of chunks of 
+        data. 
+ 
+        Raise HashMismatch if none match. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s1">gots = {}</span>
+        <span class="s0">for </span><span class="s1">hash_name </span><span class="s0">in </span><span class="s1">self._allowed.keys():</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">gots[hash_name] = hashlib.new(hash_name)</span>
+            <span class="s0">except </span><span class="s1">(ValueError</span><span class="s0">, </span><span class="s1">TypeError):</span>
+                <span class="s0">raise </span><span class="s1">InstallationError(</span><span class="s3">f&quot;Unknown hash name: </span><span class="s0">{</span><span class="s1">hash_name</span><span class="s0">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+
+        <span class="s0">for </span><span class="s1">chunk </span><span class="s0">in </span><span class="s1">chunks:</span>
+            <span class="s0">for </span><span class="s1">hash </span><span class="s0">in </span><span class="s1">gots.values():</span>
+                <span class="s1">hash.update(chunk)</span>
+
+        <span class="s0">for </span><span class="s1">hash_name</span><span class="s0">, </span><span class="s1">got </span><span class="s0">in </span><span class="s1">gots.items():</span>
+            <span class="s0">if </span><span class="s1">got.hexdigest() </span><span class="s0">in </span><span class="s1">self._allowed[hash_name]:</span>
+                <span class="s0">return</span>
+        <span class="s1">self._raise(gots)</span>
+
+    <span class="s0">def </span><span class="s1">_raise(self</span><span class="s0">, </span><span class="s1">gots: Dict[str</span><span class="s0">, </span><span class="s3">&quot;_Hash&quot;</span><span class="s1">]) -&gt; </span><span class="s3">&quot;NoReturn&quot;</span><span class="s1">:</span>
+        <span class="s0">raise </span><span class="s1">HashMismatch(self._allowed</span><span class="s0">, </span><span class="s1">gots)</span>
+
+    <span class="s0">def </span><span class="s1">check_against_file(self</span><span class="s0">, </span><span class="s1">file: BinaryIO) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s4">&quot;&quot;&quot;Check good hashes against a file-like object 
+ 
+        Raise HashMismatch if none match. 
+ 
+        &quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">self.check_against_chunks(read_chunks(file))</span>
+
+    <span class="s0">def </span><span class="s1">check_against_path(self</span><span class="s0">, </span><span class="s1">path: str) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s0">with </span><span class="s1">open(path</span><span class="s0">, </span><span class="s3">&quot;rb&quot;</span><span class="s1">) </span><span class="s0">as </span><span class="s1">file:</span>
+            <span class="s0">return </span><span class="s1">self.check_against_file(file)</span>
+
+    <span class="s0">def </span><span class="s1">__bool__(self) -&gt; bool:</span>
+        <span class="s4">&quot;&quot;&quot;Return whether I know any known-good hashes.&quot;&quot;&quot;</span>
+        <span class="s0">return </span><span class="s1">bool(self._allowed)</span>
+
+    <span class="s0">def </span><span class="s1">__eq__(self</span><span class="s0">, </span><span class="s1">other: object) -&gt; bool:</span>
+        <span class="s0">if not </span><span class="s1">isinstance(other</span><span class="s0">, </span><span class="s1">Hashes):</span>
+            <span class="s0">return </span><span class="s1">NotImplemented</span>
+        <span class="s0">return </span><span class="s1">self._allowed == other._allowed</span>
+
+    <span class="s0">def </span><span class="s1">__hash__(self) -&gt; int:</span>
+        <span class="s0">return </span><span class="s1">hash(</span>
+            <span class="s3">&quot;,&quot;</span><span class="s1">.join(</span>
+                <span class="s1">sorted(</span>
+                    <span class="s3">&quot;:&quot;</span><span class="s1">.join((alg</span><span class="s0">, </span><span class="s1">digest))</span>
+                    <span class="s0">for </span><span class="s1">alg</span><span class="s0">, </span><span class="s1">digest_list </span><span class="s0">in </span><span class="s1">self._allowed.items()</span>
+                    <span class="s0">for </span><span class="s1">digest </span><span class="s0">in </span><span class="s1">digest_list</span>
+                <span class="s1">)</span>
+            <span class="s1">)</span>
+        <span class="s1">)</span>
+
+
+<span class="s0">class </span><span class="s1">MissingHashes(Hashes):</span>
+    <span class="s4">&quot;&quot;&quot;A workalike for Hashes used when we're missing a hash for a requirement 
+ 
+    It computes the actual hash of the requirement and raises a HashMissing 
+    exception showing it to the user. 
+ 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s4">&quot;&quot;&quot;Don't offer the ``hashes`` kwarg.&quot;&quot;&quot;</span>
+        <span class="s2"># Pass our favorite hash in to generate a &quot;gotten hash&quot;. With the</span>
+        <span class="s2"># empty list, it will never match, so an error will always raise.</span>
+        <span class="s1">super().__init__(hashes={FAVORITE_HASH: []})</span>
+
+    <span class="s0">def </span><span class="s1">_raise(self</span><span class="s0">, </span><span class="s1">gots: Dict[str</span><span class="s0">, </span><span class="s3">&quot;_Hash&quot;</span><span class="s1">]) -&gt; </span><span class="s3">&quot;NoReturn&quot;</span><span class="s1">:</span>
+        <span class="s0">raise </span><span class="s1">HashMissing(gots[FAVORITE_HASH].hexdigest())</span>
+</pre>
+</body>
+</html>

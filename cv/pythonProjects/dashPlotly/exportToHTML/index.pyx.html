@@ -1,0 +1,816 @@
+<html>
+<head>
+<title>index.pyx</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+index.pyx</font>
+</center></td></tr></table>
+<pre><span class="s0">cimport cython</span>
+
+<span class="s0">import numpy as np</span>
+
+<span class="s0">cimport numpy as cnp</span>
+<span class="s0">from numpy cimport (</span>
+    <span class="s0">float32_t,</span>
+    <span class="s0">float64_t,</span>
+    <span class="s0">int8_t,</span>
+    <span class="s0">int16_t,</span>
+    <span class="s0">int32_t,</span>
+    <span class="s0">int64_t,</span>
+    <span class="s0">intp_t,</span>
+    <span class="s0">ndarray,</span>
+    <span class="s0">uint8_t,</span>
+    <span class="s0">uint16_t,</span>
+    <span class="s0">uint32_t,</span>
+    <span class="s0">uint64_t,</span>
+<span class="s0">)</span>
+
+<span class="s0">cnp.import_array()</span>
+
+
+<span class="s0">from pandas._libs cimport util</span>
+<span class="s0">from pandas._libs.hashtable cimport HashTable</span>
+<span class="s0">from pandas._libs.tslibs.nattype cimport c_NaT as NaT</span>
+<span class="s0">from pandas._libs.tslibs.period cimport is_period_object</span>
+<span class="s0">from pandas._libs.tslibs.timedeltas cimport _Timedelta</span>
+<span class="s0">from pandas._libs.tslibs.timestamps cimport _Timestamp</span>
+
+<span class="s0">from pandas._libs import (</span>
+    <span class="s0">algos,</span>
+    <span class="s0">hashtable as _hash,</span>
+<span class="s0">)</span>
+
+<span class="s0">from pandas._libs.lib cimport eq_NA_compat</span>
+<span class="s0">from pandas._libs.missing cimport (</span>
+    <span class="s0">C_NA as NA,</span>
+    <span class="s0">checknull,</span>
+    <span class="s0">is_matching_na,</span>
+<span class="s0">)</span>
+
+
+<span class="s0">cdef inline bint is_definitely_invalid_key(object val):</span>
+    <span class="s0">try:</span>
+        <span class="s0">hash(val)</span>
+    <span class="s0">except TypeError:</span>
+        <span class="s0">return True</span>
+    <span class="s0">return False</span>
+
+
+<span class="s0">cdef ndarray _get_bool_indexer(ndarray values, object val):</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Return a ndarray[bool] of locations where val matches self.values.</span>
+
+    <span class="s0">If val is not NA, this is equivalent to `self.values == val`</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0"># Caller is responsible for ensuring _check_type has already been called</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">ndarray[uint8_t, ndim=1, cast=True] indexer</span>
+        <span class="s0">Py_ssize_t i</span>
+        <span class="s0">object item</span>
+
+    <span class="s0">if values.descr.type_num == cnp.NPY_OBJECT:</span>
+        <span class="s0"># i.e. values.dtype == object</span>
+        <span class="s0">if not checknull(val):</span>
+            <span class="s0">indexer = eq_NA_compat(values, val)</span>
+
+        <span class="s0">else:</span>
+            <span class="s0"># We need to check for _matching_ NA values</span>
+            <span class="s0">indexer = np.empty(len(values), dtype=np.uint8)</span>
+
+            <span class="s0">for i in range(len(values)):</span>
+                <span class="s0">item = values[i]</span>
+                <span class="s0">indexer[i] = is_matching_na(item, val)</span>
+
+    <span class="s0">else:</span>
+        <span class="s0">if util.is_nan(val):</span>
+            <span class="s0">indexer = np.isnan(values)</span>
+        <span class="s0">else:</span>
+            <span class="s0">indexer = values == val</span>
+
+    <span class="s0">return indexer.view(bool)</span>
+
+
+<span class="s0"># Don't populate hash tables in monotonic indexes larger than this</span>
+<span class="s0">_SIZE_CUTOFF = 1_000_000</span>
+
+
+<span class="s0">cdef _unpack_bool_indexer(ndarray[uint8_t, ndim=1, cast=True] indexer, object val):</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Possibly unpack a boolean mask to a single indexer.</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0"># Returns ndarray[bool] or int</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">ndarray[intp_t, ndim=1] found</span>
+        <span class="s0">int count</span>
+
+    <span class="s0">found = np.where(indexer)[0]</span>
+    <span class="s0">count = len(found)</span>
+
+    <span class="s0">if count &gt; 1:</span>
+        <span class="s0">return indexer</span>
+    <span class="s0">if count == 1:</span>
+        <span class="s0">return int(found[0])</span>
+
+    <span class="s0">raise KeyError(val)</span>
+
+
+<span class="s0">@cython.freelist(32)</span>
+<span class="s0">cdef class IndexEngine:</span>
+
+    <span class="s0">cdef readonly:</span>
+        <span class="s0">ndarray values</span>
+        <span class="s0">HashTable mapping</span>
+        <span class="s0">bint over_size_threshold</span>
+
+    <span class="s0">cdef:</span>
+        <span class="s0">bint unique, monotonic_inc, monotonic_dec</span>
+        <span class="s0">bint need_monotonic_check, need_unique_check</span>
+        <span class="s0">object _np_type</span>
+
+    <span class="s0">def __init__(self, ndarray values):</span>
+        <span class="s0">self.values = values</span>
+
+        <span class="s0">self.over_size_threshold = len(values) &gt;= _SIZE_CUTOFF</span>
+        <span class="s0">self.clear_mapping()</span>
+        <span class="s0">self._np_type = values.dtype.type</span>
+
+    <span class="s0">def __contains__(self, val: object) -&gt; bool:</span>
+        <span class="s0"># We assume before we get here:</span>
+        <span class="s0">#  - val is hashable</span>
+        <span class="s0">self._ensure_mapping_populated()</span>
+        <span class="s0">return val in self.mapping</span>
+
+    <span class="s0">cpdef get_loc(self, object val):</span>
+        <span class="s0"># -&gt; Py_ssize_t | slice | ndarray[bool]</span>
+        <span class="s0">cdef:</span>
+            <span class="s0">Py_ssize_t loc</span>
+
+        <span class="s0">if is_definitely_invalid_key(val):</span>
+            <span class="s0">raise TypeError(f&quot;'{val}' is an invalid key&quot;)</span>
+
+        <span class="s0">self._check_type(val)</span>
+
+        <span class="s0">if self.over_size_threshold and self.is_monotonic_increasing:</span>
+            <span class="s0">if not self.is_unique:</span>
+                <span class="s0">return self._get_loc_duplicates(val)</span>
+            <span class="s0">values = self.values</span>
+
+            <span class="s0">loc = self._searchsorted_left(val)</span>
+            <span class="s0">if loc &gt;= len(values):</span>
+                <span class="s0">raise KeyError(val)</span>
+            <span class="s0">if values[loc] != val:</span>
+                <span class="s0">raise KeyError(val)</span>
+            <span class="s0">return loc</span>
+
+        <span class="s0">self._ensure_mapping_populated()</span>
+        <span class="s0">if not self.unique:</span>
+            <span class="s0">return self._get_loc_duplicates(val)</span>
+
+        <span class="s0">try:</span>
+            <span class="s0">return self.mapping.get_item(val)</span>
+        <span class="s0">except OverflowError as err:</span>
+            <span class="s0"># GH#41775 OverflowError e.g. if we are uint64 and val is -1</span>
+            <span class="s0">#  or if we are int64 and value is np.iinfo(np.int64).max+1</span>
+            <span class="s0">#  (the uint64 with -1 case should actually be excluded by _check_type)</span>
+            <span class="s0">raise KeyError(val) from err</span>
+
+    <span class="s0">cdef Py_ssize_t _searchsorted_left(self, val) except? -1:</span>
+        <span class="s0">&quot;&quot;&quot;</span>
+        <span class="s0">See ObjectEngine._searchsorted_left.__doc__.</span>
+        <span class="s0">&quot;&quot;&quot;</span>
+        <span class="s0"># Caller is responsible for ensuring _check_type has already been called</span>
+        <span class="s0">loc = self.values.searchsorted(self._np_type(val), side=&quot;left&quot;)</span>
+        <span class="s0">return loc</span>
+
+    <span class="s0">cdef inline _get_loc_duplicates(self, object val):</span>
+        <span class="s0"># -&gt; Py_ssize_t | slice | ndarray[bool]</span>
+        <span class="s0">cdef:</span>
+            <span class="s0">Py_ssize_t diff, left, right</span>
+
+        <span class="s0">if self.is_monotonic_increasing:</span>
+            <span class="s0">values = self.values</span>
+            <span class="s0">try:</span>
+                <span class="s0">left = values.searchsorted(val, side='left')</span>
+                <span class="s0">right = values.searchsorted(val, side='right')</span>
+            <span class="s0">except TypeError:</span>
+                <span class="s0"># e.g. GH#29189 get_loc(None) with a Float64Index</span>
+                <span class="s0">#  2021-09-29 Now only reached for object-dtype</span>
+                <span class="s0">raise KeyError(val)</span>
+
+            <span class="s0">diff = right - left</span>
+            <span class="s0">if diff == 0:</span>
+                <span class="s0">raise KeyError(val)</span>
+            <span class="s0">elif diff == 1:</span>
+                <span class="s0">return left</span>
+            <span class="s0">else:</span>
+                <span class="s0">return slice(left, right)</span>
+
+        <span class="s0">return self._maybe_get_bool_indexer(val)</span>
+
+    <span class="s0">cdef _maybe_get_bool_indexer(self, object val):</span>
+        <span class="s0"># Returns ndarray[bool] or int</span>
+        <span class="s0">cdef:</span>
+            <span class="s0">ndarray[uint8_t, ndim=1, cast=True] indexer</span>
+
+        <span class="s0">indexer = _get_bool_indexer(self.values, val)</span>
+        <span class="s0">return _unpack_bool_indexer(indexer, val)</span>
+
+    <span class="s0">def sizeof(self, deep: bool = False) -&gt; int:</span>
+        <span class="s0">&quot;&quot;&quot; return the sizeof our mapping &quot;&quot;&quot;</span>
+        <span class="s0">if not self.is_mapping_populated:</span>
+            <span class="s0">return 0</span>
+        <span class="s0">return self.mapping.sizeof(deep=deep)</span>
+
+    <span class="s0">def __sizeof__(self) -&gt; int:</span>
+        <span class="s0">return self.sizeof()</span>
+
+    <span class="s0">@property</span>
+    <span class="s0">def is_unique(self) -&gt; bool:</span>
+        <span class="s0">if self.need_unique_check:</span>
+            <span class="s0">self._do_unique_check()</span>
+
+        <span class="s0">return self.unique == 1</span>
+
+    <span class="s0">cdef inline _do_unique_check(self):</span>
+
+        <span class="s0"># this de-facto the same</span>
+        <span class="s0">self._ensure_mapping_populated()</span>
+
+    <span class="s0">@property</span>
+    <span class="s0">def is_monotonic_increasing(self) -&gt; bool:</span>
+        <span class="s0">if self.need_monotonic_check:</span>
+            <span class="s0">self._do_monotonic_check()</span>
+
+        <span class="s0">return self.monotonic_inc == 1</span>
+
+    <span class="s0">@property</span>
+    <span class="s0">def is_monotonic_decreasing(self) -&gt; bool:</span>
+        <span class="s0">if self.need_monotonic_check:</span>
+            <span class="s0">self._do_monotonic_check()</span>
+
+        <span class="s0">return self.monotonic_dec == 1</span>
+
+    <span class="s0">cdef inline _do_monotonic_check(self):</span>
+        <span class="s0">cdef:</span>
+            <span class="s0">bint is_unique</span>
+        <span class="s0">try:</span>
+            <span class="s0">values = self.values</span>
+            <span class="s0">self.monotonic_inc, self.monotonic_dec, is_unique = \</span>
+                <span class="s0">self._call_monotonic(values)</span>
+        <span class="s0">except TypeError:</span>
+            <span class="s0">self.monotonic_inc = 0</span>
+            <span class="s0">self.monotonic_dec = 0</span>
+            <span class="s0">is_unique = 0</span>
+
+        <span class="s0">self.need_monotonic_check = 0</span>
+
+        <span class="s0"># we can only be sure of uniqueness if is_unique=1</span>
+        <span class="s0">if is_unique:</span>
+            <span class="s0">self.unique = 1</span>
+            <span class="s0">self.need_unique_check = 0</span>
+
+    <span class="s0">cdef _call_monotonic(self, values):</span>
+        <span class="s0">return algos.is_monotonic(values, timelike=False)</span>
+
+    <span class="s0">cdef _make_hash_table(self, Py_ssize_t n):</span>
+        <span class="s0">raise NotImplementedError  # pragma: no cover</span>
+
+    <span class="s0">cdef _check_type(self, object val):</span>
+        <span class="s0">hash(val)</span>
+
+    <span class="s0">@property</span>
+    <span class="s0">def is_mapping_populated(self) -&gt; bool:</span>
+        <span class="s0">return self.mapping is not None</span>
+
+    <span class="s0">cdef inline _ensure_mapping_populated(self):</span>
+        <span class="s0"># this populates the mapping</span>
+        <span class="s0"># if its not already populated</span>
+        <span class="s0"># also satisfies the need_unique_check</span>
+
+        <span class="s0">if not self.is_mapping_populated:</span>
+
+            <span class="s0">values = self.values</span>
+            <span class="s0">self.mapping = self._make_hash_table(len(values))</span>
+            <span class="s0">self.mapping.map_locations(values)</span>
+
+            <span class="s0">if len(self.mapping) == len(values):</span>
+                <span class="s0">self.unique = 1</span>
+
+        <span class="s0">self.need_unique_check = 0</span>
+
+    <span class="s0">def clear_mapping(self):</span>
+        <span class="s0">self.mapping = None</span>
+        <span class="s0">self.need_monotonic_check = 1</span>
+        <span class="s0">self.need_unique_check = 1</span>
+
+        <span class="s0">self.unique = 0</span>
+        <span class="s0">self.monotonic_inc = 0</span>
+        <span class="s0">self.monotonic_dec = 0</span>
+
+    <span class="s0">def get_indexer(self, ndarray values) -&gt; np.ndarray:</span>
+        <span class="s0">self._ensure_mapping_populated()</span>
+        <span class="s0">return self.mapping.lookup(values)</span>
+
+    <span class="s0">def get_indexer_non_unique(self, ndarray targets):</span>
+        <span class="s0">&quot;&quot;&quot;</span>
+        <span class="s0">Return an indexer suitable for taking from a non unique index</span>
+        <span class="s0">return the labels in the same order as the target</span>
+        <span class="s0">and a missing indexer into the targets (which correspond</span>
+        <span class="s0">to the -1 indices in the results</span>
+
+        <span class="s0">Returns</span>
+        <span class="s0">-------</span>
+        <span class="s0">indexer : np.ndarray[np.intp]</span>
+        <span class="s0">missing : np.ndarray[np.intp]</span>
+        <span class="s0">&quot;&quot;&quot;</span>
+        <span class="s0">cdef:</span>
+            <span class="s0">ndarray values</span>
+            <span class="s0">ndarray[intp_t] result, missing</span>
+            <span class="s0">set stargets, remaining_stargets, found_nas</span>
+            <span class="s0">dict d = {}</span>
+            <span class="s0">object val</span>
+            <span class="s0">Py_ssize_t count = 0, count_missing = 0</span>
+            <span class="s0">Py_ssize_t i, j, n, n_t, n_alloc, start, end</span>
+            <span class="s0">bint check_na_values = False</span>
+
+        <span class="s0">values = self.values</span>
+        <span class="s0">stargets = set(targets)</span>
+
+        <span class="s0">n = len(values)</span>
+        <span class="s0">n_t = len(targets)</span>
+        <span class="s0">if n &gt; 10_000:</span>
+            <span class="s0">n_alloc = 10_000</span>
+        <span class="s0">else:</span>
+            <span class="s0">n_alloc = n</span>
+
+        <span class="s0">result = np.empty(n_alloc, dtype=np.intp)</span>
+        <span class="s0">missing = np.empty(n_t, dtype=np.intp)</span>
+
+        <span class="s0"># map each starget to its position in the index</span>
+        <span class="s0">if (</span>
+                <span class="s0">stargets and</span>
+                <span class="s0">len(stargets) &lt; 5 and</span>
+                <span class="s0">not any([checknull(t) for t in stargets]) and</span>
+                <span class="s0">self.is_monotonic_increasing</span>
+        <span class="s0">):</span>
+            <span class="s0"># if there are few enough stargets and the index is monotonically</span>
+            <span class="s0"># increasing, then use binary search for each starget</span>
+            <span class="s0">remaining_stargets = set()</span>
+            <span class="s0">for starget in stargets:</span>
+                <span class="s0">try:</span>
+                    <span class="s0">start = values.searchsorted(starget, side='left')</span>
+                    <span class="s0">end = values.searchsorted(starget, side='right')</span>
+                <span class="s0">except TypeError:  # e.g. if we tried to search for string in int array</span>
+                    <span class="s0">remaining_stargets.add(starget)</span>
+                <span class="s0">else:</span>
+                    <span class="s0">if start != end:</span>
+                        <span class="s0">d[starget] = list(range(start, end))</span>
+
+            <span class="s0">stargets = remaining_stargets</span>
+
+        <span class="s0">if stargets:</span>
+            <span class="s0"># otherwise, map by iterating through all items in the index</span>
+
+            <span class="s0"># short-circuit na check</span>
+            <span class="s0">if values.dtype == object:</span>
+                <span class="s0">check_na_values = True</span>
+                <span class="s0"># keep track of nas in values</span>
+                <span class="s0">found_nas = set()</span>
+
+            <span class="s0">for i in range(n):</span>
+                <span class="s0">val = values[i]</span>
+
+                <span class="s0"># GH#43870</span>
+                <span class="s0"># handle lookup for nas</span>
+                <span class="s0"># (ie. np.nan, float(&quot;NaN&quot;), Decimal(&quot;NaN&quot;), dt64nat, td64nat)</span>
+                <span class="s0">if check_na_values and checknull(val):</span>
+                    <span class="s0">match = [na for na in found_nas if is_matching_na(val, na)]</span>
+
+                    <span class="s0"># matching na not found</span>
+                    <span class="s0">if not len(match):</span>
+                        <span class="s0">found_nas.add(val)</span>
+
+                        <span class="s0"># add na to stargets to utilize `in` for stargets/d lookup</span>
+                        <span class="s0">match_stargets = [</span>
+                            <span class="s0">x for x in stargets if is_matching_na(val, x)</span>
+                        <span class="s0">]</span>
+
+                        <span class="s0">if len(match_stargets):</span>
+                            <span class="s0"># add our 'standardized' na</span>
+                            <span class="s0">stargets.add(val)</span>
+
+                    <span class="s0"># matching na found</span>
+                    <span class="s0">else:</span>
+                        <span class="s0">assert len(match) == 1</span>
+                        <span class="s0">val = match[0]</span>
+
+                <span class="s0">if val in stargets:</span>
+                    <span class="s0">if val not in d:</span>
+                        <span class="s0">d[val] = []</span>
+                    <span class="s0">d[val].append(i)</span>
+
+        <span class="s0">for i in range(n_t):</span>
+            <span class="s0">val = targets[i]</span>
+
+            <span class="s0"># ensure there are nas in values before looking for a matching na</span>
+            <span class="s0">if check_na_values and checknull(val):</span>
+                <span class="s0">match = [na for na in found_nas if is_matching_na(val, na)]</span>
+                <span class="s0">if len(match):</span>
+                    <span class="s0">assert len(match) == 1</span>
+                    <span class="s0">val = match[0]</span>
+
+            <span class="s0"># found</span>
+            <span class="s0">if val in d:</span>
+                <span class="s0">key = val</span>
+
+                <span class="s0">for j in d[key]:</span>
+
+                    <span class="s0"># realloc if needed</span>
+                    <span class="s0">if count &gt;= n_alloc:</span>
+                        <span class="s0">n_alloc += 10_000</span>
+                        <span class="s0">result = np.resize(result, n_alloc)</span>
+
+                    <span class="s0">result[count] = j</span>
+                    <span class="s0">count += 1</span>
+
+            <span class="s0"># value not found</span>
+            <span class="s0">else:</span>
+
+                <span class="s0">if count &gt;= n_alloc:</span>
+                    <span class="s0">n_alloc += 10_000</span>
+                    <span class="s0">result = np.resize(result, n_alloc)</span>
+                <span class="s0">result[count] = -1</span>
+                <span class="s0">count += 1</span>
+                <span class="s0">missing[count_missing] = i</span>
+                <span class="s0">count_missing += 1</span>
+
+        <span class="s0">return result[0:count], missing[0:count_missing]</span>
+
+
+<span class="s0">cdef Py_ssize_t _bin_search(ndarray values, object val) except -1:</span>
+    <span class="s0"># GH#1757 ndarray.searchsorted is not safe to use with array of tuples</span>
+    <span class="s0">#  (treats a tuple `val` as a sequence of keys instead of a single key),</span>
+    <span class="s0">#  so we implement something similar.</span>
+    <span class="s0"># This is equivalent to the stdlib's bisect.bisect_left</span>
+
+    <span class="s0">cdef:</span>
+        <span class="s0">Py_ssize_t mid = 0, lo = 0, hi = len(values) - 1</span>
+        <span class="s0">object pval</span>
+
+    <span class="s0">if hi == 0 or (hi &gt; 0 and val &gt; values[hi]):</span>
+        <span class="s0">return len(values)</span>
+
+    <span class="s0">while lo &lt; hi:</span>
+        <span class="s0">mid = (lo + hi) // 2</span>
+        <span class="s0">pval = values[mid]</span>
+        <span class="s0">if val &lt; pval:</span>
+            <span class="s0">hi = mid</span>
+        <span class="s0">elif val &gt; pval:</span>
+            <span class="s0">lo = mid + 1</span>
+        <span class="s0">else:</span>
+            <span class="s0">while mid &gt; 0 and val == values[mid - 1]:</span>
+                <span class="s0">mid -= 1</span>
+            <span class="s0">return mid</span>
+
+    <span class="s0">if val &lt;= values[mid]:</span>
+        <span class="s0">return mid</span>
+    <span class="s0">else:</span>
+        <span class="s0">return mid + 1</span>
+
+
+<span class="s0">cdef class ObjectEngine(IndexEngine):</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Index Engine for use with object-dtype Index, namely the base class Index.</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">cdef _make_hash_table(self, Py_ssize_t n):</span>
+        <span class="s0">return _hash.PyObjectHashTable(n)</span>
+
+    <span class="s0">cdef Py_ssize_t _searchsorted_left(self, val) except? -1:</span>
+        <span class="s0"># using values.searchsorted here would treat a tuple `val` as a sequence</span>
+        <span class="s0">#  instead of a single key, so we use a different implementation</span>
+        <span class="s0">try:</span>
+            <span class="s0">loc = _bin_search(self.values, val)</span>
+        <span class="s0">except TypeError as err:</span>
+            <span class="s0">raise KeyError(val) from err</span>
+        <span class="s0">return loc</span>
+
+
+<span class="s0">cdef class DatetimeEngine(Int64Engine):</span>
+
+    <span class="s0">cdef int64_t _unbox_scalar(self, scalar) except? -1:</span>
+        <span class="s0"># NB: caller is responsible for ensuring tzawareness compat</span>
+        <span class="s0">#  before we get here</span>
+        <span class="s0">if not (isinstance(scalar, _Timestamp) or scalar is NaT):</span>
+            <span class="s0">raise TypeError(scalar)</span>
+        <span class="s0">return scalar.value</span>
+
+    <span class="s0">def __contains__(self, val: object) -&gt; bool:</span>
+        <span class="s0"># We assume before we get here:</span>
+        <span class="s0">#  - val is hashable</span>
+        <span class="s0">self._unbox_scalar(val)</span>
+        <span class="s0">try:</span>
+            <span class="s0">self.get_loc(val)</span>
+            <span class="s0">return True</span>
+        <span class="s0">except KeyError:</span>
+            <span class="s0">return False</span>
+
+    <span class="s0">cdef _call_monotonic(self, values):</span>
+        <span class="s0">return algos.is_monotonic(values, timelike=True)</span>
+
+    <span class="s0">cpdef get_loc(self, object val):</span>
+        <span class="s0"># NB: the caller is responsible for ensuring that we are called</span>
+        <span class="s0">#  with either a Timestamp or NaT (Timedelta or NaT for TimedeltaEngine)</span>
+
+        <span class="s0">cdef:</span>
+            <span class="s0">Py_ssize_t loc</span>
+
+        <span class="s0">if is_definitely_invalid_key(val):</span>
+            <span class="s0">raise TypeError(f&quot;'{val}' is an invalid key&quot;)</span>
+
+        <span class="s0">try:</span>
+            <span class="s0">conv = self._unbox_scalar(val)</span>
+        <span class="s0">except TypeError:</span>
+            <span class="s0">raise KeyError(val)</span>
+
+        <span class="s0"># Welcome to the spaghetti factory</span>
+        <span class="s0">if self.over_size_threshold and self.is_monotonic_increasing:</span>
+            <span class="s0">if not self.is_unique:</span>
+                <span class="s0">return self._get_loc_duplicates(conv)</span>
+            <span class="s0">values = self.values</span>
+
+            <span class="s0">loc = values.searchsorted(conv, side='left')</span>
+
+            <span class="s0">if loc == len(values) or values[loc] != conv:</span>
+                <span class="s0">raise KeyError(val)</span>
+            <span class="s0">return loc</span>
+
+        <span class="s0">self._ensure_mapping_populated()</span>
+        <span class="s0">if not self.unique:</span>
+            <span class="s0">return self._get_loc_duplicates(conv)</span>
+
+        <span class="s0">try:</span>
+            <span class="s0">return self.mapping.get_item(conv)</span>
+        <span class="s0">except KeyError:</span>
+            <span class="s0">raise KeyError(val)</span>
+
+
+<span class="s0">cdef class TimedeltaEngine(DatetimeEngine):</span>
+
+    <span class="s0">cdef int64_t _unbox_scalar(self, scalar) except? -1:</span>
+        <span class="s0">if not (isinstance(scalar, _Timedelta) or scalar is NaT):</span>
+            <span class="s0">raise TypeError(scalar)</span>
+        <span class="s0">return scalar.value</span>
+
+
+<span class="s0">cdef class PeriodEngine(Int64Engine):</span>
+
+    <span class="s0">cdef int64_t _unbox_scalar(self, scalar) except? -1:</span>
+        <span class="s0">if scalar is NaT:</span>
+            <span class="s0">return scalar.value</span>
+        <span class="s0">if is_period_object(scalar):</span>
+            <span class="s0"># NB: we assume that we have the correct freq here.</span>
+            <span class="s0">return scalar.ordinal</span>
+        <span class="s0">raise TypeError(scalar)</span>
+
+    <span class="s0">cpdef get_loc(self, object val):</span>
+        <span class="s0"># NB: the caller is responsible for ensuring that we are called</span>
+        <span class="s0">#  with either a Period or NaT</span>
+        <span class="s0">cdef:</span>
+            <span class="s0">int64_t conv</span>
+
+        <span class="s0">try:</span>
+            <span class="s0">conv = self._unbox_scalar(val)</span>
+        <span class="s0">except TypeError:</span>
+            <span class="s0">raise KeyError(val)</span>
+
+        <span class="s0">return Int64Engine.get_loc(self, conv)</span>
+
+    <span class="s0">cdef _call_monotonic(self, values):</span>
+        <span class="s0">return algos.is_monotonic(values, timelike=True)</span>
+
+
+<span class="s0">cdef class BaseMultiIndexCodesEngine:</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Base class for MultiIndexUIntEngine and MultiIndexPyIntEngine, which</span>
+    <span class="s0">represent each label in a MultiIndex as an integer, by juxtaposing the bits</span>
+    <span class="s0">encoding each level, with appropriate offsets.</span>
+
+    <span class="s0">For instance: if 3 levels have respectively 3, 6 and 1 possible values,</span>
+    <span class="s0">then their labels can be represented using respectively 2, 3 and 1 bits,</span>
+    <span class="s0">as follows:</span>
+     <span class="s0">_ _ _ _____ _ __ __ __</span>
+    <span class="s0">|0|0|0| ... |0| 0|a1|a0| -&gt; offset 0 (first level)</span>
+     <span class="s0">— — — ————— — —— —— ——</span>
+    <span class="s0">|0|0|0| ... |0|b2|b1|b0| -&gt; offset 2 (bits required for first level)</span>
+     <span class="s0">— — — ————— — —— —— ——</span>
+    <span class="s0">|0|0|0| ... |0| 0| 0|c0| -&gt; offset 5 (bits required for first two levels)</span>
+     <span class="s0">‾ ‾ ‾ ‾‾‾‾‾ ‾ ‾‾ ‾‾ ‾‾</span>
+    <span class="s0">and the resulting unsigned integer representation will be:</span>
+     <span class="s0">_ _ _ _____ _ __ __ __ __ __ __</span>
+    <span class="s0">|0|0|0| ... |0|c0|b2|b1|b0|a1|a0|</span>
+     <span class="s0">‾ ‾ ‾ ‾‾‾‾‾ ‾ ‾‾ ‾‾ ‾‾ ‾‾ ‾‾ ‾‾</span>
+
+    <span class="s0">Offsets are calculated at initialization, labels are transformed by method</span>
+    <span class="s0">_codes_to_ints.</span>
+
+    <span class="s0">Keys are located by first locating each component against the respective</span>
+    <span class="s0">level, then locating (the integer representation of) codes.</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">def __init__(self, object levels, object labels,</span>
+                 <span class="s0">ndarray[uint64_t, ndim=1] offsets):</span>
+        <span class="s0">&quot;&quot;&quot;</span>
+        <span class="s0">Parameters</span>
+        <span class="s0">----------</span>
+        <span class="s0">levels : list-like of numpy arrays</span>
+            <span class="s0">Levels of the MultiIndex.</span>
+        <span class="s0">labels : list-like of numpy arrays of integer dtype</span>
+            <span class="s0">Labels of the MultiIndex.</span>
+        <span class="s0">offsets : numpy array of uint64 dtype</span>
+            <span class="s0">Pre-calculated offsets, one for each level of the index.</span>
+        <span class="s0">&quot;&quot;&quot;</span>
+        <span class="s0">self.levels = levels</span>
+        <span class="s0">self.offsets = offsets</span>
+
+        <span class="s0"># Transform labels in a single array, and add 1 so that we are working</span>
+        <span class="s0"># with positive integers (-1 for NaN becomes 0):</span>
+        <span class="s0">codes = (np.array(labels, dtype='int64').T + 1).astype('uint64',</span>
+                                                               <span class="s0">copy=False)</span>
+
+        <span class="s0"># Map each codes combination in the index to an integer unambiguously</span>
+        <span class="s0"># (no collisions possible), based on the &quot;offsets&quot;, which describe the</span>
+        <span class="s0"># number of bits to switch labels for each level:</span>
+        <span class="s0">lab_ints = self._codes_to_ints(codes)</span>
+
+        <span class="s0"># Initialize underlying index (e.g. libindex.UInt64Engine) with</span>
+        <span class="s0"># integers representing labels: we will use its get_loc and get_indexer</span>
+        <span class="s0">self._base.__init__(self, lab_ints)</span>
+
+    <span class="s0">def _codes_to_ints(self, ndarray[uint64_t] codes) -&gt; np.ndarray:</span>
+        <span class="s0">raise NotImplementedError(&quot;Implemented by subclass&quot;)  # pragma: no cover</span>
+
+    <span class="s0">def _extract_level_codes(self, target) -&gt; np.ndarray:</span>
+        <span class="s0">&quot;&quot;&quot;</span>
+        <span class="s0">Map the requested list of (tuple) keys to their integer representations</span>
+        <span class="s0">for searching in the underlying integer index.</span>
+
+        <span class="s0">Parameters</span>
+        <span class="s0">----------</span>
+        <span class="s0">target : MultiIndex</span>
+
+        <span class="s0">Returns</span>
+        <span class="s0">------</span>
+        <span class="s0">int_keys : 1-dimensional array of dtype uint64 or object</span>
+            <span class="s0">Integers representing one combination each</span>
+        <span class="s0">&quot;&quot;&quot;</span>
+        <span class="s0">zt = [target._get_level_values(i) for i in range(target.nlevels)]</span>
+        <span class="s0">level_codes = [lev.get_indexer_for(codes) + 1 for lev, codes</span>
+                       <span class="s0">in zip(self.levels, zt)]</span>
+        <span class="s0">return self._codes_to_ints(np.array(level_codes, dtype='uint64').T)</span>
+
+    <span class="s0">def get_indexer(self, target: np.ndarray) -&gt; np.ndarray:</span>
+        <span class="s0">&quot;&quot;&quot;</span>
+        <span class="s0">Returns an array giving the positions of each value of `target` in</span>
+        <span class="s0">`self.values`, where -1 represents a value in `target` which does not</span>
+        <span class="s0">appear in `self.values`</span>
+
+        <span class="s0">Parameters</span>
+        <span class="s0">----------</span>
+        <span class="s0">target : np.ndarray</span>
+
+        <span class="s0">Returns</span>
+        <span class="s0">-------</span>
+        <span class="s0">np.ndarray[intp_t, ndim=1] of the indexer of `target` into</span>
+        <span class="s0">`self.values`</span>
+        <span class="s0">&quot;&quot;&quot;</span>
+        <span class="s0">return self._base.get_indexer(self, target)</span>
+
+    <span class="s0">def get_indexer_with_fill(self, ndarray target, ndarray values,</span>
+                              <span class="s0">str method, object limit) -&gt; np.ndarray:</span>
+        <span class="s0">&quot;&quot;&quot;</span>
+        <span class="s0">Returns an array giving the positions of each value of `target` in</span>
+        <span class="s0">`values`, where -1 represents a value in `target` which does not</span>
+        <span class="s0">appear in `values`</span>
+
+        <span class="s0">If `method` is &quot;backfill&quot; then the position for a value in `target`</span>
+        <span class="s0">which does not appear in `values` is that of the next greater value</span>
+        <span class="s0">in `values` (if one exists), and -1 if there is no such value.</span>
+
+        <span class="s0">Similarly, if the method is &quot;pad&quot; then the position for a value in</span>
+        <span class="s0">`target` which does not appear in `values` is that of the next smaller</span>
+        <span class="s0">value in `values` (if one exists), and -1 if there is no such value.</span>
+
+        <span class="s0">Parameters</span>
+        <span class="s0">----------</span>
+        <span class="s0">target: ndarray[object] of tuples</span>
+            <span class="s0">need not be sorted, but all must have the same length, which must be</span>
+            <span class="s0">the same as the length of all tuples in `values`</span>
+        <span class="s0">values : ndarray[object] of tuples</span>
+            <span class="s0">must be sorted and all have the same length.  Should be the set of</span>
+            <span class="s0">the MultiIndex's values.</span>
+        <span class="s0">method: string</span>
+            <span class="s0">&quot;backfill&quot; or &quot;pad&quot;</span>
+        <span class="s0">limit: int or None</span>
+            <span class="s0">if provided, limit the number of fills to this value</span>
+
+        <span class="s0">Returns</span>
+        <span class="s0">-------</span>
+        <span class="s0">np.ndarray[intp_t, ndim=1] of the indexer of `target` into `values`,</span>
+        <span class="s0">filled with the `method` (and optionally `limit`) specified</span>
+        <span class="s0">&quot;&quot;&quot;</span>
+        <span class="s0">assert method in (&quot;backfill&quot;, &quot;pad&quot;)</span>
+        <span class="s0">cdef:</span>
+            <span class="s0">int64_t i, j, next_code</span>
+            <span class="s0">int64_t num_values, num_target_values</span>
+            <span class="s0">ndarray[int64_t, ndim=1] target_order</span>
+            <span class="s0">ndarray[object, ndim=1] target_values</span>
+            <span class="s0">ndarray[int64_t, ndim=1] new_codes, new_target_codes</span>
+            <span class="s0">ndarray[intp_t, ndim=1] sorted_indexer</span>
+
+        <span class="s0">target_order = np.argsort(target).astype('int64')</span>
+        <span class="s0">target_values = target[target_order]</span>
+        <span class="s0">num_values, num_target_values = len(values), len(target_values)</span>
+        <span class="s0">new_codes, new_target_codes = (</span>
+            <span class="s0">np.empty((num_values,)).astype('int64'),</span>
+            <span class="s0">np.empty((num_target_values,)).astype('int64'),</span>
+        <span class="s0">)</span>
+
+        <span class="s0"># `values` and `target_values` are both sorted, so we walk through them</span>
+        <span class="s0"># and memoize the (ordered) set of indices in the (implicit) merged-and</span>
+        <span class="s0"># sorted list of the two which belong to each of them</span>
+        <span class="s0"># the effect of this is to create a factorization for the (sorted)</span>
+        <span class="s0"># merger of the index values, where `new_codes` and `new_target_codes`</span>
+        <span class="s0"># are the subset of the factors which appear in `values` and `target`,</span>
+        <span class="s0"># respectively</span>
+        <span class="s0">i, j, next_code = 0, 0, 0</span>
+        <span class="s0">while i &lt; num_values and j &lt; num_target_values:</span>
+            <span class="s0">val, target_val = values[i], target_values[j]</span>
+            <span class="s0">if val &lt;= target_val:</span>
+                <span class="s0">new_codes[i] = next_code</span>
+                <span class="s0">i += 1</span>
+            <span class="s0">if target_val &lt;= val:</span>
+                <span class="s0">new_target_codes[j] = next_code</span>
+                <span class="s0">j += 1</span>
+            <span class="s0">next_code += 1</span>
+
+        <span class="s0"># at this point, at least one should have reached the end</span>
+        <span class="s0"># the remaining values of the other should be added to the end</span>
+        <span class="s0">assert i == num_values or j == num_target_values</span>
+        <span class="s0">while i &lt; num_values:</span>
+            <span class="s0">new_codes[i] = next_code</span>
+            <span class="s0">i += 1</span>
+            <span class="s0">next_code += 1</span>
+        <span class="s0">while j &lt; num_target_values:</span>
+            <span class="s0">new_target_codes[j] = next_code</span>
+            <span class="s0">j += 1</span>
+            <span class="s0">next_code += 1</span>
+
+        <span class="s0"># get the indexer, and undo the sorting of `target.values`</span>
+        <span class="s0">algo = algos.backfill if method == &quot;backfill&quot; else algos.pad</span>
+        <span class="s0">sorted_indexer = algo(new_codes, new_target_codes, limit=limit)</span>
+        <span class="s0">return sorted_indexer[np.argsort(target_order)]</span>
+
+    <span class="s0">def get_loc(self, object key):</span>
+        <span class="s0">if is_definitely_invalid_key(key):</span>
+            <span class="s0">raise TypeError(f&quot;'{key}' is an invalid key&quot;)</span>
+        <span class="s0">if not isinstance(key, tuple):</span>
+            <span class="s0">raise KeyError(key)</span>
+        <span class="s0">try:</span>
+            <span class="s0">indices = [0 if checknull(v) else lev.get_loc(v) + 1</span>
+                       <span class="s0">for lev, v in zip(self.levels, key)]</span>
+        <span class="s0">except KeyError:</span>
+            <span class="s0">raise KeyError(key)</span>
+
+        <span class="s0"># Transform indices into single integer:</span>
+        <span class="s0">lab_int = self._codes_to_ints(np.array(indices, dtype='uint64'))</span>
+
+        <span class="s0">return self._base.get_loc(self, lab_int)</span>
+
+    <span class="s0">def get_indexer_non_unique(self, target: np.ndarray) -&gt; np.ndarray:</span>
+        <span class="s0">indexer = self._base.get_indexer_non_unique(self, target)</span>
+
+        <span class="s0">return indexer</span>
+
+    <span class="s0">def __contains__(self, val: object) -&gt; bool:</span>
+        <span class="s0"># We assume before we get here:</span>
+        <span class="s0">#  - val is hashable</span>
+        <span class="s0"># Default __contains__ looks in the underlying mapping, which in this</span>
+        <span class="s0"># case only contains integer representations.</span>
+        <span class="s0">try:</span>
+            <span class="s0">self.get_loc(val)</span>
+            <span class="s0">return True</span>
+        <span class="s0">except (KeyError, TypeError, ValueError):</span>
+            <span class="s0">return False</span>
+
+
+<span class="s0"># Generated from template.</span>
+<span class="s0">include &quot;index_class_helper.pxi&quot;</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,280 @@
+<html>
+<head>
+<title>ansitowin32.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #629755; font-style: italic;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+ansitowin32.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright Jonathan Hartley 2013. BSD 3-Clause license, see LICENSE file.</span>
+<span class="s2">import </span><span class="s1">re</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">os</span>
+
+<span class="s2">from </span><span class="s1">.ansi </span><span class="s2">import </span><span class="s1">AnsiFore</span><span class="s2">, </span><span class="s1">AnsiBack</span><span class="s2">, </span><span class="s1">AnsiStyle</span><span class="s2">, </span><span class="s1">Style</span><span class="s2">, </span><span class="s1">BEL</span>
+<span class="s2">from </span><span class="s1">.winterm </span><span class="s2">import </span><span class="s1">WinTerm</span><span class="s2">, </span><span class="s1">WinColor</span><span class="s2">, </span><span class="s1">WinStyle</span>
+<span class="s2">from </span><span class="s1">.win32 </span><span class="s2">import </span><span class="s1">windll</span><span class="s2">, </span><span class="s1">winapi_test</span>
+
+
+<span class="s1">winterm = </span><span class="s2">None</span>
+<span class="s2">if </span><span class="s1">windll </span><span class="s2">is not None</span><span class="s1">:</span>
+    <span class="s1">winterm = WinTerm()</span>
+
+
+<span class="s2">class </span><span class="s1">StreamWrapper(object):</span>
+    <span class="s3">''' 
+    Wraps a stream (such as stdout), acting as a transparent proxy for all 
+    attribute access apart from method 'write()', which is delegated to our 
+    Converter instance. 
+    '''</span>
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">wrapped</span><span class="s2">, </span><span class="s1">converter):</span>
+        <span class="s0"># double-underscore everything to prevent clashes with names of</span>
+        <span class="s0"># attributes on the wrapped stream object.</span>
+        <span class="s1">self.__wrapped = wrapped</span>
+        <span class="s1">self.__convertor = converter</span>
+
+    <span class="s2">def </span><span class="s1">__getattr__(self</span><span class="s2">, </span><span class="s1">name):</span>
+        <span class="s2">return </span><span class="s1">getattr(self.__wrapped</span><span class="s2">, </span><span class="s1">name)</span>
+
+    <span class="s2">def </span><span class="s1">__enter__(self</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+        <span class="s0"># special method lookup bypasses __getattr__/__getattribute__, see</span>
+        <span class="s0"># https://stackoverflow.com/questions/12632894/why-doesnt-getattr-work-with-exit</span>
+        <span class="s0"># thus, contextlib magic methods are not proxied via __getattr__</span>
+        <span class="s2">return </span><span class="s1">self.__wrapped.__enter__(*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s2">def </span><span class="s1">__exit__(self</span><span class="s2">, </span><span class="s1">*args</span><span class="s2">, </span><span class="s1">**kwargs):</span>
+        <span class="s2">return </span><span class="s1">self.__wrapped.__exit__(*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+
+    <span class="s2">def </span><span class="s1">write(self</span><span class="s2">, </span><span class="s1">text):</span>
+        <span class="s1">self.__convertor.write(text)</span>
+
+    <span class="s2">def </span><span class="s1">isatty(self):</span>
+        <span class="s1">stream = self.__wrapped</span>
+        <span class="s2">if </span><span class="s4">'PYCHARM_HOSTED' </span><span class="s2">in </span><span class="s1">os.environ:</span>
+            <span class="s2">if </span><span class="s1">stream </span><span class="s2">is not None and </span><span class="s1">(stream </span><span class="s2">is </span><span class="s1">sys.__stdout__ </span><span class="s2">or </span><span class="s1">stream </span><span class="s2">is </span><span class="s1">sys.__stderr__):</span>
+                <span class="s2">return True</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">stream_isatty = stream.isatty</span>
+        <span class="s2">except </span><span class="s1">AttributeError:</span>
+            <span class="s2">return False</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">stream_isatty()</span>
+
+    <span class="s1">@property</span>
+    <span class="s2">def </span><span class="s1">closed(self):</span>
+        <span class="s1">stream = self.__wrapped</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">stream.closed</span>
+        <span class="s2">except </span><span class="s1">AttributeError:</span>
+            <span class="s2">return True</span>
+
+
+<span class="s2">class </span><span class="s1">AnsiToWin32(object):</span>
+    <span class="s3">''' 
+    Implements a 'write()' method which, on Windows, will strip ANSI character 
+    sequences from the text, and if outputting to a tty, will convert them into 
+    win32 function calls. 
+    '''</span>
+    <span class="s1">ANSI_CSI_RE = re.compile(</span><span class="s4">'</span><span class="s2">\001</span><span class="s4">?</span><span class="s2">\033\\</span><span class="s4">[((?:</span><span class="s2">\\</span><span class="s4">d|;)*)([a-zA-Z])</span><span class="s2">\002</span><span class="s4">?'</span><span class="s1">)   </span><span class="s0"># Control Sequence Introducer</span>
+    <span class="s1">ANSI_OSC_RE = re.compile(</span><span class="s4">'</span><span class="s2">\001</span><span class="s4">?</span><span class="s2">\033\\</span><span class="s4">]([^</span><span class="s2">\a</span><span class="s4">]*)(</span><span class="s2">\a</span><span class="s4">)</span><span class="s2">\002</span><span class="s4">?'</span><span class="s1">)             </span><span class="s0"># Operating System Command</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">wrapped</span><span class="s2">, </span><span class="s1">convert=</span><span class="s2">None, </span><span class="s1">strip=</span><span class="s2">None, </span><span class="s1">autoreset=</span><span class="s2">False</span><span class="s1">):</span>
+        <span class="s0"># The wrapped stream (normally sys.stdout or sys.stderr)</span>
+        <span class="s1">self.wrapped = wrapped</span>
+
+        <span class="s0"># should we reset colors to defaults after every .write()</span>
+        <span class="s1">self.autoreset = autoreset</span>
+
+        <span class="s0"># create the proxy wrapping our output stream</span>
+        <span class="s1">self.stream = StreamWrapper(wrapped</span><span class="s2">, </span><span class="s1">self)</span>
+
+        <span class="s1">on_windows = os.name == </span><span class="s4">'nt'</span>
+        <span class="s0"># We test if the WinAPI works, because even if we are on Windows</span>
+        <span class="s0"># we may be using a terminal that doesn't support the WinAPI</span>
+        <span class="s0"># (e.g. Cygwin Terminal). In this case it's up to the terminal</span>
+        <span class="s0"># to support the ANSI codes.</span>
+        <span class="s1">conversion_supported = on_windows </span><span class="s2">and </span><span class="s1">winapi_test()</span>
+
+        <span class="s0"># should we strip ANSI sequences from our output?</span>
+        <span class="s2">if </span><span class="s1">strip </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">strip = conversion_supported </span><span class="s2">or </span><span class="s1">(</span><span class="s2">not </span><span class="s1">self.stream.closed </span><span class="s2">and not </span><span class="s1">self.stream.isatty())</span>
+        <span class="s1">self.strip = strip</span>
+
+        <span class="s0"># should we should convert ANSI sequences into win32 calls?</span>
+        <span class="s2">if </span><span class="s1">convert </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">convert = conversion_supported </span><span class="s2">and not </span><span class="s1">self.stream.closed </span><span class="s2">and </span><span class="s1">self.stream.isatty()</span>
+        <span class="s1">self.convert = convert</span>
+
+        <span class="s0"># dict of ansi codes to win32 functions and parameters</span>
+        <span class="s1">self.win32_calls = self.get_win32_calls()</span>
+
+        <span class="s0"># are we wrapping stderr?</span>
+        <span class="s1">self.on_stderr = self.wrapped </span><span class="s2">is </span><span class="s1">sys.stderr</span>
+
+    <span class="s2">def </span><span class="s1">should_wrap(self):</span>
+        <span class="s3">''' 
+        True if this class is actually needed. If false, then the output 
+        stream will not be affected, nor will win32 calls be issued, so 
+        wrapping stdout is not actually required. This will generally be 
+        False on non-Windows platforms, unless optional functionality like 
+        autoreset has been requested using kwargs to init() 
+        '''</span>
+        <span class="s2">return </span><span class="s1">self.convert </span><span class="s2">or </span><span class="s1">self.strip </span><span class="s2">or </span><span class="s1">self.autoreset</span>
+
+    <span class="s2">def </span><span class="s1">get_win32_calls(self):</span>
+        <span class="s2">if </span><span class="s1">self.convert </span><span class="s2">and </span><span class="s1">winterm:</span>
+            <span class="s2">return </span><span class="s1">{</span>
+                <span class="s1">AnsiStyle.RESET_ALL: (winterm.reset_all</span><span class="s2">, </span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">AnsiStyle.BRIGHT: (winterm.style</span><span class="s2">, </span><span class="s1">WinStyle.BRIGHT)</span><span class="s2">,</span>
+                <span class="s1">AnsiStyle.DIM: (winterm.style</span><span class="s2">, </span><span class="s1">WinStyle.NORMAL)</span><span class="s2">,</span>
+                <span class="s1">AnsiStyle.NORMAL: (winterm.style</span><span class="s2">, </span><span class="s1">WinStyle.NORMAL)</span><span class="s2">,</span>
+                <span class="s1">AnsiFore.BLACK: (winterm.fore</span><span class="s2">, </span><span class="s1">WinColor.BLACK)</span><span class="s2">,</span>
+                <span class="s1">AnsiFore.RED: (winterm.fore</span><span class="s2">, </span><span class="s1">WinColor.RED)</span><span class="s2">,</span>
+                <span class="s1">AnsiFore.GREEN: (winterm.fore</span><span class="s2">, </span><span class="s1">WinColor.GREEN)</span><span class="s2">,</span>
+                <span class="s1">AnsiFore.YELLOW: (winterm.fore</span><span class="s2">, </span><span class="s1">WinColor.YELLOW)</span><span class="s2">,</span>
+                <span class="s1">AnsiFore.BLUE: (winterm.fore</span><span class="s2">, </span><span class="s1">WinColor.BLUE)</span><span class="s2">,</span>
+                <span class="s1">AnsiFore.MAGENTA: (winterm.fore</span><span class="s2">, </span><span class="s1">WinColor.MAGENTA)</span><span class="s2">,</span>
+                <span class="s1">AnsiFore.CYAN: (winterm.fore</span><span class="s2">, </span><span class="s1">WinColor.CYAN)</span><span class="s2">,</span>
+                <span class="s1">AnsiFore.WHITE: (winterm.fore</span><span class="s2">, </span><span class="s1">WinColor.GREY)</span><span class="s2">,</span>
+                <span class="s1">AnsiFore.RESET: (winterm.fore</span><span class="s2">, </span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">AnsiFore.LIGHTBLACK_EX: (winterm.fore</span><span class="s2">, </span><span class="s1">WinColor.BLACK</span><span class="s2">, True</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">AnsiFore.LIGHTRED_EX: (winterm.fore</span><span class="s2">, </span><span class="s1">WinColor.RED</span><span class="s2">, True</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">AnsiFore.LIGHTGREEN_EX: (winterm.fore</span><span class="s2">, </span><span class="s1">WinColor.GREEN</span><span class="s2">, True</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">AnsiFore.LIGHTYELLOW_EX: (winterm.fore</span><span class="s2">, </span><span class="s1">WinColor.YELLOW</span><span class="s2">, True</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">AnsiFore.LIGHTBLUE_EX: (winterm.fore</span><span class="s2">, </span><span class="s1">WinColor.BLUE</span><span class="s2">, True</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">AnsiFore.LIGHTMAGENTA_EX: (winterm.fore</span><span class="s2">, </span><span class="s1">WinColor.MAGENTA</span><span class="s2">, True</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">AnsiFore.LIGHTCYAN_EX: (winterm.fore</span><span class="s2">, </span><span class="s1">WinColor.CYAN</span><span class="s2">, True</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">AnsiFore.LIGHTWHITE_EX: (winterm.fore</span><span class="s2">, </span><span class="s1">WinColor.GREY</span><span class="s2">, True</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">AnsiBack.BLACK: (winterm.back</span><span class="s2">, </span><span class="s1">WinColor.BLACK)</span><span class="s2">,</span>
+                <span class="s1">AnsiBack.RED: (winterm.back</span><span class="s2">, </span><span class="s1">WinColor.RED)</span><span class="s2">,</span>
+                <span class="s1">AnsiBack.GREEN: (winterm.back</span><span class="s2">, </span><span class="s1">WinColor.GREEN)</span><span class="s2">,</span>
+                <span class="s1">AnsiBack.YELLOW: (winterm.back</span><span class="s2">, </span><span class="s1">WinColor.YELLOW)</span><span class="s2">,</span>
+                <span class="s1">AnsiBack.BLUE: (winterm.back</span><span class="s2">, </span><span class="s1">WinColor.BLUE)</span><span class="s2">,</span>
+                <span class="s1">AnsiBack.MAGENTA: (winterm.back</span><span class="s2">, </span><span class="s1">WinColor.MAGENTA)</span><span class="s2">,</span>
+                <span class="s1">AnsiBack.CYAN: (winterm.back</span><span class="s2">, </span><span class="s1">WinColor.CYAN)</span><span class="s2">,</span>
+                <span class="s1">AnsiBack.WHITE: (winterm.back</span><span class="s2">, </span><span class="s1">WinColor.GREY)</span><span class="s2">,</span>
+                <span class="s1">AnsiBack.RESET: (winterm.back</span><span class="s2">, </span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">AnsiBack.LIGHTBLACK_EX: (winterm.back</span><span class="s2">, </span><span class="s1">WinColor.BLACK</span><span class="s2">, True</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">AnsiBack.LIGHTRED_EX: (winterm.back</span><span class="s2">, </span><span class="s1">WinColor.RED</span><span class="s2">, True</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">AnsiBack.LIGHTGREEN_EX: (winterm.back</span><span class="s2">, </span><span class="s1">WinColor.GREEN</span><span class="s2">, True</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">AnsiBack.LIGHTYELLOW_EX: (winterm.back</span><span class="s2">, </span><span class="s1">WinColor.YELLOW</span><span class="s2">, True</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">AnsiBack.LIGHTBLUE_EX: (winterm.back</span><span class="s2">, </span><span class="s1">WinColor.BLUE</span><span class="s2">, True</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">AnsiBack.LIGHTMAGENTA_EX: (winterm.back</span><span class="s2">, </span><span class="s1">WinColor.MAGENTA</span><span class="s2">, True</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">AnsiBack.LIGHTCYAN_EX: (winterm.back</span><span class="s2">, </span><span class="s1">WinColor.CYAN</span><span class="s2">, True</span><span class="s1">)</span><span class="s2">,</span>
+                <span class="s1">AnsiBack.LIGHTWHITE_EX: (winterm.back</span><span class="s2">, </span><span class="s1">WinColor.GREY</span><span class="s2">, True</span><span class="s1">)</span><span class="s2">,</span>
+            <span class="s1">}</span>
+        <span class="s2">return </span><span class="s1">dict()</span>
+
+    <span class="s2">def </span><span class="s1">write(self</span><span class="s2">, </span><span class="s1">text):</span>
+        <span class="s2">if </span><span class="s1">self.strip </span><span class="s2">or </span><span class="s1">self.convert:</span>
+            <span class="s1">self.write_and_convert(text)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">self.wrapped.write(text)</span>
+            <span class="s1">self.wrapped.flush()</span>
+        <span class="s2">if </span><span class="s1">self.autoreset:</span>
+            <span class="s1">self.reset_all()</span>
+
+
+    <span class="s2">def </span><span class="s1">reset_all(self):</span>
+        <span class="s2">if </span><span class="s1">self.convert:</span>
+            <span class="s1">self.call_win32(</span><span class="s4">'m'</span><span class="s2">, </span><span class="s1">(</span><span class="s5">0</span><span class="s2">,</span><span class="s1">))</span>
+        <span class="s2">elif not </span><span class="s1">self.strip </span><span class="s2">and not </span><span class="s1">self.stream.closed:</span>
+            <span class="s1">self.wrapped.write(Style.RESET_ALL)</span>
+
+
+    <span class="s2">def </span><span class="s1">write_and_convert(self</span><span class="s2">, </span><span class="s1">text):</span>
+        <span class="s3">''' 
+        Write the given text to our wrapped stream, stripping any ANSI 
+        sequences from the text, and optionally converting them into win32 
+        calls. 
+        '''</span>
+        <span class="s1">cursor = </span><span class="s5">0</span>
+        <span class="s1">text = self.convert_osc(text)</span>
+        <span class="s2">for </span><span class="s1">match </span><span class="s2">in </span><span class="s1">self.ANSI_CSI_RE.finditer(text):</span>
+            <span class="s1">start</span><span class="s2">, </span><span class="s1">end = match.span()</span>
+            <span class="s1">self.write_plain_text(text</span><span class="s2">, </span><span class="s1">cursor</span><span class="s2">, </span><span class="s1">start)</span>
+            <span class="s1">self.convert_ansi(*match.groups())</span>
+            <span class="s1">cursor = end</span>
+        <span class="s1">self.write_plain_text(text</span><span class="s2">, </span><span class="s1">cursor</span><span class="s2">, </span><span class="s1">len(text))</span>
+
+
+    <span class="s2">def </span><span class="s1">write_plain_text(self</span><span class="s2">, </span><span class="s1">text</span><span class="s2">, </span><span class="s1">start</span><span class="s2">, </span><span class="s1">end):</span>
+        <span class="s2">if </span><span class="s1">start &lt; end:</span>
+            <span class="s1">self.wrapped.write(text[start:end])</span>
+            <span class="s1">self.wrapped.flush()</span>
+
+
+    <span class="s2">def </span><span class="s1">convert_ansi(self</span><span class="s2">, </span><span class="s1">paramstring</span><span class="s2">, </span><span class="s1">command):</span>
+        <span class="s2">if </span><span class="s1">self.convert:</span>
+            <span class="s1">params = self.extract_params(command</span><span class="s2">, </span><span class="s1">paramstring)</span>
+            <span class="s1">self.call_win32(command</span><span class="s2">, </span><span class="s1">params)</span>
+
+
+    <span class="s2">def </span><span class="s1">extract_params(self</span><span class="s2">, </span><span class="s1">command</span><span class="s2">, </span><span class="s1">paramstring):</span>
+        <span class="s2">if </span><span class="s1">command </span><span class="s2">in </span><span class="s4">'Hf'</span><span class="s1">:</span>
+            <span class="s1">params = tuple(int(p) </span><span class="s2">if </span><span class="s1">len(p) != </span><span class="s5">0 </span><span class="s2">else </span><span class="s5">1 </span><span class="s2">for </span><span class="s1">p </span><span class="s2">in </span><span class="s1">paramstring.split(</span><span class="s4">';'</span><span class="s1">))</span>
+            <span class="s2">while </span><span class="s1">len(params) &lt; </span><span class="s5">2</span><span class="s1">:</span>
+                <span class="s0"># defaults:</span>
+                <span class="s1">params = params + (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">)</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s1">params = tuple(int(p) </span><span class="s2">for </span><span class="s1">p </span><span class="s2">in </span><span class="s1">paramstring.split(</span><span class="s4">';'</span><span class="s1">) </span><span class="s2">if </span><span class="s1">len(p) != </span><span class="s5">0</span><span class="s1">)</span>
+            <span class="s2">if </span><span class="s1">len(params) == </span><span class="s5">0</span><span class="s1">:</span>
+                <span class="s0"># defaults:</span>
+                <span class="s2">if </span><span class="s1">command </span><span class="s2">in </span><span class="s4">'JKm'</span><span class="s1">:</span>
+                    <span class="s1">params = (</span><span class="s5">0</span><span class="s2">,</span><span class="s1">)</span>
+                <span class="s2">elif </span><span class="s1">command </span><span class="s2">in </span><span class="s4">'ABCD'</span><span class="s1">:</span>
+                    <span class="s1">params = (</span><span class="s5">1</span><span class="s2">,</span><span class="s1">)</span>
+
+        <span class="s2">return </span><span class="s1">params</span>
+
+
+    <span class="s2">def </span><span class="s1">call_win32(self</span><span class="s2">, </span><span class="s1">command</span><span class="s2">, </span><span class="s1">params):</span>
+        <span class="s2">if </span><span class="s1">command == </span><span class="s4">'m'</span><span class="s1">:</span>
+            <span class="s2">for </span><span class="s1">param </span><span class="s2">in </span><span class="s1">params:</span>
+                <span class="s2">if </span><span class="s1">param </span><span class="s2">in </span><span class="s1">self.win32_calls:</span>
+                    <span class="s1">func_args = self.win32_calls[param]</span>
+                    <span class="s1">func = func_args[</span><span class="s5">0</span><span class="s1">]</span>
+                    <span class="s1">args = func_args[</span><span class="s5">1</span><span class="s1">:]</span>
+                    <span class="s1">kwargs = dict(on_stderr=self.on_stderr)</span>
+                    <span class="s1">func(*args</span><span class="s2">, </span><span class="s1">**kwargs)</span>
+        <span class="s2">elif </span><span class="s1">command </span><span class="s2">in </span><span class="s4">'J'</span><span class="s1">:</span>
+            <span class="s1">winterm.erase_screen(params[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">on_stderr=self.on_stderr)</span>
+        <span class="s2">elif </span><span class="s1">command </span><span class="s2">in </span><span class="s4">'K'</span><span class="s1">:</span>
+            <span class="s1">winterm.erase_line(params[</span><span class="s5">0</span><span class="s1">]</span><span class="s2">, </span><span class="s1">on_stderr=self.on_stderr)</span>
+        <span class="s2">elif </span><span class="s1">command </span><span class="s2">in </span><span class="s4">'Hf'</span><span class="s1">:     </span><span class="s0"># cursor position - absolute</span>
+            <span class="s1">winterm.set_cursor_position(params</span><span class="s2">, </span><span class="s1">on_stderr=self.on_stderr)</span>
+        <span class="s2">elif </span><span class="s1">command </span><span class="s2">in </span><span class="s4">'ABCD'</span><span class="s1">:   </span><span class="s0"># cursor position - relative</span>
+            <span class="s1">n = params[</span><span class="s5">0</span><span class="s1">]</span>
+            <span class="s0"># A - up, B - down, C - forward, D - back</span>
+            <span class="s1">x</span><span class="s2">, </span><span class="s1">y = {</span><span class="s4">'A'</span><span class="s1">: (</span><span class="s5">0</span><span class="s2">, </span><span class="s1">-n)</span><span class="s2">, </span><span class="s4">'B'</span><span class="s1">: (</span><span class="s5">0</span><span class="s2">, </span><span class="s1">n)</span><span class="s2">, </span><span class="s4">'C'</span><span class="s1">: (n</span><span class="s2">, </span><span class="s5">0</span><span class="s1">)</span><span class="s2">, </span><span class="s4">'D'</span><span class="s1">: (-n</span><span class="s2">, </span><span class="s5">0</span><span class="s1">)}[command]</span>
+            <span class="s1">winterm.cursor_adjust(x</span><span class="s2">, </span><span class="s1">y</span><span class="s2">, </span><span class="s1">on_stderr=self.on_stderr)</span>
+
+
+    <span class="s2">def </span><span class="s1">convert_osc(self</span><span class="s2">, </span><span class="s1">text):</span>
+        <span class="s2">for </span><span class="s1">match </span><span class="s2">in </span><span class="s1">self.ANSI_OSC_RE.finditer(text):</span>
+            <span class="s1">start</span><span class="s2">, </span><span class="s1">end = match.span()</span>
+            <span class="s1">text = text[:start] + text[end:]</span>
+            <span class="s1">paramstring</span><span class="s2">, </span><span class="s1">command = match.groups()</span>
+            <span class="s2">if </span><span class="s1">command == BEL:</span>
+                <span class="s2">if </span><span class="s1">paramstring.count(</span><span class="s4">&quot;;&quot;</span><span class="s1">) == </span><span class="s5">1</span><span class="s1">:</span>
+                    <span class="s1">params = paramstring.split(</span><span class="s4">&quot;;&quot;</span><span class="s1">)</span>
+                    <span class="s0"># 0 - change title and icon (we will only change title)</span>
+                    <span class="s0"># 1 - change icon (we don't support this)</span>
+                    <span class="s0"># 2 - change title</span>
+                    <span class="s2">if </span><span class="s1">params[</span><span class="s5">0</span><span class="s1">] </span><span class="s2">in </span><span class="s4">'02'</span><span class="s1">:</span>
+                        <span class="s1">winterm.set_title(params[</span><span class="s5">1</span><span class="s1">])</span>
+        <span class="s2">return </span><span class="s1">text</span>
+</pre>
+</body>
+</html>

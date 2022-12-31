@@ -1,0 +1,343 @@
+<html>
+<head>
+<title>progress_bars.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #6a8759;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+progress_bars.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">functools</span>
+<span class="s0">import </span><span class="s1">itertools</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">from </span><span class="s1">signal </span><span class="s0">import </span><span class="s1">SIGINT</span><span class="s0">, </span><span class="s1">default_int_handler</span><span class="s0">, </span><span class="s1">signal</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">Any</span><span class="s0">, </span><span class="s1">Callable</span><span class="s0">, </span><span class="s1">Iterator</span><span class="s0">, </span><span class="s1">Optional</span><span class="s0">, </span><span class="s1">Tuple</span>
+
+<span class="s0">from </span><span class="s1">pip._vendor.progress.bar </span><span class="s0">import </span><span class="s1">Bar</span><span class="s0">, </span><span class="s1">FillingCirclesBar</span><span class="s0">, </span><span class="s1">IncrementalBar</span>
+<span class="s0">from </span><span class="s1">pip._vendor.progress.spinner </span><span class="s0">import </span><span class="s1">Spinner</span>
+<span class="s0">from </span><span class="s1">pip._vendor.rich.progress </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">BarColumn</span><span class="s0">,</span>
+    <span class="s1">DownloadColumn</span><span class="s0">,</span>
+    <span class="s1">FileSizeColumn</span><span class="s0">,</span>
+    <span class="s1">Progress</span><span class="s0">,</span>
+    <span class="s1">ProgressColumn</span><span class="s0">,</span>
+    <span class="s1">SpinnerColumn</span><span class="s0">,</span>
+    <span class="s1">TextColumn</span><span class="s0">,</span>
+    <span class="s1">TimeElapsedColumn</span><span class="s0">,</span>
+    <span class="s1">TimeRemainingColumn</span><span class="s0">,</span>
+    <span class="s1">TransferSpeedColumn</span><span class="s0">,</span>
+<span class="s1">)</span>
+
+<span class="s0">from </span><span class="s1">pip._internal.utils.compat </span><span class="s0">import </span><span class="s1">WINDOWS</span>
+<span class="s0">from </span><span class="s1">pip._internal.utils.logging </span><span class="s0">import </span><span class="s1">get_indentation</span>
+<span class="s0">from </span><span class="s1">pip._internal.utils.misc </span><span class="s0">import </span><span class="s1">format_size</span>
+
+<span class="s0">try</span><span class="s1">:</span>
+    <span class="s0">from </span><span class="s1">pip._vendor </span><span class="s0">import </span><span class="s1">colorama</span>
+<span class="s2"># Lots of different errors can come from this, including SystemError and</span>
+<span class="s2"># ImportError.</span>
+<span class="s0">except </span><span class="s1">Exception:</span>
+    <span class="s1">colorama = </span><span class="s0">None</span>
+
+<span class="s1">DownloadProgressRenderer = Callable[[Iterator[bytes]]</span><span class="s0">, </span><span class="s1">Iterator[bytes]]</span>
+
+
+<span class="s0">def </span><span class="s1">_select_progress_class(preferred: Bar</span><span class="s0">, </span><span class="s1">fallback: Bar) -&gt; Bar:</span>
+    <span class="s1">encoding = getattr(preferred.file</span><span class="s0">, </span><span class="s3">&quot;encoding&quot;</span><span class="s0">, None</span><span class="s1">)</span>
+
+    <span class="s2"># If we don't know what encoding this file is in, then we'll just assume</span>
+    <span class="s2"># that it doesn't support unicode and use the ASCII bar.</span>
+    <span class="s0">if not </span><span class="s1">encoding:</span>
+        <span class="s0">return </span><span class="s1">fallback</span>
+
+    <span class="s2"># Collect all of the possible characters we want to use with the preferred</span>
+    <span class="s2"># bar.</span>
+    <span class="s1">characters = [</span>
+        <span class="s1">getattr(preferred</span><span class="s0">, </span><span class="s3">&quot;empty_fill&quot;</span><span class="s0">, </span><span class="s3">&quot;&quot;</span><span class="s1">)</span><span class="s0">,</span>
+        <span class="s1">getattr(preferred</span><span class="s0">, </span><span class="s3">&quot;fill&quot;</span><span class="s0">, </span><span class="s3">&quot;&quot;</span><span class="s1">)</span><span class="s0">,</span>
+    <span class="s1">]</span>
+    <span class="s1">characters += list(getattr(preferred</span><span class="s0">, </span><span class="s3">&quot;phases&quot;</span><span class="s0">, </span><span class="s1">[]))</span>
+
+    <span class="s2"># Try to decode the characters we're using for the bar using the encoding</span>
+    <span class="s2"># of the given file, if this works then we'll assume that we can use the</span>
+    <span class="s2"># fancier bar and if not we'll fall back to the plaintext bar.</span>
+    <span class="s0">try</span><span class="s1">:</span>
+        <span class="s3">&quot;&quot;</span><span class="s1">.join(characters).encode(encoding)</span>
+    <span class="s0">except </span><span class="s1">UnicodeEncodeError:</span>
+        <span class="s0">return </span><span class="s1">fallback</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s0">return </span><span class="s1">preferred</span>
+
+
+<span class="s1">_BaseBar: Any = _select_progress_class(IncrementalBar</span><span class="s0">, </span><span class="s1">Bar)</span>
+
+
+<span class="s0">class </span><span class="s1">InterruptibleMixin:</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Helper to ensure that self.finish() gets called on keyboard interrupt. 
+ 
+    This allows downloads to be interrupted without leaving temporary state 
+    (like hidden cursors) behind. 
+ 
+    This class is similar to the progress library's existing SigIntMixin 
+    helper, but as of version 1.2, that helper has the following problems: 
+ 
+    1. It calls sys.exit(). 
+    2. It discards the existing SIGINT handler completely. 
+    3. It leaves its own handler in place even after an uninterrupted finish, 
+       which will have unexpected delayed effects if the user triggers an 
+       unrelated keyboard interrupt some time after a progress-displaying 
+       download has already completed, for example. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">*args: Any</span><span class="s0">, </span><span class="s1">**kwargs: Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Save the original SIGINT handler for later. 
+        &quot;&quot;&quot;</span>
+        <span class="s2"># https://github.com/python/mypy/issues/5887</span>
+        <span class="s1">super().__init__(*args</span><span class="s0">, </span><span class="s1">**kwargs)  </span><span class="s2"># type: ignore</span>
+
+        <span class="s1">self.original_handler = signal(SIGINT</span><span class="s0">, </span><span class="s1">self.handle_sigint)</span>
+
+        <span class="s2"># If signal() returns None, the previous handler was not installed from</span>
+        <span class="s2"># Python, and we cannot restore it. This probably should not happen,</span>
+        <span class="s2"># but if it does, we must restore something sensible instead, at least.</span>
+        <span class="s2"># The least bad option should be Python's default SIGINT handler, which</span>
+        <span class="s2"># just raises KeyboardInterrupt.</span>
+        <span class="s0">if </span><span class="s1">self.original_handler </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">self.original_handler = default_int_handler</span>
+
+    <span class="s0">def </span><span class="s1">finish(self) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Restore the original SIGINT handler after finishing. 
+ 
+        This should happen regardless of whether the progress display finishes 
+        normally, or gets interrupted. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">super().finish()  </span><span class="s2"># type: ignore</span>
+        <span class="s1">signal(SIGINT</span><span class="s0">, </span><span class="s1">self.original_handler)</span>
+
+    <span class="s0">def </span><span class="s1">handle_sigint(self</span><span class="s0">, </span><span class="s1">signum</span><span class="s0">, </span><span class="s1">frame):  </span><span class="s2"># type: ignore</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Call self.finish() before delegating to the original SIGINT handler. 
+ 
+        This handler should only be in place while the progress display is 
+        active. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">self.finish()</span>
+        <span class="s1">self.original_handler(signum</span><span class="s0">, </span><span class="s1">frame)</span>
+
+
+<span class="s0">class </span><span class="s1">SilentBar(Bar):</span>
+    <span class="s0">def </span><span class="s1">update(self) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s0">pass</span>
+
+
+<span class="s0">class </span><span class="s1">BlueEmojiBar(IncrementalBar):</span>
+
+    <span class="s1">suffix = </span><span class="s3">&quot;%(percent)d%%&quot;</span>
+    <span class="s1">bar_prefix = </span><span class="s3">&quot; &quot;</span>
+    <span class="s1">bar_suffix = </span><span class="s3">&quot; &quot;</span>
+    <span class="s1">phases = (</span><span class="s3">&quot;</span><span class="s0">\U0001F539</span><span class="s3">&quot;</span><span class="s0">, </span><span class="s3">&quot;</span><span class="s0">\U0001F537</span><span class="s3">&quot;</span><span class="s0">, </span><span class="s3">&quot;</span><span class="s0">\U0001F535</span><span class="s3">&quot;</span><span class="s1">)</span>
+
+
+<span class="s0">class </span><span class="s1">DownloadProgressMixin:</span>
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">*args: Any</span><span class="s0">, </span><span class="s1">**kwargs: Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s2"># https://github.com/python/mypy/issues/5887</span>
+        <span class="s1">super().__init__(*args</span><span class="s0">, </span><span class="s1">**kwargs)  </span><span class="s2"># type: ignore</span>
+        <span class="s1">self.message: str = (</span><span class="s3">&quot; &quot; </span><span class="s1">* (get_indentation() + </span><span class="s5">2</span><span class="s1">)) + self.message</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">downloaded(self) -&gt; str:</span>
+        <span class="s0">return </span><span class="s1">format_size(self.index)  </span><span class="s2"># type: ignore</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">download_speed(self) -&gt; str:</span>
+        <span class="s2"># Avoid zero division errors...</span>
+        <span class="s0">if </span><span class="s1">self.avg == </span><span class="s5">0.0</span><span class="s1">:  </span><span class="s2"># type: ignore</span>
+            <span class="s0">return </span><span class="s3">&quot;...&quot;</span>
+        <span class="s0">return </span><span class="s1">format_size(</span><span class="s5">1 </span><span class="s1">/ self.avg) + </span><span class="s3">&quot;/s&quot;  </span><span class="s2"># type: ignore</span>
+
+    <span class="s1">@property</span>
+    <span class="s0">def </span><span class="s1">pretty_eta(self) -&gt; str:</span>
+        <span class="s0">if </span><span class="s1">self.eta:  </span><span class="s2"># type: ignore</span>
+            <span class="s0">return </span><span class="s3">f&quot;eta </span><span class="s0">{</span><span class="s1">self.eta_td</span><span class="s0">}</span><span class="s3">&quot;  </span><span class="s2"># type: ignore</span>
+        <span class="s0">return </span><span class="s3">&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">iter(self</span><span class="s0">, </span><span class="s1">it):  </span><span class="s2"># type: ignore</span>
+        <span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">it:</span>
+            <span class="s0">yield </span><span class="s1">x</span>
+            <span class="s2"># B305 is incorrectly raised here</span>
+            <span class="s2"># https://github.com/PyCQA/flake8-bugbear/issues/59</span>
+            <span class="s1">self.next(len(x))  </span><span class="s2"># noqa: B305</span>
+        <span class="s1">self.finish()</span>
+
+
+<span class="s0">class </span><span class="s1">WindowsMixin:</span>
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">*args: Any</span><span class="s0">, </span><span class="s1">**kwargs: Any) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s2"># The Windows terminal does not support the hide/show cursor ANSI codes</span>
+        <span class="s2"># even with colorama. So we'll ensure that hide_cursor is False on</span>
+        <span class="s2"># Windows.</span>
+        <span class="s2"># This call needs to go before the super() call, so that hide_cursor</span>
+        <span class="s2"># is set in time. The base progress bar class writes the &quot;hide cursor&quot;</span>
+        <span class="s2"># code to the terminal in its init, so if we don't set this soon</span>
+        <span class="s2"># enough, we get a &quot;hide&quot; with no corresponding &quot;show&quot;...</span>
+        <span class="s0">if </span><span class="s1">WINDOWS </span><span class="s0">and </span><span class="s1">self.hide_cursor:  </span><span class="s2"># type: ignore</span>
+            <span class="s1">self.hide_cursor = </span><span class="s0">False</span>
+
+        <span class="s2"># https://github.com/python/mypy/issues/5887</span>
+        <span class="s1">super().__init__(*args</span><span class="s0">, </span><span class="s1">**kwargs)  </span><span class="s2"># type: ignore</span>
+
+        <span class="s2"># Check if we are running on Windows and we have the colorama module,</span>
+        <span class="s2"># if we do then wrap our file with it.</span>
+        <span class="s0">if </span><span class="s1">WINDOWS </span><span class="s0">and </span><span class="s1">colorama:</span>
+            <span class="s1">self.file = colorama.AnsiToWin32(self.file)  </span><span class="s2"># type: ignore</span>
+            <span class="s2"># The progress code expects to be able to call self.file.isatty()</span>
+            <span class="s2"># but the colorama.AnsiToWin32() object doesn't have that, so we'll</span>
+            <span class="s2"># add it.</span>
+            <span class="s1">self.file.isatty = </span><span class="s0">lambda</span><span class="s1">: self.file.wrapped.isatty()</span>
+            <span class="s2"># The progress code expects to be able to call self.file.flush()</span>
+            <span class="s2"># but the colorama.AnsiToWin32() object doesn't have that, so we'll</span>
+            <span class="s2"># add it.</span>
+            <span class="s1">self.file.flush = </span><span class="s0">lambda</span><span class="s1">: self.file.wrapped.flush()</span>
+
+
+<span class="s0">class </span><span class="s1">BaseDownloadProgressBar(WindowsMixin</span><span class="s0">, </span><span class="s1">InterruptibleMixin</span><span class="s0">, </span><span class="s1">DownloadProgressMixin):</span>
+
+    <span class="s1">file = sys.stdout</span>
+    <span class="s1">message = </span><span class="s3">&quot;%(percent)d%%&quot;</span>
+    <span class="s1">suffix = </span><span class="s3">&quot;%(downloaded)s %(download_speed)s %(pretty_eta)s&quot;</span>
+
+
+<span class="s0">class </span><span class="s1">DefaultDownloadProgressBar(BaseDownloadProgressBar</span><span class="s0">, </span><span class="s1">_BaseBar):</span>
+    <span class="s0">pass</span>
+
+
+<span class="s0">class </span><span class="s1">DownloadSilentBar(BaseDownloadProgressBar</span><span class="s0">, </span><span class="s1">SilentBar):</span>
+    <span class="s0">pass</span>
+
+
+<span class="s0">class </span><span class="s1">DownloadBar(BaseDownloadProgressBar</span><span class="s0">, </span><span class="s1">Bar):</span>
+    <span class="s0">pass</span>
+
+
+<span class="s0">class </span><span class="s1">DownloadFillingCirclesBar(BaseDownloadProgressBar</span><span class="s0">, </span><span class="s1">FillingCirclesBar):</span>
+    <span class="s0">pass</span>
+
+
+<span class="s0">class </span><span class="s1">DownloadBlueEmojiProgressBar(BaseDownloadProgressBar</span><span class="s0">, </span><span class="s1">BlueEmojiBar):</span>
+    <span class="s0">pass</span>
+
+
+<span class="s0">class </span><span class="s1">DownloadProgressSpinner(</span>
+    <span class="s1">WindowsMixin</span><span class="s0">, </span><span class="s1">InterruptibleMixin</span><span class="s0">, </span><span class="s1">DownloadProgressMixin</span><span class="s0">, </span><span class="s1">Spinner</span>
+<span class="s1">):</span>
+
+    <span class="s1">file = sys.stdout</span>
+    <span class="s1">suffix = </span><span class="s3">&quot;%(downloaded)s %(download_speed)s&quot;</span>
+
+    <span class="s0">def </span><span class="s1">next_phase(self) -&gt; str:</span>
+        <span class="s0">if not </span><span class="s1">hasattr(self</span><span class="s0">, </span><span class="s3">&quot;_phaser&quot;</span><span class="s1">):</span>
+            <span class="s1">self._phaser = itertools.cycle(self.phases)</span>
+        <span class="s0">return </span><span class="s1">next(self._phaser)</span>
+
+    <span class="s0">def </span><span class="s1">update(self) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">message = self.message % self</span>
+        <span class="s1">phase = self.next_phase()</span>
+        <span class="s1">suffix = self.suffix % self</span>
+        <span class="s1">line = </span><span class="s3">&quot;&quot;</span><span class="s1">.join(</span>
+            <span class="s1">[</span>
+                <span class="s1">message</span><span class="s0">,</span>
+                <span class="s3">&quot; &quot; </span><span class="s0">if </span><span class="s1">message </span><span class="s0">else </span><span class="s3">&quot;&quot;</span><span class="s0">,</span>
+                <span class="s1">phase</span><span class="s0">,</span>
+                <span class="s3">&quot; &quot; </span><span class="s0">if </span><span class="s1">suffix </span><span class="s0">else </span><span class="s3">&quot;&quot;</span><span class="s0">,</span>
+                <span class="s1">suffix</span><span class="s0">,</span>
+            <span class="s1">]</span>
+        <span class="s1">)</span>
+
+        <span class="s1">self.writeln(line)</span>
+
+
+<span class="s1">BAR_TYPES = {</span>
+    <span class="s3">&quot;off&quot;</span><span class="s1">: (DownloadSilentBar</span><span class="s0">, </span><span class="s1">DownloadSilentBar)</span><span class="s0">,</span>
+    <span class="s3">&quot;on&quot;</span><span class="s1">: (DefaultDownloadProgressBar</span><span class="s0">, </span><span class="s1">DownloadProgressSpinner)</span><span class="s0">,</span>
+    <span class="s3">&quot;ascii&quot;</span><span class="s1">: (DownloadBar</span><span class="s0">, </span><span class="s1">DownloadProgressSpinner)</span><span class="s0">,</span>
+    <span class="s3">&quot;pretty&quot;</span><span class="s1">: (DownloadFillingCirclesBar</span><span class="s0">, </span><span class="s1">DownloadProgressSpinner)</span><span class="s0">,</span>
+    <span class="s3">&quot;emoji&quot;</span><span class="s1">: (DownloadBlueEmojiProgressBar</span><span class="s0">, </span><span class="s1">DownloadProgressSpinner)</span><span class="s0">,</span>
+<span class="s1">}</span>
+
+
+<span class="s0">def </span><span class="s1">_legacy_progress_bar(</span>
+    <span class="s1">progress_bar: str</span><span class="s0">, </span><span class="s1">max: Optional[int]</span>
+<span class="s1">) -&gt; DownloadProgressRenderer:</span>
+    <span class="s0">if </span><span class="s1">max </span><span class="s0">is None or </span><span class="s1">max == </span><span class="s5">0</span><span class="s1">:</span>
+        <span class="s0">return </span><span class="s1">BAR_TYPES[progress_bar][</span><span class="s5">1</span><span class="s1">]().iter  </span><span class="s2"># type: ignore</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s0">return </span><span class="s1">BAR_TYPES[progress_bar][</span><span class="s5">0</span><span class="s1">](max=max).iter</span>
+
+
+<span class="s2">#</span>
+<span class="s2"># Modern replacement, for our legacy progress bars.</span>
+<span class="s2">#</span>
+<span class="s0">def </span><span class="s1">_rich_progress_bar(</span>
+    <span class="s1">iterable: Iterator[bytes]</span><span class="s0">,</span>
+    <span class="s1">*</span><span class="s0">,</span>
+    <span class="s1">bar_type: str</span><span class="s0">,</span>
+    <span class="s1">size: int</span><span class="s0">,</span>
+<span class="s1">) -&gt; Iterator[bytes]:</span>
+    <span class="s0">assert </span><span class="s1">bar_type == </span><span class="s3">&quot;on&quot;</span><span class="s0">, </span><span class="s3">&quot;This should only be used in the default mode.&quot;</span>
+
+    <span class="s0">if not </span><span class="s1">size:</span>
+        <span class="s1">total = float(</span><span class="s3">&quot;inf&quot;</span><span class="s1">)</span>
+        <span class="s1">columns: Tuple[ProgressColumn</span><span class="s0">, </span><span class="s1">...] = (</span>
+            <span class="s1">TextColumn(</span><span class="s3">&quot;[progress.description]{task.description}&quot;</span><span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">SpinnerColumn(</span><span class="s3">&quot;line&quot;</span><span class="s0">, </span><span class="s1">speed=</span><span class="s5">1.5</span><span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">FileSizeColumn()</span><span class="s0">,</span>
+            <span class="s1">TransferSpeedColumn()</span><span class="s0">,</span>
+            <span class="s1">TimeElapsedColumn()</span><span class="s0">,</span>
+        <span class="s1">)</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">total = size</span>
+        <span class="s1">columns = (</span>
+            <span class="s1">TextColumn(</span><span class="s3">&quot;[progress.description]{task.description}&quot;</span><span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">BarColumn()</span><span class="s0">,</span>
+            <span class="s1">DownloadColumn()</span><span class="s0">,</span>
+            <span class="s1">TransferSpeedColumn()</span><span class="s0">,</span>
+            <span class="s1">TextColumn(</span><span class="s3">&quot;eta&quot;</span><span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">TimeRemainingColumn()</span><span class="s0">,</span>
+        <span class="s1">)</span>
+
+    <span class="s1">progress = Progress(*columns</span><span class="s0">, </span><span class="s1">refresh_per_second=</span><span class="s5">30</span><span class="s1">)</span>
+    <span class="s1">task_id = progress.add_task(</span><span class="s3">&quot; &quot; </span><span class="s1">* (get_indentation() + </span><span class="s5">2</span><span class="s1">)</span><span class="s0">, </span><span class="s1">total=total)</span>
+    <span class="s0">with </span><span class="s1">progress:</span>
+        <span class="s0">for </span><span class="s1">chunk </span><span class="s0">in </span><span class="s1">iterable:</span>
+            <span class="s0">yield </span><span class="s1">chunk</span>
+            <span class="s1">progress.update(task_id</span><span class="s0">, </span><span class="s1">advance=len(chunk))</span>
+
+
+<span class="s0">def </span><span class="s1">get_download_progress_renderer(</span>
+    <span class="s1">*</span><span class="s0">, </span><span class="s1">bar_type: str</span><span class="s0">, </span><span class="s1">size: Optional[int] = </span><span class="s0">None</span>
+<span class="s1">) -&gt; DownloadProgressRenderer:</span>
+    <span class="s4">&quot;&quot;&quot;Get an object that can be used to render the download progress. 
+ 
+    Returns a callable, that takes an iterable to &quot;wrap&quot;. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">bar_type == </span><span class="s3">&quot;on&quot;</span><span class="s1">:</span>
+        <span class="s0">return </span><span class="s1">functools.partial(_rich_progress_bar</span><span class="s0">, </span><span class="s1">bar_type=bar_type</span><span class="s0">, </span><span class="s1">size=size)</span>
+    <span class="s0">elif </span><span class="s1">bar_type == </span><span class="s3">&quot;off&quot;</span><span class="s1">:</span>
+        <span class="s0">return </span><span class="s1">iter  </span><span class="s2"># no-op, when passed an iterator</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s0">return </span><span class="s1">_legacy_progress_bar(bar_type</span><span class="s0">, </span><span class="s1">size)</span>
+</pre>
+</body>
+</html>

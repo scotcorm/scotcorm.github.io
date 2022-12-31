@@ -1,0 +1,441 @@
+<html>
+<head>
+<title>c_parser_wrapper.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #6a8759;}
+.s3 { color: #808080;}
+.s4 { color: #6897bb;}
+.s5 { color: #629755; font-style: italic;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+c_parser_wrapper.py</font>
+</center></td></tr></table>
+<pre><span class="s0">from </span><span class="s1">__future__ </span><span class="s0">import </span><span class="s1">annotations</span>
+
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">Hashable</span><span class="s0">,</span>
+    <span class="s1">Mapping</span><span class="s0">,</span>
+    <span class="s1">Sequence</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">import </span><span class="s1">warnings</span>
+
+<span class="s0">import </span><span class="s1">numpy </span><span class="s0">as </span><span class="s1">np</span>
+
+<span class="s0">import </span><span class="s1">pandas._libs.parsers </span><span class="s0">as </span><span class="s1">parsers</span>
+<span class="s0">from </span><span class="s1">pandas._typing </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">ArrayLike</span><span class="s0">,</span>
+    <span class="s1">DtypeArg</span><span class="s0">,</span>
+    <span class="s1">DtypeObj</span><span class="s0">,</span>
+    <span class="s1">ReadCsvBuffer</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.errors </span><span class="s0">import </span><span class="s1">DtypeWarning</span>
+<span class="s0">from </span><span class="s1">pandas.util._exceptions </span><span class="s0">import </span><span class="s1">find_stack_level</span>
+
+<span class="s0">from </span><span class="s1">pandas.core.dtypes.common </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">is_categorical_dtype</span><span class="s0">,</span>
+    <span class="s1">pandas_dtype</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.core.dtypes.concat </span><span class="s0">import </span><span class="s1">union_categoricals</span>
+<span class="s0">from </span><span class="s1">pandas.core.dtypes.dtypes </span><span class="s0">import </span><span class="s1">ExtensionDtype</span>
+
+<span class="s0">from </span><span class="s1">pandas </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">Index</span><span class="s0">,</span>
+    <span class="s1">MultiIndex</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">pandas.core.indexes.api </span><span class="s0">import </span><span class="s1">ensure_index_from_sequences</span>
+
+<span class="s0">from </span><span class="s1">pandas.io.parsers.base_parser </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">ParserBase</span><span class="s0">,</span>
+    <span class="s1">is_index_col</span><span class="s0">,</span>
+<span class="s1">)</span>
+
+
+<span class="s0">class </span><span class="s1">CParserWrapper(ParserBase):</span>
+    <span class="s1">low_memory: bool</span>
+    <span class="s1">_reader: parsers.TextReader</span>
+
+    <span class="s0">def </span><span class="s1">__init__(self</span><span class="s0">, </span><span class="s1">src: ReadCsvBuffer[str]</span><span class="s0">, </span><span class="s1">**kwds):</span>
+        <span class="s1">super().__init__(kwds)</span>
+        <span class="s1">self.kwds = kwds</span>
+        <span class="s1">kwds = kwds.copy()</span>
+
+        <span class="s1">self.low_memory = kwds.pop(</span><span class="s2">&quot;low_memory&quot;</span><span class="s0">, False</span><span class="s1">)</span>
+
+        <span class="s3"># #2442</span>
+        <span class="s3"># error: Cannot determine type of 'index_col'</span>
+        <span class="s1">kwds[</span><span class="s2">&quot;allow_leading_cols&quot;</span><span class="s1">] = (</span>
+            <span class="s1">self.index_col </span><span class="s0">is not False  </span><span class="s3"># type: ignore[has-type]</span>
+        <span class="s1">)</span>
+
+        <span class="s3"># GH20529, validate usecol arg before TextReader</span>
+        <span class="s1">kwds[</span><span class="s2">&quot;usecols&quot;</span><span class="s1">] = self.usecols</span>
+
+        <span class="s3"># Have to pass int, would break tests using TextReader directly otherwise :(</span>
+        <span class="s1">kwds[</span><span class="s2">&quot;on_bad_lines&quot;</span><span class="s1">] = self.on_bad_lines.value</span>
+
+        <span class="s0">for </span><span class="s1">key </span><span class="s0">in </span><span class="s1">(</span>
+            <span class="s2">&quot;storage_options&quot;</span><span class="s0">,</span>
+            <span class="s2">&quot;encoding&quot;</span><span class="s0">,</span>
+            <span class="s2">&quot;memory_map&quot;</span><span class="s0">,</span>
+            <span class="s2">&quot;compression&quot;</span><span class="s0">,</span>
+            <span class="s2">&quot;error_bad_lines&quot;</span><span class="s0">,</span>
+            <span class="s2">&quot;warn_bad_lines&quot;</span><span class="s0">,</span>
+        <span class="s1">):</span>
+            <span class="s1">kwds.pop(key</span><span class="s0">, None</span><span class="s1">)</span>
+
+        <span class="s1">kwds[</span><span class="s2">&quot;dtype&quot;</span><span class="s1">] = ensure_dtype_objs(kwds.get(</span><span class="s2">&quot;dtype&quot;</span><span class="s0">, None</span><span class="s1">))</span>
+        <span class="s1">self._reader = parsers.TextReader(src</span><span class="s0">, </span><span class="s1">**kwds)</span>
+
+        <span class="s1">self.unnamed_cols = self._reader.unnamed_cols</span>
+
+        <span class="s3"># error: Cannot determine type of 'names'</span>
+        <span class="s1">passed_names = self.names </span><span class="s0">is None  </span><span class="s3"># type: ignore[has-type]</span>
+
+        <span class="s0">if </span><span class="s1">self._reader.header </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">self.names = </span><span class="s0">None</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s3"># error: Cannot determine type of 'names'</span>
+            <span class="s3"># error: Cannot determine type of 'index_names'</span>
+            <span class="s1">(</span>
+                <span class="s1">self.names</span><span class="s0">,  </span><span class="s3"># type: ignore[has-type]</span>
+                <span class="s1">self.index_names</span><span class="s0">,</span>
+                <span class="s1">self.col_names</span><span class="s0">,</span>
+                <span class="s1">passed_names</span><span class="s0">,</span>
+            <span class="s1">) = self._extract_multi_indexer_columns(</span>
+                <span class="s1">self._reader.header</span><span class="s0">,</span>
+                <span class="s1">self.index_names</span><span class="s0">,  </span><span class="s3"># type: ignore[has-type]</span>
+                <span class="s1">passed_names</span><span class="s0">,</span>
+            <span class="s1">)</span>
+
+        <span class="s3"># error: Cannot determine type of 'names'</span>
+        <span class="s0">if </span><span class="s1">self.names </span><span class="s0">is None</span><span class="s1">:  </span><span class="s3"># type: ignore[has-type]</span>
+            <span class="s0">if </span><span class="s1">self.prefix:</span>
+                <span class="s3"># error: Cannot determine type of 'names'</span>
+                <span class="s1">self.names = [  </span><span class="s3"># type: ignore[has-type]</span>
+                    <span class="s2">f&quot;</span><span class="s0">{</span><span class="s1">self.prefix</span><span class="s0">}{</span><span class="s1">i</span><span class="s0">}</span><span class="s2">&quot; </span><span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">range(self._reader.table_width)</span>
+                <span class="s1">]</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s3"># error: Cannot determine type of 'names'</span>
+                <span class="s1">self.names = list(  </span><span class="s3"># type: ignore[has-type]</span>
+                    <span class="s1">range(self._reader.table_width)</span>
+                <span class="s1">)</span>
+
+        <span class="s3"># gh-9755</span>
+        <span class="s3">#</span>
+        <span class="s3"># need to set orig_names here first</span>
+        <span class="s3"># so that proper indexing can be done</span>
+        <span class="s3"># with _set_noconvert_columns</span>
+        <span class="s3">#</span>
+        <span class="s3"># once names has been filtered, we will</span>
+        <span class="s3"># then set orig_names again to names</span>
+        <span class="s3"># error: Cannot determine type of 'names'</span>
+        <span class="s1">self.orig_names = self.names[:]  </span><span class="s3"># type: ignore[has-type]</span>
+
+        <span class="s0">if </span><span class="s1">self.usecols:</span>
+            <span class="s1">usecols = self._evaluate_usecols(self.usecols</span><span class="s0">, </span><span class="s1">self.orig_names)</span>
+
+            <span class="s3"># GH 14671</span>
+            <span class="s3"># assert for mypy, orig_names is List or None, None would error in issubset</span>
+            <span class="s0">assert </span><span class="s1">self.orig_names </span><span class="s0">is not None</span>
+            <span class="s0">if </span><span class="s1">self.usecols_dtype == </span><span class="s2">&quot;string&quot; </span><span class="s0">and not </span><span class="s1">set(usecols).issubset(</span>
+                <span class="s1">self.orig_names</span>
+            <span class="s1">):</span>
+                <span class="s1">self._validate_usecols_names(usecols</span><span class="s0">, </span><span class="s1">self.orig_names)</span>
+
+            <span class="s3"># error: Cannot determine type of 'names'</span>
+            <span class="s0">if </span><span class="s1">len(self.names) &gt; len(usecols):  </span><span class="s3"># type: ignore[has-type]</span>
+                <span class="s3"># error: Cannot determine type of 'names'</span>
+                <span class="s1">self.names = [  </span><span class="s3"># type: ignore[has-type]</span>
+                    <span class="s1">n</span>
+                    <span class="s3"># error: Cannot determine type of 'names'</span>
+                    <span class="s0">for </span><span class="s1">i</span><span class="s0">, </span><span class="s1">n </span><span class="s0">in </span><span class="s1">enumerate(self.names)  </span><span class="s3"># type: ignore[has-type]</span>
+                    <span class="s0">if </span><span class="s1">(i </span><span class="s0">in </span><span class="s1">usecols </span><span class="s0">or </span><span class="s1">n </span><span class="s0">in </span><span class="s1">usecols)</span>
+                <span class="s1">]</span>
+
+            <span class="s3"># error: Cannot determine type of 'names'</span>
+            <span class="s0">if </span><span class="s1">len(self.names) &lt; len(usecols):  </span><span class="s3"># type: ignore[has-type]</span>
+                <span class="s3"># error: Cannot determine type of 'names'</span>
+                <span class="s1">self._validate_usecols_names(</span>
+                    <span class="s1">usecols</span><span class="s0">,</span>
+                    <span class="s1">self.names</span><span class="s0">,  </span><span class="s3"># type: ignore[has-type]</span>
+                <span class="s1">)</span>
+
+        <span class="s3"># error: Cannot determine type of 'names'</span>
+        <span class="s1">self._validate_parse_dates_presence(self.names)  </span><span class="s3"># type: ignore[has-type]</span>
+        <span class="s1">self._set_noconvert_columns()</span>
+
+        <span class="s3"># error: Cannot determine type of 'names'</span>
+        <span class="s1">self.orig_names = self.names  </span><span class="s3"># type: ignore[has-type]</span>
+
+        <span class="s0">if not </span><span class="s1">self._has_complex_date_col:</span>
+            <span class="s3"># error: Cannot determine type of 'index_col'</span>
+            <span class="s0">if </span><span class="s1">self._reader.leading_cols == </span><span class="s4">0 </span><span class="s0">and </span><span class="s1">is_index_col(</span>
+                <span class="s1">self.index_col  </span><span class="s3"># type: ignore[has-type]</span>
+            <span class="s1">):</span>
+
+                <span class="s1">self._name_processed = </span><span class="s0">True</span>
+                <span class="s1">(</span>
+                    <span class="s1">index_names</span><span class="s0">,</span>
+                    <span class="s3"># error: Cannot determine type of 'names'</span>
+                    <span class="s1">self.names</span><span class="s0">,  </span><span class="s3"># type: ignore[has-type]</span>
+                    <span class="s1">self.index_col</span><span class="s0">,</span>
+                <span class="s1">) = self._clean_index_names(</span>
+                    <span class="s3"># error: Cannot determine type of 'names'</span>
+                    <span class="s1">self.names</span><span class="s0">,  </span><span class="s3"># type: ignore[has-type]</span>
+                    <span class="s3"># error: Cannot determine type of 'index_col'</span>
+                    <span class="s1">self.index_col</span><span class="s0">,  </span><span class="s3"># type: ignore[has-type]</span>
+                    <span class="s1">self.unnamed_cols</span><span class="s0">,</span>
+                <span class="s1">)</span>
+
+                <span class="s0">if </span><span class="s1">self.index_names </span><span class="s0">is None</span><span class="s1">:</span>
+                    <span class="s1">self.index_names = index_names</span>
+
+            <span class="s0">if </span><span class="s1">self._reader.header </span><span class="s0">is None and not </span><span class="s1">passed_names:</span>
+                <span class="s0">assert </span><span class="s1">self.index_names </span><span class="s0">is not None</span>
+                <span class="s1">self.index_names = [</span><span class="s0">None</span><span class="s1">] * len(self.index_names)</span>
+
+        <span class="s1">self._implicit_index = self._reader.leading_cols &gt; </span><span class="s4">0</span>
+
+    <span class="s0">def </span><span class="s1">close(self) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s3"># close handles opened by C parser</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">self._reader.close()</span>
+        <span class="s0">except </span><span class="s1">ValueError:</span>
+            <span class="s0">pass</span>
+
+    <span class="s0">def </span><span class="s1">_set_noconvert_columns(self) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s5">&quot;&quot;&quot; 
+        Set the columns that should not undergo dtype conversions. 
+ 
+        Currently, any column that is involved with date parsing will not 
+        undergo such conversions. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">assert </span><span class="s1">self.orig_names </span><span class="s0">is not None</span>
+        <span class="s3"># error: Cannot determine type of 'names'</span>
+
+        <span class="s3"># much faster than using orig_names.index(x) xref GH#44106</span>
+        <span class="s1">names_dict = {x: i </span><span class="s0">for </span><span class="s1">i</span><span class="s0">, </span><span class="s1">x </span><span class="s0">in </span><span class="s1">enumerate(self.orig_names)}</span>
+        <span class="s1">col_indices = [names_dict[x] </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">self.names]  </span><span class="s3"># type: ignore[has-type]</span>
+        <span class="s3"># error: Cannot determine type of 'names'</span>
+        <span class="s1">noconvert_columns = self._set_noconvert_dtype_columns(</span>
+            <span class="s1">col_indices</span><span class="s0">,</span>
+            <span class="s1">self.names</span><span class="s0">,  </span><span class="s3"># type: ignore[has-type]</span>
+        <span class="s1">)</span>
+        <span class="s0">for </span><span class="s1">col </span><span class="s0">in </span><span class="s1">noconvert_columns:</span>
+            <span class="s1">self._reader.set_noconvert(col)</span>
+
+    <span class="s0">def </span><span class="s1">read(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">nrows: int | </span><span class="s0">None </span><span class="s1">= </span><span class="s0">None,</span>
+    <span class="s1">) -&gt; tuple[</span>
+        <span class="s1">Index | MultiIndex | </span><span class="s0">None,</span>
+        <span class="s1">Sequence[Hashable] | MultiIndex</span><span class="s0">,</span>
+        <span class="s1">Mapping[Hashable</span><span class="s0">, </span><span class="s1">ArrayLike]</span><span class="s0">,</span>
+    <span class="s1">]:</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">if </span><span class="s1">self.low_memory:</span>
+                <span class="s1">chunks = self._reader.read_low_memory(nrows)</span>
+                <span class="s3"># destructive to chunks</span>
+                <span class="s1">data = _concatenate_chunks(chunks)</span>
+
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">data = self._reader.read(nrows)</span>
+        <span class="s0">except </span><span class="s1">StopIteration:</span>
+            <span class="s0">if </span><span class="s1">self._first_chunk:</span>
+                <span class="s1">self._first_chunk = </span><span class="s0">False</span>
+                <span class="s1">names = self._maybe_dedup_names(self.orig_names)</span>
+                <span class="s1">index</span><span class="s0">, </span><span class="s1">columns</span><span class="s0">, </span><span class="s1">col_dict = self._get_empty_meta(</span>
+                    <span class="s1">names</span><span class="s0">,</span>
+                    <span class="s1">self.index_col</span><span class="s0">,</span>
+                    <span class="s1">self.index_names</span><span class="s0">,</span>
+                    <span class="s1">dtype=self.kwds.get(</span><span class="s2">&quot;dtype&quot;</span><span class="s1">)</span><span class="s0">,</span>
+                <span class="s1">)</span>
+                <span class="s1">columns = self._maybe_make_multi_index_columns(columns</span><span class="s0">, </span><span class="s1">self.col_names)</span>
+
+                <span class="s0">if </span><span class="s1">self.usecols </span><span class="s0">is not None</span><span class="s1">:</span>
+                    <span class="s1">columns = self._filter_usecols(columns)</span>
+
+                <span class="s1">col_dict = {k: v </span><span class="s0">for </span><span class="s1">k</span><span class="s0">, </span><span class="s1">v </span><span class="s0">in </span><span class="s1">col_dict.items() </span><span class="s0">if </span><span class="s1">k </span><span class="s0">in </span><span class="s1">columns}</span>
+
+                <span class="s0">return </span><span class="s1">index</span><span class="s0">, </span><span class="s1">columns</span><span class="s0">, </span><span class="s1">col_dict</span>
+
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s1">self.close()</span>
+                <span class="s0">raise</span>
+
+        <span class="s3"># Done with first read, next time raise StopIteration</span>
+        <span class="s1">self._first_chunk = </span><span class="s0">False</span>
+
+        <span class="s3"># error: Cannot determine type of 'names'</span>
+        <span class="s1">names = self.names  </span><span class="s3"># type: ignore[has-type]</span>
+
+        <span class="s0">if </span><span class="s1">self._reader.leading_cols:</span>
+            <span class="s0">if </span><span class="s1">self._has_complex_date_col:</span>
+                <span class="s0">raise </span><span class="s1">NotImplementedError(</span><span class="s2">&quot;file structure not yet supported&quot;</span><span class="s1">)</span>
+
+            <span class="s3"># implicit index, no index names</span>
+            <span class="s1">arrays = []</span>
+
+            <span class="s0">for </span><span class="s1">i </span><span class="s0">in </span><span class="s1">range(self._reader.leading_cols):</span>
+                <span class="s0">if </span><span class="s1">self.index_col </span><span class="s0">is None</span><span class="s1">:</span>
+                    <span class="s1">values = data.pop(i)</span>
+                <span class="s0">else</span><span class="s1">:</span>
+                    <span class="s1">values = data.pop(self.index_col[i])</span>
+
+                <span class="s1">values = self._maybe_parse_dates(values</span><span class="s0">, </span><span class="s1">i</span><span class="s0">, </span><span class="s1">try_parse_dates=</span><span class="s0">True</span><span class="s1">)</span>
+                <span class="s1">arrays.append(values)</span>
+
+            <span class="s1">index = ensure_index_from_sequences(arrays)</span>
+
+            <span class="s0">if </span><span class="s1">self.usecols </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s1">names = self._filter_usecols(names)</span>
+
+            <span class="s1">names = self._maybe_dedup_names(names)</span>
+
+            <span class="s3"># rename dict keys</span>
+            <span class="s1">data_tups = sorted(data.items())</span>
+            <span class="s1">data = {k: v </span><span class="s0">for </span><span class="s1">k</span><span class="s0">, </span><span class="s1">(i</span><span class="s0">, </span><span class="s1">v) </span><span class="s0">in </span><span class="s1">zip(names</span><span class="s0">, </span><span class="s1">data_tups)}</span>
+
+            <span class="s1">names</span><span class="s0">, </span><span class="s1">date_data = self._do_date_conversions(names</span><span class="s0">, </span><span class="s1">data)</span>
+
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s3"># rename dict keys</span>
+            <span class="s1">data_tups = sorted(data.items())</span>
+
+            <span class="s3"># ugh, mutation</span>
+
+            <span class="s3"># assert for mypy, orig_names is List or None, None would error in list(...)</span>
+            <span class="s0">assert </span><span class="s1">self.orig_names </span><span class="s0">is not None</span>
+            <span class="s1">names = list(self.orig_names)</span>
+            <span class="s1">names = self._maybe_dedup_names(names)</span>
+
+            <span class="s0">if </span><span class="s1">self.usecols </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s1">names = self._filter_usecols(names)</span>
+
+            <span class="s3"># columns as list</span>
+            <span class="s1">alldata = [x[</span><span class="s4">1</span><span class="s1">] </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">data_tups]</span>
+            <span class="s0">if </span><span class="s1">self.usecols </span><span class="s0">is None</span><span class="s1">:</span>
+                <span class="s1">self._check_data_length(names</span><span class="s0">, </span><span class="s1">alldata)</span>
+
+            <span class="s1">data = {k: v </span><span class="s0">for </span><span class="s1">k</span><span class="s0">, </span><span class="s1">(i</span><span class="s0">, </span><span class="s1">v) </span><span class="s0">in </span><span class="s1">zip(names</span><span class="s0">, </span><span class="s1">data_tups)}</span>
+
+            <span class="s1">names</span><span class="s0">, </span><span class="s1">date_data = self._do_date_conversions(names</span><span class="s0">, </span><span class="s1">data)</span>
+            <span class="s1">index</span><span class="s0">, </span><span class="s1">names = self._make_index(date_data</span><span class="s0">, </span><span class="s1">alldata</span><span class="s0">, </span><span class="s1">names)</span>
+
+        <span class="s3"># maybe create a mi on the columns</span>
+        <span class="s1">conv_names = self._maybe_make_multi_index_columns(names</span><span class="s0">, </span><span class="s1">self.col_names)</span>
+
+        <span class="s0">return </span><span class="s1">index</span><span class="s0">, </span><span class="s1">conv_names</span><span class="s0">, </span><span class="s1">date_data</span>
+
+    <span class="s0">def </span><span class="s1">_filter_usecols(self</span><span class="s0">, </span><span class="s1">names: Sequence[Hashable]) -&gt; Sequence[Hashable]:</span>
+        <span class="s3"># hackish</span>
+        <span class="s1">usecols = self._evaluate_usecols(self.usecols</span><span class="s0">, </span><span class="s1">names)</span>
+        <span class="s0">if </span><span class="s1">usecols </span><span class="s0">is not None and </span><span class="s1">len(names) != len(usecols):</span>
+            <span class="s1">names = [</span>
+                <span class="s1">name </span><span class="s0">for </span><span class="s1">i</span><span class="s0">, </span><span class="s1">name </span><span class="s0">in </span><span class="s1">enumerate(names) </span><span class="s0">if </span><span class="s1">i </span><span class="s0">in </span><span class="s1">usecols </span><span class="s0">or </span><span class="s1">name </span><span class="s0">in </span><span class="s1">usecols</span>
+            <span class="s1">]</span>
+        <span class="s0">return </span><span class="s1">names</span>
+
+    <span class="s0">def </span><span class="s1">_get_index_names(self):</span>
+        <span class="s1">names = list(self._reader.header[</span><span class="s4">0</span><span class="s1">])</span>
+        <span class="s1">idx_names = </span><span class="s0">None</span>
+
+        <span class="s0">if </span><span class="s1">self._reader.leading_cols == </span><span class="s4">0 </span><span class="s0">and </span><span class="s1">self.index_col </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s1">(idx_names</span><span class="s0">, </span><span class="s1">names</span><span class="s0">, </span><span class="s1">self.index_col) = self._clean_index_names(</span>
+                <span class="s1">names</span><span class="s0">, </span><span class="s1">self.index_col</span><span class="s0">, </span><span class="s1">self.unnamed_cols</span>
+            <span class="s1">)</span>
+
+        <span class="s0">return </span><span class="s1">names</span><span class="s0">, </span><span class="s1">idx_names</span>
+
+    <span class="s0">def </span><span class="s1">_maybe_parse_dates(self</span><span class="s0">, </span><span class="s1">values</span><span class="s0">, </span><span class="s1">index: int</span><span class="s0">, </span><span class="s1">try_parse_dates: bool = </span><span class="s0">True</span><span class="s1">):</span>
+        <span class="s0">if </span><span class="s1">try_parse_dates </span><span class="s0">and </span><span class="s1">self._should_parse_dates(index):</span>
+            <span class="s1">values = self._date_conv(values)</span>
+        <span class="s0">return </span><span class="s1">values</span>
+
+
+<span class="s0">def </span><span class="s1">_concatenate_chunks(chunks: list[dict[int</span><span class="s0">, </span><span class="s1">ArrayLike]]) -&gt; dict:</span>
+    <span class="s5">&quot;&quot;&quot; 
+    Concatenate chunks of data read with low_memory=True. 
+ 
+    The tricky part is handling Categoricals, where different chunks 
+    may have different inferred categories. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">names = list(chunks[</span><span class="s4">0</span><span class="s1">].keys())</span>
+    <span class="s1">warning_columns = []</span>
+
+    <span class="s1">result = {}</span>
+    <span class="s0">for </span><span class="s1">name </span><span class="s0">in </span><span class="s1">names:</span>
+        <span class="s1">arrs = [chunk.pop(name) </span><span class="s0">for </span><span class="s1">chunk </span><span class="s0">in </span><span class="s1">chunks]</span>
+        <span class="s3"># Check each arr for consistent types.</span>
+        <span class="s1">dtypes = {a.dtype </span><span class="s0">for </span><span class="s1">a </span><span class="s0">in </span><span class="s1">arrs}</span>
+        <span class="s3"># TODO: shouldn't we exclude all EA dtypes here?</span>
+        <span class="s1">numpy_dtypes = {x </span><span class="s0">for </span><span class="s1">x </span><span class="s0">in </span><span class="s1">dtypes </span><span class="s0">if not </span><span class="s1">is_categorical_dtype(x)}</span>
+        <span class="s0">if </span><span class="s1">len(numpy_dtypes) &gt; </span><span class="s4">1</span><span class="s1">:</span>
+            <span class="s3"># error: Argument 1 to &quot;find_common_type&quot; has incompatible type</span>
+            <span class="s3"># &quot;Set[Any]&quot;; expected &quot;Sequence[Union[dtype[Any], None, type,</span>
+            <span class="s3"># _SupportsDType, str, Union[Tuple[Any, int], Tuple[Any,</span>
+            <span class="s3"># Union[int, Sequence[int]]], List[Any], _DTypeDict, Tuple[Any, Any]]]]&quot;</span>
+            <span class="s1">common_type = np.find_common_type(</span>
+                <span class="s1">numpy_dtypes</span><span class="s0">,  </span><span class="s3"># type: ignore[arg-type]</span>
+                <span class="s1">[]</span><span class="s0">,</span>
+            <span class="s1">)</span>
+            <span class="s0">if </span><span class="s1">common_type == object:</span>
+                <span class="s1">warning_columns.append(str(name))</span>
+
+        <span class="s1">dtype = dtypes.pop()</span>
+        <span class="s0">if </span><span class="s1">is_categorical_dtype(dtype):</span>
+            <span class="s1">result[name] = union_categoricals(arrs</span><span class="s0">, </span><span class="s1">sort_categories=</span><span class="s0">False</span><span class="s1">)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s0">if </span><span class="s1">isinstance(dtype</span><span class="s0">, </span><span class="s1">ExtensionDtype):</span>
+                <span class="s3"># TODO: concat_compat?</span>
+                <span class="s1">array_type = dtype.construct_array_type()</span>
+                <span class="s3"># error: Argument 1 to &quot;_concat_same_type&quot; of &quot;ExtensionArray&quot;</span>
+                <span class="s3"># has incompatible type &quot;List[Union[ExtensionArray, ndarray]]&quot;;</span>
+                <span class="s3"># expected &quot;Sequence[ExtensionArray]&quot;</span>
+                <span class="s1">result[name] = array_type._concat_same_type(</span>
+                    <span class="s1">arrs  </span><span class="s3"># type: ignore[arg-type]</span>
+                <span class="s1">)</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s3"># Argument 1 to &quot;concatenate&quot; has incompatible type</span>
+                <span class="s3"># &quot;List[Union[ExtensionArray, ndarray[Any, Any]]]&quot;; expected</span>
+                <span class="s3"># &quot;Union[_SupportsArray[dtype[Any]],</span>
+                <span class="s3"># Sequence[_SupportsArray[dtype[Any]]],</span>
+                <span class="s3"># Sequence[Sequence[_SupportsArray[dtype[Any]]]],</span>
+                <span class="s3"># Sequence[Sequence[Sequence[_SupportsArray[dtype[Any]]]]],</span>
+                <span class="s3"># Sequence[Sequence[Sequence[Sequence[_SupportsArray[dtype[Any]]]]]]]&quot;</span>
+                <span class="s1">result[name] = np.concatenate(arrs)  </span><span class="s3"># type: ignore[arg-type]</span>
+
+    <span class="s0">if </span><span class="s1">warning_columns:</span>
+        <span class="s1">warning_names = </span><span class="s2">&quot;,&quot;</span><span class="s1">.join(warning_columns)</span>
+        <span class="s1">warning_message = </span><span class="s2">&quot; &quot;</span><span class="s1">.join(</span>
+            <span class="s1">[</span>
+                <span class="s2">f&quot;Columns (</span><span class="s0">{</span><span class="s1">warning_names</span><span class="s0">}</span><span class="s2">) have mixed types. &quot;</span>
+                <span class="s2">f&quot;Specify dtype option on import or set low_memory=False.&quot;</span>
+            <span class="s1">]</span>
+        <span class="s1">)</span>
+        <span class="s1">warnings.warn(warning_message</span><span class="s0">, </span><span class="s1">DtypeWarning</span><span class="s0">, </span><span class="s1">stacklevel=find_stack_level())</span>
+    <span class="s0">return </span><span class="s1">result</span>
+
+
+<span class="s0">def </span><span class="s1">ensure_dtype_objs(</span>
+    <span class="s1">dtype: DtypeArg | dict[Hashable</span><span class="s0">, </span><span class="s1">DtypeArg] | </span><span class="s0">None</span>
+<span class="s1">) -&gt; DtypeObj | dict[Hashable</span><span class="s0">, </span><span class="s1">DtypeObj] | </span><span class="s0">None</span><span class="s1">:</span>
+    <span class="s5">&quot;&quot;&quot; 
+    Ensure we have either None, a dtype object, or a dictionary mapping to 
+    dtype objects. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">isinstance(dtype</span><span class="s0">, </span><span class="s1">dict):</span>
+        <span class="s0">return </span><span class="s1">{k: pandas_dtype(dtype[k]) </span><span class="s0">for </span><span class="s1">k </span><span class="s0">in </span><span class="s1">dtype}</span>
+    <span class="s0">elif </span><span class="s1">dtype </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s0">return </span><span class="s1">pandas_dtype(dtype)</span>
+    <span class="s0">return </span><span class="s1">dtype</span>
+</pre>
+</body>
+</html>

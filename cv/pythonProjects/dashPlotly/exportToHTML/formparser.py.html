@@ -1,0 +1,518 @@
+<html>
+<head>
+<title>formparser.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #6a8759;}
+.s4 { color: #6897bb;}
+.s5 { color: #629755; font-style: italic;}
+.s6 { color: #a5c261;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+formparser.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">typing </span><span class="s0">as </span><span class="s1">t</span>
+<span class="s0">import </span><span class="s1">warnings</span>
+<span class="s0">from </span><span class="s1">functools </span><span class="s0">import </span><span class="s1">update_wrapper</span>
+<span class="s0">from </span><span class="s1">io </span><span class="s0">import </span><span class="s1">BytesIO</span>
+<span class="s0">from </span><span class="s1">itertools </span><span class="s0">import </span><span class="s1">chain</span>
+<span class="s0">from </span><span class="s1">typing </span><span class="s0">import </span><span class="s1">Union</span>
+
+<span class="s0">from </span><span class="s1">. </span><span class="s0">import </span><span class="s1">exceptions</span>
+<span class="s0">from </span><span class="s1">._internal </span><span class="s0">import </span><span class="s1">_to_str</span>
+<span class="s0">from </span><span class="s1">.datastructures </span><span class="s0">import </span><span class="s1">FileStorage</span>
+<span class="s0">from </span><span class="s1">.datastructures </span><span class="s0">import </span><span class="s1">Headers</span>
+<span class="s0">from </span><span class="s1">.datastructures </span><span class="s0">import </span><span class="s1">MultiDict</span>
+<span class="s0">from </span><span class="s1">.http </span><span class="s0">import </span><span class="s1">parse_options_header</span>
+<span class="s0">from </span><span class="s1">.sansio.multipart </span><span class="s0">import </span><span class="s1">Data</span>
+<span class="s0">from </span><span class="s1">.sansio.multipart </span><span class="s0">import </span><span class="s1">Epilogue</span>
+<span class="s0">from </span><span class="s1">.sansio.multipart </span><span class="s0">import </span><span class="s1">Field</span>
+<span class="s0">from </span><span class="s1">.sansio.multipart </span><span class="s0">import </span><span class="s1">File</span>
+<span class="s0">from </span><span class="s1">.sansio.multipart </span><span class="s0">import </span><span class="s1">MultipartDecoder</span>
+<span class="s0">from </span><span class="s1">.sansio.multipart </span><span class="s0">import </span><span class="s1">NeedData</span>
+<span class="s0">from </span><span class="s1">.urls </span><span class="s0">import </span><span class="s1">url_decode_stream</span>
+<span class="s0">from </span><span class="s1">.wsgi </span><span class="s0">import </span><span class="s1">_make_chunk_iter</span>
+<span class="s0">from </span><span class="s1">.wsgi </span><span class="s0">import </span><span class="s1">get_content_length</span>
+<span class="s0">from </span><span class="s1">.wsgi </span><span class="s0">import </span><span class="s1">get_input_stream</span>
+
+<span class="s2"># there are some platforms where SpooledTemporaryFile is not available.</span>
+<span class="s2"># In that case we need to provide a fallback.</span>
+<span class="s0">try</span><span class="s1">:</span>
+    <span class="s0">from </span><span class="s1">tempfile </span><span class="s0">import </span><span class="s1">SpooledTemporaryFile</span>
+<span class="s0">except </span><span class="s1">ImportError:</span>
+    <span class="s0">from </span><span class="s1">tempfile </span><span class="s0">import </span><span class="s1">TemporaryFile</span>
+
+    <span class="s1">SpooledTemporaryFile = </span><span class="s0">None  </span><span class="s2"># type: ignore</span>
+
+<span class="s0">if </span><span class="s1">t.TYPE_CHECKING:</span>
+    <span class="s0">import </span><span class="s1">typing </span><span class="s0">as </span><span class="s1">te</span>
+    <span class="s0">from </span><span class="s1">_typeshed.wsgi </span><span class="s0">import </span><span class="s1">WSGIEnvironment</span>
+
+    <span class="s1">t_parse_result = t.Tuple[t.IO[bytes]</span><span class="s0">, </span><span class="s1">MultiDict</span><span class="s0">, </span><span class="s1">MultiDict]</span>
+
+    <span class="s0">class </span><span class="s1">TStreamFactory(te.Protocol):</span>
+        <span class="s0">def </span><span class="s1">__call__(</span>
+            <span class="s1">self</span><span class="s0">,</span>
+            <span class="s1">total_content_length: t.Optional[int]</span><span class="s0">,</span>
+            <span class="s1">content_type: t.Optional[str]</span><span class="s0">,</span>
+            <span class="s1">filename: t.Optional[str]</span><span class="s0">,</span>
+            <span class="s1">content_length: t.Optional[int] = </span><span class="s0">None,</span>
+        <span class="s1">) -&gt; t.IO[bytes]:</span>
+            <span class="s1">...</span>
+
+
+<span class="s1">F = t.TypeVar(</span><span class="s3">&quot;F&quot;</span><span class="s0">, </span><span class="s1">bound=t.Callable[...</span><span class="s0">, </span><span class="s1">t.Any])</span>
+
+
+<span class="s0">def </span><span class="s1">_exhaust(stream: t.IO[bytes]) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+    <span class="s1">bts = stream.read(</span><span class="s4">64 </span><span class="s1">* </span><span class="s4">1024</span><span class="s1">)</span>
+    <span class="s0">while </span><span class="s1">bts:</span>
+        <span class="s1">bts = stream.read(</span><span class="s4">64 </span><span class="s1">* </span><span class="s4">1024</span><span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">default_stream_factory(</span>
+    <span class="s1">total_content_length: t.Optional[int]</span><span class="s0">,</span>
+    <span class="s1">content_type: t.Optional[str]</span><span class="s0">,</span>
+    <span class="s1">filename: t.Optional[str]</span><span class="s0">,</span>
+    <span class="s1">content_length: t.Optional[int] = </span><span class="s0">None,</span>
+<span class="s1">) -&gt; t.IO[bytes]:</span>
+    <span class="s1">max_size = </span><span class="s4">1024 </span><span class="s1">* </span><span class="s4">500</span>
+
+    <span class="s0">if </span><span class="s1">SpooledTemporaryFile </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s0">return </span><span class="s1">t.cast(t.IO[bytes]</span><span class="s0">, </span><span class="s1">SpooledTemporaryFile(max_size=max_size</span><span class="s0">, </span><span class="s1">mode=</span><span class="s3">&quot;rb+&quot;</span><span class="s1">))</span>
+    <span class="s0">elif </span><span class="s1">total_content_length </span><span class="s0">is None or </span><span class="s1">total_content_length &gt; max_size:</span>
+        <span class="s0">return </span><span class="s1">t.cast(t.IO[bytes]</span><span class="s0">, </span><span class="s1">TemporaryFile(</span><span class="s3">&quot;rb+&quot;</span><span class="s1">))</span>
+
+    <span class="s0">return </span><span class="s1">BytesIO()</span>
+
+
+<span class="s0">def </span><span class="s1">parse_form_data(</span>
+    <span class="s1">environ: </span><span class="s3">&quot;WSGIEnvironment&quot;</span><span class="s0">,</span>
+    <span class="s1">stream_factory: t.Optional[</span><span class="s3">&quot;TStreamFactory&quot;</span><span class="s1">] = </span><span class="s0">None,</span>
+    <span class="s1">charset: str = </span><span class="s3">&quot;utf-8&quot;</span><span class="s0">,</span>
+    <span class="s1">errors: str = </span><span class="s3">&quot;replace&quot;</span><span class="s0">,</span>
+    <span class="s1">max_form_memory_size: t.Optional[int] = </span><span class="s0">None,</span>
+    <span class="s1">max_content_length: t.Optional[int] = </span><span class="s0">None,</span>
+    <span class="s1">cls: t.Optional[t.Type[MultiDict]] = </span><span class="s0">None,</span>
+    <span class="s1">silent: bool = </span><span class="s0">True,</span>
+<span class="s1">) -&gt; </span><span class="s3">&quot;t_parse_result&quot;</span><span class="s1">:</span>
+    <span class="s5">&quot;&quot;&quot;Parse the form data in the environ and return it as tuple in the form 
+    ``(stream, form, files)``.  You should only call this method if the 
+    transport method is `POST`, `PUT`, or `PATCH`. 
+ 
+    If the mimetype of the data transmitted is `multipart/form-data` the 
+    files multidict will be filled with `FileStorage` objects.  If the 
+    mimetype is unknown the input stream is wrapped and returned as first 
+    argument, else the stream is empty. 
+ 
+    This is a shortcut for the common usage of :class:`FormDataParser`. 
+ 
+    Have a look at :doc:`/request_data` for more details. 
+ 
+    .. versionadded:: 0.5 
+       The `max_form_memory_size`, `max_content_length` and 
+       `cls` parameters were added. 
+ 
+    .. versionadded:: 0.5.1 
+       The optional `silent` flag was added. 
+ 
+    :param environ: the WSGI environment to be used for parsing. 
+    :param stream_factory: An optional callable that returns a new read and 
+                           writeable file descriptor.  This callable works 
+                           the same as :meth:`Response._get_file_stream`. 
+    :param charset: The character set for URL and url encoded form data. 
+    :param errors: The encoding error behavior. 
+    :param max_form_memory_size: the maximum number of bytes to be accepted for 
+                           in-memory stored form data.  If the data 
+                           exceeds the value specified an 
+                           :exc:`~exceptions.RequestEntityTooLarge` 
+                           exception is raised. 
+    :param max_content_length: If this is provided and the transmitted data 
+                               is longer than this value an 
+                               :exc:`~exceptions.RequestEntityTooLarge` 
+                               exception is raised. 
+    :param cls: an optional dict class to use.  If this is not specified 
+                       or `None` the default :class:`MultiDict` is used. 
+    :param silent: If set to False parsing errors will not be caught. 
+    :return: A tuple in the form ``(stream, form, files)``. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">return </span><span class="s1">FormDataParser(</span>
+        <span class="s1">stream_factory</span><span class="s0">,</span>
+        <span class="s1">charset</span><span class="s0">,</span>
+        <span class="s1">errors</span><span class="s0">,</span>
+        <span class="s1">max_form_memory_size</span><span class="s0">,</span>
+        <span class="s1">max_content_length</span><span class="s0">,</span>
+        <span class="s1">cls</span><span class="s0">,</span>
+        <span class="s1">silent</span><span class="s0">,</span>
+    <span class="s1">).parse_from_environ(environ)</span>
+
+
+<span class="s0">def </span><span class="s1">exhaust_stream(f: F) -&gt; F:</span>
+    <span class="s5">&quot;&quot;&quot;Helper decorator for methods that exhausts the stream on return.&quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">wrapper(self</span><span class="s0">, </span><span class="s1">stream</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):  </span><span class="s2"># type: ignore</span>
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s0">return </span><span class="s1">f(self</span><span class="s0">, </span><span class="s1">stream</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs)</span>
+        <span class="s0">finally</span><span class="s1">:</span>
+            <span class="s1">exhaust = getattr(stream</span><span class="s0">, </span><span class="s3">&quot;exhaust&quot;</span><span class="s0">, None</span><span class="s1">)</span>
+
+            <span class="s0">if </span><span class="s1">exhaust </span><span class="s0">is not None</span><span class="s1">:</span>
+                <span class="s1">exhaust()</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s0">while True</span><span class="s1">:</span>
+                    <span class="s1">chunk = stream.read(</span><span class="s4">1024 </span><span class="s1">* </span><span class="s4">64</span><span class="s1">)</span>
+
+                    <span class="s0">if not </span><span class="s1">chunk:</span>
+                        <span class="s0">break</span>
+
+    <span class="s0">return </span><span class="s1">update_wrapper(t.cast(F</span><span class="s0">, </span><span class="s1">wrapper)</span><span class="s0">, </span><span class="s1">f)</span>
+
+
+<span class="s0">class </span><span class="s1">FormDataParser:</span>
+    <span class="s5">&quot;&quot;&quot;This class implements parsing of form data for Werkzeug.  By itself 
+    it can parse multipart and url encoded form data.  It can be subclassed 
+    and extended but for most mimetypes it is a better idea to use the 
+    untouched stream and expose it as separate attributes on a request 
+    object. 
+ 
+    .. versionadded:: 0.8 
+ 
+    :param stream_factory: An optional callable that returns a new read and 
+                           writeable file descriptor.  This callable works 
+                           the same as :meth:`Response._get_file_stream`. 
+    :param charset: The character set for URL and url encoded form data. 
+    :param errors: The encoding error behavior. 
+    :param max_form_memory_size: the maximum number of bytes to be accepted for 
+                           in-memory stored form data.  If the data 
+                           exceeds the value specified an 
+                           :exc:`~exceptions.RequestEntityTooLarge` 
+                           exception is raised. 
+    :param max_content_length: If this is provided and the transmitted data 
+                               is longer than this value an 
+                               :exc:`~exceptions.RequestEntityTooLarge` 
+                               exception is raised. 
+    :param cls: an optional dict class to use.  If this is not specified 
+                       or `None` the default :class:`MultiDict` is used. 
+    :param silent: If set to False parsing errors will not be caught. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s0">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">stream_factory: t.Optional[</span><span class="s3">&quot;TStreamFactory&quot;</span><span class="s1">] = </span><span class="s0">None,</span>
+        <span class="s1">charset: str = </span><span class="s3">&quot;utf-8&quot;</span><span class="s0">,</span>
+        <span class="s1">errors: str = </span><span class="s3">&quot;replace&quot;</span><span class="s0">,</span>
+        <span class="s1">max_form_memory_size: t.Optional[int] = </span><span class="s0">None,</span>
+        <span class="s1">max_content_length: t.Optional[int] = </span><span class="s0">None,</span>
+        <span class="s1">cls: t.Optional[t.Type[MultiDict]] = </span><span class="s0">None,</span>
+        <span class="s1">silent: bool = </span><span class="s0">True,</span>
+    <span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s0">if </span><span class="s1">stream_factory </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">stream_factory = default_stream_factory</span>
+
+        <span class="s1">self.stream_factory = stream_factory</span>
+        <span class="s1">self.charset = charset</span>
+        <span class="s1">self.errors = errors</span>
+        <span class="s1">self.max_form_memory_size = max_form_memory_size</span>
+        <span class="s1">self.max_content_length = max_content_length</span>
+
+        <span class="s0">if </span><span class="s1">cls </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">cls = MultiDict</span>
+
+        <span class="s1">self.cls = cls</span>
+        <span class="s1">self.silent = silent</span>
+
+    <span class="s0">def </span><span class="s1">get_parse_func(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">mimetype: str</span><span class="s0">, </span><span class="s1">options: t.Dict[str</span><span class="s0">, </span><span class="s1">str]</span>
+    <span class="s1">) -&gt; t.Optional[</span>
+        <span class="s1">t.Callable[</span>
+            <span class="s1">[</span><span class="s3">&quot;FormDataParser&quot;</span><span class="s0">, </span><span class="s1">t.IO[bytes]</span><span class="s0">, </span><span class="s1">str</span><span class="s0">, </span><span class="s1">t.Optional[int]</span><span class="s0">, </span><span class="s1">t.Dict[str</span><span class="s0">, </span><span class="s1">str]]</span><span class="s0">,</span>
+            <span class="s3">&quot;t_parse_result&quot;</span><span class="s0">,</span>
+        <span class="s1">]</span>
+    <span class="s1">]:</span>
+        <span class="s0">return </span><span class="s1">self.parse_functions.get(mimetype)</span>
+
+    <span class="s0">def </span><span class="s1">parse_from_environ(self</span><span class="s0">, </span><span class="s1">environ: </span><span class="s3">&quot;WSGIEnvironment&quot;</span><span class="s1">) -&gt; </span><span class="s3">&quot;t_parse_result&quot;</span><span class="s1">:</span>
+        <span class="s5">&quot;&quot;&quot;Parses the information from the environment as form data. 
+ 
+        :param environ: the WSGI environment to be used for parsing. 
+        :return: A tuple in the form ``(stream, form, files)``. 
+        &quot;&quot;&quot;</span>
+        <span class="s1">content_type = environ.get(</span><span class="s3">&quot;CONTENT_TYPE&quot;</span><span class="s0">, </span><span class="s3">&quot;&quot;</span><span class="s1">)</span>
+        <span class="s1">content_length = get_content_length(environ)</span>
+        <span class="s1">mimetype</span><span class="s0">, </span><span class="s1">options = parse_options_header(content_type)</span>
+        <span class="s0">return </span><span class="s1">self.parse(get_input_stream(environ)</span><span class="s0">, </span><span class="s1">mimetype</span><span class="s0">, </span><span class="s1">content_length</span><span class="s0">, </span><span class="s1">options)</span>
+
+    <span class="s0">def </span><span class="s1">parse(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">stream: t.IO[bytes]</span><span class="s0">,</span>
+        <span class="s1">mimetype: str</span><span class="s0">,</span>
+        <span class="s1">content_length: t.Optional[int]</span><span class="s0">,</span>
+        <span class="s1">options: t.Optional[t.Dict[str</span><span class="s0">, </span><span class="s1">str]] = </span><span class="s0">None,</span>
+    <span class="s1">) -&gt; </span><span class="s3">&quot;t_parse_result&quot;</span><span class="s1">:</span>
+        <span class="s5">&quot;&quot;&quot;Parses the information from the given stream, mimetype, 
+        content length and mimetype parameters. 
+ 
+        :param stream: an input stream 
+        :param mimetype: the mimetype of the data 
+        :param content_length: the content length of the incoming data 
+        :param options: optional mimetype parameters (used for 
+                        the multipart boundary for instance) 
+        :return: A tuple in the form ``(stream, form, files)``. 
+        &quot;&quot;&quot;</span>
+        <span class="s0">if </span><span class="s1">(</span>
+            <span class="s1">self.max_content_length </span><span class="s0">is not None</span>
+            <span class="s0">and </span><span class="s1">content_length </span><span class="s0">is not None</span>
+            <span class="s0">and </span><span class="s1">content_length &gt; self.max_content_length</span>
+        <span class="s1">):</span>
+            <span class="s2"># if the input stream is not exhausted, firefox reports Connection Reset</span>
+            <span class="s1">_exhaust(stream)</span>
+            <span class="s0">raise </span><span class="s1">exceptions.RequestEntityTooLarge()</span>
+
+        <span class="s0">if </span><span class="s1">options </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">options = {}</span>
+
+        <span class="s1">parse_func = self.get_parse_func(mimetype</span><span class="s0">, </span><span class="s1">options)</span>
+
+        <span class="s0">if </span><span class="s1">parse_func </span><span class="s0">is not None</span><span class="s1">:</span>
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s0">return </span><span class="s1">parse_func(self</span><span class="s0">, </span><span class="s1">stream</span><span class="s0">, </span><span class="s1">mimetype</span><span class="s0">, </span><span class="s1">content_length</span><span class="s0">, </span><span class="s1">options)</span>
+            <span class="s0">except </span><span class="s1">ValueError:</span>
+                <span class="s0">if not </span><span class="s1">self.silent:</span>
+                    <span class="s0">raise</span>
+
+        <span class="s0">return </span><span class="s1">stream</span><span class="s0">, </span><span class="s1">self.cls()</span><span class="s0">, </span><span class="s1">self.cls()</span>
+
+    <span class="s1">@exhaust_stream</span>
+    <span class="s0">def </span><span class="s1">_parse_multipart(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">stream: t.IO[bytes]</span><span class="s0">,</span>
+        <span class="s1">mimetype: str</span><span class="s0">,</span>
+        <span class="s1">content_length: t.Optional[int]</span><span class="s0">,</span>
+        <span class="s1">options: t.Dict[str</span><span class="s0">, </span><span class="s1">str]</span><span class="s0">,</span>
+    <span class="s1">) -&gt; </span><span class="s3">&quot;t_parse_result&quot;</span><span class="s1">:</span>
+        <span class="s1">parser = MultiPartParser(</span>
+            <span class="s1">self.stream_factory</span><span class="s0">,</span>
+            <span class="s1">self.charset</span><span class="s0">,</span>
+            <span class="s1">self.errors</span><span class="s0">,</span>
+            <span class="s1">max_form_memory_size=self.max_form_memory_size</span><span class="s0">,</span>
+            <span class="s1">cls=self.cls</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s1">boundary = options.get(</span><span class="s3">&quot;boundary&quot;</span><span class="s0">, </span><span class="s3">&quot;&quot;</span><span class="s1">).encode(</span><span class="s3">&quot;ascii&quot;</span><span class="s1">)</span>
+
+        <span class="s0">if not </span><span class="s1">boundary:</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;Missing boundary&quot;</span><span class="s1">)</span>
+
+        <span class="s1">form</span><span class="s0">, </span><span class="s1">files = parser.parse(stream</span><span class="s0">, </span><span class="s1">boundary</span><span class="s0">, </span><span class="s1">content_length)</span>
+        <span class="s0">return </span><span class="s1">stream</span><span class="s0">, </span><span class="s1">form</span><span class="s0">, </span><span class="s1">files</span>
+
+    <span class="s1">@exhaust_stream</span>
+    <span class="s0">def </span><span class="s1">_parse_urlencoded(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">stream: t.IO[bytes]</span><span class="s0">,</span>
+        <span class="s1">mimetype: str</span><span class="s0">,</span>
+        <span class="s1">content_length: t.Optional[int]</span><span class="s0">,</span>
+        <span class="s1">options: t.Dict[str</span><span class="s0">, </span><span class="s1">str]</span><span class="s0">,</span>
+    <span class="s1">) -&gt; </span><span class="s3">&quot;t_parse_result&quot;</span><span class="s1">:</span>
+        <span class="s0">if </span><span class="s1">(</span>
+            <span class="s1">self.max_form_memory_size </span><span class="s0">is not None</span>
+            <span class="s0">and </span><span class="s1">content_length </span><span class="s0">is not None</span>
+            <span class="s0">and </span><span class="s1">content_length &gt; self.max_form_memory_size</span>
+        <span class="s1">):</span>
+            <span class="s2"># if the input stream is not exhausted, firefox reports Connection Reset</span>
+            <span class="s1">_exhaust(stream)</span>
+            <span class="s0">raise </span><span class="s1">exceptions.RequestEntityTooLarge()</span>
+
+        <span class="s1">form = url_decode_stream(stream</span><span class="s0">, </span><span class="s1">self.charset</span><span class="s0">, </span><span class="s1">errors=self.errors</span><span class="s0">, </span><span class="s1">cls=self.cls)</span>
+        <span class="s0">return </span><span class="s1">stream</span><span class="s0">, </span><span class="s1">form</span><span class="s0">, </span><span class="s1">self.cls()</span>
+
+    <span class="s2">#: mapping of mimetypes to parsing functions</span>
+    <span class="s1">parse_functions: t.Dict[</span>
+        <span class="s1">str</span><span class="s0">,</span>
+        <span class="s1">t.Callable[</span>
+            <span class="s1">[</span><span class="s3">&quot;FormDataParser&quot;</span><span class="s0">, </span><span class="s1">t.IO[bytes]</span><span class="s0">, </span><span class="s1">str</span><span class="s0">, </span><span class="s1">t.Optional[int]</span><span class="s0">, </span><span class="s1">t.Dict[str</span><span class="s0">, </span><span class="s1">str]]</span><span class="s0">,</span>
+            <span class="s3">&quot;t_parse_result&quot;</span><span class="s0">,</span>
+        <span class="s1">]</span><span class="s0">,</span>
+    <span class="s1">] = {</span>
+        <span class="s3">&quot;multipart/form-data&quot;</span><span class="s1">: _parse_multipart</span><span class="s0">,</span>
+        <span class="s3">&quot;application/x-www-form-urlencoded&quot;</span><span class="s1">: _parse_urlencoded</span><span class="s0">,</span>
+        <span class="s3">&quot;application/x-url-encoded&quot;</span><span class="s1">: _parse_urlencoded</span><span class="s0">,</span>
+    <span class="s1">}</span>
+
+
+<span class="s0">def </span><span class="s1">_line_parse(line: str) -&gt; t.Tuple[str</span><span class="s0">, </span><span class="s1">bool]:</span>
+    <span class="s5">&quot;&quot;&quot;Removes line ending characters and returns a tuple (`stripped_line`, 
+    `is_terminated`). 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">line[-</span><span class="s4">2</span><span class="s1">:] == </span><span class="s3">&quot;</span><span class="s0">\r\n</span><span class="s3">&quot;</span><span class="s1">:</span>
+        <span class="s0">return </span><span class="s1">line[:-</span><span class="s4">2</span><span class="s1">]</span><span class="s0">, True</span>
+
+    <span class="s0">elif </span><span class="s1">line[-</span><span class="s4">1</span><span class="s1">:] </span><span class="s0">in </span><span class="s1">{</span><span class="s3">&quot;</span><span class="s0">\r</span><span class="s3">&quot;</span><span class="s0">, </span><span class="s3">&quot;</span><span class="s0">\n</span><span class="s3">&quot;</span><span class="s1">}:</span>
+        <span class="s0">return </span><span class="s1">line[:-</span><span class="s4">1</span><span class="s1">]</span><span class="s0">, True</span>
+
+    <span class="s0">return </span><span class="s1">line</span><span class="s0">, False</span>
+
+
+<span class="s0">def </span><span class="s1">parse_multipart_headers(iterable: t.Iterable[bytes]) -&gt; Headers:</span>
+    <span class="s5">&quot;&quot;&quot;Parses multipart headers from an iterable that yields lines (including 
+    the trailing newline symbol).  The iterable has to be newline terminated. 
+    The iterable will stop at the line where the headers ended so it can be 
+    further consumed. 
+    :param iterable: iterable of strings that are newline terminated 
+    &quot;&quot;&quot;</span>
+    <span class="s1">warnings.warn(</span>
+        <span class="s3">&quot;'parse_multipart_headers' is deprecated and will be removed in&quot;</span>
+        <span class="s3">&quot; Werkzeug 2.1.&quot;</span><span class="s0">,</span>
+        <span class="s1">DeprecationWarning</span><span class="s0">,</span>
+        <span class="s1">stacklevel=</span><span class="s4">2</span><span class="s0">,</span>
+    <span class="s1">)</span>
+    <span class="s1">result: t.List[t.Tuple[str</span><span class="s0">, </span><span class="s1">str]] = []</span>
+
+    <span class="s0">for </span><span class="s1">b_line </span><span class="s0">in </span><span class="s1">iterable:</span>
+        <span class="s1">line = _to_str(b_line)</span>
+        <span class="s1">line</span><span class="s0">, </span><span class="s1">line_terminated = _line_parse(line)</span>
+
+        <span class="s0">if not </span><span class="s1">line_terminated:</span>
+            <span class="s0">raise </span><span class="s1">ValueError(</span><span class="s3">&quot;unexpected end of line in multipart header&quot;</span><span class="s1">)</span>
+
+        <span class="s0">if not </span><span class="s1">line:</span>
+            <span class="s0">break</span>
+        <span class="s0">elif </span><span class="s1">line[</span><span class="s4">0</span><span class="s1">] </span><span class="s0">in </span><span class="s3">&quot; </span><span class="s0">\t</span><span class="s3">&quot; </span><span class="s0">and </span><span class="s1">result:</span>
+            <span class="s1">key</span><span class="s0">, </span><span class="s1">value = result[-</span><span class="s4">1</span><span class="s1">]</span>
+            <span class="s1">result[-</span><span class="s4">1</span><span class="s1">] = (key</span><span class="s0">, </span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">value</span><span class="s0">}\n {</span><span class="s1">line[</span><span class="s4">1</span><span class="s1">:]</span><span class="s0">}</span><span class="s3">&quot;</span><span class="s1">)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">parts = line.split(</span><span class="s3">&quot;:&quot;</span><span class="s0">, </span><span class="s4">1</span><span class="s1">)</span>
+
+            <span class="s0">if </span><span class="s1">len(parts) == </span><span class="s4">2</span><span class="s1">:</span>
+                <span class="s1">result.append((parts[</span><span class="s4">0</span><span class="s1">].strip()</span><span class="s0">, </span><span class="s1">parts[</span><span class="s4">1</span><span class="s1">].strip()))</span>
+
+    <span class="s2"># we link the list to the headers, no need to create a copy, the</span>
+    <span class="s2"># list was not shared anyways.</span>
+    <span class="s0">return </span><span class="s1">Headers(result)</span>
+
+
+<span class="s0">class </span><span class="s1">MultiPartParser:</span>
+    <span class="s0">def </span><span class="s1">__init__(</span>
+        <span class="s1">self</span><span class="s0">,</span>
+        <span class="s1">stream_factory: t.Optional[</span><span class="s3">&quot;TStreamFactory&quot;</span><span class="s1">] = </span><span class="s0">None,</span>
+        <span class="s1">charset: str = </span><span class="s3">&quot;utf-8&quot;</span><span class="s0">,</span>
+        <span class="s1">errors: str = </span><span class="s3">&quot;replace&quot;</span><span class="s0">,</span>
+        <span class="s1">max_form_memory_size: t.Optional[int] = </span><span class="s0">None,</span>
+        <span class="s1">cls: t.Optional[t.Type[MultiDict]] = </span><span class="s0">None,</span>
+        <span class="s1">buffer_size: int = </span><span class="s4">64 </span><span class="s1">* </span><span class="s4">1024</span><span class="s0">,</span>
+    <span class="s1">) -&gt; </span><span class="s0">None</span><span class="s1">:</span>
+        <span class="s1">self.charset = charset</span>
+        <span class="s1">self.errors = errors</span>
+        <span class="s1">self.max_form_memory_size = max_form_memory_size</span>
+
+        <span class="s0">if </span><span class="s1">stream_factory </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">stream_factory = default_stream_factory</span>
+
+        <span class="s1">self.stream_factory = stream_factory</span>
+
+        <span class="s0">if </span><span class="s1">cls </span><span class="s0">is None</span><span class="s1">:</span>
+            <span class="s1">cls = MultiDict</span>
+
+        <span class="s1">self.cls = cls</span>
+
+        <span class="s1">self.buffer_size = buffer_size</span>
+
+    <span class="s0">def </span><span class="s1">fail(self</span><span class="s0">, </span><span class="s1">message: str) -&gt; </span><span class="s3">&quot;te.NoReturn&quot;</span><span class="s1">:</span>
+        <span class="s0">raise </span><span class="s1">ValueError(message)</span>
+
+    <span class="s0">def </span><span class="s1">get_part_charset(self</span><span class="s0">, </span><span class="s1">headers: Headers) -&gt; str:</span>
+        <span class="s2"># Figure out input charset for current part</span>
+        <span class="s1">content_type = headers.get(</span><span class="s3">&quot;content-type&quot;</span><span class="s1">)</span>
+
+        <span class="s0">if </span><span class="s1">content_type:</span>
+            <span class="s1">mimetype</span><span class="s0">, </span><span class="s1">ct_params = parse_options_header(content_type)</span>
+            <span class="s0">return </span><span class="s1">ct_params.get(</span><span class="s3">&quot;charset&quot;</span><span class="s0">, </span><span class="s1">self.charset)</span>
+
+        <span class="s0">return </span><span class="s1">self.charset</span>
+
+    <span class="s0">def </span><span class="s1">start_file_streaming(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">event: File</span><span class="s0">, </span><span class="s1">total_content_length: t.Optional[int]</span>
+    <span class="s1">) -&gt; t.IO[bytes]:</span>
+        <span class="s1">content_type = event.headers.get(</span><span class="s3">&quot;content-type&quot;</span><span class="s1">)</span>
+
+        <span class="s0">try</span><span class="s1">:</span>
+            <span class="s1">content_length = int(event.headers[</span><span class="s3">&quot;content-length&quot;</span><span class="s1">])</span>
+        <span class="s0">except </span><span class="s1">(KeyError</span><span class="s0">, </span><span class="s1">ValueError):</span>
+            <span class="s1">content_length = </span><span class="s4">0</span>
+
+        <span class="s1">container = self.stream_factory(</span>
+            <span class="s1">total_content_length=total_content_length</span><span class="s0">,</span>
+            <span class="s1">filename=event.filename</span><span class="s0">,</span>
+            <span class="s1">content_type=content_type</span><span class="s0">,</span>
+            <span class="s1">content_length=content_length</span><span class="s0">,</span>
+        <span class="s1">)</span>
+        <span class="s0">return </span><span class="s1">container</span>
+
+    <span class="s0">def </span><span class="s1">parse(</span>
+        <span class="s1">self</span><span class="s0">, </span><span class="s1">stream: t.IO[bytes]</span><span class="s0">, </span><span class="s1">boundary: bytes</span><span class="s0">, </span><span class="s1">content_length: t.Optional[int]</span>
+    <span class="s1">) -&gt; t.Tuple[MultiDict</span><span class="s0">, </span><span class="s1">MultiDict]:</span>
+        <span class="s1">container: t.Union[t.IO[bytes]</span><span class="s0">, </span><span class="s1">t.List[bytes]]</span>
+        <span class="s1">_write: t.Callable[[bytes]</span><span class="s0">, </span><span class="s1">t.Any]</span>
+
+        <span class="s1">iterator = chain(</span>
+            <span class="s1">_make_chunk_iter(</span>
+                <span class="s1">stream</span><span class="s0">,</span>
+                <span class="s1">limit=content_length</span><span class="s0">,</span>
+                <span class="s1">buffer_size=self.buffer_size</span><span class="s0">,</span>
+            <span class="s1">)</span><span class="s0">,</span>
+            <span class="s1">[</span><span class="s0">None</span><span class="s1">]</span><span class="s0">,</span>
+        <span class="s1">)</span>
+
+        <span class="s1">parser = MultipartDecoder(boundary</span><span class="s0">, </span><span class="s1">self.max_form_memory_size)</span>
+
+        <span class="s1">fields = []</span>
+        <span class="s1">files = []</span>
+
+        <span class="s1">current_part: Union[Field</span><span class="s0">, </span><span class="s1">File]</span>
+        <span class="s0">for </span><span class="s1">data </span><span class="s0">in </span><span class="s1">iterator:</span>
+            <span class="s1">parser.receive_data(data)</span>
+            <span class="s1">event = parser.next_event()</span>
+            <span class="s0">while not </span><span class="s1">isinstance(event</span><span class="s0">, </span><span class="s1">(Epilogue</span><span class="s0">, </span><span class="s1">NeedData)):</span>
+                <span class="s0">if </span><span class="s1">isinstance(event</span><span class="s0">, </span><span class="s1">Field):</span>
+                    <span class="s1">current_part = event</span>
+                    <span class="s1">container = []</span>
+                    <span class="s1">_write = container.append</span>
+                <span class="s0">elif </span><span class="s1">isinstance(event</span><span class="s0">, </span><span class="s1">File):</span>
+                    <span class="s1">current_part = event</span>
+                    <span class="s1">container = self.start_file_streaming(event</span><span class="s0">, </span><span class="s1">content_length)</span>
+                    <span class="s1">_write = container.write</span>
+                <span class="s0">elif </span><span class="s1">isinstance(event</span><span class="s0">, </span><span class="s1">Data):</span>
+                    <span class="s1">_write(event.data)</span>
+                    <span class="s0">if not </span><span class="s1">event.more_data:</span>
+                        <span class="s0">if </span><span class="s1">isinstance(current_part</span><span class="s0">, </span><span class="s1">Field):</span>
+                            <span class="s1">value = </span><span class="s6">b&quot;&quot;</span><span class="s1">.join(container).decode(</span>
+                                <span class="s1">self.get_part_charset(current_part.headers)</span><span class="s0">, </span><span class="s1">self.errors</span>
+                            <span class="s1">)</span>
+                            <span class="s1">fields.append((current_part.name</span><span class="s0">, </span><span class="s1">value))</span>
+                        <span class="s0">else</span><span class="s1">:</span>
+                            <span class="s1">container = t.cast(t.IO[bytes]</span><span class="s0">, </span><span class="s1">container)</span>
+                            <span class="s1">container.seek(</span><span class="s4">0</span><span class="s1">)</span>
+                            <span class="s1">files.append(</span>
+                                <span class="s1">(</span>
+                                    <span class="s1">current_part.name</span><span class="s0">,</span>
+                                    <span class="s1">FileStorage(</span>
+                                        <span class="s1">container</span><span class="s0">,</span>
+                                        <span class="s1">current_part.filename</span><span class="s0">,</span>
+                                        <span class="s1">current_part.name</span><span class="s0">,</span>
+                                        <span class="s1">headers=current_part.headers</span><span class="s0">,</span>
+                                    <span class="s1">)</span><span class="s0">,</span>
+                                <span class="s1">)</span>
+                            <span class="s1">)</span>
+
+                <span class="s1">event = parser.next_event()</span>
+
+        <span class="s0">return </span><span class="s1">self.cls(fields)</span><span class="s0">, </span><span class="s1">self.cls(files)</span>
+</pre>
+</body>
+</html>

@@ -1,0 +1,2074 @@
+<html>
+<head>
+<title>parsers.pyx</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+parsers.pyx</font>
+</center></td></tr></table>
+<pre><span class="s0"># Copyright (c) 2012, Lambda Foundry, Inc.</span>
+<span class="s0"># See LICENSE for the license</span>
+<span class="s0">from csv import (</span>
+    <span class="s0">QUOTE_MINIMAL,</span>
+    <span class="s0">QUOTE_NONE,</span>
+    <span class="s0">QUOTE_NONNUMERIC,</span>
+<span class="s0">)</span>
+<span class="s0">from errno import ENOENT</span>
+<span class="s0">import sys</span>
+<span class="s0">import time</span>
+<span class="s0">import warnings</span>
+
+<span class="s0">from libc.stdlib cimport free</span>
+<span class="s0">from libc.string cimport (</span>
+    <span class="s0">strcasecmp,</span>
+    <span class="s0">strlen,</span>
+    <span class="s0">strncpy,</span>
+<span class="s0">)</span>
+
+<span class="s0">import cython</span>
+<span class="s0">from cython import Py_ssize_t</span>
+
+<span class="s0">from cpython.bytes cimport (</span>
+    <span class="s0">PyBytes_AsString,</span>
+    <span class="s0">PyBytes_FromString,</span>
+<span class="s0">)</span>
+<span class="s0">from cpython.exc cimport (</span>
+    <span class="s0">PyErr_Fetch,</span>
+    <span class="s0">PyErr_Occurred,</span>
+<span class="s0">)</span>
+<span class="s0">from cpython.object cimport PyObject</span>
+<span class="s0">from cpython.ref cimport (</span>
+    <span class="s0">Py_INCREF,</span>
+    <span class="s0">Py_XDECREF,</span>
+<span class="s0">)</span>
+<span class="s0">from cpython.unicode cimport (</span>
+    <span class="s0">PyUnicode_AsUTF8String,</span>
+    <span class="s0">PyUnicode_Decode,</span>
+    <span class="s0">PyUnicode_DecodeUTF8,</span>
+<span class="s0">)</span>
+
+
+<span class="s0">cdef extern from &quot;Python.h&quot;:</span>
+    <span class="s0">object PyUnicode_FromString(char *v)</span>
+
+
+<span class="s0">import numpy as np</span>
+
+<span class="s0">cimport numpy as cnp</span>
+<span class="s0">from numpy cimport (</span>
+    <span class="s0">float64_t,</span>
+    <span class="s0">int64_t,</span>
+    <span class="s0">ndarray,</span>
+    <span class="s0">uint8_t,</span>
+    <span class="s0">uint64_t,</span>
+<span class="s0">)</span>
+
+<span class="s0">cnp.import_array()</span>
+
+<span class="s0">from pandas._libs cimport util</span>
+<span class="s0">from pandas._libs.util cimport (</span>
+    <span class="s0">INT64_MAX,</span>
+    <span class="s0">INT64_MIN,</span>
+    <span class="s0">UINT64_MAX,</span>
+<span class="s0">)</span>
+
+<span class="s0">import pandas._libs.lib as lib</span>
+
+<span class="s0">from pandas._libs.khash cimport (</span>
+    <span class="s0">kh_destroy_float64,</span>
+    <span class="s0">kh_destroy_str,</span>
+    <span class="s0">kh_destroy_str_starts,</span>
+    <span class="s0">kh_destroy_strbox,</span>
+    <span class="s0">kh_exist_str,</span>
+    <span class="s0">kh_float64_t,</span>
+    <span class="s0">kh_get_float64,</span>
+    <span class="s0">kh_get_str,</span>
+    <span class="s0">kh_get_str_starts_item,</span>
+    <span class="s0">kh_get_strbox,</span>
+    <span class="s0">kh_init_float64,</span>
+    <span class="s0">kh_init_str,</span>
+    <span class="s0">kh_init_str_starts,</span>
+    <span class="s0">kh_init_strbox,</span>
+    <span class="s0">kh_put_float64,</span>
+    <span class="s0">kh_put_str,</span>
+    <span class="s0">kh_put_str_starts_item,</span>
+    <span class="s0">kh_put_strbox,</span>
+    <span class="s0">kh_resize_float64,</span>
+    <span class="s0">kh_resize_str_starts,</span>
+    <span class="s0">kh_str_starts_t,</span>
+    <span class="s0">kh_str_t,</span>
+    <span class="s0">kh_strbox_t,</span>
+    <span class="s0">khiter_t,</span>
+<span class="s0">)</span>
+
+<span class="s0">from pandas.errors import (</span>
+    <span class="s0">EmptyDataError,</span>
+    <span class="s0">ParserError,</span>
+    <span class="s0">ParserWarning,</span>
+<span class="s0">)</span>
+
+<span class="s0">from pandas.core.dtypes.common import (</span>
+    <span class="s0">is_bool_dtype,</span>
+    <span class="s0">is_datetime64_dtype,</span>
+    <span class="s0">is_extension_array_dtype,</span>
+    <span class="s0">is_float_dtype,</span>
+    <span class="s0">is_integer_dtype,</span>
+    <span class="s0">is_object_dtype,</span>
+<span class="s0">)</span>
+<span class="s0">from pandas.core.dtypes.dtypes import CategoricalDtype</span>
+<span class="s0">from pandas.core.dtypes.inference import is_dict_like</span>
+
+<span class="s0">cdef:</span>
+    <span class="s0">float64_t INF = &lt;float64_t&gt;np.inf</span>
+    <span class="s0">float64_t NEGINF = -INF</span>
+    <span class="s0">int64_t DEFAULT_CHUNKSIZE = 256 * 1024</span>
+
+
+<span class="s0">cdef extern from &quot;headers/portable.h&quot;:</span>
+    <span class="s0"># I *think* this is here so that strcasecmp is defined on Windows</span>
+    <span class="s0"># so we don't get</span>
+    <span class="s0"># `parsers.obj : error LNK2001: unresolved external symbol strcasecmp`</span>
+    <span class="s0"># in Appveyor.</span>
+    <span class="s0"># In a sane world, the `from libc.string cimport` above would fail</span>
+    <span class="s0"># loudly.</span>
+    <span class="s0">pass</span>
+
+
+<span class="s0">cdef extern from &quot;parser/tokenizer.h&quot;:</span>
+
+    <span class="s0">ctypedef enum ParserState:</span>
+        <span class="s0">START_RECORD</span>
+        <span class="s0">START_FIELD</span>
+        <span class="s0">ESCAPED_CHAR</span>
+        <span class="s0">IN_FIELD</span>
+        <span class="s0">IN_QUOTED_FIELD</span>
+        <span class="s0">ESCAPE_IN_QUOTED_FIELD</span>
+        <span class="s0">QUOTE_IN_QUOTED_FIELD</span>
+        <span class="s0">EAT_CRNL</span>
+        <span class="s0">EAT_CRNL_NOP</span>
+        <span class="s0">EAT_WHITESPACE</span>
+        <span class="s0">EAT_COMMENT</span>
+        <span class="s0">EAT_LINE_COMMENT</span>
+        <span class="s0">WHITESPACE_LINE</span>
+        <span class="s0">SKIP_LINE</span>
+        <span class="s0">FINISHED</span>
+
+    <span class="s0">enum: ERROR_OVERFLOW</span>
+
+    <span class="s0">ctypedef enum BadLineHandleMethod:</span>
+        <span class="s0">ERROR,</span>
+        <span class="s0">WARN,</span>
+        <span class="s0">SKIP</span>
+
+    <span class="s0">ctypedef void* (*io_callback)(void *src, size_t nbytes, size_t *bytes_read,</span>
+                                  <span class="s0">int *status, const char *encoding_errors)</span>
+    <span class="s0">ctypedef int (*io_cleanup)(void *src)</span>
+
+    <span class="s0">ctypedef struct parser_t:</span>
+        <span class="s0">void *source</span>
+        <span class="s0">io_callback cb_io</span>
+        <span class="s0">io_cleanup cb_cleanup</span>
+
+        <span class="s0">int64_t chunksize  # Number of bytes to prepare for each chunk</span>
+        <span class="s0">char *data         # pointer to data to be processed</span>
+        <span class="s0">int64_t datalen    # amount of data available</span>
+        <span class="s0">int64_t datapos</span>
+
+        <span class="s0"># where to write out tokenized data</span>
+        <span class="s0">char *stream</span>
+        <span class="s0">uint64_t stream_len</span>
+        <span class="s0">uint64_t stream_cap</span>
+
+        <span class="s0"># Store words in (potentially ragged) matrix for now, hmm</span>
+        <span class="s0">char **words</span>
+        <span class="s0">int64_t *word_starts  # where we are in the stream</span>
+        <span class="s0">uint64_t words_len</span>
+        <span class="s0">uint64_t words_cap</span>
+        <span class="s0">uint64_t max_words_cap   # maximum word cap encountered</span>
+
+        <span class="s0">char *pword_start        # pointer to stream start of current field</span>
+        <span class="s0">int64_t word_start       # position start of current field</span>
+
+        <span class="s0">int64_t *line_start      # position in words for start of line</span>
+        <span class="s0">int64_t *line_fields     # Number of fields in each line</span>
+        <span class="s0">uint64_t lines           # Number of lines observed</span>
+        <span class="s0">uint64_t file_lines      # Number of lines observed (with bad/skipped)</span>
+        <span class="s0">uint64_t lines_cap       # Vector capacity</span>
+
+        <span class="s0"># Tokenizing stuff</span>
+        <span class="s0">ParserState state</span>
+        <span class="s0">int doublequote            # is &quot; represented by &quot;&quot;? */</span>
+        <span class="s0">char delimiter             # field separator */</span>
+        <span class="s0">int delim_whitespace       # consume tabs / spaces instead</span>
+        <span class="s0">char quotechar             # quote character */</span>
+        <span class="s0">char escapechar            # escape character */</span>
+        <span class="s0">char lineterminator</span>
+        <span class="s0">int skipinitialspace       # ignore spaces following delimiter? */</span>
+        <span class="s0">int quoting                # style of quoting to write */</span>
+
+        <span class="s0">char commentchar</span>
+        <span class="s0">int allow_embedded_newline</span>
+
+        <span class="s0">int usecols</span>
+
+        <span class="s0">Py_ssize_t expected_fields</span>
+        <span class="s0">BadLineHandleMethod on_bad_lines</span>
+
+        <span class="s0"># floating point options</span>
+        <span class="s0">char decimal</span>
+        <span class="s0">char sci</span>
+
+        <span class="s0"># thousands separator (comma, period)</span>
+        <span class="s0">char thousands</span>
+
+        <span class="s0">int header                  # Boolean: 1: has header, 0: no header</span>
+        <span class="s0">int64_t header_start        # header row start</span>
+        <span class="s0">uint64_t header_end         # header row end</span>
+
+        <span class="s0">void *skipset</span>
+        <span class="s0">PyObject *skipfunc</span>
+        <span class="s0">int64_t skip_first_N_rows</span>
+        <span class="s0">int64_t skipfooter</span>
+        <span class="s0"># pick one, depending on whether the converter requires GIL</span>
+        <span class="s0">float64_t (*double_converter)(const char *, char **,</span>
+                                      <span class="s0">char, char, char,</span>
+                                      <span class="s0">int, int *, int *) nogil</span>
+
+        <span class="s0">#  error handling</span>
+        <span class="s0">char *warn_msg</span>
+        <span class="s0">char *error_msg</span>
+
+        <span class="s0">int64_t skip_empty_lines</span>
+
+    <span class="s0">ctypedef struct coliter_t:</span>
+        <span class="s0">char **words</span>
+        <span class="s0">int64_t *line_start</span>
+        <span class="s0">int64_t col</span>
+
+    <span class="s0">ctypedef struct uint_state:</span>
+        <span class="s0">int seen_sint</span>
+        <span class="s0">int seen_uint</span>
+        <span class="s0">int seen_null</span>
+
+    <span class="s0">void uint_state_init(uint_state *self)</span>
+    <span class="s0">int uint64_conflict(uint_state *self)</span>
+
+    <span class="s0">void coliter_setup(coliter_t *it, parser_t *parser,</span>
+                       <span class="s0">int64_t i, int64_t start) nogil</span>
+    <span class="s0">void COLITER_NEXT(coliter_t, const char *) nogil</span>
+
+    <span class="s0">parser_t* parser_new()</span>
+
+    <span class="s0">int parser_init(parser_t *self) nogil</span>
+    <span class="s0">void parser_free(parser_t *self) nogil</span>
+    <span class="s0">void parser_del(parser_t *self) nogil</span>
+    <span class="s0">int parser_add_skiprow(parser_t *self, int64_t row)</span>
+
+    <span class="s0">int parser_set_skipfirstnrows(parser_t *self, int64_t nrows)</span>
+
+    <span class="s0">void parser_set_default_options(parser_t *self)</span>
+
+    <span class="s0">int parser_consume_rows(parser_t *self, size_t nrows)</span>
+
+    <span class="s0">int parser_trim_buffers(parser_t *self)</span>
+
+    <span class="s0">int tokenize_all_rows(parser_t *self, const char *encoding_errors) nogil</span>
+    <span class="s0">int tokenize_nrows(parser_t *self, size_t nrows, const char *encoding_errors) nogil</span>
+
+    <span class="s0">int64_t str_to_int64(char *p_item, int64_t int_min,</span>
+                         <span class="s0">int64_t int_max, int *error, char tsep) nogil</span>
+    <span class="s0">uint64_t str_to_uint64(uint_state *state, char *p_item, int64_t int_max,</span>
+                           <span class="s0">uint64_t uint_max, int *error, char tsep) nogil</span>
+
+    <span class="s0">float64_t xstrtod(const char *p, char **q, char decimal,</span>
+                      <span class="s0">char sci, char tsep, int skip_trailing,</span>
+                      <span class="s0">int *error, int *maybe_int) nogil</span>
+    <span class="s0">float64_t precise_xstrtod(const char *p, char **q, char decimal,</span>
+                              <span class="s0">char sci, char tsep, int skip_trailing,</span>
+                              <span class="s0">int *error, int *maybe_int) nogil</span>
+    <span class="s0">float64_t round_trip(const char *p, char **q, char decimal,</span>
+                         <span class="s0">char sci, char tsep, int skip_trailing,</span>
+                         <span class="s0">int *error, int *maybe_int) nogil</span>
+
+    <span class="s0">int to_boolean(const char *item, uint8_t *val) nogil</span>
+
+
+<span class="s0">cdef extern from &quot;parser/io.h&quot;:</span>
+    <span class="s0">void *new_rd_source(object obj) except NULL</span>
+
+    <span class="s0">int del_rd_source(void *src)</span>
+
+    <span class="s0">void* buffer_rd_bytes(void *source, size_t nbytes,</span>
+                          <span class="s0">size_t *bytes_read, int *status, const char *encoding_errors)</span>
+
+
+<span class="s0">cdef class TextReader:</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+
+    <span class="s0"># source: StringIO or file object</span>
+
+    <span class="s0">..versionchange:: 1.2.0</span>
+        <span class="s0">removed 'compression', 'memory_map', and 'encoding' argument.</span>
+        <span class="s0">These arguments are outsourced to CParserWrapper.</span>
+        <span class="s0">'source' has to be a file handle.</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+
+    <span class="s0">cdef:</span>
+        <span class="s0">parser_t *parser</span>
+        <span class="s0">object na_fvalues</span>
+        <span class="s0">object true_values, false_values</span>
+        <span class="s0">object handle</span>
+        <span class="s0">object orig_header</span>
+        <span class="s0">bint na_filter, keep_default_na, verbose, has_usecols, has_mi_columns</span>
+        <span class="s0">bint mangle_dupe_cols, allow_leading_cols</span>
+        <span class="s0">uint64_t parser_start  # this is modified after __init__</span>
+        <span class="s0">list clocks</span>
+        <span class="s0">const char *encoding_errors</span>
+        <span class="s0">kh_str_starts_t *false_set</span>
+        <span class="s0">kh_str_starts_t *true_set</span>
+        <span class="s0">int64_t buffer_lines, skipfooter</span>
+        <span class="s0">list dtype_cast_order  # list[np.dtype]</span>
+        <span class="s0">list names   # can be None</span>
+        <span class="s0">set noconvert  # set[int]</span>
+
+    <span class="s0">cdef public:</span>
+        <span class="s0">int64_t leading_cols, table_width</span>
+        <span class="s0">object delimiter  # bytes or str</span>
+        <span class="s0">object converters</span>
+        <span class="s0">object na_values</span>
+        <span class="s0">list header  # list[list[non-negative integers]]</span>
+        <span class="s0">object index_col</span>
+        <span class="s0">object skiprows</span>
+        <span class="s0">object dtype</span>
+        <span class="s0">object usecols</span>
+        <span class="s0">set unnamed_cols  # set[str]</span>
+
+    <span class="s0">def __cinit__(self, source,</span>
+                  <span class="s0">delimiter=b',',  # bytes | str</span>
+                  <span class="s0">header=0,</span>
+                  <span class="s0">int64_t header_start=0,</span>
+                  <span class="s0">uint64_t header_end=0,</span>
+                  <span class="s0">index_col=None,</span>
+                  <span class="s0">names=None,</span>
+                  <span class="s0">tokenize_chunksize=DEFAULT_CHUNKSIZE,</span>
+                  <span class="s0">bint delim_whitespace=False,</span>
+                  <span class="s0">converters=None,</span>
+                  <span class="s0">bint skipinitialspace=False,</span>
+                  <span class="s0">escapechar=None,      # bytes | str</span>
+                  <span class="s0">bint doublequote=True,</span>
+                  <span class="s0">quotechar=b'&quot;',</span>
+                  <span class="s0">quoting=0,            # int</span>
+                  <span class="s0">lineterminator=None,  # bytes | str</span>
+                  <span class="s0">comment=None,</span>
+                  <span class="s0">decimal=b'.',         # bytes | str</span>
+                  <span class="s0">thousands=None,       # bytes | str</span>
+                  <span class="s0">dtype=None,</span>
+                  <span class="s0">usecols=None,</span>
+                  <span class="s0">on_bad_lines=ERROR,</span>
+                  <span class="s0">bint na_filter=True,</span>
+                  <span class="s0">na_values=None,</span>
+                  <span class="s0">na_fvalues=None,</span>
+                  <span class="s0">bint keep_default_na=True,</span>
+                  <span class="s0">true_values=None,</span>
+                  <span class="s0">false_values=None,</span>
+                  <span class="s0">bint allow_leading_cols=True,</span>
+                  <span class="s0">skiprows=None,</span>
+                  <span class="s0">skipfooter=0,         # int64_t</span>
+                  <span class="s0">bint verbose=False,</span>
+                  <span class="s0">bint mangle_dupe_cols=True,</span>
+                  <span class="s0">float_precision=None,</span>
+                  <span class="s0">bint skip_blank_lines=True,</span>
+                  <span class="s0">encoding_errors=b&quot;strict&quot;):</span>
+
+        <span class="s0"># set encoding for native Python and C library</span>
+        <span class="s0">if isinstance(encoding_errors, str):</span>
+            <span class="s0">encoding_errors = encoding_errors.encode(&quot;utf-8&quot;)</span>
+        <span class="s0">elif encoding_errors is None:</span>
+            <span class="s0">encoding_errors = b&quot;strict&quot;</span>
+        <span class="s0">Py_INCREF(encoding_errors)</span>
+        <span class="s0">self.encoding_errors = PyBytes_AsString(encoding_errors)</span>
+
+        <span class="s0">self.parser = parser_new()</span>
+        <span class="s0">self.parser.chunksize = tokenize_chunksize</span>
+
+        <span class="s0">self.mangle_dupe_cols = mangle_dupe_cols</span>
+
+        <span class="s0"># For timekeeping</span>
+        <span class="s0">self.clocks = []</span>
+
+        <span class="s0">self.parser.usecols = (usecols is not None)</span>
+
+        <span class="s0">self._setup_parser_source(source)</span>
+        <span class="s0">parser_set_default_options(self.parser)</span>
+
+        <span class="s0">parser_init(self.parser)</span>
+
+        <span class="s0">if delim_whitespace:</span>
+            <span class="s0">self.parser.delim_whitespace = delim_whitespace</span>
+        <span class="s0">else:</span>
+            <span class="s0">if len(delimiter) &gt; 1:</span>
+                <span class="s0">raise ValueError('only length-1 separators excluded right now')</span>
+            <span class="s0">self.parser.delimiter = &lt;char&gt;ord(delimiter)</span>
+
+        <span class="s0"># ----------------------------------------</span>
+        <span class="s0"># parser options</span>
+
+        <span class="s0">self.parser.doublequote = doublequote</span>
+        <span class="s0">self.parser.skipinitialspace = skipinitialspace</span>
+        <span class="s0">self.parser.skip_empty_lines = skip_blank_lines</span>
+
+        <span class="s0">if lineterminator is not None:</span>
+            <span class="s0">if len(lineterminator) != 1:</span>
+                <span class="s0">raise ValueError('Only length-1 line terminators supported')</span>
+            <span class="s0">self.parser.lineterminator = &lt;char&gt;ord(lineterminator)</span>
+
+        <span class="s0">if len(decimal) != 1:</span>
+            <span class="s0">raise ValueError('Only length-1 decimal markers supported')</span>
+        <span class="s0">self.parser.decimal = &lt;char&gt;ord(decimal)</span>
+
+        <span class="s0">if thousands is not None:</span>
+            <span class="s0">if len(thousands) != 1:</span>
+                <span class="s0">raise ValueError('Only length-1 thousands markers supported')</span>
+            <span class="s0">self.parser.thousands = &lt;char&gt;ord(thousands)</span>
+
+        <span class="s0">if escapechar is not None:</span>
+            <span class="s0">if len(escapechar) != 1:</span>
+                <span class="s0">raise ValueError('Only length-1 escapes supported')</span>
+            <span class="s0">self.parser.escapechar = &lt;char&gt;ord(escapechar)</span>
+
+        <span class="s0">self._set_quoting(quotechar, quoting)</span>
+
+        <span class="s0">dtype_order = ['int64', 'float64', 'bool', 'object']</span>
+        <span class="s0">if quoting == QUOTE_NONNUMERIC:</span>
+            <span class="s0"># consistent with csv module semantics, cast all to float</span>
+            <span class="s0">dtype_order = dtype_order[1:]</span>
+        <span class="s0">self.dtype_cast_order = [np.dtype(x) for x in dtype_order]</span>
+
+        <span class="s0">if comment is not None:</span>
+            <span class="s0">if len(comment) &gt; 1:</span>
+                <span class="s0">raise ValueError('Only length-1 comment characters supported')</span>
+            <span class="s0">self.parser.commentchar = &lt;char&gt;ord(comment)</span>
+
+        <span class="s0">self.parser.on_bad_lines = on_bad_lines</span>
+
+        <span class="s0">self.skiprows = skiprows</span>
+        <span class="s0">if skiprows is not None:</span>
+            <span class="s0">self._make_skiprow_set()</span>
+
+        <span class="s0">self.skipfooter = skipfooter</span>
+
+        <span class="s0"># suboptimal</span>
+        <span class="s0">if usecols is not None:</span>
+            <span class="s0">self.has_usecols = 1</span>
+            <span class="s0"># GH-20558, validate usecols at higher level and only pass clean</span>
+            <span class="s0"># usecols into TextReader.</span>
+            <span class="s0">self.usecols = usecols</span>
+
+        <span class="s0"># TODO: XXX?</span>
+        <span class="s0">if skipfooter &gt; 0:</span>
+            <span class="s0">self.parser.on_bad_lines = SKIP</span>
+
+        <span class="s0">self.delimiter = delimiter</span>
+
+        <span class="s0">self.na_values = na_values</span>
+        <span class="s0">if na_fvalues is None:</span>
+            <span class="s0">na_fvalues = set()</span>
+        <span class="s0">self.na_fvalues = na_fvalues</span>
+
+        <span class="s0">self.true_values = _maybe_encode(true_values) + _true_values</span>
+        <span class="s0">self.false_values = _maybe_encode(false_values) + _false_values</span>
+
+        <span class="s0">self.true_set = kset_from_list(self.true_values)</span>
+        <span class="s0">self.false_set = kset_from_list(self.false_values)</span>
+
+        <span class="s0">self.keep_default_na = keep_default_na</span>
+        <span class="s0">self.converters = converters</span>
+        <span class="s0">self.na_filter = na_filter</span>
+
+        <span class="s0">self.verbose = verbose</span>
+
+        <span class="s0">if float_precision == &quot;round_trip&quot;:</span>
+            <span class="s0"># see gh-15140</span>
+            <span class="s0">self.parser.double_converter = round_trip</span>
+        <span class="s0">elif float_precision == &quot;legacy&quot;:</span>
+            <span class="s0">self.parser.double_converter = xstrtod</span>
+        <span class="s0">elif float_precision == &quot;high&quot; or float_precision is None:</span>
+            <span class="s0">self.parser.double_converter = precise_xstrtod</span>
+        <span class="s0">else:</span>
+            <span class="s0">raise ValueError(f'Unrecognized float_precision option: '</span>
+                             <span class="s0">f'{float_precision}')</span>
+
+        <span class="s0"># Caller is responsible for ensuring we have one of</span>
+        <span class="s0"># - None</span>
+        <span class="s0"># - DtypeObj</span>
+        <span class="s0"># - dict[Any, DtypeObj]</span>
+        <span class="s0">self.dtype = dtype</span>
+
+        <span class="s0"># XXX</span>
+        <span class="s0">self.noconvert = set()</span>
+
+        <span class="s0">self.index_col = index_col</span>
+
+        <span class="s0"># ----------------------------------------</span>
+        <span class="s0"># header stuff</span>
+
+        <span class="s0">self.allow_leading_cols = allow_leading_cols</span>
+        <span class="s0">self.leading_cols = 0  # updated in _get_header</span>
+
+        <span class="s0"># TODO: no header vs. header is not the first row</span>
+        <span class="s0">self.has_mi_columns = 0</span>
+        <span class="s0">self.orig_header = header</span>
+        <span class="s0">if header is None:</span>
+            <span class="s0"># sentinel value</span>
+            <span class="s0">self.parser.header_start = -1</span>
+            <span class="s0">self.parser.header_end = -1</span>
+            <span class="s0">self.parser.header = -1</span>
+            <span class="s0">self.parser_start = 0</span>
+            <span class="s0">prelim_header = []</span>
+        <span class="s0">else:</span>
+            <span class="s0">if isinstance(header, list):</span>
+                <span class="s0">if len(header) &gt; 1:</span>
+                    <span class="s0"># need to artificially skip the final line</span>
+                    <span class="s0"># which is still a header line</span>
+                    <span class="s0">header = list(header)</span>
+                    <span class="s0">header.append(header[-1] + 1)</span>
+                    <span class="s0">self.parser.header_end = header[-1]</span>
+                    <span class="s0">self.has_mi_columns = 1</span>
+                <span class="s0">else:</span>
+                    <span class="s0">self.parser.header_end = header[0]</span>
+
+                <span class="s0">self.parser_start = header[-1] + 1</span>
+                <span class="s0">self.parser.header_start = header[0]</span>
+                <span class="s0">self.parser.header = header[0]</span>
+                <span class="s0">prelim_header = header</span>
+            <span class="s0">else:</span>
+                <span class="s0">self.parser.header_start = header</span>
+                <span class="s0">self.parser.header_end = header</span>
+                <span class="s0">self.parser_start = header + 1</span>
+                <span class="s0">self.parser.header = header</span>
+                <span class="s0">prelim_header = [header]</span>
+
+        <span class="s0">self.names = names</span>
+        <span class="s0">header, table_width, unnamed_cols = self._get_header(prelim_header)</span>
+        <span class="s0"># header, table_width, and unnamed_cols are set here, never changed</span>
+        <span class="s0">self.header = header</span>
+        <span class="s0">self.table_width = table_width</span>
+        <span class="s0">self.unnamed_cols = unnamed_cols</span>
+
+        <span class="s0">if not self.table_width:</span>
+            <span class="s0">raise EmptyDataError(&quot;No columns to parse from file&quot;)</span>
+
+        <span class="s0"># Compute buffer_lines as function of table width.</span>
+        <span class="s0">heuristic = 2**20 // self.table_width</span>
+        <span class="s0">self.buffer_lines = 1</span>
+        <span class="s0">while self.buffer_lines * 2 &lt; heuristic:</span>
+            <span class="s0">self.buffer_lines *= 2</span>
+
+    <span class="s0">def __init__(self, *args, **kwargs):</span>
+        <span class="s0">pass</span>
+
+    <span class="s0">def __dealloc__(self):</span>
+        <span class="s0">_close(self)</span>
+        <span class="s0">parser_del(self.parser)</span>
+
+    <span class="s0">def close(self):</span>
+        <span class="s0">_close(self)</span>
+
+    <span class="s0">def _set_quoting(self, quote_char: str | bytes | None, quoting: int):</span>
+        <span class="s0">if not isinstance(quoting, int):</span>
+            <span class="s0">raise TypeError('&quot;quoting&quot; must be an integer')</span>
+
+        <span class="s0">if not QUOTE_MINIMAL &lt;= quoting &lt;= QUOTE_NONE:</span>
+            <span class="s0">raise TypeError('bad &quot;quoting&quot; value')</span>
+
+        <span class="s0">if not isinstance(quote_char, (str, bytes)) and quote_char is not None:</span>
+            <span class="s0">dtype = type(quote_char).__name__</span>
+            <span class="s0">raise TypeError(f'&quot;quotechar&quot; must be string, not {dtype}')</span>
+
+        <span class="s0">if quote_char is None or quote_char == '':</span>
+            <span class="s0">if quoting != QUOTE_NONE:</span>
+                <span class="s0">raise TypeError(&quot;quotechar must be set if quoting enabled&quot;)</span>
+            <span class="s0">self.parser.quoting = quoting</span>
+            <span class="s0">self.parser.quotechar = -1</span>
+        <span class="s0">elif len(quote_char) &gt; 1:  # 0-len case handled earlier</span>
+            <span class="s0">raise TypeError('&quot;quotechar&quot; must be a 1-character string')</span>
+        <span class="s0">else:</span>
+            <span class="s0">self.parser.quoting = quoting</span>
+            <span class="s0">self.parser.quotechar = &lt;char&gt;ord(quote_char)</span>
+
+    <span class="s0">cdef _make_skiprow_set(self):</span>
+        <span class="s0">if util.is_integer_object(self.skiprows):</span>
+            <span class="s0">parser_set_skipfirstnrows(self.parser, self.skiprows)</span>
+        <span class="s0">elif not callable(self.skiprows):</span>
+            <span class="s0">for i in self.skiprows:</span>
+                <span class="s0">parser_add_skiprow(self.parser, i)</span>
+        <span class="s0">else:</span>
+            <span class="s0">self.parser.skipfunc = &lt;PyObject *&gt;self.skiprows</span>
+
+    <span class="s0">cdef _setup_parser_source(self, source):</span>
+        <span class="s0">cdef:</span>
+            <span class="s0">void *ptr</span>
+
+        <span class="s0">ptr = new_rd_source(source)</span>
+        <span class="s0">self.parser.source = ptr</span>
+        <span class="s0">self.parser.cb_io = &amp;buffer_rd_bytes</span>
+        <span class="s0">self.parser.cb_cleanup = &amp;del_rd_source</span>
+
+    <span class="s0">cdef _get_header(self, list prelim_header):</span>
+        <span class="s0"># header is now a list of lists, so field_count should use header[0]</span>
+        <span class="s0">#</span>
+        <span class="s0"># modifies:</span>
+        <span class="s0">#   self.parser attributes</span>
+        <span class="s0">#   self.parser_start</span>
+        <span class="s0">#   self.leading_cols</span>
+
+        <span class="s0">cdef:</span>
+            <span class="s0">Py_ssize_t i, start, field_count, passed_count, unnamed_count, level</span>
+            <span class="s0">char *word</span>
+            <span class="s0">str name, old_name</span>
+            <span class="s0">uint64_t hr, data_line = 0</span>
+            <span class="s0">list header = []</span>
+            <span class="s0">set unnamed_cols = set()</span>
+
+        <span class="s0">if self.parser.header_start &gt;= 0:</span>
+
+            <span class="s0"># Header is in the file</span>
+            <span class="s0">for level, hr in enumerate(prelim_header):</span>
+
+                <span class="s0">this_header = []</span>
+
+                <span class="s0">if self.parser.lines &lt; hr + 1:</span>
+                    <span class="s0">self._tokenize_rows(hr + 2)</span>
+
+                <span class="s0">if self.parser.lines == 0:</span>
+                    <span class="s0">field_count = 0</span>
+                    <span class="s0">start = self.parser.line_start[0]</span>
+
+                <span class="s0"># e.g., if header=3 and file only has 2 lines</span>
+                <span class="s0">elif (self.parser.lines &lt; hr + 1</span>
+                      <span class="s0">and not isinstance(self.orig_header, list)) or (</span>
+                          <span class="s0">self.parser.lines &lt; hr):</span>
+                    <span class="s0">msg = self.orig_header</span>
+                    <span class="s0">if isinstance(msg, list):</span>
+                        <span class="s0">joined = ','.join(str(m) for m in msg)</span>
+                        <span class="s0">msg = f&quot;[{joined}], len of {len(msg)},&quot;</span>
+                    <span class="s0">raise ParserError(</span>
+                        <span class="s0">f'Passed header={msg} but only '</span>
+                        <span class="s0">f'{self.parser.lines} lines in file')</span>
+
+                <span class="s0">else:</span>
+                    <span class="s0">field_count = self.parser.line_fields[hr]</span>
+                    <span class="s0">start = self.parser.line_start[hr]</span>
+
+                <span class="s0">unnamed_count = 0</span>
+                <span class="s0">unnamed_col_indices = []</span>
+
+                <span class="s0">for i in range(field_count):</span>
+                    <span class="s0">word = self.parser.words[start + i]</span>
+
+                    <span class="s0">name = PyUnicode_DecodeUTF8(word, strlen(word),</span>
+                                                <span class="s0">self.encoding_errors)</span>
+
+                    <span class="s0">if name == '':</span>
+                        <span class="s0">if self.has_mi_columns:</span>
+                            <span class="s0">name = f'Unnamed: {i}_level_{level}'</span>
+                        <span class="s0">else:</span>
+                            <span class="s0">name = f'Unnamed: {i}'</span>
+
+                        <span class="s0">unnamed_count += 1</span>
+                        <span class="s0">unnamed_col_indices.append(i)</span>
+
+                    <span class="s0">this_header.append(name)</span>
+
+                <span class="s0">if not self.has_mi_columns and self.mangle_dupe_cols:</span>
+                    <span class="s0"># Ensure that regular columns are used before unnamed ones</span>
+                    <span class="s0"># to keep given names and mangle unnamed columns</span>
+                    <span class="s0">col_loop_order = [i for i in range(len(this_header))</span>
+                                      <span class="s0">if i not in unnamed_col_indices</span>
+                                      <span class="s0">] + unnamed_col_indices</span>
+                    <span class="s0">counts = {}</span>
+
+                    <span class="s0">for i in col_loop_order:</span>
+                        <span class="s0">col = this_header[i]</span>
+                        <span class="s0">old_col = col</span>
+                        <span class="s0">cur_count = counts.get(col, 0)</span>
+
+                        <span class="s0">if cur_count &gt; 0:</span>
+                            <span class="s0">while cur_count &gt; 0:</span>
+                                <span class="s0">counts[old_col] = cur_count + 1</span>
+                                <span class="s0">col = f'{old_col}.{cur_count}'</span>
+                                <span class="s0">if col in this_header:</span>
+                                    <span class="s0">cur_count += 1</span>
+                                <span class="s0">else:</span>
+                                    <span class="s0">cur_count = counts.get(col, 0)</span>
+
+                            <span class="s0">if (</span>
+                                <span class="s0">self.dtype is not None</span>
+                                <span class="s0">and is_dict_like(self.dtype)</span>
+                                <span class="s0">and self.dtype.get(old_col) is not None</span>
+                                <span class="s0">and self.dtype.get(col) is None</span>
+                            <span class="s0">):</span>
+                                <span class="s0">self.dtype.update({col: self.dtype.get(old_col)})</span>
+
+                        <span class="s0">this_header[i] = col</span>
+                        <span class="s0">counts[col] = cur_count + 1</span>
+
+                <span class="s0">if self.has_mi_columns:</span>
+
+                    <span class="s0"># If we have grabbed an extra line, but it's not in our</span>
+                    <span class="s0"># format, save in the buffer, and create an blank extra</span>
+                    <span class="s0"># line for the rest of the parsing code.</span>
+                    <span class="s0">if hr == prelim_header[-1]:</span>
+                        <span class="s0">lc = len(this_header)</span>
+                        <span class="s0">ic = (len(self.index_col) if self.index_col</span>
+                              <span class="s0">is not None else 0)</span>
+
+                        <span class="s0"># if wrong number of blanks or no index, not our format</span>
+                        <span class="s0">if (lc != unnamed_count and lc - ic &gt; unnamed_count) or ic == 0:</span>
+                            <span class="s0">hr -= 1</span>
+                            <span class="s0">self.parser_start -= 1</span>
+                            <span class="s0">this_header = [None] * lc</span>
+
+                <span class="s0">data_line = hr + 1</span>
+                <span class="s0">header.append(this_header)</span>
+                <span class="s0">unnamed_cols.update({this_header[i] for i in unnamed_col_indices})</span>
+
+            <span class="s0">if self.names is not None:</span>
+                <span class="s0">header = [self.names]</span>
+
+        <span class="s0">elif self.names is not None:</span>
+            <span class="s0"># Names passed</span>
+            <span class="s0">if self.parser.lines &lt; 1:</span>
+                <span class="s0">self._tokenize_rows(1)</span>
+
+            <span class="s0">header = [self.names]</span>
+
+            <span class="s0">if self.parser.lines &lt; 1:</span>
+                <span class="s0">field_count = len(header[0])</span>
+            <span class="s0">else:</span>
+                <span class="s0">field_count = self.parser.line_fields[data_line]</span>
+
+            <span class="s0"># Enforce this unless usecols</span>
+            <span class="s0">if not self.has_usecols:</span>
+                <span class="s0">self.parser.expected_fields = max(field_count, len(self.names))</span>
+        <span class="s0">else:</span>
+            <span class="s0"># No header passed nor to be found in the file</span>
+            <span class="s0">if self.parser.lines &lt; 1:</span>
+                <span class="s0">self._tokenize_rows(1)</span>
+
+            <span class="s0">return None, self.parser.line_fields[0], unnamed_cols</span>
+
+        <span class="s0"># Corner case, not enough lines in the file</span>
+        <span class="s0">if self.parser.lines &lt; data_line + 1:</span>
+            <span class="s0">field_count = len(header[0])</span>
+        <span class="s0">else:  # not self.has_usecols:</span>
+
+            <span class="s0">field_count = self.parser.line_fields[data_line]</span>
+
+            <span class="s0"># #2981</span>
+            <span class="s0">if self.names is not None:</span>
+                <span class="s0">field_count = max(field_count, len(self.names))</span>
+
+            <span class="s0">passed_count = len(header[0])</span>
+
+            <span class="s0">if (self.has_usecols and self.allow_leading_cols and</span>
+                    <span class="s0">not callable(self.usecols)):</span>
+                <span class="s0">nuse = len(self.usecols)</span>
+                <span class="s0">if nuse == passed_count:</span>
+                    <span class="s0">self.leading_cols = 0</span>
+                <span class="s0">elif self.names is None and nuse &lt; passed_count:</span>
+                    <span class="s0">self.leading_cols = field_count - passed_count</span>
+                <span class="s0">elif passed_count != field_count:</span>
+                    <span class="s0">raise ValueError('Number of passed names did not match number of '</span>
+                                     <span class="s0">'header fields in the file')</span>
+            <span class="s0"># oh boy, #2442, #2981</span>
+            <span class="s0">elif self.allow_leading_cols and passed_count &lt; field_count:</span>
+                <span class="s0">self.leading_cols = field_count - passed_count</span>
+
+        <span class="s0">return header, field_count, unnamed_cols</span>
+
+    <span class="s0">def read(self, rows: int | None = None) -&gt; dict[int, &quot;ArrayLike&quot;]:</span>
+        <span class="s0">&quot;&quot;&quot;</span>
+        <span class="s0">rows=None --&gt; read all rows</span>
+        <span class="s0">&quot;&quot;&quot;</span>
+        <span class="s0"># Don't care about memory usage</span>
+        <span class="s0">columns = self._read_rows(rows, 1)</span>
+
+        <span class="s0">return columns</span>
+
+    <span class="s0">def read_low_memory(self, rows: int | None)-&gt; list[dict[int, &quot;ArrayLike&quot;]]:</span>
+        <span class="s0">&quot;&quot;&quot;</span>
+        <span class="s0">rows=None --&gt; read all rows</span>
+        <span class="s0">&quot;&quot;&quot;</span>
+        <span class="s0"># Conserve intermediate space</span>
+        <span class="s0"># Caller is responsible for concatenating chunks,</span>
+        <span class="s0">#  see c_parser_wrapper._concatenate_chunks</span>
+        <span class="s0">cdef:</span>
+            <span class="s0">size_t rows_read = 0</span>
+            <span class="s0">list chunks = []</span>
+
+        <span class="s0">if rows is None:</span>
+            <span class="s0">while True:</span>
+                <span class="s0">try:</span>
+                    <span class="s0">chunk = self._read_rows(self.buffer_lines, 0)</span>
+                    <span class="s0">if len(chunk) == 0:</span>
+                        <span class="s0">break</span>
+                <span class="s0">except StopIteration:</span>
+                    <span class="s0">break</span>
+                <span class="s0">else:</span>
+                    <span class="s0">chunks.append(chunk)</span>
+        <span class="s0">else:</span>
+            <span class="s0">while rows_read &lt; rows:</span>
+                <span class="s0">try:</span>
+                    <span class="s0">crows = min(self.buffer_lines, rows - rows_read)</span>
+
+                    <span class="s0">chunk = self._read_rows(crows, 0)</span>
+                    <span class="s0">if len(chunk) == 0:</span>
+                        <span class="s0">break</span>
+
+                    <span class="s0">rows_read += len(list(chunk.values())[0])</span>
+                <span class="s0">except StopIteration:</span>
+                    <span class="s0">break</span>
+                <span class="s0">else:</span>
+                    <span class="s0">chunks.append(chunk)</span>
+
+        <span class="s0">parser_trim_buffers(self.parser)</span>
+
+        <span class="s0">if len(chunks) == 0:</span>
+            <span class="s0">raise StopIteration</span>
+
+        <span class="s0">return chunks</span>
+
+    <span class="s0">cdef _tokenize_rows(self, size_t nrows):</span>
+        <span class="s0">cdef:</span>
+            <span class="s0">int status</span>
+
+        <span class="s0">with nogil:</span>
+            <span class="s0">status = tokenize_nrows(self.parser, nrows, self.encoding_errors)</span>
+
+        <span class="s0">if self.parser.warn_msg != NULL:</span>
+            <span class="s0">print(self.parser.warn_msg, file=sys.stderr)</span>
+            <span class="s0">free(self.parser.warn_msg)</span>
+            <span class="s0">self.parser.warn_msg = NULL</span>
+
+        <span class="s0">if status &lt; 0:</span>
+            <span class="s0">raise_parser_error('Error tokenizing data', self.parser)</span>
+
+    <span class="s0">#  -&gt; dict[int, &quot;ArrayLike&quot;]</span>
+    <span class="s0">cdef _read_rows(self, rows, bint trim):</span>
+        <span class="s0">cdef:</span>
+            <span class="s0">int64_t buffered_lines</span>
+            <span class="s0">int64_t irows</span>
+
+        <span class="s0">self._start_clock()</span>
+
+        <span class="s0">if rows is not None:</span>
+            <span class="s0">irows = rows</span>
+            <span class="s0">buffered_lines = self.parser.lines - self.parser_start</span>
+            <span class="s0">if buffered_lines &lt; irows:</span>
+                <span class="s0">self._tokenize_rows(irows - buffered_lines)</span>
+
+            <span class="s0">if self.skipfooter &gt; 0:</span>
+                <span class="s0">raise ValueError('skipfooter can only be used to read '</span>
+                                 <span class="s0">'the whole file')</span>
+        <span class="s0">else:</span>
+            <span class="s0">with nogil:</span>
+                <span class="s0">status = tokenize_all_rows(self.parser, self.encoding_errors)</span>
+
+            <span class="s0">if self.parser.warn_msg != NULL:</span>
+                <span class="s0">print(self.parser.warn_msg, file=sys.stderr)</span>
+                <span class="s0">free(self.parser.warn_msg)</span>
+                <span class="s0">self.parser.warn_msg = NULL</span>
+
+            <span class="s0">if status &lt; 0:</span>
+                <span class="s0">raise_parser_error('Error tokenizing data', self.parser)</span>
+
+        <span class="s0">if self.parser_start &gt;= self.parser.lines:</span>
+            <span class="s0">raise StopIteration</span>
+        <span class="s0">self._end_clock('Tokenization')</span>
+
+        <span class="s0">self._start_clock()</span>
+        <span class="s0">columns = self._convert_column_data(rows)</span>
+        <span class="s0">self._end_clock('Type conversion')</span>
+        <span class="s0">self._start_clock()</span>
+        <span class="s0">if len(columns) &gt; 0:</span>
+            <span class="s0">rows_read = len(list(columns.values())[0])</span>
+            <span class="s0"># trim</span>
+            <span class="s0">parser_consume_rows(self.parser, rows_read)</span>
+            <span class="s0">if trim:</span>
+                <span class="s0">parser_trim_buffers(self.parser)</span>
+            <span class="s0">self.parser_start -= rows_read</span>
+
+        <span class="s0">self._end_clock('Parser memory cleanup')</span>
+
+        <span class="s0">return columns</span>
+
+    <span class="s0">cdef _start_clock(self):</span>
+        <span class="s0">self.clocks.append(time.time())</span>
+
+    <span class="s0">cdef _end_clock(self, str what):</span>
+        <span class="s0">if self.verbose:</span>
+            <span class="s0">elapsed = time.time() - self.clocks.pop(-1)</span>
+            <span class="s0">print(f'{what} took: {elapsed * 1000:.2f} ms')</span>
+
+    <span class="s0">def set_noconvert(self, i: int) -&gt; None:</span>
+        <span class="s0">self.noconvert.add(i)</span>
+
+    <span class="s0">def remove_noconvert(self, i: int) -&gt; None:</span>
+        <span class="s0">self.noconvert.remove(i)</span>
+
+    <span class="s0">def _convert_column_data(self, rows: int | None) -&gt; dict[int, &quot;ArrayLike&quot;]:</span>
+        <span class="s0">cdef:</span>
+            <span class="s0">int64_t i</span>
+            <span class="s0">int nused</span>
+            <span class="s0">kh_str_starts_t *na_hashset = NULL</span>
+            <span class="s0">int64_t start, end</span>
+            <span class="s0">object name, na_flist, col_dtype = None</span>
+            <span class="s0">bint na_filter = 0</span>
+            <span class="s0">int64_t num_cols</span>
+            <span class="s0">dict result</span>
+
+        <span class="s0">start = self.parser_start</span>
+
+        <span class="s0">if rows is None:</span>
+            <span class="s0">end = self.parser.lines</span>
+        <span class="s0">else:</span>
+            <span class="s0">end = min(start + rows, self.parser.lines)</span>
+
+        <span class="s0">num_cols = -1</span>
+        <span class="s0"># Py_ssize_t cast prevents build warning</span>
+        <span class="s0">for i in range(&lt;Py_ssize_t&gt;self.parser.lines):</span>
+            <span class="s0">num_cols = (num_cols &lt; self.parser.line_fields[i]) * \</span>
+                <span class="s0">self.parser.line_fields[i] + \</span>
+                <span class="s0">(num_cols &gt;= self.parser.line_fields[i]) * num_cols</span>
+
+        <span class="s0">usecols_not_callable_and_exists = not callable(self.usecols) and self.usecols</span>
+        <span class="s0">names_larger_num_cols = (self.names and</span>
+                                 <span class="s0">len(self.names) - self.leading_cols &gt; num_cols)</span>
+
+        <span class="s0">if self.table_width - self.leading_cols &gt; num_cols:</span>
+            <span class="s0">if (usecols_not_callable_and_exists</span>
+                    <span class="s0">and self.table_width - self.leading_cols &lt; len(self.usecols)</span>
+                    <span class="s0">or names_larger_num_cols):</span>
+                <span class="s0">raise ParserError(f&quot;Too many columns specified: expected &quot;</span>
+                                  <span class="s0">f&quot;{self.table_width - self.leading_cols} &quot;</span>
+                                  <span class="s0">f&quot;and found {num_cols}&quot;)</span>
+
+        <span class="s0">if (usecols_not_callable_and_exists and</span>
+                <span class="s0">all(isinstance(u, int) for u in self.usecols)):</span>
+            <span class="s0">missing_usecols = [col for col in self.usecols if col &gt;= num_cols]</span>
+            <span class="s0">if missing_usecols:</span>
+                <span class="s0">warnings.warn(</span>
+                    <span class="s0">&quot;Defining usecols with out of bounds indices is deprecated &quot;</span>
+                    <span class="s0">&quot;and will raise a ParserError in a future version.&quot;,</span>
+                    <span class="s0">FutureWarning,</span>
+                    <span class="s0">stacklevel=6,</span>
+                <span class="s0">)</span>
+
+        <span class="s0">results = {}</span>
+        <span class="s0">nused = 0</span>
+        <span class="s0">for i in range(self.table_width):</span>
+            <span class="s0">if i &lt; self.leading_cols:</span>
+                <span class="s0"># Pass through leading columns always</span>
+                <span class="s0">name = i</span>
+            <span class="s0">elif (self.usecols and not callable(self.usecols) and</span>
+                    <span class="s0">nused == len(self.usecols)):</span>
+                <span class="s0"># Once we've gathered all requested columns, stop. GH5766</span>
+                <span class="s0">break</span>
+            <span class="s0">else:</span>
+                <span class="s0">name = self._get_column_name(i, nused)</span>
+                <span class="s0">usecols = set()</span>
+                <span class="s0">if callable(self.usecols):</span>
+                    <span class="s0">if self.usecols(name):</span>
+                        <span class="s0">usecols = {i}</span>
+                <span class="s0">else:</span>
+                    <span class="s0">usecols = self.usecols</span>
+                <span class="s0">if self.has_usecols and not (i in usecols or</span>
+                                             <span class="s0">name in usecols):</span>
+                    <span class="s0">continue</span>
+                <span class="s0">nused += 1</span>
+
+            <span class="s0">conv = self._get_converter(i, name)</span>
+
+            <span class="s0">col_dtype = None</span>
+            <span class="s0">if self.dtype is not None:</span>
+                <span class="s0">if isinstance(self.dtype, dict):</span>
+                    <span class="s0">if name in self.dtype:</span>
+                        <span class="s0">col_dtype = self.dtype[name]</span>
+                    <span class="s0">elif i in self.dtype:</span>
+                        <span class="s0">col_dtype = self.dtype[i]</span>
+                <span class="s0">else:</span>
+                    <span class="s0">if self.dtype.names:</span>
+                        <span class="s0"># structured array</span>
+                        <span class="s0">col_dtype = np.dtype(self.dtype.descr[i][1])</span>
+                    <span class="s0">else:</span>
+                        <span class="s0">col_dtype = self.dtype</span>
+
+            <span class="s0">if conv:</span>
+                <span class="s0">if col_dtype is not None:</span>
+                    <span class="s0">warnings.warn((f&quot;Both a converter and dtype were specified &quot;</span>
+                                   <span class="s0">f&quot;for column {name} - only the converter will &quot;</span>
+                                   <span class="s0">f&quot;be used.&quot;), ParserWarning,</span>
+                                  <span class="s0">stacklevel=5)</span>
+                <span class="s0">results[i] = _apply_converter(conv, self.parser, i, start, end)</span>
+                <span class="s0">continue</span>
+
+            <span class="s0"># Collect the list of NaN values associated with the column.</span>
+            <span class="s0"># If we aren't supposed to do that, or none are collected,</span>
+            <span class="s0"># we set `na_filter` to `0` (`1` otherwise).</span>
+            <span class="s0">na_flist = set()</span>
+
+            <span class="s0">if self.na_filter:</span>
+                <span class="s0">na_list, na_flist = self._get_na_list(i, name)</span>
+                <span class="s0">if na_list is None:</span>
+                    <span class="s0">na_filter = 0</span>
+                <span class="s0">else:</span>
+                    <span class="s0">na_filter = 1</span>
+                    <span class="s0">na_hashset = kset_from_list(na_list)</span>
+            <span class="s0">else:</span>
+                <span class="s0">na_filter = 0</span>
+
+            <span class="s0"># Attempt to parse tokens and infer dtype of the column.</span>
+            <span class="s0"># Should return as the desired dtype (inferred or specified).</span>
+            <span class="s0">try:</span>
+                <span class="s0">col_res, na_count = self._convert_tokens(</span>
+                    <span class="s0">i, start, end, name, na_filter, na_hashset,</span>
+                    <span class="s0">na_flist, col_dtype)</span>
+            <span class="s0">finally:</span>
+                <span class="s0"># gh-21353</span>
+                <span class="s0">#</span>
+                <span class="s0"># Cleanup the NaN hash that we generated</span>
+                <span class="s0"># to avoid memory leaks.</span>
+                <span class="s0">if na_filter:</span>
+                    <span class="s0">self._free_na_set(na_hashset)</span>
+
+            <span class="s0"># don't try to upcast EAs</span>
+            <span class="s0">if na_count &gt; 0 and not is_extension_array_dtype(col_dtype):</span>
+                <span class="s0">col_res = _maybe_upcast(col_res)</span>
+
+            <span class="s0">if col_res is None:</span>
+                <span class="s0">raise ParserError(f'Unable to parse column {i}')</span>
+
+            <span class="s0">results[i] = col_res</span>
+
+        <span class="s0">self.parser_start += end - start</span>
+
+        <span class="s0">return results</span>
+
+    <span class="s0"># -&gt; tuple[&quot;ArrayLike&quot;, int]:</span>
+    <span class="s0">cdef inline _convert_tokens(self, Py_ssize_t i, int64_t start,</span>
+                                <span class="s0">int64_t end, object name, bint na_filter,</span>
+                                <span class="s0">kh_str_starts_t *na_hashset,</span>
+                                <span class="s0">object na_flist, object col_dtype):</span>
+
+        <span class="s0">if col_dtype is not None:</span>
+            <span class="s0">col_res, na_count = self._convert_with_dtype(</span>
+                <span class="s0">col_dtype, i, start, end, na_filter,</span>
+                <span class="s0">1, na_hashset, na_flist)</span>
+
+            <span class="s0"># Fallback on the parse (e.g. we requested int dtype,</span>
+            <span class="s0"># but its actually a float).</span>
+            <span class="s0">if col_res is not None:</span>
+                <span class="s0">return col_res, na_count</span>
+
+        <span class="s0">if i in self.noconvert:</span>
+            <span class="s0">return self._string_convert(i, start, end, na_filter, na_hashset)</span>
+        <span class="s0">else:</span>
+            <span class="s0">col_res = None</span>
+            <span class="s0">for dt in self.dtype_cast_order:</span>
+                <span class="s0">try:</span>
+                    <span class="s0">col_res, na_count = self._convert_with_dtype(</span>
+                        <span class="s0">dt, i, start, end, na_filter, 0, na_hashset, na_flist)</span>
+                <span class="s0">except ValueError:</span>
+                    <span class="s0"># This error is raised from trying to convert to uint64,</span>
+                    <span class="s0"># and we discover that we cannot convert to any numerical</span>
+                    <span class="s0"># dtype successfully. As a result, we leave the data</span>
+                    <span class="s0"># column AS IS with object dtype.</span>
+                    <span class="s0">col_res, na_count = self._convert_with_dtype(</span>
+                        <span class="s0">np.dtype('object'), i, start, end, 0,</span>
+                        <span class="s0">0, na_hashset, na_flist)</span>
+                <span class="s0">except OverflowError:</span>
+                    <span class="s0">col_res, na_count = self._convert_with_dtype(</span>
+                        <span class="s0">np.dtype('object'), i, start, end, na_filter,</span>
+                        <span class="s0">0, na_hashset, na_flist)</span>
+
+                <span class="s0">if col_res is not None:</span>
+                    <span class="s0">break</span>
+
+        <span class="s0"># we had a fallback parse on the dtype, so now try to cast</span>
+        <span class="s0">if col_res is not None and col_dtype is not None:</span>
+            <span class="s0"># If col_res is bool, it might actually be a bool array mixed with NaNs</span>
+            <span class="s0"># (see _try_bool_flex()). Usually this would be taken care of using</span>
+            <span class="s0"># _maybe_upcast(), but if col_dtype is a floating type we should just</span>
+            <span class="s0"># take care of that cast here.</span>
+            <span class="s0">if col_res.dtype == np.bool_ and is_float_dtype(col_dtype):</span>
+                <span class="s0">mask = col_res.view(np.uint8) == na_values[np.uint8]</span>
+                <span class="s0">col_res = col_res.astype(col_dtype)</span>
+                <span class="s0">np.putmask(col_res, mask, np.nan)</span>
+                <span class="s0">return col_res, na_count</span>
+
+            <span class="s0"># NaNs are already cast to True here, so can not use astype</span>
+            <span class="s0">if col_res.dtype == np.bool_ and is_integer_dtype(col_dtype):</span>
+                <span class="s0">if na_count &gt; 0:</span>
+                    <span class="s0">raise ValueError(</span>
+                        <span class="s0">f&quot;cannot safely convert passed user dtype of &quot;</span>
+                        <span class="s0">f&quot;{col_dtype} for {np.bool_} dtyped data in &quot;</span>
+                        <span class="s0">f&quot;column {i} due to NA values&quot;</span>
+                    <span class="s0">)</span>
+
+            <span class="s0"># only allow safe casts, eg. with a nan you cannot safely cast to int</span>
+            <span class="s0">try:</span>
+                <span class="s0">col_res = col_res.astype(col_dtype, casting='safe')</span>
+            <span class="s0">except TypeError:</span>
+
+                <span class="s0"># float -&gt; int conversions can fail the above</span>
+                <span class="s0"># even with no nans</span>
+                <span class="s0">col_res_orig = col_res</span>
+                <span class="s0">col_res = col_res.astype(col_dtype)</span>
+                <span class="s0">if (col_res != col_res_orig).any():</span>
+                    <span class="s0">raise ValueError(</span>
+                        <span class="s0">f&quot;cannot safely convert passed user dtype of &quot;</span>
+                        <span class="s0">f&quot;{col_dtype} for {col_res_orig.dtype.name} dtyped data in &quot;</span>
+                        <span class="s0">f&quot;column {i}&quot;)</span>
+
+        <span class="s0">return col_res, na_count</span>
+
+    <span class="s0">cdef _convert_with_dtype(self, object dtype, Py_ssize_t i,</span>
+                             <span class="s0">int64_t start, int64_t end,</span>
+                             <span class="s0">bint na_filter,</span>
+                             <span class="s0">bint user_dtype,</span>
+                             <span class="s0">kh_str_starts_t *na_hashset,</span>
+                             <span class="s0">object na_flist):</span>
+        <span class="s0">if isinstance(dtype, CategoricalDtype):</span>
+            <span class="s0"># TODO: I suspect that _categorical_convert could be</span>
+            <span class="s0"># optimized when dtype is an instance of CategoricalDtype</span>
+            <span class="s0">codes, cats, na_count = _categorical_convert(</span>
+                <span class="s0">self.parser, i, start, end, na_filter, na_hashset)</span>
+
+            <span class="s0"># Method accepts list of strings, not encoded ones.</span>
+            <span class="s0">true_values = [x.decode() for x in self.true_values]</span>
+            <span class="s0">array_type = dtype.construct_array_type()</span>
+            <span class="s0">cat = array_type._from_inferred_categories(</span>
+                <span class="s0">cats, codes, dtype, true_values=true_values)</span>
+            <span class="s0">return cat, na_count</span>
+
+        <span class="s0">elif is_extension_array_dtype(dtype):</span>
+            <span class="s0">result, na_count = self._string_convert(i, start, end, na_filter,</span>
+                                                    <span class="s0">na_hashset)</span>
+
+            <span class="s0">array_type = dtype.construct_array_type()</span>
+            <span class="s0">try:</span>
+                <span class="s0"># use _from_sequence_of_strings if the class defines it</span>
+                <span class="s0">if is_bool_dtype(dtype):</span>
+                    <span class="s0">true_values = [x.decode() for x in self.true_values]</span>
+                    <span class="s0">false_values = [x.decode() for x in self.false_values]</span>
+                    <span class="s0">result = array_type._from_sequence_of_strings(</span>
+                        <span class="s0">result, dtype=dtype, true_values=true_values,</span>
+                        <span class="s0">false_values=false_values)</span>
+                <span class="s0">else:</span>
+                    <span class="s0">result = array_type._from_sequence_of_strings(result, dtype=dtype)</span>
+            <span class="s0">except NotImplementedError:</span>
+                <span class="s0">raise NotImplementedError(</span>
+                    <span class="s0">f&quot;Extension Array: {array_type} must implement &quot;</span>
+                    <span class="s0">f&quot;_from_sequence_of_strings in order &quot;</span>
+                    <span class="s0">f&quot;to be used in parser methods&quot;)</span>
+
+            <span class="s0">return result, na_count</span>
+
+        <span class="s0">elif is_integer_dtype(dtype):</span>
+            <span class="s0">try:</span>
+                <span class="s0">result, na_count = _try_int64(self.parser, i, start,</span>
+                                              <span class="s0">end, na_filter, na_hashset)</span>
+                <span class="s0">if user_dtype and na_count is not None:</span>
+                    <span class="s0">if na_count &gt; 0:</span>
+                        <span class="s0">raise ValueError(f&quot;Integer column has NA values in column {i}&quot;)</span>
+            <span class="s0">except OverflowError:</span>
+                <span class="s0">result = _try_uint64(self.parser, i, start, end,</span>
+                                     <span class="s0">na_filter, na_hashset)</span>
+                <span class="s0">na_count = 0</span>
+
+            <span class="s0">if result is not None and dtype != 'int64':</span>
+                <span class="s0">result = result.astype(dtype)</span>
+
+            <span class="s0">return result, na_count</span>
+
+        <span class="s0">elif is_float_dtype(dtype):</span>
+            <span class="s0">result, na_count = _try_double(self.parser, i, start, end,</span>
+                                           <span class="s0">na_filter, na_hashset, na_flist)</span>
+
+            <span class="s0">if result is not None and dtype != 'float64':</span>
+                <span class="s0">result = result.astype(dtype)</span>
+            <span class="s0">return result, na_count</span>
+        <span class="s0">elif is_bool_dtype(dtype):</span>
+            <span class="s0">result, na_count = _try_bool_flex(self.parser, i, start, end,</span>
+                                              <span class="s0">na_filter, na_hashset,</span>
+                                              <span class="s0">self.true_set, self.false_set)</span>
+            <span class="s0">if user_dtype and na_count is not None:</span>
+                <span class="s0">if na_count &gt; 0:</span>
+                    <span class="s0">raise ValueError(f&quot;Bool column has NA values in column {i}&quot;)</span>
+            <span class="s0">return result, na_count</span>
+
+        <span class="s0">elif dtype.kind == 'S':</span>
+            <span class="s0"># TODO: na handling</span>
+            <span class="s0">width = dtype.itemsize</span>
+            <span class="s0">if width &gt; 0:</span>
+                <span class="s0">result = _to_fw_string(self.parser, i, start, end, width)</span>
+                <span class="s0">return result, 0</span>
+
+            <span class="s0"># treat as a regular string parsing</span>
+            <span class="s0">return self._string_convert(i, start, end, na_filter,</span>
+                                        <span class="s0">na_hashset)</span>
+        <span class="s0">elif dtype.kind == 'U':</span>
+            <span class="s0">width = dtype.itemsize</span>
+            <span class="s0">if width &gt; 0:</span>
+                <span class="s0">raise TypeError(f&quot;the dtype {dtype} is not supported for parsing&quot;)</span>
+
+            <span class="s0"># unicode variable width</span>
+            <span class="s0">return self._string_convert(i, start, end, na_filter,</span>
+                                        <span class="s0">na_hashset)</span>
+        <span class="s0">elif is_object_dtype(dtype):</span>
+            <span class="s0">return self._string_convert(i, start, end, na_filter,</span>
+                                        <span class="s0">na_hashset)</span>
+        <span class="s0">elif is_datetime64_dtype(dtype):</span>
+            <span class="s0">raise TypeError(f&quot;the dtype {dtype} is not supported &quot;</span>
+                            <span class="s0">f&quot;for parsing, pass this column &quot;</span>
+                            <span class="s0">f&quot;using parse_dates instead&quot;)</span>
+        <span class="s0">else:</span>
+            <span class="s0">raise TypeError(f&quot;the dtype {dtype} is not supported for parsing&quot;)</span>
+
+    <span class="s0"># -&gt; tuple[ndarray[object], int]</span>
+    <span class="s0">cdef _string_convert(self, Py_ssize_t i, int64_t start, int64_t end,</span>
+                         <span class="s0">bint na_filter, kh_str_starts_t *na_hashset):</span>
+
+        <span class="s0">return _string_box_utf8(self.parser, i, start, end, na_filter,</span>
+                                <span class="s0">na_hashset, self.encoding_errors)</span>
+
+    <span class="s0">def _get_converter(self, i: int, name):</span>
+        <span class="s0">if self.converters is None:</span>
+            <span class="s0">return None</span>
+
+        <span class="s0">if name is not None and name in self.converters:</span>
+            <span class="s0">return self.converters[name]</span>
+
+        <span class="s0"># Converter for position, if any</span>
+        <span class="s0">return self.converters.get(i)</span>
+
+    <span class="s0">cdef _get_na_list(self, Py_ssize_t i, name):</span>
+        <span class="s0"># Note: updates self.na_values, self.na_fvalues</span>
+        <span class="s0">if self.na_values is None:</span>
+            <span class="s0">return None, set()</span>
+
+        <span class="s0">if isinstance(self.na_values, dict):</span>
+            <span class="s0">key = None</span>
+            <span class="s0">values = None</span>
+
+            <span class="s0">if name is not None and name in self.na_values:</span>
+                <span class="s0">key = name</span>
+            <span class="s0">elif i in self.na_values:</span>
+                <span class="s0">key = i</span>
+            <span class="s0">else:  # No na_values provided for this column.</span>
+                <span class="s0">if self.keep_default_na:</span>
+                    <span class="s0">return _NA_VALUES, set()</span>
+
+                <span class="s0">return list(), set()</span>
+
+            <span class="s0">values = self.na_values[key]</span>
+            <span class="s0">if values is not None and not isinstance(values, list):</span>
+                <span class="s0">values = list(values)</span>
+
+            <span class="s0">fvalues = self.na_fvalues[key]</span>
+            <span class="s0">if fvalues is not None and not isinstance(fvalues, set):</span>
+                <span class="s0">fvalues = set(fvalues)</span>
+
+            <span class="s0">return _ensure_encoded(values), fvalues</span>
+        <span class="s0">else:</span>
+            <span class="s0">if not isinstance(self.na_values, list):</span>
+                <span class="s0">self.na_values = list(self.na_values)</span>
+            <span class="s0">if not isinstance(self.na_fvalues, set):</span>
+                <span class="s0">self.na_fvalues = set(self.na_fvalues)</span>
+
+            <span class="s0">return _ensure_encoded(self.na_values), self.na_fvalues</span>
+
+    <span class="s0">cdef _free_na_set(self, kh_str_starts_t *table):</span>
+        <span class="s0">kh_destroy_str_starts(table)</span>
+
+    <span class="s0">cdef _get_column_name(self, Py_ssize_t i, Py_ssize_t nused):</span>
+        <span class="s0">cdef int64_t j</span>
+        <span class="s0">if self.has_usecols and self.names is not None:</span>
+            <span class="s0">if (not callable(self.usecols) and</span>
+                    <span class="s0">len(self.names) == len(self.usecols)):</span>
+                <span class="s0">return self.names[nused]</span>
+            <span class="s0">else:</span>
+                <span class="s0">return self.names[i - self.leading_cols]</span>
+        <span class="s0">else:</span>
+            <span class="s0">if self.header is not None:</span>
+                <span class="s0">j = i - self.leading_cols</span>
+                <span class="s0"># generate extra (bogus) headers if there are more columns than headers</span>
+                <span class="s0">if j &gt;= len(self.header[0]):</span>
+                    <span class="s0">return j</span>
+                <span class="s0">elif self.has_mi_columns:</span>
+                    <span class="s0">return tuple(header_row[j] for header_row in self.header)</span>
+                <span class="s0">else:</span>
+                    <span class="s0">return self.header[0][j]</span>
+            <span class="s0">else:</span>
+                <span class="s0">return None</span>
+
+
+<span class="s0"># Factor out code common to TextReader.__dealloc__ and TextReader.close</span>
+<span class="s0"># It cannot be a class method, since calling self.close() in __dealloc__</span>
+<span class="s0"># which causes a class attribute lookup and violates best parctices</span>
+<span class="s0"># https://cython.readthedocs.io/en/latest/src/userguide/special_methods.html#finalization-method-dealloc</span>
+<span class="s0">cdef _close(TextReader reader):</span>
+    <span class="s0"># also preemptively free all allocated memory</span>
+    <span class="s0">parser_free(reader.parser)</span>
+    <span class="s0">if reader.true_set:</span>
+        <span class="s0">kh_destroy_str_starts(reader.true_set)</span>
+        <span class="s0">reader.true_set = NULL</span>
+    <span class="s0">if reader.false_set:</span>
+        <span class="s0">kh_destroy_str_starts(reader.false_set)</span>
+        <span class="s0">reader.false_set = NULL</span>
+
+
+<span class="s0">cdef:</span>
+    <span class="s0">object _true_values = [b'True', b'TRUE', b'true']</span>
+    <span class="s0">object _false_values = [b'False', b'FALSE', b'false']</span>
+
+
+<span class="s0">def _ensure_encoded(list lst):</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">list result = []</span>
+    <span class="s0">for x in lst:</span>
+        <span class="s0">if isinstance(x, str):</span>
+            <span class="s0">x = PyUnicode_AsUTF8String(x)</span>
+        <span class="s0">elif not isinstance(x, bytes):</span>
+            <span class="s0">x = str(x).encode('utf-8')</span>
+
+        <span class="s0">result.append(x)</span>
+    <span class="s0">return result</span>
+
+
+<span class="s0"># common NA values</span>
+<span class="s0"># no longer excluding inf representations</span>
+<span class="s0"># '1.#INF','-1.#INF', '1.#INF000000',</span>
+<span class="s0">STR_NA_VALUES = {</span>
+    <span class="s0">&quot;-1.#IND&quot;,</span>
+    <span class="s0">&quot;1.#QNAN&quot;,</span>
+    <span class="s0">&quot;1.#IND&quot;,</span>
+    <span class="s0">&quot;-1.#QNAN&quot;,</span>
+    <span class="s0">&quot;#N/A N/A&quot;,</span>
+    <span class="s0">&quot;#N/A&quot;,</span>
+    <span class="s0">&quot;N/A&quot;,</span>
+    <span class="s0">&quot;n/a&quot;,</span>
+    <span class="s0">&quot;NA&quot;,</span>
+    <span class="s0">&quot;&lt;NA&gt;&quot;,</span>
+    <span class="s0">&quot;#NA&quot;,</span>
+    <span class="s0">&quot;NULL&quot;,</span>
+    <span class="s0">&quot;null&quot;,</span>
+    <span class="s0">&quot;NaN&quot;,</span>
+    <span class="s0">&quot;-NaN&quot;,</span>
+    <span class="s0">&quot;nan&quot;,</span>
+    <span class="s0">&quot;-nan&quot;,</span>
+    <span class="s0">&quot;&quot;,</span>
+<span class="s0">}</span>
+<span class="s0">_NA_VALUES = _ensure_encoded(list(STR_NA_VALUES))</span>
+
+
+<span class="s0">def _maybe_upcast(arr):</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">if issubclass(arr.dtype.type, np.integer):</span>
+        <span class="s0">na_value = na_values[arr.dtype]</span>
+        <span class="s0">arr = arr.astype(float)</span>
+        <span class="s0">np.putmask(arr, arr == na_value, np.nan)</span>
+    <span class="s0">elif arr.dtype == np.bool_:</span>
+        <span class="s0">mask = arr.view(np.uint8) == na_values[np.uint8]</span>
+        <span class="s0">arr = arr.astype(object)</span>
+        <span class="s0">np.putmask(arr, mask, np.nan)</span>
+
+    <span class="s0">return arr</span>
+
+
+<span class="s0"># ----------------------------------------------------------------------</span>
+<span class="s0"># Type conversions / inference support code</span>
+
+
+<span class="s0"># -&gt; tuple[ndarray[object], int]</span>
+<span class="s0">cdef _string_box_utf8(parser_t *parser, int64_t col,</span>
+                      <span class="s0">int64_t line_start, int64_t line_end,</span>
+                      <span class="s0">bint na_filter, kh_str_starts_t *na_hashset,</span>
+                      <span class="s0">const char *encoding_errors):</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">int error, na_count = 0</span>
+        <span class="s0">Py_ssize_t i, lines</span>
+        <span class="s0">coliter_t it</span>
+        <span class="s0">const char *word = NULL</span>
+        <span class="s0">ndarray[object] result</span>
+
+        <span class="s0">int ret = 0</span>
+        <span class="s0">kh_strbox_t *table</span>
+
+        <span class="s0">object pyval</span>
+
+        <span class="s0">object NA = na_values[np.object_]</span>
+        <span class="s0">khiter_t k</span>
+
+    <span class="s0">table = kh_init_strbox()</span>
+    <span class="s0">lines = line_end - line_start</span>
+    <span class="s0">result = np.empty(lines, dtype=np.object_)</span>
+    <span class="s0">coliter_setup(&amp;it, parser, col, line_start)</span>
+
+    <span class="s0">for i in range(lines):</span>
+        <span class="s0">COLITER_NEXT(it, word)</span>
+
+        <span class="s0">if na_filter:</span>
+            <span class="s0">if kh_get_str_starts_item(na_hashset, word):</span>
+                <span class="s0"># in the hash table</span>
+                <span class="s0">na_count += 1</span>
+                <span class="s0">result[i] = NA</span>
+                <span class="s0">continue</span>
+
+        <span class="s0">k = kh_get_strbox(table, word)</span>
+
+        <span class="s0"># in the hash table</span>
+        <span class="s0">if k != table.n_buckets:</span>
+            <span class="s0"># this increments the refcount, but need to test</span>
+            <span class="s0">pyval = &lt;object&gt;table.vals[k]</span>
+        <span class="s0">else:</span>
+            <span class="s0"># box it. new ref?</span>
+            <span class="s0">pyval = PyUnicode_Decode(word, strlen(word), &quot;utf-8&quot;, encoding_errors)</span>
+
+            <span class="s0">k = kh_put_strbox(table, word, &amp;ret)</span>
+            <span class="s0">table.vals[k] = &lt;PyObject *&gt;pyval</span>
+
+        <span class="s0">result[i] = pyval</span>
+
+    <span class="s0">kh_destroy_strbox(table)</span>
+
+    <span class="s0">return result, na_count</span>
+
+
+<span class="s0">@cython.boundscheck(False)</span>
+<span class="s0">cdef _categorical_convert(parser_t *parser, int64_t col,</span>
+                          <span class="s0">int64_t line_start, int64_t line_end,</span>
+                          <span class="s0">bint na_filter, kh_str_starts_t *na_hashset):</span>
+    <span class="s0">&quot;Convert column data into codes, categories&quot;</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">int na_count = 0</span>
+        <span class="s0">Py_ssize_t i, size, lines</span>
+        <span class="s0">coliter_t it</span>
+        <span class="s0">const char *word = NULL</span>
+
+        <span class="s0">int64_t NA = -1</span>
+        <span class="s0">int64_t[:] codes</span>
+        <span class="s0">int64_t current_category = 0</span>
+
+        <span class="s0">char *errors = &quot;strict&quot;</span>
+
+        <span class="s0">int ret = 0</span>
+        <span class="s0">kh_str_t *table</span>
+        <span class="s0">khiter_t k</span>
+
+    <span class="s0">lines = line_end - line_start</span>
+    <span class="s0">codes = np.empty(lines, dtype=np.int64)</span>
+
+    <span class="s0"># factorize parsed values, creating a hash table</span>
+    <span class="s0"># bytes -&gt; category code</span>
+    <span class="s0">with nogil:</span>
+        <span class="s0">table = kh_init_str()</span>
+        <span class="s0">coliter_setup(&amp;it, parser, col, line_start)</span>
+
+        <span class="s0">for i in range(lines):</span>
+            <span class="s0">COLITER_NEXT(it, word)</span>
+
+            <span class="s0">if na_filter:</span>
+                <span class="s0">if kh_get_str_starts_item(na_hashset, word):</span>
+                    <span class="s0"># is in NA values</span>
+                    <span class="s0">na_count += 1</span>
+                    <span class="s0">codes[i] = NA</span>
+                    <span class="s0">continue</span>
+
+            <span class="s0">k = kh_get_str(table, word)</span>
+            <span class="s0"># not in the hash table</span>
+            <span class="s0">if k == table.n_buckets:</span>
+                <span class="s0">k = kh_put_str(table, word, &amp;ret)</span>
+                <span class="s0">table.vals[k] = current_category</span>
+                <span class="s0">current_category += 1</span>
+
+            <span class="s0">codes[i] = table.vals[k]</span>
+
+    <span class="s0"># parse and box categories to python strings</span>
+    <span class="s0">result = np.empty(table.n_occupied, dtype=np.object_)</span>
+    <span class="s0">for k in range(table.n_buckets):</span>
+        <span class="s0">if kh_exist_str(table, k):</span>
+            <span class="s0">result[table.vals[k]] = PyUnicode_FromString(table.keys[k])</span>
+
+    <span class="s0">kh_destroy_str(table)</span>
+    <span class="s0">return np.asarray(codes), result, na_count</span>
+
+
+<span class="s0"># -&gt; ndarray[f'|S{width}']</span>
+<span class="s0">cdef _to_fw_string(parser_t *parser, int64_t col, int64_t line_start,</span>
+                   <span class="s0">int64_t line_end, int64_t width):</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">char *data</span>
+        <span class="s0">ndarray result</span>
+
+    <span class="s0">result = np.empty(line_end - line_start, dtype=f'|S{width}')</span>
+    <span class="s0">data = &lt;char*&gt;result.data</span>
+
+    <span class="s0">with nogil:</span>
+        <span class="s0">_to_fw_string_nogil(parser, col, line_start, line_end, width, data)</span>
+
+    <span class="s0">return result</span>
+
+
+<span class="s0">cdef inline void _to_fw_string_nogil(parser_t *parser, int64_t col,</span>
+                                     <span class="s0">int64_t line_start, int64_t line_end,</span>
+                                     <span class="s0">size_t width, char *data) nogil:</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">int64_t i</span>
+        <span class="s0">coliter_t it</span>
+        <span class="s0">const char *word = NULL</span>
+
+    <span class="s0">coliter_setup(&amp;it, parser, col, line_start)</span>
+
+    <span class="s0">for i in range(line_end - line_start):</span>
+        <span class="s0">COLITER_NEXT(it, word)</span>
+        <span class="s0">strncpy(data, word, width)</span>
+        <span class="s0">data += width</span>
+
+
+<span class="s0">cdef:</span>
+    <span class="s0">char* cinf = b'inf'</span>
+    <span class="s0">char* cposinf = b'+inf'</span>
+    <span class="s0">char* cneginf = b'-inf'</span>
+
+    <span class="s0">char* cinfty = b'Infinity'</span>
+    <span class="s0">char* cposinfty = b'+Infinity'</span>
+    <span class="s0">char* cneginfty = b'-Infinity'</span>
+
+
+<span class="s0"># -&gt; tuple[ndarray[float64_t], int]  | tuple[None, None]</span>
+<span class="s0">cdef _try_double(parser_t *parser, int64_t col,</span>
+                 <span class="s0">int64_t line_start, int64_t line_end,</span>
+                 <span class="s0">bint na_filter, kh_str_starts_t *na_hashset, object na_flist):</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">int error, na_count = 0</span>
+        <span class="s0">Py_ssize_t lines</span>
+        <span class="s0">float64_t *data</span>
+        <span class="s0">float64_t NA = na_values[np.float64]</span>
+        <span class="s0">kh_float64_t *na_fset</span>
+        <span class="s0">ndarray[float64_t] result</span>
+        <span class="s0">bint use_na_flist = len(na_flist) &gt; 0</span>
+
+    <span class="s0">lines = line_end - line_start</span>
+    <span class="s0">result = np.empty(lines, dtype=np.float64)</span>
+    <span class="s0">data = &lt;float64_t *&gt;result.data</span>
+    <span class="s0">na_fset = kset_float64_from_list(na_flist)</span>
+    <span class="s0">with nogil:</span>
+        <span class="s0">error = _try_double_nogil(parser, parser.double_converter,</span>
+                                  <span class="s0">col, line_start, line_end,</span>
+                                  <span class="s0">na_filter, na_hashset, use_na_flist,</span>
+                                  <span class="s0">na_fset, NA, data, &amp;na_count)</span>
+
+    <span class="s0">kh_destroy_float64(na_fset)</span>
+    <span class="s0">if error != 0:</span>
+        <span class="s0">return None, None</span>
+    <span class="s0">return result, na_count</span>
+
+
+<span class="s0">cdef inline int _try_double_nogil(parser_t *parser,</span>
+                                  <span class="s0">float64_t (*double_converter)(</span>
+                                      <span class="s0">const char *, char **, char,</span>
+                                      <span class="s0">char, char, int, int *, int *) nogil,</span>
+                                  <span class="s0">int64_t col, int64_t line_start, int64_t line_end,</span>
+                                  <span class="s0">bint na_filter, kh_str_starts_t *na_hashset,</span>
+                                  <span class="s0">bint use_na_flist,</span>
+                                  <span class="s0">const kh_float64_t *na_flist,</span>
+                                  <span class="s0">float64_t NA, float64_t *data,</span>
+                                  <span class="s0">int *na_count) nogil:</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">int error = 0,</span>
+        <span class="s0">Py_ssize_t i, lines = line_end - line_start</span>
+        <span class="s0">coliter_t it</span>
+        <span class="s0">const char *word = NULL</span>
+        <span class="s0">char *p_end</span>
+        <span class="s0">khiter_t k64</span>
+
+    <span class="s0">na_count[0] = 0</span>
+    <span class="s0">coliter_setup(&amp;it, parser, col, line_start)</span>
+
+    <span class="s0">if na_filter:</span>
+        <span class="s0">for i in range(lines):</span>
+            <span class="s0">COLITER_NEXT(it, word)</span>
+
+            <span class="s0">if kh_get_str_starts_item(na_hashset, word):</span>
+                <span class="s0"># in the hash table</span>
+                <span class="s0">na_count[0] += 1</span>
+                <span class="s0">data[0] = NA</span>
+            <span class="s0">else:</span>
+                <span class="s0">data[0] = double_converter(word, &amp;p_end, parser.decimal,</span>
+                                           <span class="s0">parser.sci, parser.thousands,</span>
+                                           <span class="s0">1, &amp;error, NULL)</span>
+                <span class="s0">if error != 0 or p_end == word or p_end[0]:</span>
+                    <span class="s0">error = 0</span>
+                    <span class="s0">if (strcasecmp(word, cinf) == 0 or</span>
+                            <span class="s0">strcasecmp(word, cposinf) == 0 or</span>
+                            <span class="s0">strcasecmp(word, cinfty) == 0 or</span>
+                            <span class="s0">strcasecmp(word, cposinfty) == 0):</span>
+                        <span class="s0">data[0] = INF</span>
+                    <span class="s0">elif (strcasecmp(word, cneginf) == 0 or</span>
+                            <span class="s0">strcasecmp(word, cneginfty) == 0):</span>
+                        <span class="s0">data[0] = NEGINF</span>
+                    <span class="s0">else:</span>
+                        <span class="s0">return 1</span>
+                <span class="s0">if use_na_flist:</span>
+                    <span class="s0">k64 = kh_get_float64(na_flist, data[0])</span>
+                    <span class="s0">if k64 != na_flist.n_buckets:</span>
+                        <span class="s0">na_count[0] += 1</span>
+                        <span class="s0">data[0] = NA</span>
+            <span class="s0">data += 1</span>
+    <span class="s0">else:</span>
+        <span class="s0">for i in range(lines):</span>
+            <span class="s0">COLITER_NEXT(it, word)</span>
+            <span class="s0">data[0] = double_converter(word, &amp;p_end, parser.decimal,</span>
+                                       <span class="s0">parser.sci, parser.thousands,</span>
+                                       <span class="s0">1, &amp;error, NULL)</span>
+            <span class="s0">if error != 0 or p_end == word or p_end[0]:</span>
+                <span class="s0">error = 0</span>
+                <span class="s0">if (strcasecmp(word, cinf) == 0 or</span>
+                        <span class="s0">strcasecmp(word, cposinf) == 0 or</span>
+                        <span class="s0">strcasecmp(word, cinfty) == 0 or</span>
+                        <span class="s0">strcasecmp(word, cposinfty) == 0):</span>
+                    <span class="s0">data[0] = INF</span>
+                <span class="s0">elif (strcasecmp(word, cneginf) == 0 or</span>
+                        <span class="s0">strcasecmp(word, cneginfty) == 0):</span>
+                    <span class="s0">data[0] = NEGINF</span>
+                <span class="s0">else:</span>
+                    <span class="s0">return 1</span>
+            <span class="s0">data += 1</span>
+
+    <span class="s0">return 0</span>
+
+
+<span class="s0">cdef _try_uint64(parser_t *parser, int64_t col,</span>
+                 <span class="s0">int64_t line_start, int64_t line_end,</span>
+                 <span class="s0">bint na_filter, kh_str_starts_t *na_hashset):</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">int error</span>
+        <span class="s0">Py_ssize_t lines</span>
+        <span class="s0">coliter_t it</span>
+        <span class="s0">uint64_t *data</span>
+        <span class="s0">ndarray result</span>
+        <span class="s0">uint_state state</span>
+
+    <span class="s0">lines = line_end - line_start</span>
+    <span class="s0">result = np.empty(lines, dtype=np.uint64)</span>
+    <span class="s0">data = &lt;uint64_t *&gt;result.data</span>
+
+    <span class="s0">uint_state_init(&amp;state)</span>
+    <span class="s0">coliter_setup(&amp;it, parser, col, line_start)</span>
+    <span class="s0">with nogil:</span>
+        <span class="s0">error = _try_uint64_nogil(parser, col, line_start, line_end,</span>
+                                  <span class="s0">na_filter, na_hashset, data, &amp;state)</span>
+    <span class="s0">if error != 0:</span>
+        <span class="s0">if error == ERROR_OVERFLOW:</span>
+            <span class="s0"># Can't get the word variable</span>
+            <span class="s0">raise OverflowError('Overflow')</span>
+        <span class="s0">return None</span>
+
+    <span class="s0">if uint64_conflict(&amp;state):</span>
+        <span class="s0">raise ValueError('Cannot convert to numerical dtype')</span>
+
+    <span class="s0">if state.seen_sint:</span>
+        <span class="s0">raise OverflowError('Overflow')</span>
+
+    <span class="s0">return result</span>
+
+
+<span class="s0">cdef inline int _try_uint64_nogil(parser_t *parser, int64_t col,</span>
+                                  <span class="s0">int64_t line_start,</span>
+                                  <span class="s0">int64_t line_end, bint na_filter,</span>
+                                  <span class="s0">const kh_str_starts_t *na_hashset,</span>
+                                  <span class="s0">uint64_t *data, uint_state *state) nogil:</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">int error</span>
+        <span class="s0">Py_ssize_t i, lines = line_end - line_start</span>
+        <span class="s0">coliter_t it</span>
+        <span class="s0">const char *word = NULL</span>
+
+    <span class="s0">coliter_setup(&amp;it, parser, col, line_start)</span>
+
+    <span class="s0">if na_filter:</span>
+        <span class="s0">for i in range(lines):</span>
+            <span class="s0">COLITER_NEXT(it, word)</span>
+            <span class="s0">if kh_get_str_starts_item(na_hashset, word):</span>
+                <span class="s0"># in the hash table</span>
+                <span class="s0">state.seen_null = 1</span>
+                <span class="s0">data[i] = 0</span>
+                <span class="s0">continue</span>
+
+            <span class="s0">data[i] = str_to_uint64(state, word, INT64_MAX, UINT64_MAX,</span>
+                                    <span class="s0">&amp;error, parser.thousands)</span>
+            <span class="s0">if error != 0:</span>
+                <span class="s0">return error</span>
+    <span class="s0">else:</span>
+        <span class="s0">for i in range(lines):</span>
+            <span class="s0">COLITER_NEXT(it, word)</span>
+            <span class="s0">data[i] = str_to_uint64(state, word, INT64_MAX, UINT64_MAX,</span>
+                                    <span class="s0">&amp;error, parser.thousands)</span>
+            <span class="s0">if error != 0:</span>
+                <span class="s0">return error</span>
+
+    <span class="s0">return 0</span>
+
+
+<span class="s0">cdef _try_int64(parser_t *parser, int64_t col,</span>
+                <span class="s0">int64_t line_start, int64_t line_end,</span>
+                <span class="s0">bint na_filter, kh_str_starts_t *na_hashset):</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">int error, na_count = 0</span>
+        <span class="s0">Py_ssize_t lines</span>
+        <span class="s0">coliter_t it</span>
+        <span class="s0">int64_t *data</span>
+        <span class="s0">ndarray result</span>
+        <span class="s0">int64_t NA = na_values[np.int64]</span>
+
+    <span class="s0">lines = line_end - line_start</span>
+    <span class="s0">result = np.empty(lines, dtype=np.int64)</span>
+    <span class="s0">data = &lt;int64_t *&gt;result.data</span>
+    <span class="s0">coliter_setup(&amp;it, parser, col, line_start)</span>
+    <span class="s0">with nogil:</span>
+        <span class="s0">error = _try_int64_nogil(parser, col, line_start, line_end,</span>
+                                 <span class="s0">na_filter, na_hashset, NA, data, &amp;na_count)</span>
+    <span class="s0">if error != 0:</span>
+        <span class="s0">if error == ERROR_OVERFLOW:</span>
+            <span class="s0"># Can't get the word variable</span>
+            <span class="s0">raise OverflowError('Overflow')</span>
+        <span class="s0">return None, None</span>
+
+    <span class="s0">return result, na_count</span>
+
+
+<span class="s0">cdef inline int _try_int64_nogil(parser_t *parser, int64_t col,</span>
+                                 <span class="s0">int64_t line_start,</span>
+                                 <span class="s0">int64_t line_end, bint na_filter,</span>
+                                 <span class="s0">const kh_str_starts_t *na_hashset, int64_t NA,</span>
+                                 <span class="s0">int64_t *data, int *na_count) nogil:</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">int error</span>
+        <span class="s0">Py_ssize_t i, lines = line_end - line_start</span>
+        <span class="s0">coliter_t it</span>
+        <span class="s0">const char *word = NULL</span>
+
+    <span class="s0">na_count[0] = 0</span>
+    <span class="s0">coliter_setup(&amp;it, parser, col, line_start)</span>
+
+    <span class="s0">if na_filter:</span>
+        <span class="s0">for i in range(lines):</span>
+            <span class="s0">COLITER_NEXT(it, word)</span>
+            <span class="s0">if kh_get_str_starts_item(na_hashset, word):</span>
+                <span class="s0"># in the hash table</span>
+                <span class="s0">na_count[0] += 1</span>
+                <span class="s0">data[i] = NA</span>
+                <span class="s0">continue</span>
+
+            <span class="s0">data[i] = str_to_int64(word, INT64_MIN, INT64_MAX,</span>
+                                   <span class="s0">&amp;error, parser.thousands)</span>
+            <span class="s0">if error != 0:</span>
+                <span class="s0">return error</span>
+    <span class="s0">else:</span>
+        <span class="s0">for i in range(lines):</span>
+            <span class="s0">COLITER_NEXT(it, word)</span>
+            <span class="s0">data[i] = str_to_int64(word, INT64_MIN, INT64_MAX,</span>
+                                   <span class="s0">&amp;error, parser.thousands)</span>
+            <span class="s0">if error != 0:</span>
+                <span class="s0">return error</span>
+
+    <span class="s0">return 0</span>
+
+
+<span class="s0"># -&gt; tuple[ndarray[bool], int]</span>
+<span class="s0">cdef _try_bool_flex(parser_t *parser, int64_t col,</span>
+                    <span class="s0">int64_t line_start, int64_t line_end,</span>
+                    <span class="s0">bint na_filter, const kh_str_starts_t *na_hashset,</span>
+                    <span class="s0">const kh_str_starts_t *true_hashset,</span>
+                    <span class="s0">const kh_str_starts_t *false_hashset):</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">int error, na_count = 0</span>
+        <span class="s0">Py_ssize_t lines</span>
+        <span class="s0">uint8_t *data</span>
+        <span class="s0">ndarray result</span>
+        <span class="s0">uint8_t NA = na_values[np.bool_]</span>
+
+    <span class="s0">lines = line_end - line_start</span>
+    <span class="s0">result = np.empty(lines, dtype=np.uint8)</span>
+    <span class="s0">data = &lt;uint8_t *&gt;result.data</span>
+    <span class="s0">with nogil:</span>
+        <span class="s0">error = _try_bool_flex_nogil(parser, col, line_start, line_end,</span>
+                                     <span class="s0">na_filter, na_hashset, true_hashset,</span>
+                                     <span class="s0">false_hashset, NA, data, &amp;na_count)</span>
+    <span class="s0">if error != 0:</span>
+        <span class="s0">return None, None</span>
+    <span class="s0">return result.view(np.bool_), na_count</span>
+
+
+<span class="s0">cdef inline int _try_bool_flex_nogil(parser_t *parser, int64_t col,</span>
+                                     <span class="s0">int64_t line_start,</span>
+                                     <span class="s0">int64_t line_end, bint na_filter,</span>
+                                     <span class="s0">const kh_str_starts_t *na_hashset,</span>
+                                     <span class="s0">const kh_str_starts_t *true_hashset,</span>
+                                     <span class="s0">const kh_str_starts_t *false_hashset,</span>
+                                     <span class="s0">uint8_t NA, uint8_t *data,</span>
+                                     <span class="s0">int *na_count) nogil:</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">int error = 0</span>
+        <span class="s0">Py_ssize_t i, lines = line_end - line_start</span>
+        <span class="s0">coliter_t it</span>
+        <span class="s0">const char *word = NULL</span>
+
+    <span class="s0">na_count[0] = 0</span>
+    <span class="s0">coliter_setup(&amp;it, parser, col, line_start)</span>
+
+    <span class="s0">if na_filter:</span>
+        <span class="s0">for i in range(lines):</span>
+            <span class="s0">COLITER_NEXT(it, word)</span>
+
+            <span class="s0">if kh_get_str_starts_item(na_hashset, word):</span>
+                <span class="s0"># in the hash table</span>
+                <span class="s0">na_count[0] += 1</span>
+                <span class="s0">data[0] = NA</span>
+                <span class="s0">data += 1</span>
+                <span class="s0">continue</span>
+
+            <span class="s0">if kh_get_str_starts_item(true_hashset, word):</span>
+                <span class="s0">data[0] = 1</span>
+                <span class="s0">data += 1</span>
+                <span class="s0">continue</span>
+            <span class="s0">if kh_get_str_starts_item(false_hashset, word):</span>
+                <span class="s0">data[0] = 0</span>
+                <span class="s0">data += 1</span>
+                <span class="s0">continue</span>
+
+            <span class="s0">error = to_boolean(word, data)</span>
+            <span class="s0">if error != 0:</span>
+                <span class="s0">return error</span>
+            <span class="s0">data += 1</span>
+    <span class="s0">else:</span>
+        <span class="s0">for i in range(lines):</span>
+            <span class="s0">COLITER_NEXT(it, word)</span>
+
+            <span class="s0">if kh_get_str_starts_item(true_hashset, word):</span>
+                <span class="s0">data[0] = 1</span>
+                <span class="s0">data += 1</span>
+                <span class="s0">continue</span>
+
+            <span class="s0">if kh_get_str_starts_item(false_hashset, word):</span>
+                <span class="s0">data[0] = 0</span>
+                <span class="s0">data += 1</span>
+                <span class="s0">continue</span>
+
+            <span class="s0">error = to_boolean(word, data)</span>
+            <span class="s0">if error != 0:</span>
+                <span class="s0">return error</span>
+            <span class="s0">data += 1</span>
+
+    <span class="s0">return 0</span>
+
+
+<span class="s0">cdef kh_str_starts_t* kset_from_list(list values) except NULL:</span>
+    <span class="s0"># caller takes responsibility for freeing the hash table</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">Py_ssize_t i</span>
+        <span class="s0">kh_str_starts_t *table</span>
+        <span class="s0">int ret = 0</span>
+        <span class="s0">object val</span>
+
+    <span class="s0">table = kh_init_str_starts()</span>
+
+    <span class="s0">for i in range(len(values)):</span>
+        <span class="s0">val = values[i]</span>
+
+        <span class="s0"># None creeps in sometimes, which isn't possible here</span>
+        <span class="s0">if not isinstance(val, bytes):</span>
+            <span class="s0">kh_destroy_str_starts(table)</span>
+            <span class="s0">raise ValueError('Must be all encoded bytes')</span>
+
+        <span class="s0">kh_put_str_starts_item(table, PyBytes_AsString(val), &amp;ret)</span>
+
+    <span class="s0">if table.table.n_buckets &lt;= 128:</span>
+        <span class="s0"># Resize the hash table to make it almost empty, this</span>
+        <span class="s0"># reduces amount of hash collisions on lookup thus</span>
+        <span class="s0"># &quot;key not in table&quot; case is faster.</span>
+        <span class="s0"># Note that this trades table memory footprint for lookup speed.</span>
+        <span class="s0">kh_resize_str_starts(table, table.table.n_buckets * 8)</span>
+
+    <span class="s0">return table</span>
+
+
+<span class="s0">cdef kh_float64_t* kset_float64_from_list(values) except NULL:</span>
+    <span class="s0"># caller takes responsibility for freeing the hash table</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">khiter_t k</span>
+        <span class="s0">kh_float64_t *table</span>
+        <span class="s0">int ret = 0</span>
+        <span class="s0">float64_t val</span>
+        <span class="s0">object value</span>
+
+    <span class="s0">table = kh_init_float64()</span>
+
+    <span class="s0">for value in values:</span>
+        <span class="s0">val = float(value)</span>
+
+        <span class="s0">k = kh_put_float64(table, val, &amp;ret)</span>
+
+    <span class="s0">if table.n_buckets &lt;= 128:</span>
+        <span class="s0"># See reasoning in kset_from_list</span>
+        <span class="s0">kh_resize_float64(table, table.n_buckets * 8)</span>
+    <span class="s0">return table</span>
+
+
+<span class="s0">cdef raise_parser_error(object base, parser_t *parser):</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">object old_exc</span>
+        <span class="s0">object exc_type</span>
+        <span class="s0">PyObject *type</span>
+        <span class="s0">PyObject *value</span>
+        <span class="s0">PyObject *traceback</span>
+
+    <span class="s0">if PyErr_Occurred():</span>
+        <span class="s0">PyErr_Fetch(&amp;type, &amp;value, &amp;traceback)</span>
+        <span class="s0">Py_XDECREF(traceback)</span>
+
+        <span class="s0">if value != NULL:</span>
+            <span class="s0">old_exc = &lt;object&gt;value</span>
+            <span class="s0">Py_XDECREF(value)</span>
+
+            <span class="s0"># PyErr_Fetch only returned the error message in *value,</span>
+            <span class="s0"># so the Exception class must be extracted from *type.</span>
+            <span class="s0">if isinstance(old_exc, str):</span>
+                <span class="s0">if type != NULL:</span>
+                    <span class="s0">exc_type = &lt;object&gt;type</span>
+                <span class="s0">else:</span>
+                    <span class="s0">exc_type = ParserError</span>
+
+                <span class="s0">Py_XDECREF(type)</span>
+                <span class="s0">raise exc_type(old_exc)</span>
+            <span class="s0">else:</span>
+                <span class="s0">Py_XDECREF(type)</span>
+                <span class="s0">raise old_exc</span>
+
+    <span class="s0">message = f'{base}. C error: '</span>
+    <span class="s0">if parser.error_msg != NULL:</span>
+        <span class="s0">message += parser.error_msg.decode('utf-8')</span>
+    <span class="s0">else:</span>
+        <span class="s0">message += 'no error message set'</span>
+
+    <span class="s0">raise ParserError(message)</span>
+
+
+<span class="s0"># ----------------------------------------------------------------------</span>
+<span class="s0"># NA values</span>
+<span class="s0">def _compute_na_values():</span>
+    <span class="s0">int64info = np.iinfo(np.int64)</span>
+    <span class="s0">int32info = np.iinfo(np.int32)</span>
+    <span class="s0">int16info = np.iinfo(np.int16)</span>
+    <span class="s0">int8info = np.iinfo(np.int8)</span>
+    <span class="s0">uint64info = np.iinfo(np.uint64)</span>
+    <span class="s0">uint32info = np.iinfo(np.uint32)</span>
+    <span class="s0">uint16info = np.iinfo(np.uint16)</span>
+    <span class="s0">uint8info = np.iinfo(np.uint8)</span>
+    <span class="s0">na_values = {</span>
+        <span class="s0">np.float64: np.nan,</span>
+        <span class="s0">np.int64: int64info.min,</span>
+        <span class="s0">np.int32: int32info.min,</span>
+        <span class="s0">np.int16: int16info.min,</span>
+        <span class="s0">np.int8: int8info.min,</span>
+        <span class="s0">np.uint64: uint64info.max,</span>
+        <span class="s0">np.uint32: uint32info.max,</span>
+        <span class="s0">np.uint16: uint16info.max,</span>
+        <span class="s0">np.uint8: uint8info.max,</span>
+        <span class="s0">np.bool_: uint8info.max,</span>
+        <span class="s0">np.object_: np.nan   # oof</span>
+    <span class="s0">}</span>
+    <span class="s0">return na_values</span>
+
+
+<span class="s0">na_values = _compute_na_values()</span>
+
+<span class="s0">for k in list(na_values):</span>
+    <span class="s0">na_values[np.dtype(k)] = na_values[k]</span>
+
+
+<span class="s0"># -&gt; ArrayLike</span>
+<span class="s0">cdef _apply_converter(object f, parser_t *parser, int64_t col,</span>
+                      <span class="s0">int64_t line_start, int64_t line_end):</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">Py_ssize_t i, lines</span>
+        <span class="s0">coliter_t it</span>
+        <span class="s0">const char *word = NULL</span>
+        <span class="s0">ndarray[object] result</span>
+        <span class="s0">object val</span>
+
+    <span class="s0">lines = line_end - line_start</span>
+    <span class="s0">result = np.empty(lines, dtype=np.object_)</span>
+
+    <span class="s0">coliter_setup(&amp;it, parser, col, line_start)</span>
+
+    <span class="s0">for i in range(lines):</span>
+        <span class="s0">COLITER_NEXT(it, word)</span>
+        <span class="s0">val = PyUnicode_FromString(word)</span>
+        <span class="s0">result[i] = f(val)</span>
+
+    <span class="s0">return lib.maybe_convert_objects(result)</span>
+
+
+<span class="s0">cdef list _maybe_encode(list values):</span>
+    <span class="s0">if values is None:</span>
+        <span class="s0">return []</span>
+    <span class="s0">return [x.encode('utf-8') if isinstance(x, str) else x for x in values]</span>
+
+
+<span class="s0">def sanitize_objects(ndarray[object] values, set na_values) -&gt; int:</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Convert specified values, including the given set na_values to np.nan.</span>
+
+    <span class="s0">Parameters</span>
+    <span class="s0">----------</span>
+    <span class="s0">values : ndarray[object]</span>
+    <span class="s0">na_values : set</span>
+
+    <span class="s0">Returns</span>
+    <span class="s0">-------</span>
+    <span class="s0">na_count : int</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">Py_ssize_t i, n</span>
+        <span class="s0">object val, onan</span>
+        <span class="s0">Py_ssize_t na_count = 0</span>
+        <span class="s0">dict memo = {}</span>
+
+    <span class="s0">n = len(values)</span>
+    <span class="s0">onan = np.nan</span>
+
+    <span class="s0">for i in range(n):</span>
+        <span class="s0">val = values[i]</span>
+        <span class="s0">if val in na_values:</span>
+            <span class="s0">values[i] = onan</span>
+            <span class="s0">na_count += 1</span>
+        <span class="s0">elif val in memo:</span>
+            <span class="s0">values[i] = memo[val]</span>
+        <span class="s0">else:</span>
+            <span class="s0">memo[val] = val</span>
+
+    <span class="s0">return na_count</span>
+</pre>
+</body>
+</html>

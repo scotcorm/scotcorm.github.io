@@ -1,0 +1,161 @@
+<html>
+<head>
+<title>heuristics.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #6a8759;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+heuristics.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># SPDX-FileCopyrightText: 2015 Eric Larson</span>
+<span class="s0">#</span>
+<span class="s0"># SPDX-License-Identifier: Apache-2.0</span>
+
+<span class="s2">import </span><span class="s1">calendar</span>
+<span class="s2">import </span><span class="s1">time</span>
+
+<span class="s2">from </span><span class="s1">email.utils </span><span class="s2">import </span><span class="s1">formatdate</span><span class="s2">, </span><span class="s1">parsedate</span><span class="s2">, </span><span class="s1">parsedate_tz</span>
+
+<span class="s2">from </span><span class="s1">datetime </span><span class="s2">import </span><span class="s1">datetime</span><span class="s2">, </span><span class="s1">timedelta</span>
+
+<span class="s1">TIME_FMT = </span><span class="s3">&quot;%a, %d %b %Y %H:%M:%S GMT&quot;</span>
+
+
+<span class="s2">def </span><span class="s1">expire_after(delta</span><span class="s2">, </span><span class="s1">date=</span><span class="s2">None</span><span class="s1">):</span>
+    <span class="s1">date = date </span><span class="s2">or </span><span class="s1">datetime.utcnow()</span>
+    <span class="s2">return </span><span class="s1">date + delta</span>
+
+
+<span class="s2">def </span><span class="s1">datetime_to_header(dt):</span>
+    <span class="s2">return </span><span class="s1">formatdate(calendar.timegm(dt.timetuple()))</span>
+
+
+<span class="s2">class </span><span class="s1">BaseHeuristic(object):</span>
+
+    <span class="s2">def </span><span class="s1">warning(self</span><span class="s2">, </span><span class="s1">response):</span>
+        <span class="s4">&quot;&quot;&quot; 
+        Return a valid 1xx warning header value describing the cache 
+        adjustments. 
+ 
+        The response is provided too allow warnings like 113 
+        http://tools.ietf.org/html/rfc7234#section-5.5.4 where we need 
+        to explicitly say response is over 24 hours old. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s3">'110 - &quot;Response is Stale&quot;'</span>
+
+    <span class="s2">def </span><span class="s1">update_headers(self</span><span class="s2">, </span><span class="s1">response):</span>
+        <span class="s4">&quot;&quot;&quot;Update the response headers with any new headers. 
+ 
+        NOTE: This SHOULD always include some Warning header to 
+              signify that the response was cached by the client, not 
+              by way of the provided headers. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">return </span><span class="s1">{}</span>
+
+    <span class="s2">def </span><span class="s1">apply(self</span><span class="s2">, </span><span class="s1">response):</span>
+        <span class="s1">updated_headers = self.update_headers(response)</span>
+
+        <span class="s2">if </span><span class="s1">updated_headers:</span>
+            <span class="s1">response.headers.update(updated_headers)</span>
+            <span class="s1">warning_header_value = self.warning(response)</span>
+            <span class="s2">if </span><span class="s1">warning_header_value </span><span class="s2">is not None</span><span class="s1">:</span>
+                <span class="s1">response.headers.update({</span><span class="s3">&quot;Warning&quot;</span><span class="s1">: warning_header_value})</span>
+
+        <span class="s2">return </span><span class="s1">response</span>
+
+
+<span class="s2">class </span><span class="s1">OneDayCache(BaseHeuristic):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Cache the response by providing an expires 1 day in the 
+    future. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">update_headers(self</span><span class="s2">, </span><span class="s1">response):</span>
+        <span class="s1">headers = {}</span>
+
+        <span class="s2">if </span><span class="s3">&quot;expires&quot; </span><span class="s2">not in </span><span class="s1">response.headers:</span>
+            <span class="s1">date = parsedate(response.headers[</span><span class="s3">&quot;date&quot;</span><span class="s1">])</span>
+            <span class="s1">expires = expire_after(timedelta(days=</span><span class="s5">1</span><span class="s1">)</span><span class="s2">, </span><span class="s1">date=datetime(*date[:</span><span class="s5">6</span><span class="s1">]))</span>
+            <span class="s1">headers[</span><span class="s3">&quot;expires&quot;</span><span class="s1">] = datetime_to_header(expires)</span>
+            <span class="s1">headers[</span><span class="s3">&quot;cache-control&quot;</span><span class="s1">] = </span><span class="s3">&quot;public&quot;</span>
+        <span class="s2">return </span><span class="s1">headers</span>
+
+
+<span class="s2">class </span><span class="s1">ExpiresAfter(BaseHeuristic):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Cache **all** requests for a defined time period. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">**kw):</span>
+        <span class="s1">self.delta = timedelta(**kw)</span>
+
+    <span class="s2">def </span><span class="s1">update_headers(self</span><span class="s2">, </span><span class="s1">response):</span>
+        <span class="s1">expires = expire_after(self.delta)</span>
+        <span class="s2">return </span><span class="s1">{</span><span class="s3">&quot;expires&quot;</span><span class="s1">: datetime_to_header(expires)</span><span class="s2">, </span><span class="s3">&quot;cache-control&quot;</span><span class="s1">: </span><span class="s3">&quot;public&quot;</span><span class="s1">}</span>
+
+    <span class="s2">def </span><span class="s1">warning(self</span><span class="s2">, </span><span class="s1">response):</span>
+        <span class="s1">tmpl = </span><span class="s3">&quot;110 - Automatically cached for %s. Response might be stale&quot;</span>
+        <span class="s2">return </span><span class="s1">tmpl % self.delta</span>
+
+
+<span class="s2">class </span><span class="s1">LastModified(BaseHeuristic):</span>
+    <span class="s4">&quot;&quot;&quot; 
+    If there is no Expires header already, fall back on Last-Modified 
+    using the heuristic from 
+    http://tools.ietf.org/html/rfc7234#section-4.2.2 
+    to calculate a reasonable value. 
+ 
+    Firefox also does something like this per 
+    https://developer.mozilla.org/en-US/docs/Web/HTTP/Caching_FAQ 
+    http://lxr.mozilla.org/mozilla-release/source/netwerk/protocol/http/nsHttpResponseHead.cpp#397 
+    Unlike mozilla we limit this to 24-hr. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">cacheable_by_default_statuses = {</span>
+        <span class="s5">200</span><span class="s2">, </span><span class="s5">203</span><span class="s2">, </span><span class="s5">204</span><span class="s2">, </span><span class="s5">206</span><span class="s2">, </span><span class="s5">300</span><span class="s2">, </span><span class="s5">301</span><span class="s2">, </span><span class="s5">404</span><span class="s2">, </span><span class="s5">405</span><span class="s2">, </span><span class="s5">410</span><span class="s2">, </span><span class="s5">414</span><span class="s2">, </span><span class="s5">501</span>
+    <span class="s1">}</span>
+
+    <span class="s2">def </span><span class="s1">update_headers(self</span><span class="s2">, </span><span class="s1">resp):</span>
+        <span class="s1">headers = resp.headers</span>
+
+        <span class="s2">if </span><span class="s3">&quot;expires&quot; </span><span class="s2">in </span><span class="s1">headers:</span>
+            <span class="s2">return </span><span class="s1">{}</span>
+
+        <span class="s2">if </span><span class="s3">&quot;cache-control&quot; </span><span class="s2">in </span><span class="s1">headers </span><span class="s2">and </span><span class="s1">headers[</span><span class="s3">&quot;cache-control&quot;</span><span class="s1">] != </span><span class="s3">&quot;public&quot;</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">{}</span>
+
+        <span class="s2">if </span><span class="s1">resp.status </span><span class="s2">not in </span><span class="s1">self.cacheable_by_default_statuses:</span>
+            <span class="s2">return </span><span class="s1">{}</span>
+
+        <span class="s2">if </span><span class="s3">&quot;date&quot; </span><span class="s2">not in </span><span class="s1">headers </span><span class="s2">or </span><span class="s3">&quot;last-modified&quot; </span><span class="s2">not in </span><span class="s1">headers:</span>
+            <span class="s2">return </span><span class="s1">{}</span>
+
+        <span class="s1">date = calendar.timegm(parsedate_tz(headers[</span><span class="s3">&quot;date&quot;</span><span class="s1">]))</span>
+        <span class="s1">last_modified = parsedate(headers[</span><span class="s3">&quot;last-modified&quot;</span><span class="s1">])</span>
+        <span class="s2">if </span><span class="s1">date </span><span class="s2">is None or </span><span class="s1">last_modified </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">{}</span>
+
+        <span class="s1">now = time.time()</span>
+        <span class="s1">current_age = max(</span><span class="s5">0</span><span class="s2">, </span><span class="s1">now - date)</span>
+        <span class="s1">delta = date - calendar.timegm(last_modified)</span>
+        <span class="s1">freshness_lifetime = max(</span><span class="s5">0</span><span class="s2">, </span><span class="s1">min(delta / </span><span class="s5">10</span><span class="s2">, </span><span class="s5">24 </span><span class="s1">* </span><span class="s5">3600</span><span class="s1">))</span>
+        <span class="s2">if </span><span class="s1">freshness_lifetime &lt;= current_age:</span>
+            <span class="s2">return </span><span class="s1">{}</span>
+
+        <span class="s1">expires = date + freshness_lifetime</span>
+        <span class="s2">return </span><span class="s1">{</span><span class="s3">&quot;expires&quot;</span><span class="s1">: time.strftime(TIME_FMT</span><span class="s2">, </span><span class="s1">time.gmtime(expires))}</span>
+
+    <span class="s2">def </span><span class="s1">warning(self</span><span class="s2">, </span><span class="s1">resp):</span>
+        <span class="s2">return None</span>
+</pre>
+</body>
+</html>

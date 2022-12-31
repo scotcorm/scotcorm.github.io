@@ -1,0 +1,386 @@
+<html>
+<head>
+<title>noseclasses.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #808080;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #cc7832;}
+.s3 { color: #629755; font-style: italic;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+noseclasses.py</font>
+</center></td></tr></table>
+<pre><span class="s0"># These classes implement a doctest runner plugin for nose, a &quot;known failure&quot;</span>
+<span class="s0"># error class, and a customized TestProgram for NumPy.</span>
+
+<span class="s0"># Because this module imports nose directly, it should not</span>
+<span class="s0"># be used except by nosetester.py to avoid a general NumPy</span>
+<span class="s0"># dependency on nose.</span>
+<span class="s2">import </span><span class="s1">os</span>
+<span class="s2">import </span><span class="s1">sys</span>
+<span class="s2">import </span><span class="s1">doctest</span>
+<span class="s2">import </span><span class="s1">inspect</span>
+
+<span class="s2">import </span><span class="s1">numpy</span>
+<span class="s2">import </span><span class="s1">nose</span>
+<span class="s2">from </span><span class="s1">nose.plugins </span><span class="s2">import </span><span class="s1">doctests </span><span class="s2">as </span><span class="s1">npd</span>
+<span class="s2">from </span><span class="s1">nose.plugins.errorclass </span><span class="s2">import </span><span class="s1">ErrorClass</span><span class="s2">, </span><span class="s1">ErrorClassPlugin</span>
+<span class="s2">from </span><span class="s1">nose.plugins.base </span><span class="s2">import </span><span class="s1">Plugin</span>
+<span class="s2">from </span><span class="s1">nose.util </span><span class="s2">import </span><span class="s1">src</span>
+<span class="s2">from </span><span class="s1">.nosetester </span><span class="s2">import </span><span class="s1">get_package_name</span>
+<span class="s2">from </span><span class="s1">.utils </span><span class="s2">import </span><span class="s1">KnownFailureException</span><span class="s2">, </span><span class="s1">KnownFailureTest</span>
+
+
+<span class="s0"># Some of the classes in this module begin with 'Numpy' to clearly distinguish</span>
+<span class="s0"># them from the plethora of very similar names from nose/unittest/doctest</span>
+
+<span class="s0">#-----------------------------------------------------------------------------</span>
+<span class="s0"># Modified version of the one in the stdlib, that fixes a python bug (doctests</span>
+<span class="s0"># not found in extension modules, https://bugs.python.org/issue3158)</span>
+<span class="s2">class </span><span class="s1">NumpyDocTestFinder(doctest.DocTestFinder):</span>
+
+    <span class="s2">def </span><span class="s1">_from_module(self</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s1">object):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Return true if the given object is defined in the given 
+        module. 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">module </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s2">return True</span>
+        <span class="s2">elif </span><span class="s1">inspect.isfunction(object):</span>
+            <span class="s2">return </span><span class="s1">module.__dict__ </span><span class="s2">is </span><span class="s1">object.__globals__</span>
+        <span class="s2">elif </span><span class="s1">inspect.isbuiltin(object):</span>
+            <span class="s2">return </span><span class="s1">module.__name__ == object.__module__</span>
+        <span class="s2">elif </span><span class="s1">inspect.isclass(object):</span>
+            <span class="s2">return </span><span class="s1">module.__name__ == object.__module__</span>
+        <span class="s2">elif </span><span class="s1">inspect.ismethod(object):</span>
+            <span class="s0"># This one may be a bug in cython that fails to correctly set the</span>
+            <span class="s0"># __module__ attribute of methods, but since the same error is easy</span>
+            <span class="s0"># to make by extension code writers, having this safety in place</span>
+            <span class="s0"># isn't such a bad idea</span>
+            <span class="s2">return </span><span class="s1">module.__name__ == object.__self__.__class__.__module__</span>
+        <span class="s2">elif </span><span class="s1">inspect.getmodule(object) </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s2">return </span><span class="s1">module </span><span class="s2">is </span><span class="s1">inspect.getmodule(object)</span>
+        <span class="s2">elif </span><span class="s1">hasattr(object</span><span class="s2">, </span><span class="s4">'__module__'</span><span class="s1">):</span>
+            <span class="s2">return </span><span class="s1">module.__name__ == object.__module__</span>
+        <span class="s2">elif </span><span class="s1">isinstance(object</span><span class="s2">, </span><span class="s1">property):</span>
+            <span class="s2">return True  </span><span class="s0"># [XX] no way not be sure.</span>
+        <span class="s2">else</span><span class="s1">:</span>
+            <span class="s2">raise </span><span class="s1">ValueError(</span><span class="s4">&quot;object must be a class or function&quot;</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">_find(self</span><span class="s2">, </span><span class="s1">tests</span><span class="s2">, </span><span class="s1">obj</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s1">source_lines</span><span class="s2">, </span><span class="s1">globs</span><span class="s2">, </span><span class="s1">seen):</span>
+        <span class="s3">&quot;&quot;&quot; 
+        Find tests for the given object and any contained objects, and 
+        add them to `tests`. 
+        &quot;&quot;&quot;</span>
+
+        <span class="s1">doctest.DocTestFinder._find(self</span><span class="s2">, </span><span class="s1">tests</span><span class="s2">, </span><span class="s1">obj</span><span class="s2">, </span><span class="s1">name</span><span class="s2">, </span><span class="s1">module</span><span class="s2">,</span>
+                                    <span class="s1">source_lines</span><span class="s2">, </span><span class="s1">globs</span><span class="s2">, </span><span class="s1">seen)</span>
+
+        <span class="s0"># Below we re-run pieces of the above method with manual modifications,</span>
+        <span class="s0"># because the original code is buggy and fails to correctly identify</span>
+        <span class="s0"># doctests in extension modules.</span>
+
+        <span class="s0"># Local shorthands</span>
+        <span class="s2">from </span><span class="s1">inspect </span><span class="s2">import </span><span class="s1">(</span>
+            <span class="s1">isroutine</span><span class="s2">, </span><span class="s1">isclass</span><span class="s2">, </span><span class="s1">ismodule</span><span class="s2">, </span><span class="s1">isfunction</span><span class="s2">, </span><span class="s1">ismethod</span>
+            <span class="s1">)</span>
+
+        <span class="s0"># Look for tests in a module's contained objects.</span>
+        <span class="s2">if </span><span class="s1">ismodule(obj) </span><span class="s2">and </span><span class="s1">self._recurse:</span>
+            <span class="s2">for </span><span class="s1">valname</span><span class="s2">, </span><span class="s1">val </span><span class="s2">in </span><span class="s1">obj.__dict__.items():</span>
+                <span class="s1">valname1 = </span><span class="s4">f'</span><span class="s2">{</span><span class="s1">name</span><span class="s2">}</span><span class="s4">.</span><span class="s2">{</span><span class="s1">valname</span><span class="s2">}</span><span class="s4">'</span>
+                <span class="s2">if </span><span class="s1">( (isroutine(val) </span><span class="s2">or </span><span class="s1">isclass(val))</span>
+                     <span class="s2">and </span><span class="s1">self._from_module(module</span><span class="s2">, </span><span class="s1">val)):</span>
+
+                    <span class="s1">self._find(tests</span><span class="s2">, </span><span class="s1">val</span><span class="s2">, </span><span class="s1">valname1</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s1">source_lines</span><span class="s2">,</span>
+                               <span class="s1">globs</span><span class="s2">, </span><span class="s1">seen)</span>
+
+        <span class="s0"># Look for tests in a class's contained objects.</span>
+        <span class="s2">if </span><span class="s1">isclass(obj) </span><span class="s2">and </span><span class="s1">self._recurse:</span>
+            <span class="s2">for </span><span class="s1">valname</span><span class="s2">, </span><span class="s1">val </span><span class="s2">in </span><span class="s1">obj.__dict__.items():</span>
+                <span class="s0"># Special handling for staticmethod/classmethod.</span>
+                <span class="s2">if </span><span class="s1">isinstance(val</span><span class="s2">, </span><span class="s1">staticmethod):</span>
+                    <span class="s1">val = getattr(obj</span><span class="s2">, </span><span class="s1">valname)</span>
+                <span class="s2">if </span><span class="s1">isinstance(val</span><span class="s2">, </span><span class="s1">classmethod):</span>
+                    <span class="s1">val = getattr(obj</span><span class="s2">, </span><span class="s1">valname).__func__</span>
+
+                <span class="s0"># Recurse to methods, properties, and nested classes.</span>
+                <span class="s2">if </span><span class="s1">((isfunction(val) </span><span class="s2">or </span><span class="s1">isclass(val) </span><span class="s2">or</span>
+                     <span class="s1">ismethod(val) </span><span class="s2">or </span><span class="s1">isinstance(val</span><span class="s2">, </span><span class="s1">property)) </span><span class="s2">and</span>
+                      <span class="s1">self._from_module(module</span><span class="s2">, </span><span class="s1">val)):</span>
+                    <span class="s1">valname = </span><span class="s4">f'</span><span class="s2">{</span><span class="s1">name</span><span class="s2">}</span><span class="s4">.</span><span class="s2">{</span><span class="s1">valname</span><span class="s2">}</span><span class="s4">'</span>
+                    <span class="s1">self._find(tests</span><span class="s2">, </span><span class="s1">val</span><span class="s2">, </span><span class="s1">valname</span><span class="s2">, </span><span class="s1">module</span><span class="s2">, </span><span class="s1">source_lines</span><span class="s2">,</span>
+                               <span class="s1">globs</span><span class="s2">, </span><span class="s1">seen)</span>
+
+
+<span class="s0"># second-chance checker; if the default comparison doesn't</span>
+<span class="s0"># pass, then see if the expected output string contains flags that</span>
+<span class="s0"># tell us to ignore the output</span>
+<span class="s2">class </span><span class="s1">NumpyOutputChecker(doctest.OutputChecker):</span>
+    <span class="s2">def </span><span class="s1">check_output(self</span><span class="s2">, </span><span class="s1">want</span><span class="s2">, </span><span class="s1">got</span><span class="s2">, </span><span class="s1">optionflags):</span>
+        <span class="s1">ret = doctest.OutputChecker.check_output(self</span><span class="s2">, </span><span class="s1">want</span><span class="s2">, </span><span class="s1">got</span><span class="s2">,</span>
+                                                 <span class="s1">optionflags)</span>
+        <span class="s2">if not </span><span class="s1">ret:</span>
+            <span class="s2">if </span><span class="s4">&quot;#random&quot; </span><span class="s2">in </span><span class="s1">want:</span>
+                <span class="s2">return True</span>
+
+            <span class="s0"># it would be useful to normalize endianness so that</span>
+            <span class="s0"># bigendian machines don't fail all the tests (and there are</span>
+            <span class="s0"># actually some bigendian examples in the doctests). Let's try</span>
+            <span class="s0"># making them all little endian</span>
+            <span class="s1">got = got.replace(</span><span class="s4">&quot;'&gt;&quot;</span><span class="s2">, </span><span class="s4">&quot;'&lt;&quot;</span><span class="s1">)</span>
+            <span class="s1">want = want.replace(</span><span class="s4">&quot;'&gt;&quot;</span><span class="s2">, </span><span class="s4">&quot;'&lt;&quot;</span><span class="s1">)</span>
+
+            <span class="s0"># try to normalize out 32 and 64 bit default int sizes</span>
+            <span class="s2">for </span><span class="s1">sz </span><span class="s2">in </span><span class="s1">[</span><span class="s5">4</span><span class="s2">, </span><span class="s5">8</span><span class="s1">]:</span>
+                <span class="s1">got = got.replace(</span><span class="s4">&quot;'&lt;i%d'&quot; </span><span class="s1">% sz</span><span class="s2">, </span><span class="s4">&quot;int&quot;</span><span class="s1">)</span>
+                <span class="s1">want = want.replace(</span><span class="s4">&quot;'&lt;i%d'&quot; </span><span class="s1">% sz</span><span class="s2">, </span><span class="s4">&quot;int&quot;</span><span class="s1">)</span>
+
+            <span class="s1">ret = doctest.OutputChecker.check_output(self</span><span class="s2">, </span><span class="s1">want</span><span class="s2">,</span>
+                    <span class="s1">got</span><span class="s2">, </span><span class="s1">optionflags)</span>
+
+        <span class="s2">return </span><span class="s1">ret</span>
+
+
+<span class="s0"># Subclass nose.plugins.doctests.DocTestCase to work around a bug in</span>
+<span class="s0"># its constructor that blocks non-default arguments from being passed</span>
+<span class="s0"># down into doctest.DocTestCase</span>
+<span class="s2">class </span><span class="s1">NumpyDocTestCase(npd.DocTestCase):</span>
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">test</span><span class="s2">, </span><span class="s1">optionflags=</span><span class="s5">0</span><span class="s2">, </span><span class="s1">setUp=</span><span class="s2">None, </span><span class="s1">tearDown=</span><span class="s2">None,</span>
+                 <span class="s1">checker=</span><span class="s2">None, </span><span class="s1">obj=</span><span class="s2">None, </span><span class="s1">result_var=</span><span class="s4">'_'</span><span class="s1">):</span>
+        <span class="s1">self._result_var = result_var</span>
+        <span class="s1">self._nose_obj = obj</span>
+        <span class="s1">doctest.DocTestCase.__init__(self</span><span class="s2">, </span><span class="s1">test</span><span class="s2">,</span>
+                                     <span class="s1">optionflags=optionflags</span><span class="s2">,</span>
+                                     <span class="s1">setUp=setUp</span><span class="s2">, </span><span class="s1">tearDown=tearDown</span><span class="s2">,</span>
+                                     <span class="s1">checker=checker)</span>
+
+
+<span class="s1">print_state = numpy.get_printoptions()</span>
+
+<span class="s2">class </span><span class="s1">NumpyDoctest(npd.Doctest):</span>
+    <span class="s1">name = </span><span class="s4">'numpydoctest'   </span><span class="s0"># call nosetests with --with-numpydoctest</span>
+    <span class="s1">score = </span><span class="s5">1000  </span><span class="s0"># load late, after doctest builtin</span>
+
+    <span class="s0"># always use whitespace and ellipsis options for doctests</span>
+    <span class="s1">doctest_optflags = doctest.NORMALIZE_WHITESPACE | doctest.ELLIPSIS</span>
+
+    <span class="s0"># files that should be ignored for doctests</span>
+    <span class="s1">doctest_ignore = [</span><span class="s4">'generate_numpy_api.py'</span><span class="s2">,</span>
+                      <span class="s4">'setup.py'</span><span class="s1">]</span>
+
+    <span class="s0"># Custom classes; class variables to allow subclassing</span>
+    <span class="s1">doctest_case_class = NumpyDocTestCase</span>
+    <span class="s1">out_check_class = NumpyOutputChecker</span>
+    <span class="s1">test_finder_class = NumpyDocTestFinder</span>
+
+    <span class="s0"># Don't use the standard doctest option handler; hard-code the option values</span>
+    <span class="s2">def </span><span class="s1">options(self</span><span class="s2">, </span><span class="s1">parser</span><span class="s2">, </span><span class="s1">env=os.environ):</span>
+        <span class="s1">Plugin.options(self</span><span class="s2">, </span><span class="s1">parser</span><span class="s2">, </span><span class="s1">env)</span>
+        <span class="s0"># Test doctests in 'test' files / directories. Standard plugin default</span>
+        <span class="s0"># is False</span>
+        <span class="s1">self.doctest_tests = </span><span class="s2">True</span>
+        <span class="s0"># Variable name; if defined, doctest results stored in this variable in</span>
+        <span class="s0"># the top-level namespace.  None is the standard default</span>
+        <span class="s1">self.doctest_result_var = </span><span class="s2">None</span>
+
+    <span class="s2">def </span><span class="s1">configure(self</span><span class="s2">, </span><span class="s1">options</span><span class="s2">, </span><span class="s1">config):</span>
+        <span class="s0"># parent method sets enabled flag from command line --with-numpydoctest</span>
+        <span class="s1">Plugin.configure(self</span><span class="s2">, </span><span class="s1">options</span><span class="s2">, </span><span class="s1">config)</span>
+        <span class="s1">self.finder = self.test_finder_class()</span>
+        <span class="s1">self.parser = doctest.DocTestParser()</span>
+        <span class="s2">if </span><span class="s1">self.enabled:</span>
+            <span class="s0"># Pull standard doctest out of plugin list; there's no reason to run</span>
+            <span class="s0"># both.  In practice the Unplugger plugin above would cover us when</span>
+            <span class="s0"># run from a standard numpy.test() call; this is just in case</span>
+            <span class="s0"># someone wants to run our plugin outside the numpy.test() machinery</span>
+            <span class="s1">config.plugins.plugins = [p </span><span class="s2">for </span><span class="s1">p </span><span class="s2">in </span><span class="s1">config.plugins.plugins</span>
+                                      <span class="s2">if </span><span class="s1">p.name != </span><span class="s4">'doctest'</span><span class="s1">]</span>
+
+    <span class="s2">def </span><span class="s1">set_test_context(self</span><span class="s2">, </span><span class="s1">test):</span>
+        <span class="s3">&quot;&quot;&quot; Configure `test` object to set test context 
+ 
+        We set the numpy / scipy standard doctest namespace 
+ 
+        Parameters 
+        ---------- 
+        test : test object 
+            with ``globs`` dictionary defining namespace 
+ 
+        Returns 
+        ------- 
+        None 
+ 
+        Notes 
+        ----- 
+        `test` object modified in place 
+        &quot;&quot;&quot;</span>
+        <span class="s0"># set the namespace for tests</span>
+        <span class="s1">pkg_name = get_package_name(os.path.dirname(test.filename))</span>
+
+        <span class="s0"># Each doctest should execute in an environment equivalent to</span>
+        <span class="s0"># starting Python and executing &quot;import numpy as np&quot;, and,</span>
+        <span class="s0"># for SciPy packages, an additional import of the local</span>
+        <span class="s0"># package (so that scipy.linalg.basic.py's doctests have an</span>
+        <span class="s0"># implicit &quot;from scipy import linalg&quot; as well).</span>
+        <span class="s0">#</span>
+        <span class="s0"># Note: __file__ allows the doctest in NoseTester to run</span>
+        <span class="s0"># without producing an error</span>
+        <span class="s1">test.globs = {</span><span class="s4">'__builtins__'</span><span class="s1">:__builtins__</span><span class="s2">,</span>
+                      <span class="s4">'__file__'</span><span class="s1">:</span><span class="s4">'__main__'</span><span class="s2">,</span>
+                      <span class="s4">'__name__'</span><span class="s1">:</span><span class="s4">'__main__'</span><span class="s2">,</span>
+                      <span class="s4">'np'</span><span class="s1">:numpy}</span>
+        <span class="s0"># add appropriate scipy import for SciPy tests</span>
+        <span class="s2">if </span><span class="s4">'scipy' </span><span class="s2">in </span><span class="s1">pkg_name:</span>
+            <span class="s1">p = pkg_name.split(</span><span class="s4">'.'</span><span class="s1">)</span>
+            <span class="s1">p2 = p[-</span><span class="s5">1</span><span class="s1">]</span>
+            <span class="s1">test.globs[p2] = __import__(pkg_name</span><span class="s2">, </span><span class="s1">test.globs</span><span class="s2">, </span><span class="s1">{}</span><span class="s2">, </span><span class="s1">[p2])</span>
+
+    <span class="s0"># Override test loading to customize test context (with set_test_context</span>
+    <span class="s0"># method), set standard docstring options, and install our own test output</span>
+    <span class="s0"># checker</span>
+    <span class="s2">def </span><span class="s1">loadTestsFromModule(self</span><span class="s2">, </span><span class="s1">module):</span>
+        <span class="s2">if not </span><span class="s1">self.matches(module.__name__):</span>
+            <span class="s1">npd.log.debug(</span><span class="s4">&quot;Doctest doesn't want module %s&quot;</span><span class="s2">, </span><span class="s1">module)</span>
+            <span class="s2">return</span>
+        <span class="s2">try</span><span class="s1">:</span>
+            <span class="s1">tests = self.finder.find(module)</span>
+        <span class="s2">except </span><span class="s1">AttributeError:</span>
+            <span class="s0"># nose allows module.__test__ = False; doctest does not and</span>
+            <span class="s0"># throws AttributeError</span>
+            <span class="s2">return</span>
+        <span class="s2">if not </span><span class="s1">tests:</span>
+            <span class="s2">return</span>
+        <span class="s1">tests.sort()</span>
+        <span class="s1">module_file = src(module.__file__)</span>
+        <span class="s2">for </span><span class="s1">test </span><span class="s2">in </span><span class="s1">tests:</span>
+            <span class="s2">if not </span><span class="s1">test.examples:</span>
+                <span class="s2">continue</span>
+            <span class="s2">if not </span><span class="s1">test.filename:</span>
+                <span class="s1">test.filename = module_file</span>
+            <span class="s0"># Set test namespace; test altered in place</span>
+            <span class="s1">self.set_test_context(test)</span>
+            <span class="s2">yield </span><span class="s1">self.doctest_case_class(test</span><span class="s2">,</span>
+                                          <span class="s1">optionflags=self.doctest_optflags</span><span class="s2">,</span>
+                                          <span class="s1">checker=self.out_check_class()</span><span class="s2">,</span>
+                                          <span class="s1">result_var=self.doctest_result_var)</span>
+
+    <span class="s0"># Add an afterContext method to nose.plugins.doctests.Doctest in order</span>
+    <span class="s0"># to restore print options to the original state after each doctest</span>
+    <span class="s2">def </span><span class="s1">afterContext(self):</span>
+        <span class="s1">numpy.set_printoptions(**print_state)</span>
+
+    <span class="s0"># Ignore NumPy-specific build files that shouldn't be searched for tests</span>
+    <span class="s2">def </span><span class="s1">wantFile(self</span><span class="s2">, </span><span class="s1">file):</span>
+        <span class="s1">bn = os.path.basename(file)</span>
+        <span class="s2">if </span><span class="s1">bn </span><span class="s2">in </span><span class="s1">self.doctest_ignore:</span>
+            <span class="s2">return False</span>
+        <span class="s2">return </span><span class="s1">npd.Doctest.wantFile(self</span><span class="s2">, </span><span class="s1">file)</span>
+
+
+<span class="s2">class </span><span class="s1">Unplugger:</span>
+    <span class="s3">&quot;&quot;&quot; Nose plugin to remove named plugin late in loading 
+ 
+    By default it removes the &quot;doctest&quot; plugin. 
+    &quot;&quot;&quot;</span>
+    <span class="s1">name = </span><span class="s4">'unplugger'</span>
+    <span class="s1">enabled = </span><span class="s2">True  </span><span class="s0"># always enabled</span>
+    <span class="s1">score = </span><span class="s5">4000  </span><span class="s0"># load late in order to be after builtins</span>
+
+    <span class="s2">def </span><span class="s1">__init__(self</span><span class="s2">, </span><span class="s1">to_unplug=</span><span class="s4">'doctest'</span><span class="s1">):</span>
+        <span class="s1">self.to_unplug = to_unplug</span>
+
+    <span class="s2">def </span><span class="s1">options(self</span><span class="s2">, </span><span class="s1">parser</span><span class="s2">, </span><span class="s1">env):</span>
+        <span class="s2">pass</span>
+
+    <span class="s2">def </span><span class="s1">configure(self</span><span class="s2">, </span><span class="s1">options</span><span class="s2">, </span><span class="s1">config):</span>
+        <span class="s0"># Pull named plugin out of plugins list</span>
+        <span class="s1">config.plugins.plugins = [p </span><span class="s2">for </span><span class="s1">p </span><span class="s2">in </span><span class="s1">config.plugins.plugins</span>
+                                  <span class="s2">if </span><span class="s1">p.name != self.to_unplug]</span>
+
+
+<span class="s2">class </span><span class="s1">KnownFailurePlugin(ErrorClassPlugin):</span>
+    <span class="s3">'''Plugin that installs a KNOWNFAIL error class for the 
+    KnownFailureClass exception.  When KnownFailure is raised, 
+    the exception will be logged in the knownfail attribute of the 
+    result, 'K' or 'KNOWNFAIL' (verbose) will be output, and the 
+    exception will not be counted as an error or failure.'''</span>
+    <span class="s1">enabled = </span><span class="s2">True</span>
+    <span class="s1">knownfail = ErrorClass(KnownFailureException</span><span class="s2">,</span>
+                           <span class="s1">label=</span><span class="s4">'KNOWNFAIL'</span><span class="s2">,</span>
+                           <span class="s1">isfailure=</span><span class="s2">False</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">options(self</span><span class="s2">, </span><span class="s1">parser</span><span class="s2">, </span><span class="s1">env=os.environ):</span>
+        <span class="s1">env_opt = </span><span class="s4">'NOSE_WITHOUT_KNOWNFAIL'</span>
+        <span class="s1">parser.add_option(</span><span class="s4">'--no-knownfail'</span><span class="s2">, </span><span class="s1">action=</span><span class="s4">'store_true'</span><span class="s2">,</span>
+                          <span class="s1">dest=</span><span class="s4">'noKnownFail'</span><span class="s2">, </span><span class="s1">default=env.get(env_opt</span><span class="s2">, False</span><span class="s1">)</span><span class="s2">,</span>
+                          <span class="s1">help=</span><span class="s4">'Disable special handling of KnownFailure '</span>
+                               <span class="s4">'exceptions'</span><span class="s1">)</span>
+
+    <span class="s2">def </span><span class="s1">configure(self</span><span class="s2">, </span><span class="s1">options</span><span class="s2">, </span><span class="s1">conf):</span>
+        <span class="s2">if not </span><span class="s1">self.can_configure:</span>
+            <span class="s2">return</span>
+        <span class="s1">self.conf = conf</span>
+        <span class="s1">disable = getattr(options</span><span class="s2">, </span><span class="s4">'noKnownFail'</span><span class="s2">, False</span><span class="s1">)</span>
+        <span class="s2">if </span><span class="s1">disable:</span>
+            <span class="s1">self.enabled = </span><span class="s2">False</span>
+
+<span class="s1">KnownFailure = KnownFailurePlugin   </span><span class="s0"># backwards compat</span>
+
+
+<span class="s2">class </span><span class="s1">FPUModeCheckPlugin(Plugin):</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Plugin that checks the FPU mode before and after each test, 
+    raising failures if the test changed the mode. 
+    &quot;&quot;&quot;</span>
+
+    <span class="s2">def </span><span class="s1">prepareTestCase(self</span><span class="s2">, </span><span class="s1">test):</span>
+        <span class="s2">from </span><span class="s1">numpy.core._multiarray_tests </span><span class="s2">import </span><span class="s1">get_fpu_mode</span>
+
+        <span class="s2">def </span><span class="s1">run(result):</span>
+            <span class="s1">old_mode = get_fpu_mode()</span>
+            <span class="s1">test.test(result)</span>
+            <span class="s1">new_mode = get_fpu_mode()</span>
+
+            <span class="s2">if </span><span class="s1">old_mode != new_mode:</span>
+                <span class="s2">try</span><span class="s1">:</span>
+                    <span class="s2">raise </span><span class="s1">AssertionError(</span>
+                        <span class="s4">&quot;FPU mode changed from {0:#x} to {1:#x} during the &quot;</span>
+                        <span class="s4">&quot;test&quot;</span><span class="s1">.format(old_mode</span><span class="s2">, </span><span class="s1">new_mode))</span>
+                <span class="s2">except </span><span class="s1">AssertionError:</span>
+                    <span class="s1">result.addFailure(test</span><span class="s2">, </span><span class="s1">sys.exc_info())</span>
+
+        <span class="s2">return </span><span class="s1">run</span>
+
+
+<span class="s0"># Class allows us to save the results of the tests in runTests - see runTests</span>
+<span class="s0"># method docstring for details</span>
+<span class="s2">class </span><span class="s1">NumpyTestProgram(nose.core.TestProgram):</span>
+    <span class="s2">def </span><span class="s1">runTests(self):</span>
+        <span class="s3">&quot;&quot;&quot;Run Tests. Returns true on success, false on failure, and 
+        sets self.success to the same value. 
+ 
+        Because nose currently discards the test result object, but we need 
+        to return it to the user, override TestProgram.runTests to retain 
+        the result 
+        &quot;&quot;&quot;</span>
+        <span class="s2">if </span><span class="s1">self.testRunner </span><span class="s2">is None</span><span class="s1">:</span>
+            <span class="s1">self.testRunner = nose.core.TextTestRunner(stream=self.config.stream</span><span class="s2">,</span>
+                                                       <span class="s1">verbosity=self.config.verbosity</span><span class="s2">,</span>
+                                                       <span class="s1">config=self.config)</span>
+        <span class="s1">plug_runner = self.config.plugins.prepareTestRunner(self.testRunner)</span>
+        <span class="s2">if </span><span class="s1">plug_runner </span><span class="s2">is not None</span><span class="s1">:</span>
+            <span class="s1">self.testRunner = plug_runner</span>
+        <span class="s1">self.result = self.testRunner.run(self.test)</span>
+        <span class="s1">self.success = self.result.wasSuccessful()</span>
+        <span class="s2">return </span><span class="s1">self.success</span>
+</pre>
+</body>
+</html>

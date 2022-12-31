@@ -1,0 +1,241 @@
+<html>
+<head>
+<title>_sysconfig.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #6a8759;}
+.s4 { color: #629755; font-style: italic;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_sysconfig.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">distutils.util  </span><span class="s2"># FIXME: For change_root.</span>
+<span class="s0">import </span><span class="s1">logging</span>
+<span class="s0">import </span><span class="s1">os</span>
+<span class="s0">import </span><span class="s1">sys</span>
+<span class="s0">import </span><span class="s1">sysconfig</span>
+<span class="s0">import </span><span class="s1">typing</span>
+
+<span class="s0">from </span><span class="s1">pip._internal.exceptions </span><span class="s0">import </span><span class="s1">InvalidSchemeCombination</span><span class="s0">, </span><span class="s1">UserInstallationInvalid</span>
+<span class="s0">from </span><span class="s1">pip._internal.models.scheme </span><span class="s0">import </span><span class="s1">SCHEME_KEYS</span><span class="s0">, </span><span class="s1">Scheme</span>
+<span class="s0">from </span><span class="s1">pip._internal.utils.virtualenv </span><span class="s0">import </span><span class="s1">running_under_virtualenv</span>
+
+<span class="s0">from </span><span class="s1">.base </span><span class="s0">import </span><span class="s1">get_major_minor_version</span><span class="s0">, </span><span class="s1">is_osx_framework</span>
+
+<span class="s1">logger = logging.getLogger(__name__)</span>
+
+
+<span class="s2"># Notes on _infer_* functions.</span>
+<span class="s2"># Unfortunately ``get_default_scheme()`` didn't exist before 3.10, so there's no</span>
+<span class="s2"># way to ask things like &quot;what is the '_prefix' scheme on this platform&quot;. These</span>
+<span class="s2"># functions try to answer that with some heuristics while accounting for ad-hoc</span>
+<span class="s2"># platforms not covered by CPython's default sysconfig implementation. If the</span>
+<span class="s2"># ad-hoc implementation does not fully implement sysconfig, we'll fall back to</span>
+<span class="s2"># a POSIX scheme.</span>
+
+<span class="s1">_AVAILABLE_SCHEMES = set(sysconfig.get_scheme_names())</span>
+
+<span class="s1">_PREFERRED_SCHEME_API = getattr(sysconfig</span><span class="s0">, </span><span class="s3">&quot;get_preferred_scheme&quot;</span><span class="s0">, None</span><span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">_should_use_osx_framework_prefix() -&gt; bool:</span>
+    <span class="s4">&quot;&quot;&quot;Check for Apple's ``osx_framework_library`` scheme. 
+ 
+    Python distributed by Apple's Command Line Tools has this special scheme 
+    that's used when: 
+ 
+    * This is a framework build. 
+    * We are installing into the system prefix. 
+ 
+    This does not account for ``pip install --prefix`` (also means we're not 
+    installing to the system prefix), which should use ``posix_prefix``, but 
+    logic here means ``_infer_prefix()`` outputs ``osx_framework_library``. But 
+    since ``prefix`` is not available for ``sysconfig.get_default_scheme()``, 
+    which is the stdlib replacement for ``_infer_prefix()``, presumably Apple 
+    wouldn't be able to magically switch between ``osx_framework_library`` and 
+    ``posix_prefix``. ``_infer_prefix()`` returning ``osx_framework_library`` 
+    means its behavior is consistent whether we use the stdlib implementation 
+    or our own, and we deal with this special case in ``get_scheme()`` instead. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">return </span><span class="s1">(</span>
+        <span class="s3">&quot;osx_framework_library&quot; </span><span class="s0">in </span><span class="s1">_AVAILABLE_SCHEMES</span>
+        <span class="s0">and not </span><span class="s1">running_under_virtualenv()</span>
+        <span class="s0">and </span><span class="s1">is_osx_framework()</span>
+    <span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">_infer_prefix() -&gt; str:</span>
+    <span class="s4">&quot;&quot;&quot;Try to find a prefix scheme for the current platform. 
+ 
+    This tries: 
+ 
+    * A special ``osx_framework_library`` for Python distributed by Apple's 
+      Command Line Tools, when not running in a virtual environment. 
+    * Implementation + OS, used by PyPy on Windows (``pypy_nt``). 
+    * Implementation without OS, used by PyPy on POSIX (``pypy``). 
+    * OS + &quot;prefix&quot;, used by CPython on POSIX (``posix_prefix``). 
+    * Just the OS name, used by CPython on Windows (``nt``). 
+ 
+    If none of the above works, fall back to ``posix_prefix``. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">_PREFERRED_SCHEME_API:</span>
+        <span class="s0">return </span><span class="s1">_PREFERRED_SCHEME_API(</span><span class="s3">&quot;prefix&quot;</span><span class="s1">)</span>
+    <span class="s0">if </span><span class="s1">_should_use_osx_framework_prefix():</span>
+        <span class="s0">return </span><span class="s3">&quot;osx_framework_library&quot;</span>
+    <span class="s1">implementation_suffixed = </span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">sys.implementation.name</span><span class="s0">}</span><span class="s3">_</span><span class="s0">{</span><span class="s1">os.name</span><span class="s0">}</span><span class="s3">&quot;</span>
+    <span class="s0">if </span><span class="s1">implementation_suffixed </span><span class="s0">in </span><span class="s1">_AVAILABLE_SCHEMES:</span>
+        <span class="s0">return </span><span class="s1">implementation_suffixed</span>
+    <span class="s0">if </span><span class="s1">sys.implementation.name </span><span class="s0">in </span><span class="s1">_AVAILABLE_SCHEMES:</span>
+        <span class="s0">return </span><span class="s1">sys.implementation.name</span>
+    <span class="s1">suffixed = </span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">os.name</span><span class="s0">}</span><span class="s3">_prefix&quot;</span>
+    <span class="s0">if </span><span class="s1">suffixed </span><span class="s0">in </span><span class="s1">_AVAILABLE_SCHEMES:</span>
+        <span class="s0">return </span><span class="s1">suffixed</span>
+    <span class="s0">if </span><span class="s1">os.name </span><span class="s0">in </span><span class="s1">_AVAILABLE_SCHEMES:  </span><span class="s2"># On Windows, prefx is just called &quot;nt&quot;.</span>
+        <span class="s0">return </span><span class="s1">os.name</span>
+    <span class="s0">return </span><span class="s3">&quot;posix_prefix&quot;</span>
+
+
+<span class="s0">def </span><span class="s1">_infer_user() -&gt; str:</span>
+    <span class="s4">&quot;&quot;&quot;Try to find a user scheme for the current platform.&quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">_PREFERRED_SCHEME_API:</span>
+        <span class="s0">return </span><span class="s1">_PREFERRED_SCHEME_API(</span><span class="s3">&quot;user&quot;</span><span class="s1">)</span>
+    <span class="s0">if </span><span class="s1">is_osx_framework() </span><span class="s0">and not </span><span class="s1">running_under_virtualenv():</span>
+        <span class="s1">suffixed = </span><span class="s3">&quot;osx_framework_user&quot;</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">suffixed = </span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">os.name</span><span class="s0">}</span><span class="s3">_user&quot;</span>
+    <span class="s0">if </span><span class="s1">suffixed </span><span class="s0">in </span><span class="s1">_AVAILABLE_SCHEMES:</span>
+        <span class="s0">return </span><span class="s1">suffixed</span>
+    <span class="s0">if </span><span class="s3">&quot;posix_user&quot; </span><span class="s0">not in </span><span class="s1">_AVAILABLE_SCHEMES:  </span><span class="s2"># User scheme unavailable.</span>
+        <span class="s0">raise </span><span class="s1">UserInstallationInvalid()</span>
+    <span class="s0">return </span><span class="s3">&quot;posix_user&quot;</span>
+
+
+<span class="s0">def </span><span class="s1">_infer_home() -&gt; str:</span>
+    <span class="s4">&quot;&quot;&quot;Try to find a home for the current platform.&quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">_PREFERRED_SCHEME_API:</span>
+        <span class="s0">return </span><span class="s1">_PREFERRED_SCHEME_API(</span><span class="s3">&quot;home&quot;</span><span class="s1">)</span>
+    <span class="s1">suffixed = </span><span class="s3">f&quot;</span><span class="s0">{</span><span class="s1">os.name</span><span class="s0">}</span><span class="s3">_home&quot;</span>
+    <span class="s0">if </span><span class="s1">suffixed </span><span class="s0">in </span><span class="s1">_AVAILABLE_SCHEMES:</span>
+        <span class="s0">return </span><span class="s1">suffixed</span>
+    <span class="s0">return </span><span class="s3">&quot;posix_home&quot;</span>
+
+
+<span class="s2"># Update these keys if the user sets a custom home.</span>
+<span class="s1">_HOME_KEYS = [</span>
+    <span class="s3">&quot;installed_base&quot;</span><span class="s0">,</span>
+    <span class="s3">&quot;base&quot;</span><span class="s0">,</span>
+    <span class="s3">&quot;installed_platbase&quot;</span><span class="s0">,</span>
+    <span class="s3">&quot;platbase&quot;</span><span class="s0">,</span>
+    <span class="s3">&quot;prefix&quot;</span><span class="s0">,</span>
+    <span class="s3">&quot;exec_prefix&quot;</span><span class="s0">,</span>
+<span class="s1">]</span>
+<span class="s0">if </span><span class="s1">sysconfig.get_config_var(</span><span class="s3">&quot;userbase&quot;</span><span class="s1">) </span><span class="s0">is not None</span><span class="s1">:</span>
+    <span class="s1">_HOME_KEYS.append(</span><span class="s3">&quot;userbase&quot;</span><span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">get_scheme(</span>
+    <span class="s1">dist_name: str</span><span class="s0">,</span>
+    <span class="s1">user: bool = </span><span class="s0">False,</span>
+    <span class="s1">home: typing.Optional[str] = </span><span class="s0">None,</span>
+    <span class="s1">root: typing.Optional[str] = </span><span class="s0">None,</span>
+    <span class="s1">isolated: bool = </span><span class="s0">False,</span>
+    <span class="s1">prefix: typing.Optional[str] = </span><span class="s0">None,</span>
+<span class="s1">) -&gt; Scheme:</span>
+    <span class="s4">&quot;&quot;&quot; 
+    Get the &quot;scheme&quot; corresponding to the input parameters. 
+ 
+    :param dist_name: the name of the package to retrieve the scheme for, used 
+        in the headers scheme path 
+    :param user: indicates to use the &quot;user&quot; scheme 
+    :param home: indicates to use the &quot;home&quot; scheme 
+    :param root: root under which other directories are re-based 
+    :param isolated: ignored, but kept for distutils compatibility (where 
+        this controls whether the user-site pydistutils.cfg is honored) 
+    :param prefix: indicates to use the &quot;prefix&quot; scheme and provides the 
+        base directory for the same 
+    &quot;&quot;&quot;</span>
+    <span class="s0">if </span><span class="s1">user </span><span class="s0">and </span><span class="s1">prefix:</span>
+        <span class="s0">raise </span><span class="s1">InvalidSchemeCombination(</span><span class="s3">&quot;--user&quot;</span><span class="s0">, </span><span class="s3">&quot;--prefix&quot;</span><span class="s1">)</span>
+    <span class="s0">if </span><span class="s1">home </span><span class="s0">and </span><span class="s1">prefix:</span>
+        <span class="s0">raise </span><span class="s1">InvalidSchemeCombination(</span><span class="s3">&quot;--home&quot;</span><span class="s0">, </span><span class="s3">&quot;--prefix&quot;</span><span class="s1">)</span>
+
+    <span class="s0">if </span><span class="s1">home </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s1">scheme_name = _infer_home()</span>
+    <span class="s0">elif </span><span class="s1">user:</span>
+        <span class="s1">scheme_name = _infer_user()</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">scheme_name = _infer_prefix()</span>
+
+    <span class="s2"># Special case: When installing into a custom prefix, use posix_prefix</span>
+    <span class="s2"># instead of osx_framework_library. See _should_use_osx_framework_prefix()</span>
+    <span class="s2"># docstring for details.</span>
+    <span class="s0">if </span><span class="s1">prefix </span><span class="s0">is not None and </span><span class="s1">scheme_name == </span><span class="s3">&quot;osx_framework_library&quot;</span><span class="s1">:</span>
+        <span class="s1">scheme_name = </span><span class="s3">&quot;posix_prefix&quot;</span>
+
+    <span class="s0">if </span><span class="s1">home </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s1">variables = {k: home </span><span class="s0">for </span><span class="s1">k </span><span class="s0">in </span><span class="s1">_HOME_KEYS}</span>
+    <span class="s0">elif </span><span class="s1">prefix </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s1">variables = {k: prefix </span><span class="s0">for </span><span class="s1">k </span><span class="s0">in </span><span class="s1">_HOME_KEYS}</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">variables = {}</span>
+
+    <span class="s1">paths = sysconfig.get_paths(scheme=scheme_name</span><span class="s0">, </span><span class="s1">vars=variables)</span>
+
+    <span class="s2"># Logic here is very arbitrary, we're doing it for compatibility, don't ask.</span>
+    <span class="s2"># 1. Pip historically uses a special header path in virtual environments.</span>
+    <span class="s2"># 2. If the distribution name is not known, distutils uses 'UNKNOWN'. We</span>
+    <span class="s2">#    only do the same when not running in a virtual environment because</span>
+    <span class="s2">#    pip's historical header path logic (see point 1) did not do this.</span>
+    <span class="s0">if </span><span class="s1">running_under_virtualenv():</span>
+        <span class="s0">if </span><span class="s1">user:</span>
+            <span class="s1">base = variables.get(</span><span class="s3">&quot;userbase&quot;</span><span class="s0">, </span><span class="s1">sys.prefix)</span>
+        <span class="s0">else</span><span class="s1">:</span>
+            <span class="s1">base = variables.get(</span><span class="s3">&quot;base&quot;</span><span class="s0">, </span><span class="s1">sys.prefix)</span>
+        <span class="s1">python_xy = </span><span class="s3">f&quot;python</span><span class="s0">{</span><span class="s1">get_major_minor_version()</span><span class="s0">}</span><span class="s3">&quot;</span>
+        <span class="s1">paths[</span><span class="s3">&quot;include&quot;</span><span class="s1">] = os.path.join(base</span><span class="s0">, </span><span class="s3">&quot;include&quot;</span><span class="s0">, </span><span class="s3">&quot;site&quot;</span><span class="s0">, </span><span class="s1">python_xy)</span>
+    <span class="s0">elif not </span><span class="s1">dist_name:</span>
+        <span class="s1">dist_name = </span><span class="s3">&quot;UNKNOWN&quot;</span>
+
+    <span class="s1">scheme = Scheme(</span>
+        <span class="s1">platlib=paths[</span><span class="s3">&quot;platlib&quot;</span><span class="s1">]</span><span class="s0">,</span>
+        <span class="s1">purelib=paths[</span><span class="s3">&quot;purelib&quot;</span><span class="s1">]</span><span class="s0">,</span>
+        <span class="s1">headers=os.path.join(paths[</span><span class="s3">&quot;include&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">dist_name)</span><span class="s0">,</span>
+        <span class="s1">scripts=paths[</span><span class="s3">&quot;scripts&quot;</span><span class="s1">]</span><span class="s0">,</span>
+        <span class="s1">data=paths[</span><span class="s3">&quot;data&quot;</span><span class="s1">]</span><span class="s0">,</span>
+    <span class="s1">)</span>
+    <span class="s0">if </span><span class="s1">root </span><span class="s0">is not None</span><span class="s1">:</span>
+        <span class="s0">for </span><span class="s1">key </span><span class="s0">in </span><span class="s1">SCHEME_KEYS:</span>
+            <span class="s1">value = distutils.util.change_root(root</span><span class="s0">, </span><span class="s1">getattr(scheme</span><span class="s0">, </span><span class="s1">key))</span>
+            <span class="s1">setattr(scheme</span><span class="s0">, </span><span class="s1">key</span><span class="s0">, </span><span class="s1">value)</span>
+    <span class="s0">return </span><span class="s1">scheme</span>
+
+
+<span class="s0">def </span><span class="s1">get_bin_prefix() -&gt; str:</span>
+    <span class="s2"># Forcing to use /usr/local/bin for standard macOS framework installs.</span>
+    <span class="s0">if </span><span class="s1">sys.platform[:</span><span class="s5">6</span><span class="s1">] == </span><span class="s3">&quot;darwin&quot; </span><span class="s0">and </span><span class="s1">sys.prefix[:</span><span class="s5">16</span><span class="s1">] == </span><span class="s3">&quot;/System/Library/&quot;</span><span class="s1">:</span>
+        <span class="s0">return </span><span class="s3">&quot;/usr/local/bin&quot;</span>
+    <span class="s0">return </span><span class="s1">sysconfig.get_paths()[</span><span class="s3">&quot;scripts&quot;</span><span class="s1">]</span>
+
+
+<span class="s0">def </span><span class="s1">get_purelib() -&gt; str:</span>
+    <span class="s0">return </span><span class="s1">sysconfig.get_paths()[</span><span class="s3">&quot;purelib&quot;</span><span class="s1">]</span>
+
+
+<span class="s0">def </span><span class="s1">get_platlib() -&gt; str:</span>
+    <span class="s0">return </span><span class="s1">sysconfig.get_paths()[</span><span class="s3">&quot;platlib&quot;</span><span class="s1">]</span>
+
+
+<span class="s0">def </span><span class="s1">get_prefixed_libs(prefix: str) -&gt; typing.Tuple[str</span><span class="s0">, </span><span class="s1">str]:</span>
+    <span class="s1">paths = sysconfig.get_paths(vars={</span><span class="s3">&quot;base&quot;</span><span class="s1">: prefix</span><span class="s0">, </span><span class="s3">&quot;platbase&quot;</span><span class="s1">: prefix})</span>
+    <span class="s0">return </span><span class="s1">(paths[</span><span class="s3">&quot;purelib&quot;</span><span class="s1">]</span><span class="s0">, </span><span class="s1">paths[</span><span class="s3">&quot;platlib&quot;</span><span class="s1">])</span>
+</pre>
+</body>
+</html>

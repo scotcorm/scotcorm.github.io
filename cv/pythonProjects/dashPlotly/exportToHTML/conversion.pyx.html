@@ -1,0 +1,875 @@
+<html>
+<head>
+<title>conversion.pyx</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #a9b7c6;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+conversion.pyx</font>
+</center></td></tr></table>
+<pre><span class="s0">import cython</span>
+<span class="s0">import numpy as np</span>
+
+<span class="s0">cimport numpy as cnp</span>
+<span class="s0">from numpy cimport (</span>
+    <span class="s0">int32_t,</span>
+    <span class="s0">int64_t,</span>
+    <span class="s0">intp_t,</span>
+    <span class="s0">ndarray,</span>
+<span class="s0">)</span>
+
+<span class="s0">cnp.import_array()</span>
+
+<span class="s0">import pytz</span>
+
+<span class="s0"># stdlib datetime imports</span>
+
+<span class="s0">from cpython.datetime cimport (</span>
+    <span class="s0">PyDate_Check,</span>
+    <span class="s0">PyDateTime_Check,</span>
+    <span class="s0">PyDateTime_IMPORT,</span>
+    <span class="s0">datetime,</span>
+    <span class="s0">time,</span>
+    <span class="s0">tzinfo,</span>
+<span class="s0">)</span>
+
+<span class="s0">PyDateTime_IMPORT</span>
+
+<span class="s0">from pandas._libs.tslibs.base cimport ABCTimestamp</span>
+<span class="s0">from pandas._libs.tslibs.np_datetime cimport (</span>
+    <span class="s0">NPY_DATETIMEUNIT,</span>
+    <span class="s0">NPY_FR_ns,</span>
+    <span class="s0">_string_to_dts,</span>
+    <span class="s0">check_dts_bounds,</span>
+    <span class="s0">dt64_to_dtstruct,</span>
+    <span class="s0">dtstruct_to_dt64,</span>
+    <span class="s0">get_datetime64_unit,</span>
+    <span class="s0">get_datetime64_value,</span>
+    <span class="s0">npy_datetime,</span>
+    <span class="s0">npy_datetimestruct,</span>
+    <span class="s0">pandas_datetime_to_datetimestruct,</span>
+    <span class="s0">pydatetime_to_dt64,</span>
+<span class="s0">)</span>
+
+<span class="s0">from pandas._libs.tslibs.np_datetime import OutOfBoundsDatetime</span>
+
+<span class="s0">from pandas._libs.tslibs.timezones cimport (</span>
+    <span class="s0">get_dst_info,</span>
+    <span class="s0">get_utcoffset,</span>
+    <span class="s0">is_fixed_offset,</span>
+    <span class="s0">is_tzlocal,</span>
+    <span class="s0">is_utc,</span>
+    <span class="s0">maybe_get_tz,</span>
+    <span class="s0">tz_compare,</span>
+    <span class="s0">utc_pytz as UTC,</span>
+<span class="s0">)</span>
+<span class="s0">from pandas._libs.tslibs.util cimport (</span>
+    <span class="s0">is_datetime64_object,</span>
+    <span class="s0">is_float_object,</span>
+    <span class="s0">is_integer_object,</span>
+<span class="s0">)</span>
+
+<span class="s0">from pandas._libs.tslibs.parsing import parse_datetime_string</span>
+
+<span class="s0">from pandas._libs.tslibs.nattype cimport (</span>
+    <span class="s0">NPY_NAT,</span>
+    <span class="s0">c_NaT as NaT,</span>
+    <span class="s0">c_nat_strings as nat_strings,</span>
+    <span class="s0">checknull_with_nat,</span>
+<span class="s0">)</span>
+<span class="s0">from pandas._libs.tslibs.tzconversion cimport (</span>
+    <span class="s0">tz_convert_utc_to_tzlocal,</span>
+    <span class="s0">tz_localize_to_utc_single,</span>
+<span class="s0">)</span>
+
+<span class="s0"># ----------------------------------------------------------------------</span>
+<span class="s0"># Constants</span>
+
+<span class="s0">DT64NS_DTYPE = np.dtype('M8[ns]')</span>
+<span class="s0">TD64NS_DTYPE = np.dtype('m8[ns]')</span>
+
+
+<span class="s0">class OutOfBoundsTimedelta(ValueError):</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Raised when encountering a timedelta value that cannot be represented</span>
+    <span class="s0">as a timedelta64[ns].</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0"># Timedelta analogue to OutOfBoundsDatetime</span>
+    <span class="s0">pass</span>
+
+
+<span class="s0"># ----------------------------------------------------------------------</span>
+<span class="s0"># Unit Conversion Helpers</span>
+
+<span class="s0">cdef inline int64_t cast_from_unit(object ts, str unit) except? -1:</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Return a casting of the unit represented to nanoseconds</span>
+    <span class="s0">round the fractional part of a float to our precision, p.</span>
+
+    <span class="s0">Parameters</span>
+    <span class="s0">----------</span>
+    <span class="s0">ts : int, float, or None</span>
+    <span class="s0">unit : str</span>
+
+    <span class="s0">Returns</span>
+    <span class="s0">-------</span>
+    <span class="s0">int64_t</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">int64_t m</span>
+        <span class="s0">int p</span>
+
+    <span class="s0">m, p = precision_from_unit(unit)</span>
+
+    <span class="s0"># just give me the unit back</span>
+    <span class="s0">if ts is None:</span>
+        <span class="s0">return m</span>
+
+    <span class="s0"># cast the unit, multiply base/frace separately</span>
+    <span class="s0"># to avoid precision issues from float -&gt; int</span>
+    <span class="s0">base = &lt;int64_t&gt;ts</span>
+    <span class="s0">frac = ts - base</span>
+    <span class="s0">if p:</span>
+        <span class="s0">frac = round(frac, p)</span>
+    <span class="s0">return &lt;int64_t&gt;(base * m) + &lt;int64_t&gt;(frac * m)</span>
+
+
+<span class="s0">cpdef inline (int64_t, int) precision_from_unit(str unit):</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Return a casting of the unit represented to nanoseconds + the precision</span>
+    <span class="s0">to round the fractional part.</span>
+
+    <span class="s0">Notes</span>
+    <span class="s0">-----</span>
+    <span class="s0">The caller is responsible for ensuring that the default value of &quot;ns&quot;</span>
+    <span class="s0">takes the place of None.</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">int64_t m</span>
+        <span class="s0">int p</span>
+
+    <span class="s0">if unit == &quot;Y&quot;:</span>
+        <span class="s0">m = 1_000_000_000 * 31556952</span>
+        <span class="s0">p = 9</span>
+    <span class="s0">elif unit == &quot;M&quot;:</span>
+        <span class="s0">m = 1_000_000_000 * 2629746</span>
+        <span class="s0">p = 9</span>
+    <span class="s0">elif unit == &quot;W&quot;:</span>
+        <span class="s0">m = 1_000_000_000 * 3600 * 24 * 7</span>
+        <span class="s0">p = 9</span>
+    <span class="s0">elif unit == &quot;D&quot; or unit == &quot;d&quot;:</span>
+        <span class="s0">m = 1_000_000_000 * 3600 * 24</span>
+        <span class="s0">p = 9</span>
+    <span class="s0">elif unit == &quot;h&quot;:</span>
+        <span class="s0">m = 1_000_000_000 * 3600</span>
+        <span class="s0">p = 9</span>
+    <span class="s0">elif unit == &quot;m&quot;:</span>
+        <span class="s0">m = 1_000_000_000 * 60</span>
+        <span class="s0">p = 9</span>
+    <span class="s0">elif unit == &quot;s&quot;:</span>
+        <span class="s0">m = 1_000_000_000</span>
+        <span class="s0">p = 9</span>
+    <span class="s0">elif unit == &quot;ms&quot;:</span>
+        <span class="s0">m = 1_000_000</span>
+        <span class="s0">p = 6</span>
+    <span class="s0">elif unit == &quot;us&quot;:</span>
+        <span class="s0">m = 1000</span>
+        <span class="s0">p = 3</span>
+    <span class="s0">elif unit == &quot;ns&quot; or unit is None:</span>
+        <span class="s0">m = 1</span>
+        <span class="s0">p = 0</span>
+    <span class="s0">else:</span>
+        <span class="s0">raise ValueError(f&quot;cannot cast unit {unit}&quot;)</span>
+    <span class="s0">return m, p</span>
+
+
+<span class="s0">cdef inline int64_t get_datetime64_nanos(object val) except? -1:</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Extract the value and unit from a np.datetime64 object, then convert the</span>
+    <span class="s0">value to nanoseconds if necessary.</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">npy_datetimestruct dts</span>
+        <span class="s0">NPY_DATETIMEUNIT unit</span>
+        <span class="s0">npy_datetime ival</span>
+
+    <span class="s0">ival = get_datetime64_value(val)</span>
+    <span class="s0">if ival == NPY_NAT:</span>
+        <span class="s0">return NPY_NAT</span>
+
+    <span class="s0">unit = get_datetime64_unit(val)</span>
+
+    <span class="s0">if unit != NPY_FR_ns:</span>
+        <span class="s0">pandas_datetime_to_datetimestruct(ival, unit, &amp;dts)</span>
+        <span class="s0">check_dts_bounds(&amp;dts)</span>
+        <span class="s0">ival = dtstruct_to_dt64(&amp;dts)</span>
+
+    <span class="s0">return ival</span>
+
+
+<span class="s0">@cython.boundscheck(False)</span>
+<span class="s0">@cython.wraparound(False)</span>
+<span class="s0">def ensure_datetime64ns(arr: ndarray, copy: bool = True):</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Ensure a np.datetime64 array has dtype specifically 'datetime64[ns]'</span>
+
+    <span class="s0">Parameters</span>
+    <span class="s0">----------</span>
+    <span class="s0">arr : ndarray</span>
+    <span class="s0">copy : bool, default True</span>
+
+    <span class="s0">Returns</span>
+    <span class="s0">-------</span>
+    <span class="s0">ndarray with dtype datetime64[ns]</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">Py_ssize_t i, n = arr.size</span>
+        <span class="s0">const int64_t[:] ivalues</span>
+        <span class="s0">int64_t[:] iresult</span>
+        <span class="s0">NPY_DATETIMEUNIT unit</span>
+        <span class="s0">npy_datetimestruct dts</span>
+
+    <span class="s0">shape = (&lt;object&gt;arr).shape</span>
+
+    <span class="s0">if (&lt;object&gt;arr).dtype.byteorder == &quot;&gt;&quot;:</span>
+        <span class="s0"># GH#29684 we incorrectly get OutOfBoundsDatetime if we dont swap</span>
+        <span class="s0">dtype = arr.dtype</span>
+        <span class="s0">arr = arr.astype(dtype.newbyteorder(&quot;&lt;&quot;))</span>
+
+    <span class="s0">if arr.size == 0:</span>
+        <span class="s0">result = arr.view(DT64NS_DTYPE)</span>
+        <span class="s0">if copy:</span>
+            <span class="s0">result = result.copy()</span>
+        <span class="s0">return result</span>
+
+    <span class="s0">unit = get_datetime64_unit(arr.flat[0])</span>
+    <span class="s0">if unit == NPY_DATETIMEUNIT.NPY_FR_GENERIC:</span>
+        <span class="s0"># without raising explicitly here, we end up with a SystemError</span>
+        <span class="s0"># built-in function ensure_datetime64ns returned a result with an error</span>
+        <span class="s0">raise ValueError(&quot;datetime64/timedelta64 must have a unit specified&quot;)</span>
+
+    <span class="s0">if unit == NPY_FR_ns:</span>
+        <span class="s0"># Check this before allocating result for perf, might save some memory</span>
+        <span class="s0">if copy:</span>
+            <span class="s0">return arr.copy()</span>
+        <span class="s0">return arr</span>
+
+    <span class="s0">ivalues = arr.view(np.int64).ravel(&quot;K&quot;)</span>
+
+    <span class="s0">result = np.empty_like(arr, dtype=DT64NS_DTYPE)</span>
+    <span class="s0">iresult = result.ravel(&quot;K&quot;).view(np.int64)</span>
+
+    <span class="s0">for i in range(n):</span>
+        <span class="s0">if ivalues[i] != NPY_NAT:</span>
+            <span class="s0">pandas_datetime_to_datetimestruct(ivalues[i], unit, &amp;dts)</span>
+            <span class="s0">iresult[i] = dtstruct_to_dt64(&amp;dts)</span>
+            <span class="s0">check_dts_bounds(&amp;dts)</span>
+        <span class="s0">else:</span>
+            <span class="s0">iresult[i] = NPY_NAT</span>
+
+    <span class="s0">return result</span>
+
+
+<span class="s0">def ensure_timedelta64ns(arr: ndarray, copy: bool = True):</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Ensure a np.timedelta64 array has dtype specifically 'timedelta64[ns]'</span>
+
+    <span class="s0">Parameters</span>
+    <span class="s0">----------</span>
+    <span class="s0">arr : ndarray</span>
+    <span class="s0">copy : bool, default True</span>
+
+    <span class="s0">Returns</span>
+    <span class="s0">-------</span>
+    <span class="s0">ndarray[timedelta64[ns]]</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">assert arr.dtype.kind == &quot;m&quot;, arr.dtype</span>
+
+    <span class="s0">if arr.dtype == TD64NS_DTYPE:</span>
+        <span class="s0">return arr.copy() if copy else arr</span>
+
+    <span class="s0"># Re-use the datetime64 machinery to do an overflow-safe `astype`</span>
+    <span class="s0">dtype = arr.dtype.str.replace(&quot;m8&quot;, &quot;M8&quot;)</span>
+    <span class="s0">dummy = arr.view(dtype)</span>
+    <span class="s0">try:</span>
+        <span class="s0">dt64_result = ensure_datetime64ns(dummy, copy)</span>
+    <span class="s0">except OutOfBoundsDatetime as err:</span>
+        <span class="s0"># Re-write the exception in terms of timedelta64 instead of dt64</span>
+
+        <span class="s0"># Find the value that we are going to report as causing an overflow</span>
+        <span class="s0">tdmin = arr.min()</span>
+        <span class="s0">tdmax = arr.max()</span>
+        <span class="s0">if np.abs(tdmin) &gt;= np.abs(tdmax):</span>
+            <span class="s0">bad_val = tdmin</span>
+        <span class="s0">else:</span>
+            <span class="s0">bad_val = tdmax</span>
+
+        <span class="s0">msg = f&quot;Out of bounds for nanosecond {arr.dtype.name} {str(bad_val)}&quot;</span>
+        <span class="s0">raise OutOfBoundsTimedelta(msg)</span>
+
+    <span class="s0">return dt64_result.view(TD64NS_DTYPE)</span>
+
+
+<span class="s0"># ----------------------------------------------------------------------</span>
+
+
+<span class="s0">@cython.boundscheck(False)</span>
+<span class="s0">@cython.wraparound(False)</span>
+<span class="s0">def datetime_to_datetime64(ndarray[object] values):</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Convert ndarray of datetime-like objects to int64 array representing</span>
+    <span class="s0">nanosecond timestamps.</span>
+
+    <span class="s0">Parameters</span>
+    <span class="s0">----------</span>
+    <span class="s0">values : ndarray[object]</span>
+
+    <span class="s0">Returns</span>
+    <span class="s0">-------</span>
+    <span class="s0">result : ndarray[datetime64ns]</span>
+    <span class="s0">inferred_tz : tzinfo or None</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">Py_ssize_t i, n = len(values)</span>
+        <span class="s0">object val</span>
+        <span class="s0">int64_t[:] iresult</span>
+        <span class="s0">npy_datetimestruct dts</span>
+        <span class="s0">_TSObject _ts</span>
+        <span class="s0">bint found_naive = False</span>
+        <span class="s0">tzinfo inferred_tz = None</span>
+
+    <span class="s0">result = np.empty(n, dtype='M8[ns]')</span>
+    <span class="s0">iresult = result.view('i8')</span>
+    <span class="s0">for i in range(n):</span>
+        <span class="s0">val = values[i]</span>
+        <span class="s0">if checknull_with_nat(val):</span>
+            <span class="s0">iresult[i] = NPY_NAT</span>
+        <span class="s0">elif PyDateTime_Check(val):</span>
+            <span class="s0">if val.tzinfo is not None:</span>
+                <span class="s0">if found_naive:</span>
+                    <span class="s0">raise ValueError('Cannot mix tz-aware with '</span>
+                                     <span class="s0">'tz-naive values')</span>
+                <span class="s0">if inferred_tz is not None:</span>
+                    <span class="s0">if not tz_compare(val.tzinfo, inferred_tz):</span>
+                        <span class="s0">raise ValueError('Array must be all same time zone')</span>
+                <span class="s0">else:</span>
+                    <span class="s0">inferred_tz = val.tzinfo</span>
+
+                <span class="s0">_ts = convert_datetime_to_tsobject(val, None)</span>
+                <span class="s0">iresult[i] = _ts.value</span>
+                <span class="s0">check_dts_bounds(&amp;_ts.dts)</span>
+            <span class="s0">else:</span>
+                <span class="s0">found_naive = True</span>
+                <span class="s0">if inferred_tz is not None:</span>
+                    <span class="s0">raise ValueError('Cannot mix tz-aware with '</span>
+                                     <span class="s0">'tz-naive values')</span>
+                <span class="s0">iresult[i] = pydatetime_to_dt64(val, &amp;dts)</span>
+                <span class="s0">check_dts_bounds(&amp;dts)</span>
+        <span class="s0">else:</span>
+            <span class="s0">raise TypeError(f'Unrecognized value type: {type(val)}')</span>
+
+    <span class="s0">return result, inferred_tz</span>
+
+
+<span class="s0"># ----------------------------------------------------------------------</span>
+<span class="s0"># _TSObject Conversion</span>
+
+<span class="s0"># lightweight C object to hold datetime &amp; int64 pair</span>
+<span class="s0">cdef class _TSObject:</span>
+    <span class="s0"># cdef:</span>
+    <span class="s0">#    npy_datetimestruct dts      # npy_datetimestruct</span>
+    <span class="s0">#    int64_t value               # numpy dt64</span>
+    <span class="s0">#    object tzinfo</span>
+    <span class="s0">#    bint fold</span>
+
+    <span class="s0">def __cinit__(self):</span>
+        <span class="s0"># GH 25057. As per PEP 495, set fold to 0 by default</span>
+        <span class="s0">self.fold = 0</span>
+
+    <span class="s0">@property</span>
+    <span class="s0">def value(self):</span>
+        <span class="s0"># This is needed in order for `value` to be accessible in lib.pyx</span>
+        <span class="s0">return self.value</span>
+
+
+<span class="s0">cdef convert_to_tsobject(object ts, tzinfo tz, str unit,</span>
+                         <span class="s0">bint dayfirst, bint yearfirst, int32_t nanos=0):</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Extract datetime and int64 from any of:</span>
+        <span class="s0">- np.int64 (with unit providing a possible modifier)</span>
+        <span class="s0">- np.datetime64</span>
+        <span class="s0">- a float (with unit providing a possible modifier)</span>
+        <span class="s0">- python int or long object (with unit providing a possible modifier)</span>
+        <span class="s0">- iso8601 string object</span>
+        <span class="s0">- python datetime object</span>
+        <span class="s0">- another timestamp object</span>
+
+    <span class="s0">Raises</span>
+    <span class="s0">------</span>
+    <span class="s0">OutOfBoundsDatetime : ts cannot be converted within implementation bounds</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">_TSObject obj</span>
+
+    <span class="s0">obj = _TSObject()</span>
+
+    <span class="s0">if isinstance(ts, str):</span>
+        <span class="s0">return _convert_str_to_tsobject(ts, tz, unit, dayfirst, yearfirst)</span>
+
+    <span class="s0">if ts is None or ts is NaT:</span>
+        <span class="s0">obj.value = NPY_NAT</span>
+    <span class="s0">elif is_datetime64_object(ts):</span>
+        <span class="s0">obj.value = get_datetime64_nanos(ts)</span>
+        <span class="s0">if obj.value != NPY_NAT:</span>
+            <span class="s0">dt64_to_dtstruct(obj.value, &amp;obj.dts)</span>
+    <span class="s0">elif is_integer_object(ts):</span>
+        <span class="s0">try:</span>
+            <span class="s0">ts = &lt;int64_t&gt;ts</span>
+        <span class="s0">except OverflowError:</span>
+            <span class="s0"># GH#26651 re-raise as OutOfBoundsDatetime</span>
+            <span class="s0">raise OutOfBoundsDatetime(f&quot;Out of bounds nanosecond timestamp {ts}&quot;)</span>
+        <span class="s0">if ts == NPY_NAT:</span>
+            <span class="s0">obj.value = NPY_NAT</span>
+        <span class="s0">else:</span>
+            <span class="s0">ts = ts * cast_from_unit(None, unit)</span>
+            <span class="s0">obj.value = ts</span>
+            <span class="s0">dt64_to_dtstruct(ts, &amp;obj.dts)</span>
+    <span class="s0">elif is_float_object(ts):</span>
+        <span class="s0">if ts != ts or ts == NPY_NAT:</span>
+            <span class="s0">obj.value = NPY_NAT</span>
+        <span class="s0">else:</span>
+            <span class="s0">ts = cast_from_unit(ts, unit)</span>
+            <span class="s0">obj.value = ts</span>
+            <span class="s0">dt64_to_dtstruct(ts, &amp;obj.dts)</span>
+    <span class="s0">elif PyDateTime_Check(ts):</span>
+        <span class="s0">return convert_datetime_to_tsobject(ts, tz, nanos)</span>
+    <span class="s0">elif PyDate_Check(ts):</span>
+        <span class="s0"># Keep the converter same as PyDateTime's</span>
+        <span class="s0">ts = datetime.combine(ts, time())</span>
+        <span class="s0">return convert_datetime_to_tsobject(ts, tz)</span>
+    <span class="s0">else:</span>
+        <span class="s0">from .period import Period</span>
+        <span class="s0">if isinstance(ts, Period):</span>
+            <span class="s0">raise ValueError(&quot;Cannot convert Period to Timestamp &quot;</span>
+                             <span class="s0">&quot;unambiguously. Use to_timestamp&quot;)</span>
+        <span class="s0">raise TypeError(f'Cannot convert input [{ts}] of type {type(ts)} to '</span>
+                        <span class="s0">f'Timestamp')</span>
+
+    <span class="s0">if tz is not None:</span>
+        <span class="s0">_localize_tso(obj, tz)</span>
+
+    <span class="s0">if obj.value != NPY_NAT:</span>
+        <span class="s0"># check_overflows needs to run after _localize_tso</span>
+        <span class="s0">check_dts_bounds(&amp;obj.dts)</span>
+        <span class="s0">check_overflows(obj)</span>
+    <span class="s0">return obj</span>
+
+
+<span class="s0">cdef _TSObject convert_datetime_to_tsobject(datetime ts, tzinfo tz,</span>
+                                            <span class="s0">int32_t nanos=0):</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Convert a datetime (or Timestamp) input `ts`, along with optional timezone</span>
+    <span class="s0">object `tz` to a _TSObject.</span>
+
+    <span class="s0">The optional argument `nanos` allows for cases where datetime input</span>
+    <span class="s0">needs to be supplemented with higher-precision information.</span>
+
+    <span class="s0">Parameters</span>
+    <span class="s0">----------</span>
+    <span class="s0">ts : datetime or Timestamp</span>
+        <span class="s0">Value to be converted to _TSObject</span>
+    <span class="s0">tz : tzinfo or None</span>
+        <span class="s0">timezone for the timezone-aware output</span>
+    <span class="s0">nanos : int32_t, default is 0</span>
+        <span class="s0">nanoseconds supplement the precision of the datetime input ts</span>
+
+    <span class="s0">Returns</span>
+    <span class="s0">-------</span>
+    <span class="s0">obj : _TSObject</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">_TSObject obj = _TSObject()</span>
+
+    <span class="s0">obj.fold = ts.fold</span>
+    <span class="s0">if tz is not None:</span>
+        <span class="s0">tz = maybe_get_tz(tz)</span>
+
+        <span class="s0">if ts.tzinfo is not None:</span>
+            <span class="s0"># Convert the current timezone to the passed timezone</span>
+            <span class="s0">ts = ts.astimezone(tz)</span>
+            <span class="s0">obj.value = pydatetime_to_dt64(ts, &amp;obj.dts)</span>
+            <span class="s0">obj.tzinfo = ts.tzinfo</span>
+        <span class="s0">elif not is_utc(tz):</span>
+            <span class="s0">ts = _localize_pydatetime(ts, tz)</span>
+            <span class="s0">obj.value = pydatetime_to_dt64(ts, &amp;obj.dts)</span>
+            <span class="s0">obj.tzinfo = ts.tzinfo</span>
+        <span class="s0">else:</span>
+            <span class="s0"># UTC</span>
+            <span class="s0">obj.value = pydatetime_to_dt64(ts, &amp;obj.dts)</span>
+            <span class="s0">obj.tzinfo = tz</span>
+    <span class="s0">else:</span>
+        <span class="s0">obj.value = pydatetime_to_dt64(ts, &amp;obj.dts)</span>
+        <span class="s0">obj.tzinfo = ts.tzinfo</span>
+
+    <span class="s0">if obj.tzinfo is not None and not is_utc(obj.tzinfo):</span>
+        <span class="s0">offset = get_utcoffset(obj.tzinfo, ts)</span>
+        <span class="s0">obj.value -= int(offset.total_seconds() * 1e9)</span>
+
+    <span class="s0">if isinstance(ts, ABCTimestamp):</span>
+        <span class="s0">obj.value += &lt;int64_t&gt;ts.nanosecond</span>
+        <span class="s0">obj.dts.ps = ts.nanosecond * 1000</span>
+
+    <span class="s0">if nanos:</span>
+        <span class="s0">obj.value += nanos</span>
+        <span class="s0">obj.dts.ps = nanos * 1000</span>
+
+    <span class="s0">check_dts_bounds(&amp;obj.dts)</span>
+    <span class="s0">check_overflows(obj)</span>
+    <span class="s0">return obj</span>
+
+
+<span class="s0">cdef _TSObject _create_tsobject_tz_using_offset(npy_datetimestruct dts,</span>
+                                                <span class="s0">int tzoffset, tzinfo tz=None):</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Convert a datetimestruct `dts`, along with initial timezone offset</span>
+    <span class="s0">`tzoffset` to a _TSObject (with timezone object `tz` - optional).</span>
+
+    <span class="s0">Parameters</span>
+    <span class="s0">----------</span>
+    <span class="s0">dts: npy_datetimestruct</span>
+    <span class="s0">tzoffset: int</span>
+    <span class="s0">tz : tzinfo or None</span>
+        <span class="s0">timezone for the timezone-aware output.</span>
+
+    <span class="s0">Returns</span>
+    <span class="s0">-------</span>
+    <span class="s0">obj : _TSObject</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">_TSObject obj = _TSObject()</span>
+        <span class="s0">int64_t value  # numpy dt64</span>
+        <span class="s0">datetime dt</span>
+        <span class="s0">ndarray[int64_t] trans</span>
+        <span class="s0">int64_t[:] deltas</span>
+
+    <span class="s0">value = dtstruct_to_dt64(&amp;dts)</span>
+    <span class="s0">obj.dts = dts</span>
+    <span class="s0">obj.tzinfo = pytz.FixedOffset(tzoffset)</span>
+    <span class="s0">obj.value = tz_localize_to_utc_single(value, obj.tzinfo)</span>
+    <span class="s0">if tz is None:</span>
+        <span class="s0">check_overflows(obj)</span>
+        <span class="s0">return obj</span>
+
+    <span class="s0"># Infer fold from offset-adjusted obj.value</span>
+    <span class="s0"># see PEP 495 https://www.python.org/dev/peps/pep-0495/#the-fold-attribute</span>
+    <span class="s0">if is_utc(tz):</span>
+        <span class="s0">pass</span>
+    <span class="s0">elif is_tzlocal(tz):</span>
+        <span class="s0">tz_convert_utc_to_tzlocal(obj.value, tz, &amp;obj.fold)</span>
+    <span class="s0">else:</span>
+        <span class="s0">trans, deltas, typ = get_dst_info(tz)</span>
+
+        <span class="s0">if typ == 'dateutil':</span>
+            <span class="s0">pos = trans.searchsorted(obj.value, side='right') - 1</span>
+            <span class="s0">obj.fold = _infer_tsobject_fold(obj, trans, deltas, pos)</span>
+
+    <span class="s0"># Keep the converter same as PyDateTime's</span>
+    <span class="s0">dt = datetime(obj.dts.year, obj.dts.month, obj.dts.day,</span>
+                  <span class="s0">obj.dts.hour, obj.dts.min, obj.dts.sec,</span>
+                  <span class="s0">obj.dts.us, obj.tzinfo, fold=obj.fold)</span>
+    <span class="s0">obj = convert_datetime_to_tsobject(</span>
+        <span class="s0">dt, tz, nanos=obj.dts.ps // 1000)</span>
+    <span class="s0">return obj</span>
+
+
+<span class="s0">cdef _TSObject _convert_str_to_tsobject(object ts, tzinfo tz, str unit,</span>
+                                        <span class="s0">bint dayfirst=False,</span>
+                                        <span class="s0">bint yearfirst=False):</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Convert a string input `ts`, along with optional timezone object`tz`</span>
+    <span class="s0">to a _TSObject.</span>
+
+    <span class="s0">The optional arguments `dayfirst` and `yearfirst` are passed to the</span>
+    <span class="s0">dateutil parser.</span>
+
+    <span class="s0">Parameters</span>
+    <span class="s0">----------</span>
+    <span class="s0">ts : str</span>
+        <span class="s0">Value to be converted to _TSObject</span>
+    <span class="s0">tz : tzinfo or None</span>
+        <span class="s0">timezone for the timezone-aware output</span>
+    <span class="s0">unit : str or None</span>
+    <span class="s0">dayfirst : bool, default False</span>
+        <span class="s0">When parsing an ambiguous date string, interpret e.g. &quot;3/4/1975&quot; as</span>
+        <span class="s0">April 3, as opposed to the standard US interpretation March 4.</span>
+    <span class="s0">yearfirst : bool, default False</span>
+        <span class="s0">When parsing an ambiguous date string, interpret e.g. &quot;01/05/09&quot;</span>
+        <span class="s0">as &quot;May 9, 2001&quot;, as opposed to the default &quot;Jan 5, 2009&quot;</span>
+
+    <span class="s0">Returns</span>
+    <span class="s0">-------</span>
+    <span class="s0">obj : _TSObject</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">npy_datetimestruct dts</span>
+        <span class="s0">int out_local = 0, out_tzoffset = 0</span>
+        <span class="s0">bint do_parse_datetime_string = False</span>
+
+    <span class="s0">if len(ts) == 0 or ts in nat_strings:</span>
+        <span class="s0">ts = NaT</span>
+    <span class="s0">elif ts == 'now':</span>
+        <span class="s0"># Issue 9000, we short-circuit rather than going</span>
+        <span class="s0"># into np_datetime_strings which returns utc</span>
+        <span class="s0">ts = datetime.now(tz)</span>
+    <span class="s0">elif ts == 'today':</span>
+        <span class="s0"># Issue 9000, we short-circuit rather than going</span>
+        <span class="s0"># into np_datetime_strings which returns a normalized datetime</span>
+        <span class="s0">ts = datetime.now(tz)</span>
+        <span class="s0"># equiv: datetime.today().replace(tzinfo=tz)</span>
+    <span class="s0">else:</span>
+        <span class="s0">string_to_dts_failed = _string_to_dts(</span>
+            <span class="s0">ts, &amp;dts, &amp;out_local,</span>
+            <span class="s0">&amp;out_tzoffset, False</span>
+        <span class="s0">)</span>
+        <span class="s0">try:</span>
+            <span class="s0">if not string_to_dts_failed:</span>
+                <span class="s0">check_dts_bounds(&amp;dts)</span>
+                <span class="s0">if out_local == 1:</span>
+                    <span class="s0">return _create_tsobject_tz_using_offset(dts,</span>
+                                                            <span class="s0">out_tzoffset, tz)</span>
+                <span class="s0">else:</span>
+                    <span class="s0">ts = dtstruct_to_dt64(&amp;dts)</span>
+                    <span class="s0">if tz is not None:</span>
+                        <span class="s0"># shift for _localize_tso</span>
+                        <span class="s0">ts = tz_localize_to_utc_single(ts, tz,</span>
+                                                       <span class="s0">ambiguous=&quot;raise&quot;)</span>
+
+        <span class="s0">except OutOfBoundsDatetime:</span>
+            <span class="s0"># GH#19382 for just-barely-OutOfBounds falling back to dateutil</span>
+            <span class="s0"># parser will return incorrect result because it will ignore</span>
+            <span class="s0"># nanoseconds</span>
+            <span class="s0">raise</span>
+
+        <span class="s0">except ValueError:</span>
+            <span class="s0">do_parse_datetime_string = True</span>
+
+        <span class="s0">if string_to_dts_failed or do_parse_datetime_string:</span>
+            <span class="s0">try:</span>
+                <span class="s0">ts = parse_datetime_string(ts, dayfirst=dayfirst,</span>
+                                           <span class="s0">yearfirst=yearfirst)</span>
+            <span class="s0">except (ValueError, OverflowError):</span>
+                <span class="s0">raise ValueError(&quot;could not convert string to Timestamp&quot;)</span>
+
+    <span class="s0">return convert_to_tsobject(ts, tz, unit, dayfirst, yearfirst)</span>
+
+
+<span class="s0">cdef inline check_overflows(_TSObject obj):</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Check that we haven't silently overflowed in timezone conversion</span>
+
+    <span class="s0">Parameters</span>
+    <span class="s0">----------</span>
+    <span class="s0">obj : _TSObject</span>
+
+    <span class="s0">Returns</span>
+    <span class="s0">-------</span>
+    <span class="s0">None</span>
+
+    <span class="s0">Raises</span>
+    <span class="s0">------</span>
+    <span class="s0">OutOfBoundsDatetime</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0"># GH#12677</span>
+    <span class="s0">if obj.dts.year == 1677:</span>
+        <span class="s0">if not (obj.value &lt; 0):</span>
+            <span class="s0">from pandas._libs.tslibs.timestamps import Timestamp</span>
+            <span class="s0">fmt = (f&quot;{obj.dts.year}-{obj.dts.month:02d}-{obj.dts.day:02d} &quot;</span>
+                   <span class="s0">f&quot;{obj.dts.hour:02d}:{obj.dts.min:02d}:{obj.dts.sec:02d}&quot;)</span>
+            <span class="s0">raise OutOfBoundsDatetime(</span>
+                <span class="s0">f&quot;Converting {fmt} underflows past {Timestamp.min}&quot;</span>
+            <span class="s0">)</span>
+    <span class="s0">elif obj.dts.year == 2262:</span>
+        <span class="s0">if not (obj.value &gt; 0):</span>
+            <span class="s0">from pandas._libs.tslibs.timestamps import Timestamp</span>
+            <span class="s0">fmt = (f&quot;{obj.dts.year}-{obj.dts.month:02d}-{obj.dts.day:02d} &quot;</span>
+                   <span class="s0">f&quot;{obj.dts.hour:02d}:{obj.dts.min:02d}:{obj.dts.sec:02d}&quot;)</span>
+            <span class="s0">raise OutOfBoundsDatetime(</span>
+                <span class="s0">f&quot;Converting {fmt} overflows past {Timestamp.max}&quot;</span>
+            <span class="s0">)</span>
+
+<span class="s0"># ----------------------------------------------------------------------</span>
+<span class="s0"># Localization</span>
+
+<span class="s0">cdef inline void _localize_tso(_TSObject obj, tzinfo tz):</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Given the UTC nanosecond timestamp in obj.value, find the wall-clock</span>
+    <span class="s0">representation of that timestamp in the given timezone.</span>
+
+    <span class="s0">Parameters</span>
+    <span class="s0">----------</span>
+    <span class="s0">obj : _TSObject</span>
+    <span class="s0">tz : tzinfo</span>
+
+    <span class="s0">Returns</span>
+    <span class="s0">-------</span>
+    <span class="s0">None</span>
+
+    <span class="s0">Notes</span>
+    <span class="s0">-----</span>
+    <span class="s0">Sets obj.tzinfo inplace, alters obj.dts inplace.</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">ndarray[int64_t] trans</span>
+        <span class="s0">int64_t[:] deltas</span>
+        <span class="s0">int64_t local_val</span>
+        <span class="s0">Py_ssize_t pos</span>
+        <span class="s0">str typ</span>
+
+    <span class="s0">assert obj.tzinfo is None</span>
+
+    <span class="s0">if is_utc(tz):</span>
+        <span class="s0">pass</span>
+    <span class="s0">elif obj.value == NPY_NAT:</span>
+        <span class="s0">pass</span>
+    <span class="s0">elif is_tzlocal(tz):</span>
+        <span class="s0">local_val = tz_convert_utc_to_tzlocal(obj.value, tz, &amp;obj.fold)</span>
+        <span class="s0">dt64_to_dtstruct(local_val, &amp;obj.dts)</span>
+    <span class="s0">else:</span>
+        <span class="s0"># Adjust datetime64 timestamp, recompute datetimestruct</span>
+        <span class="s0">trans, deltas, typ = get_dst_info(tz)</span>
+
+        <span class="s0">if is_fixed_offset(tz):</span>
+            <span class="s0"># static/fixed tzinfo; in this case we know len(deltas) == 1</span>
+            <span class="s0"># This can come back with `typ` of either &quot;fixed&quot; or None</span>
+            <span class="s0">dt64_to_dtstruct(obj.value + deltas[0], &amp;obj.dts)</span>
+        <span class="s0">elif typ == 'pytz':</span>
+            <span class="s0"># i.e. treat_tz_as_pytz(tz)</span>
+            <span class="s0">pos = trans.searchsorted(obj.value, side='right') - 1</span>
+            <span class="s0">tz = tz._tzinfos[tz._transition_info[pos]]</span>
+            <span class="s0">dt64_to_dtstruct(obj.value + deltas[pos], &amp;obj.dts)</span>
+        <span class="s0">elif typ == 'dateutil':</span>
+            <span class="s0"># i.e. treat_tz_as_dateutil(tz)</span>
+            <span class="s0">pos = trans.searchsorted(obj.value, side='right') - 1</span>
+            <span class="s0">dt64_to_dtstruct(obj.value + deltas[pos], &amp;obj.dts)</span>
+            <span class="s0"># dateutil supports fold, so we infer fold from value</span>
+            <span class="s0">obj.fold = _infer_tsobject_fold(obj, trans, deltas, pos)</span>
+        <span class="s0">else:</span>
+            <span class="s0"># Note: as of 2018-07-17 all tzinfo objects that are _not_</span>
+            <span class="s0"># either pytz or dateutil have is_fixed_offset(tz) == True,</span>
+            <span class="s0"># so this branch will never be reached.</span>
+            <span class="s0">pass</span>
+
+    <span class="s0">obj.tzinfo = tz</span>
+
+
+<span class="s0">cdef inline bint _infer_tsobject_fold(</span>
+    <span class="s0">_TSObject obj,</span>
+    <span class="s0">const int64_t[:] trans,</span>
+    <span class="s0">const int64_t[:] deltas,</span>
+    <span class="s0">int32_t pos,</span>
+<span class="s0">):</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Infer _TSObject fold property from value by assuming 0 and then setting</span>
+    <span class="s0">to 1 if necessary.</span>
+
+    <span class="s0">Parameters</span>
+    <span class="s0">----------</span>
+    <span class="s0">obj : _TSObject</span>
+    <span class="s0">trans : ndarray[int64_t]</span>
+        <span class="s0">ndarray of offset transition points in nanoseconds since epoch.</span>
+    <span class="s0">deltas : int64_t[:]</span>
+        <span class="s0">array of offsets corresponding to transition points in trans.</span>
+    <span class="s0">pos : int32_t</span>
+        <span class="s0">Position of the last transition point before taking fold into account.</span>
+
+    <span class="s0">Returns</span>
+    <span class="s0">-------</span>
+    <span class="s0">bint</span>
+        <span class="s0">Due to daylight saving time, one wall clock time can occur twice</span>
+        <span class="s0">when shifting from summer to winter time; fold describes whether the</span>
+        <span class="s0">datetime-like corresponds  to the first (0) or the second time (1)</span>
+        <span class="s0">the wall clock hits the ambiguous time</span>
+
+    <span class="s0">References</span>
+    <span class="s0">----------</span>
+    <span class="s0">.. [1] &quot;PEP 495 - Local Time Disambiguation&quot;</span>
+           <span class="s0">https://www.python.org/dev/peps/pep-0495/#the-fold-attribute</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">bint fold = 0</span>
+
+    <span class="s0">if pos &gt; 0:</span>
+        <span class="s0">fold_delta = deltas[pos - 1] - deltas[pos]</span>
+        <span class="s0">if obj.value - fold_delta &lt; trans[pos]:</span>
+            <span class="s0">fold = 1</span>
+
+    <span class="s0">return fold</span>
+
+<span class="s0">cdef inline datetime _localize_pydatetime(datetime dt, tzinfo tz):</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Take a datetime/Timestamp in UTC and localizes to timezone tz.</span>
+
+    <span class="s0">NB: Unlike the public version, this treats datetime and Timestamp objects</span>
+        <span class="s0">identically, i.e. discards nanos from Timestamps.</span>
+        <span class="s0">It also assumes that the `tz` input is not None.</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">try:</span>
+        <span class="s0"># datetime.replace with pytz may be incorrect result</span>
+        <span class="s0">return tz.localize(dt)</span>
+    <span class="s0">except AttributeError:</span>
+        <span class="s0">return dt.replace(tzinfo=tz)</span>
+
+
+<span class="s0">cpdef inline datetime localize_pydatetime(datetime dt, tzinfo tz):</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Take a datetime/Timestamp in UTC and localizes to timezone tz.</span>
+
+    <span class="s0">Parameters</span>
+    <span class="s0">----------</span>
+    <span class="s0">dt : datetime or Timestamp</span>
+    <span class="s0">tz : tzinfo or None</span>
+
+    <span class="s0">Returns</span>
+    <span class="s0">-------</span>
+    <span class="s0">localized : datetime or Timestamp</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">if tz is None:</span>
+        <span class="s0">return dt</span>
+    <span class="s0">elif isinstance(dt, ABCTimestamp):</span>
+        <span class="s0">return dt.tz_localize(tz)</span>
+    <span class="s0">elif is_utc(tz):</span>
+        <span class="s0">return _localize_pydatetime(dt, tz)</span>
+    <span class="s0">try:</span>
+        <span class="s0"># datetime.replace with pytz may be incorrect result</span>
+        <span class="s0">return tz.localize(dt)</span>
+    <span class="s0">except AttributeError:</span>
+        <span class="s0">return dt.replace(tzinfo=tz)</span>
+
+
+<span class="s0"># ----------------------------------------------------------------------</span>
+<span class="s0"># Normalization</span>
+
+<span class="s0">@cython.cdivision(False)</span>
+<span class="s0">cdef inline int64_t normalize_i8_stamp(int64_t local_val) nogil:</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">Round the localized nanosecond timestamp down to the previous midnight.</span>
+
+    <span class="s0">Parameters</span>
+    <span class="s0">----------</span>
+    <span class="s0">local_val : int64_t</span>
+
+    <span class="s0">Returns</span>
+    <span class="s0">-------</span>
+    <span class="s0">int64_t</span>
+    <span class="s0">&quot;&quot;&quot;</span>
+    <span class="s0">cdef:</span>
+        <span class="s0">int64_t day_nanos = 24 * 3600 * 1_000_000_000</span>
+    <span class="s0">return local_val - (local_val % day_nanos)</span>
+</pre>
+</body>
+</html>

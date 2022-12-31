@@ -1,0 +1,282 @@
+<html>
+<head>
+<title>_callback.py</title>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+.s0 { color: #cc7832;}
+.s1 { color: #a9b7c6;}
+.s2 { color: #808080;}
+.s3 { color: #629755; font-style: italic;}
+.s4 { color: #6a8759;}
+.s5 { color: #6897bb;}
+</style>
+</head>
+<body bgcolor="#2b2b2b">
+<table CELLSPACING=0 CELLPADDING=5 COLS=1 WIDTH="100%" BGCOLOR="#606060" >
+<tr><td><center>
+<font face="Arial, Helvetica" color="#000000">
+_callback.py</font>
+</center></td></tr></table>
+<pre><span class="s0">import </span><span class="s1">collections</span>
+<span class="s0">from </span><span class="s1">functools </span><span class="s0">import </span><span class="s1">wraps</span>
+
+<span class="s0">from </span><span class="s1">.dependencies </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">handle_callback_args</span><span class="s0">,</span>
+    <span class="s1">handle_grouped_callback_args</span><span class="s0">,</span>
+    <span class="s1">Output</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">.exceptions </span><span class="s0">import </span><span class="s1">PreventUpdate</span>
+
+<span class="s0">from </span><span class="s1">._grouping </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">flatten_grouping</span><span class="s0">,</span>
+    <span class="s1">make_grouping_by_index</span><span class="s0">,</span>
+    <span class="s1">grouping_len</span><span class="s0">,</span>
+<span class="s1">)</span>
+<span class="s0">from </span><span class="s1">._utils </span><span class="s0">import </span><span class="s1">(</span>
+    <span class="s1">create_callback_id</span><span class="s0">,</span>
+    <span class="s1">stringify_id</span><span class="s0">,</span>
+    <span class="s1">to_json</span><span class="s0">,</span>
+<span class="s1">)</span>
+
+<span class="s0">from </span><span class="s1">. </span><span class="s0">import </span><span class="s1">_validate</span>
+
+
+<span class="s0">class </span><span class="s1">NoUpdate:</span>
+    <span class="s2"># pylint: disable=too-few-public-methods</span>
+    <span class="s0">pass</span>
+
+
+<span class="s1">GLOBAL_CALLBACK_LIST = []</span>
+<span class="s1">GLOBAL_CALLBACK_MAP = {}</span>
+<span class="s1">GLOBAL_INLINE_SCRIPTS = []</span>
+
+
+<span class="s0">def </span><span class="s1">callback(*_args</span><span class="s0">, </span><span class="s1">**_kwargs):</span>
+    <span class="s3">&quot;&quot;&quot; 
+    Normally used as a decorator, `@dash.callback` provides a server-side 
+    callback relating the values of one or more `Output` items to one or 
+    more `Input` items which will trigger the callback when they change, 
+    and optionally `State` items which provide additional information but 
+    do not trigger the callback directly. 
+ 
+    `@dash.callback` is an alternative to `@app.callback` (where `app = dash.Dash()`) 
+    introduced in Dash 2.0. 
+    It allows you to register callbacks without defining or importing the `app` 
+    object. The call signature is identical and it can be used instead of `app.callback` 
+    in all cases. 
+ 
+    The last, optional argument `prevent_initial_call` causes the callback 
+    not to fire when its outputs are first added to the page. Defaults to 
+    `False` and unlike `app.callback` is not configurable at the app level. 
+    &quot;&quot;&quot;</span>
+    <span class="s0">return </span><span class="s1">register_callback(</span>
+        <span class="s1">GLOBAL_CALLBACK_LIST</span><span class="s0">,</span>
+        <span class="s1">GLOBAL_CALLBACK_MAP</span><span class="s0">,</span>
+        <span class="s0">False,</span>
+        <span class="s1">*_args</span><span class="s0">,</span>
+        <span class="s1">**_kwargs</span><span class="s0">,</span>
+    <span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">clientside_callback(clientside_function</span><span class="s0">, </span><span class="s1">*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+    <span class="s0">return </span><span class="s1">register_clientside_callback(</span>
+        <span class="s1">GLOBAL_CALLBACK_LIST</span><span class="s0">,</span>
+        <span class="s1">GLOBAL_CALLBACK_MAP</span><span class="s0">,</span>
+        <span class="s0">False,</span>
+        <span class="s1">GLOBAL_INLINE_SCRIPTS</span><span class="s0">,</span>
+        <span class="s1">clientside_function</span><span class="s0">,</span>
+        <span class="s1">*args</span><span class="s0">,</span>
+        <span class="s1">**kwargs</span><span class="s0">,</span>
+    <span class="s1">)</span>
+
+
+<span class="s0">def </span><span class="s1">insert_callback(</span>
+    <span class="s1">callback_list</span><span class="s0">,</span>
+    <span class="s1">callback_map</span><span class="s0">,</span>
+    <span class="s1">config_prevent_initial_callbacks</span><span class="s0">,</span>
+    <span class="s1">output</span><span class="s0">,</span>
+    <span class="s1">outputs_indices</span><span class="s0">,</span>
+    <span class="s1">inputs</span><span class="s0">,</span>
+    <span class="s1">state</span><span class="s0">,</span>
+    <span class="s1">inputs_state_indices</span><span class="s0">,</span>
+    <span class="s1">prevent_initial_call</span><span class="s0">,</span>
+<span class="s1">):</span>
+    <span class="s0">if </span><span class="s1">prevent_initial_call </span><span class="s0">is None</span><span class="s1">:</span>
+        <span class="s1">prevent_initial_call = config_prevent_initial_callbacks</span>
+
+    <span class="s1">callback_id = create_callback_id(output)</span>
+    <span class="s1">callback_spec = {</span>
+        <span class="s4">&quot;output&quot;</span><span class="s1">: callback_id</span><span class="s0">,</span>
+        <span class="s4">&quot;inputs&quot;</span><span class="s1">: [c.to_dict() </span><span class="s0">for </span><span class="s1">c </span><span class="s0">in </span><span class="s1">inputs]</span><span class="s0">,</span>
+        <span class="s4">&quot;state&quot;</span><span class="s1">: [c.to_dict() </span><span class="s0">for </span><span class="s1">c </span><span class="s0">in </span><span class="s1">state]</span><span class="s0">,</span>
+        <span class="s4">&quot;clientside_function&quot;</span><span class="s1">: </span><span class="s0">None,</span>
+        <span class="s4">&quot;prevent_initial_call&quot;</span><span class="s1">: prevent_initial_call</span><span class="s0">,</span>
+    <span class="s1">}</span>
+    <span class="s1">callback_map[callback_id] = {</span>
+        <span class="s4">&quot;inputs&quot;</span><span class="s1">: callback_spec[</span><span class="s4">&quot;inputs&quot;</span><span class="s1">]</span><span class="s0">,</span>
+        <span class="s4">&quot;state&quot;</span><span class="s1">: callback_spec[</span><span class="s4">&quot;state&quot;</span><span class="s1">]</span><span class="s0">,</span>
+        <span class="s4">&quot;outputs_indices&quot;</span><span class="s1">: outputs_indices</span><span class="s0">,</span>
+        <span class="s4">&quot;inputs_state_indices&quot;</span><span class="s1">: inputs_state_indices</span><span class="s0">,</span>
+    <span class="s1">}</span>
+    <span class="s1">callback_list.append(callback_spec)</span>
+
+    <span class="s0">return </span><span class="s1">callback_id</span>
+
+
+<span class="s0">def </span><span class="s1">register_callback(</span>
+    <span class="s1">callback_list</span><span class="s0">, </span><span class="s1">callback_map</span><span class="s0">, </span><span class="s1">config_prevent_initial_callbacks</span><span class="s0">, </span><span class="s1">*_args</span><span class="s0">, </span><span class="s1">**_kwargs</span>
+<span class="s1">):</span>
+    <span class="s1">(</span>
+        <span class="s1">output</span><span class="s0">,</span>
+        <span class="s1">flat_inputs</span><span class="s0">,</span>
+        <span class="s1">flat_state</span><span class="s0">,</span>
+        <span class="s1">inputs_state_indices</span><span class="s0">,</span>
+        <span class="s1">prevent_initial_call</span><span class="s0">,</span>
+    <span class="s1">) = handle_grouped_callback_args(_args</span><span class="s0">, </span><span class="s1">_kwargs)</span>
+    <span class="s0">if </span><span class="s1">isinstance(output</span><span class="s0">, </span><span class="s1">Output):</span>
+        <span class="s2"># Insert callback with scalar (non-multi) Output</span>
+        <span class="s1">insert_output = output</span>
+        <span class="s1">multi = </span><span class="s0">False</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s2"># Insert callback as multi Output</span>
+        <span class="s1">insert_output = flatten_grouping(output)</span>
+        <span class="s1">multi = </span><span class="s0">True</span>
+
+    <span class="s1">output_indices = make_grouping_by_index(output</span><span class="s0">, </span><span class="s1">list(range(grouping_len(output))))</span>
+    <span class="s1">callback_id = insert_callback(</span>
+        <span class="s1">callback_list</span><span class="s0">,</span>
+        <span class="s1">callback_map</span><span class="s0">,</span>
+        <span class="s1">config_prevent_initial_callbacks</span><span class="s0">,</span>
+        <span class="s1">insert_output</span><span class="s0">,</span>
+        <span class="s1">output_indices</span><span class="s0">,</span>
+        <span class="s1">flat_inputs</span><span class="s0">,</span>
+        <span class="s1">flat_state</span><span class="s0">,</span>
+        <span class="s1">inputs_state_indices</span><span class="s0">,</span>
+        <span class="s1">prevent_initial_call</span><span class="s0">,</span>
+    <span class="s1">)</span>
+
+    <span class="s2"># pylint: disable=too-many-locals</span>
+    <span class="s0">def </span><span class="s1">wrap_func(func):</span>
+        <span class="s1">@wraps(func)</span>
+        <span class="s0">def </span><span class="s1">add_context(*args</span><span class="s0">, </span><span class="s1">**kwargs):</span>
+            <span class="s1">output_spec = kwargs.pop(</span><span class="s4">&quot;outputs_list&quot;</span><span class="s1">)</span>
+            <span class="s1">_validate.validate_output_spec(insert_output</span><span class="s0">, </span><span class="s1">output_spec</span><span class="s0">, </span><span class="s1">Output)</span>
+
+            <span class="s1">func_args</span><span class="s0">, </span><span class="s1">func_kwargs = _validate.validate_and_group_input_args(</span>
+                <span class="s1">args</span><span class="s0">, </span><span class="s1">inputs_state_indices</span>
+            <span class="s1">)</span>
+
+            <span class="s2"># don't touch the comment on the next line - used by debugger</span>
+            <span class="s1">output_value = func(*func_args</span><span class="s0">, </span><span class="s1">**func_kwargs)  </span><span class="s2"># %% callback invoked %%</span>
+
+            <span class="s0">if </span><span class="s1">isinstance(output_value</span><span class="s0">, </span><span class="s1">NoUpdate):</span>
+                <span class="s0">raise </span><span class="s1">PreventUpdate</span>
+
+            <span class="s0">if not </span><span class="s1">multi:</span>
+                <span class="s1">output_value</span><span class="s0">, </span><span class="s1">output_spec = [output_value]</span><span class="s0">, </span><span class="s1">[output_spec]</span>
+                <span class="s1">flat_output_values = output_value</span>
+            <span class="s0">else</span><span class="s1">:</span>
+                <span class="s0">if </span><span class="s1">isinstance(output_value</span><span class="s0">, </span><span class="s1">(list</span><span class="s0">, </span><span class="s1">tuple)):</span>
+                    <span class="s2"># For multi-output, allow top-level collection to be</span>
+                    <span class="s2"># list or tuple</span>
+                    <span class="s1">output_value = list(output_value)</span>
+
+                <span class="s2"># Flatten grouping and validate grouping structure</span>
+                <span class="s1">flat_output_values = flatten_grouping(output_value</span><span class="s0">, </span><span class="s1">output)</span>
+
+            <span class="s1">_validate.validate_multi_return(</span>
+                <span class="s1">output_spec</span><span class="s0">, </span><span class="s1">flat_output_values</span><span class="s0">, </span><span class="s1">callback_id</span>
+            <span class="s1">)</span>
+
+            <span class="s1">component_ids = collections.defaultdict(dict)</span>
+            <span class="s1">has_update = </span><span class="s0">False</span>
+            <span class="s0">for </span><span class="s1">val</span><span class="s0">, </span><span class="s1">spec </span><span class="s0">in </span><span class="s1">zip(flat_output_values</span><span class="s0">, </span><span class="s1">output_spec):</span>
+                <span class="s0">if </span><span class="s1">isinstance(val</span><span class="s0">, </span><span class="s1">NoUpdate):</span>
+                    <span class="s0">continue</span>
+                <span class="s0">for </span><span class="s1">vali</span><span class="s0">, </span><span class="s1">speci </span><span class="s0">in </span><span class="s1">(</span>
+                    <span class="s1">zip(val</span><span class="s0">, </span><span class="s1">spec) </span><span class="s0">if </span><span class="s1">isinstance(spec</span><span class="s0">, </span><span class="s1">list) </span><span class="s0">else </span><span class="s1">[[val</span><span class="s0">, </span><span class="s1">spec]]</span>
+                <span class="s1">):</span>
+                    <span class="s0">if not </span><span class="s1">isinstance(vali</span><span class="s0">, </span><span class="s1">NoUpdate):</span>
+                        <span class="s1">has_update = </span><span class="s0">True</span>
+                        <span class="s1">id_str = stringify_id(speci[</span><span class="s4">&quot;id&quot;</span><span class="s1">])</span>
+                        <span class="s1">component_ids[id_str][speci[</span><span class="s4">&quot;property&quot;</span><span class="s1">]] = vali</span>
+
+            <span class="s0">if not </span><span class="s1">has_update:</span>
+                <span class="s0">raise </span><span class="s1">PreventUpdate</span>
+
+            <span class="s1">response = {</span><span class="s4">&quot;response&quot;</span><span class="s1">: component_ids</span><span class="s0">, </span><span class="s4">&quot;multi&quot;</span><span class="s1">: </span><span class="s0">True</span><span class="s1">}</span>
+
+            <span class="s0">try</span><span class="s1">:</span>
+                <span class="s1">jsonResponse = to_json(response)</span>
+            <span class="s0">except </span><span class="s1">TypeError:</span>
+                <span class="s1">_validate.fail_callback_output(output_value</span><span class="s0">, </span><span class="s1">output)</span>
+
+            <span class="s0">return </span><span class="s1">jsonResponse</span>
+
+        <span class="s1">callback_map[callback_id][</span><span class="s4">&quot;callback&quot;</span><span class="s1">] = add_context</span>
+
+        <span class="s0">return </span><span class="s1">add_context</span>
+
+    <span class="s0">return </span><span class="s1">wrap_func</span>
+
+
+<span class="s1">_inline_clientside_template = </span><span class="s4">&quot;&quot;&quot; 
+var clientside = window.dash_clientside = window.dash_clientside || {{}}; 
+var ns = clientside[&quot;{namespace}&quot;] = clientside[&quot;{namespace}&quot;] || {{}}; 
+ns[&quot;{function_name}&quot;] = {clientside_function}; 
+&quot;&quot;&quot;</span>
+
+
+<span class="s0">def </span><span class="s1">register_clientside_callback(</span>
+    <span class="s1">callback_list</span><span class="s0">,</span>
+    <span class="s1">callback_map</span><span class="s0">,</span>
+    <span class="s1">config_prevent_initial_callbacks</span><span class="s0">,</span>
+    <span class="s1">inline_scripts</span><span class="s0">,</span>
+    <span class="s1">clientside_function</span><span class="s0">,</span>
+    <span class="s1">*args</span><span class="s0">,</span>
+    <span class="s1">**kwargs</span>
+<span class="s1">):</span>
+    <span class="s1">output</span><span class="s0">, </span><span class="s1">inputs</span><span class="s0">, </span><span class="s1">state</span><span class="s0">, </span><span class="s1">prevent_initial_call = handle_callback_args(args</span><span class="s0">, </span><span class="s1">kwargs)</span>
+    <span class="s1">insert_callback(</span>
+        <span class="s1">callback_list</span><span class="s0">,</span>
+        <span class="s1">callback_map</span><span class="s0">,</span>
+        <span class="s1">config_prevent_initial_callbacks</span><span class="s0">,</span>
+        <span class="s1">output</span><span class="s0">,</span>
+        <span class="s0">None,</span>
+        <span class="s1">inputs</span><span class="s0">,</span>
+        <span class="s1">state</span><span class="s0">,</span>
+        <span class="s0">None,</span>
+        <span class="s1">prevent_initial_call</span><span class="s0">,</span>
+    <span class="s1">)</span>
+
+    <span class="s2"># If JS source is explicitly given, create a namespace and function</span>
+    <span class="s2"># name, then inject the code.</span>
+    <span class="s0">if </span><span class="s1">isinstance(clientside_function</span><span class="s0">, </span><span class="s1">str):</span>
+
+        <span class="s1">out0 = output</span>
+        <span class="s0">if </span><span class="s1">isinstance(output</span><span class="s0">, </span><span class="s1">(list</span><span class="s0">, </span><span class="s1">tuple)):</span>
+            <span class="s1">out0 = output[</span><span class="s5">0</span><span class="s1">]</span>
+
+        <span class="s1">namespace = </span><span class="s4">&quot;_dashprivate_{}&quot;</span><span class="s1">.format(out0.component_id)</span>
+        <span class="s1">function_name = </span><span class="s4">&quot;{}&quot;</span><span class="s1">.format(out0.component_property)</span>
+
+        <span class="s1">inline_scripts.append(</span>
+            <span class="s1">_inline_clientside_template.format(</span>
+                <span class="s1">namespace=namespace.replace(</span><span class="s4">'&quot;'</span><span class="s0">, </span><span class="s4">'</span><span class="s0">\\</span><span class="s4">&quot;'</span><span class="s1">)</span><span class="s0">,</span>
+                <span class="s1">function_name=function_name.replace(</span><span class="s4">'&quot;'</span><span class="s0">, </span><span class="s4">'</span><span class="s0">\\</span><span class="s4">&quot;'</span><span class="s1">)</span><span class="s0">,</span>
+                <span class="s1">clientside_function=clientside_function</span><span class="s0">,</span>
+            <span class="s1">)</span>
+        <span class="s1">)</span>
+
+    <span class="s2"># Callback is stored in an external asset.</span>
+    <span class="s0">else</span><span class="s1">:</span>
+        <span class="s1">namespace = clientside_function.namespace</span>
+        <span class="s1">function_name = clientside_function.function_name</span>
+
+    <span class="s1">callback_list[-</span><span class="s5">1</span><span class="s1">][</span><span class="s4">&quot;clientside_function&quot;</span><span class="s1">] = {</span>
+        <span class="s4">&quot;namespace&quot;</span><span class="s1">: namespace</span><span class="s0">,</span>
+        <span class="s4">&quot;function_name&quot;</span><span class="s1">: function_name</span><span class="s0">,</span>
+    <span class="s1">}</span>
+</pre>
+</body>
+</html>
