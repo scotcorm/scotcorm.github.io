@@ -5,7 +5,9 @@
 This Resume site was created before my coding bootcamp, and even though it was one of my first efforts at using HTML, CSS and JS it continues to be useful.
 
 
-Structure
+# Structure
+ 
+```
 ├── src
 │   ├── ccCertification
 │   │   ├── CCProjects
